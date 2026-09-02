@@ -60,7 +60,15 @@ class Retriever:
         self._reranker = reranker or NoopReranker()
         self._limits = limits or RetrievalLimits()
 
-    def retrieve(self, question: str, context: RepositoryContext) -> EvidenceSet:
+    def retrieve(
+        self, question: str, context: RepositoryContext, *, literal_phrase: bool = False
+    ) -> EvidenceSet:
+        """Build a bounded evidence set.
+
+        ``literal_phrase`` additionally searches the whole question verbatim,
+        which is how ``debug`` finds an unquoted error string embedded in source
+        (V1_SPEC §16).
+        """
         analysis = analyze(question)
 
         # Scoping happens before scoring, so we never search every repository for
@@ -72,7 +80,12 @@ class Retriever:
 
         # Stage 2a — literal terms, verified by substring, scoped to primary first.
         literal_hits: list[EvidenceCandidate] = []
-        for term in analysis.literal_terms:
+        literal_terms = list(analysis.literal_terms)
+        if literal_phrase:
+            phrase = question.strip().strip("?.!").strip()
+            if phrase and phrase not in literal_terms:
+                literal_terms.insert(0, phrase)
+        for term in literal_terms:
             for scope in self._scopes(context, primary_ids):
                 hits = self._search.search_literal(term, scope, self._limits.per_source)
                 literal_hits.extend(

@@ -676,16 +676,33 @@ checks every `Evidence` item against the evidence set that was actually supplied
 Dropped citations are counted and surfaced under `--verbose`, which also makes the metric useful for evaluating
 prompts and models: a rising drop rate is a regression signal.
 
+A citation carrying no line numbers is kept: the file genuinely was supplied, and synthesising a span for it would
+itself be invention. Only a *span* disjoint from everything shown is dropped.
+
+### Where FACT and HYPOTHESIS come from
+
+`debug` renders the two separately (V1_SPEC §15), and the split is **not** a confidence threshold on model output:
+
+| Section | Source |
+|---|---|
+| `FACTS` | the retrieved `EvidenceSet` — deterministic, provenanced, RepoAtlas's own |
+| `HYPOTHESES` | the model's findings — interpretations of those facts, each with confidence |
+| `UNKNOWNS` | the model's stated unknowns, plus every finding demoted by verification |
+
+This makes the trust rule visible in the output itself: the model never contributes a row to `FACTS`.
+
 ### Backends
 
 | Backend | Purpose |
 |---|---|
 | `OllamaBackend` | V1 default. `POST /api/chat`, `format` = JSON schema, config-driven `model` and `base_url` |
-| `NullBackend` | Deterministic. Returns `INSUFFICIENT EVIDENCE` with the supplied evidence echoed as findings. Used by tests and by `--no-llm` |
+| `NullBackend` | Deterministic. Returns `INSUFFICIENT EVIDENCE` with no findings. Selected by `llm.provider: none`, and used as a test double. **Not** what `--no-llm` uses: V1_SPEC §4 specifies evidence-only output for that flag, so it skips reasoning entirely rather than narrating around a model that was never consulted |
 | `ScriptedBackend` | Test-only. Returns canned responses, including malformed ones, to exercise validation, repair and citation-dropping paths |
 
-`available()` is checked before use; an unreachable or unconfigured backend produces the exit-code-4 message rather
-than a traceback. Because the deterministic half of the system never calls a `ReasoningModel`, `init`, `sync`,
+`available()` is checked before use, and before retrieval runs, so an unusable backend wastes no work and produces
+the exit-code-4 message rather than a traceback. For Ollama, availability means *both* that the server responds and
+that the configured model is pulled — a reachable server missing the model would otherwise fail at request time,
+and the error names the `ollama pull` command that fixes it. Because the deterministic half of the system never calls a `ReasoningModel`, `init`, `sync`,
 `status`, `repos` and `locate` remain fully functional with no LLM installed — which is the state of the current
 development machine.
 
@@ -798,4 +815,7 @@ full reindex.
 | No subtree context scope | Infer scope from repos beneath cwd | A silently-wrong scope is worse than an error naming the fix (§7) |
 | `.git` marker check for repository detection | `git rev-parse` per directory | One subprocess per walked directory would dominate `init`; the marker check is faster and starts no process (§8) |
 | Parser-version staleness handled per file | A sixth forced-rehash trigger | The stored `parser_version` is on the file row, so affected files can be reparsed directly instead of hashing the entire tree to learn that nothing changed (§9) |
-| `ask`/`debug` fail with exit 4 pre-Slice B | Fall back to `locate` output | Silently answering a different question than the one asked is worse than a clear message naming the command that does work |
+| `ask`/`debug` fail with exit 4 when no model is reachable | Fall back to `locate` output | Silently answering a different question than the one asked is worse than a clear message naming the command that does work; `--no-llm` makes the fallback explicit and opt-in |
+| `httpx` promoted to a core dependency | Keep it behind the `llm` extra | The Ollama backend is the V1 default; failing at import time behind an extra is a worse experience than one small dependency |
+| Ollama availability includes "model is pulled" | Probe reachability only | A running server without the model fails at request time; checking early turns a mid-query failure into an actionable `ollama pull` message |
+| FACTS = retrieved evidence, HYPOTHESES = model findings | Split model findings by a confidence threshold | The model is never a source of facts (§2); mapping its output to "hypothesis" and retrieval to "fact" states that structurally instead of by numeric convention |

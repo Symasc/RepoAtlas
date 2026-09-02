@@ -1417,13 +1417,26 @@ Delivered 2026-09-02. 139 tests green; ruff, ruff format and pyright clean.
   rather than guessed — see §2.
 - `watch` (optional in §4) is not implemented.
 
-### Slice B — Reasoning
+### Slice B — Reasoning — **COMPLETE**
 
-- [ ] **16. Ollama model abstraction** — `ReasoningModel` protocol, `OllamaBackend`, `NullBackend`, config-driven
-      selection, availability detection → exit code 4
-- [ ] **17. Structured grounded answers** — prompt construction from bounded evidence, JSON-schema-constrained
-      output, Pydantic validation, repair retry, **citation verification** (§15)
-- [ ] **18b. `ask` and `debug`** — per-command bias, FACT/HYPOTHESIS/UNKNOWN separation, concise renderer
+Delivered 2026-09-02. 204 tests green; ruff, ruff format and pyright clean.
+
+- [x] **16. Ollama model abstraction** — `ReasoningModel` protocol, `OllamaBackend`, `NullBackend`,
+      `ScriptedBackend` for tests, config-driven selection via `llm.provider`, availability detection
+      (server reachable **and** model pulled) → exit code 4
+- [x] **17. Structured grounded answers** — versioned prompt templates, JSON-schema-constrained decoding,
+      Pydantic validation, one repair retry, then `INSUFFICIENT EVIDENCE` rather than unvalidated output,
+      and **citation verification** (§15)
+- [x] **18b. `ask` and `debug`** — `debug` additionally searches the question verbatim so unquoted error
+      strings match; FACT/HYPOTHESIS/UNKNOWN separation; concise renderers; `--no-llm` evidence-only mode
+
+**Verified:** a model answer citing a file it was never shown is stripped and demoted to an unknown, proven
+end to end over a real HTTP socket as well as in unit tests. Confidence asserted by the model does not protect
+an unsupported citation.
+
+**Note on `--no-llm`:** V1_SPEC §4 specifies evidence-only output, so the flag skips reasoning entirely rather
+than routing through `NullBackend`. `NullBackend` remains the `llm.provider: none` backend and a test double.
+`ARCHITECTURE.md` §11 was corrected to match.
 
 ### Slice C — Breadth
 
