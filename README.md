@@ -14,8 +14,8 @@ answer. See [docs/V1_SPEC.md](docs/V1_SPEC.md) for the specification and
 
 ## Status
 
-**Slices A (the deterministic spine), B (reasoning) and C (breadth) are complete.** Slices D and E are not yet
-implemented; see the checklist in [docs/V1_SPEC.md §23](docs/V1_SPEC.md#23-implementation-checklist).
+**Slices A (spine), B (reasoning), C (breadth) and D (ranking) are complete.** Slice E is not yet implemented;
+see the checklist in [docs/V1_SPEC.md §23](docs/V1_SPEC.md#23-implementation-checklist).
 
 | Working now | Not yet |
 |---|---|
@@ -23,8 +23,26 @@ implemented; see the checklist in [docs/V1_SPEC.md §23](docs/V1_SPEC.md#23-impl
 | Python, TypeScript/JavaScript, Bash, Ruby, Salt, Jinja, YAML/JSON, Dockerfile | — |
 | Dependency detection across pypi, npm and gem — declared *and* resolved versions | — |
 | Cross-file imports and cross-repository relationships | — |
-| Exact/lexical search | Semantic search and rank fusion (Slice D) |
+| Exact search, semantic search, bounded graph expansion, rank fusion | — |
 | — | Docker packaging (Slice E) |
+
+### Retrieval
+
+Exact identifiers, exact error strings, symbol names, environment variables and graph-supported relationships are
+**deterministic evidence**; embedding neighbours and lexical recall are **associative**. Rank fusion compares
+scores only within a tier, so no similarity score can displace a fact about the code. Semantic search is an aid,
+never a replacement.
+
+Embeddings use a local [fastembed](https://github.com/qdrant/fastembed) model (`BAAI/bge-small-en-v1.5`, ONNX, no
+PyTorch, no paid API). It is **not** downloaded automatically — an ordinary `sync` never stalls on a 67 MB fetch.
+Run it once when you want semantic retrieval:
+
+```bash
+repoatlas sync --embed
+```
+
+Until then semantic retrieval is off and everything else is unaffected. Re-embedding is incremental at chunk
+granularity: text that survives a reparse byte-for-byte is never embedded twice.
 
 `init`, `sync`, `status`, `repos` and `locate` need no LLM at all. `ask` and `debug` need a local reasoning
 model; without one they exit 4 and name the command that works. `--no-llm` gives either of them evidence-only
@@ -123,7 +141,7 @@ any content is read.
 ## Development
 
 ```bash
-uv run pytest          # 312 tests
+uv run pytest          # 373 tests
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright

@@ -13,11 +13,9 @@ dependencies = [
     "httpx>=0.28",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.7",
+    "numpy>=2.0",
+    "fastembed>=0.5",
 ]
-
-[project.optional-dependencies]
-# Slice D — local semantic retrieval.
-semantic = ["fastembed>=0.5", "numpy>=2.0"]
 
 [project.scripts]
 repoatlas = "repoatlas.cli.main:run"
@@ -71,7 +69,7 @@ reportMissingTypeStubs = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
+addopts = "-q --strict-markers -m 'not slow'"
 markers = [
     "slow: exercises a real model download or network access; deselected by default",
 ]

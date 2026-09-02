@@ -6,12 +6,15 @@ persist, link, chunk, index, GC.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from repoatlas.config.settings import Settings
 from repoatlas.dependencies.registry import DependencyRegistry
 from repoatlas.discovery.languages import detect_language, is_lockfile, is_manifest
+from repoatlas.embeddings.protocol import EmbeddingModel, EmbeddingUnavailable
 from repoatlas.gitstate.client import GitClient
 from repoatlas.graph.keys import file_key, repository_key, symbol_key
 from repoatlas.graph.linker import GlobalLinkResult, ReferenceLinker
@@ -22,17 +25,33 @@ from repoatlas.models.reports import RepositorySyncReport
 from repoatlas.models.repository import IndexedFile, Repository
 from repoatlas.parsers.registry import ParserRegistry
 from repoatlas.storage.protocols import ChunkRecord, EntityRecord, FileFacts
+from repoatlas.storage.sqlite.database import SCHEMA_VERSION
 from repoatlas.storage.sqlite.stores import (
     SqliteDependencyStore,
     SqliteFileStore,
     SqliteKnowledgeStore,
     SqliteRepositoryStore,
 )
+from repoatlas.storage.sqlite.vectors import SqliteVectorIndex
 from repoatlas.sync.planner import decide_rehash, plan_sync
 from repoatlas.sync.scanner import ScannedFile, hash_bytes, hash_file, scan_repository
 
 #: Bytes above which a file is recorded but never read (V1_SPEC §17 zip-bomb guard).
 _BINARY_SNIFF_BYTES = 8192
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddingResult:
+    """What one embedding pass did. Never a failure: semantic retrieval is an aid."""
+
+    embedded: int = 0
+    pending: int = 0
+    orphans_removed: int = 0
+    detail: str = ""
+
+    @property
+    def skipped(self) -> bool:
+        return self.pending > 0 and self.embedded == 0
 
 
 class SyncEngine:
@@ -47,15 +66,19 @@ class SyncEngine:
         dependencies: SqliteDependencyStore,
         registry: ParserRegistry,
         settings: Settings,
+        vectors: SqliteVectorIndex | None = None,
         git: GitClient | None = None,
         dependency_registry: DependencyRegistry | None = None,
+        embeddings: EmbeddingModel | None = None,
     ) -> None:
         self._repositories = repositories
         self._files = files
         self._knowledge = knowledge
         self._dependencies = dependencies
+        self._vectors = vectors
         self._registry = registry
         self._dependency_registry = dependency_registry or DependencyRegistry()
+        self._embeddings = embeddings
         self._settings = settings
         self._git = git or GitClient()
         self._linker = ReferenceLinker(knowledge, dependencies)
@@ -64,11 +87,22 @@ class SyncEngine:
     def facts_version(self) -> str:
         """Version of everything that turns a file into facts.
 
-        Both registries contribute, because a change to either makes stored facts
-        stale even though the file on disk is untouched (V1_SPEC §12). It is stored
-        per file, so only files with a handler are reparsed.
+        The schema version and both registries contribute, because a change to any
+        of them makes stored facts stale even though the file on disk is untouched
+        (V1_SPEC §12). It is stored per file, so a version change reparses the
+        affected files directly instead of hashing the whole tree to learn that
+        nothing moved.
+
+        The embedding model is deliberately *not* part of this. Vectors are keyed
+        by the model that produced them, so switching models simply finds no
+        vectors for the new id and re-embeds — without reparsing anything
+        (ARCHITECTURE.md §9).
         """
-        return f"{self._registry.version}||{self._dependency_registry.version}"
+        return (
+            f"schema:{SCHEMA_VERSION}"
+            f"||{self._registry.version}"
+            f"||deps:{self._dependency_registry.version}"
+        )
 
     def sync_repository(self, repo: Repository, *, full: bool = False) -> RepositorySyncReport:
         """Bring one repository's index in line with its current working tree."""
@@ -261,6 +295,7 @@ class SyncEngine:
                 line_end=chunk.line_end,
                 text=chunk.text,
                 token_estimate=chunk.token_estimate,
+                content_hash=chunk.content_hash,
             )
             for chunk in chunks
         )
@@ -368,6 +403,65 @@ class SyncEngine:
         result = self._linker.link_global()
         self._knowledge.gc_orphan_entities()
         return result
+
+    def embed_pending(self, repo_ids: Sequence[int] | None = None) -> EmbeddingResult:
+        """Embed chunk text that has no vector for the configured model.
+
+        This is the whole of "never re-embed unchanged data" (V1_SPEC §20).
+        Vectors are keyed by chunk content hash, so a chunk whose text survived a
+        reparse byte-for-byte already has one and is never seen here — even though
+        its row was deleted and reinserted with a new id.
+
+        Availability is checked *before* any work is queued, so a missing model
+        produces one clear message rather than failing part-way through.
+        """
+        if self._vectors is None or self._embeddings is None:
+            return EmbeddingResult(detail="embeddings not configured")
+
+        pending = self._vectors.missing_hashes(self._embeddings.id, repo_ids)
+        orphans = self._vectors.gc_orphan_vectors()
+        if not pending:
+            return EmbeddingResult(orphans_removed=orphans, detail="up to date")
+
+        if not self._embeddings.available():
+            # Not fatal: exact, symbol and graph retrieval are unaffected, and the
+            # next sync retries. Semantic retrieval simply stays off.
+            return EmbeddingResult(
+                pending=len(pending),
+                orphans_removed=orphans,
+                detail=self._embeddings.availability_detail(),
+            )
+
+        embedded = 0
+        batch = max(1, self._settings.embeddings.batch_size)
+        for start in range(0, len(pending), batch):
+            window = pending[start : start + batch]
+            pairs = self._vectors.texts_for_hashes(window)
+            if not pairs:
+                continue
+            try:
+                vectors = self._embeddings.embed([text for _, text in pairs])
+            except EmbeddingUnavailable as exc:
+                return EmbeddingResult(
+                    embedded=embedded,
+                    pending=len(pending) - embedded,
+                    orphans_removed=orphans,
+                    detail=str(exc),
+                )
+            embedded += self._vectors.upsert_many(
+                self._embeddings.id,
+                self._embeddings.dim,
+                [
+                    (content_hash, vector)
+                    for (content_hash, _), vector in zip(pairs, vectors, strict=True)
+                ],
+            )
+
+        return EmbeddingResult(
+            embedded=embedded,
+            orphans_removed=orphans,
+            detail=f"model {self._embeddings.id}",
+        )
 
     @staticmethod
     def _file_entity(repo: Repository, file_id: int, rel_path: str) -> EntityRecord:

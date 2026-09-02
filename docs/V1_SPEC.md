@@ -1473,12 +1473,42 @@ obtains the value from the pillar file, Bash invokes Python tooling *across a re
 - Salt `extend:` produces a reference but the linker does not apply the override semantics; V1 records the
   relationship, not the merged result.
 
-### Slice D — Ranking
+### Slice D — Ranking — **COMPLETE**
 
-- [ ] **14. Semantic retrieval** — fastembed, chunk embeddings, `VectorIndex`, incremental re-embedding only of
-      changed chunks
-- [ ] **15. Context-aware retrieval** — query analysis, graph expansion, rank fusion, primary-repo bias,
-      deduplication, token budget, `NoopReranker` seam
+Delivered 2026-09-02. 373 tests green; ruff, ruff format and pyright clean.
+
+- [x] **14. Semantic retrieval** — `EmbeddingModel` protocol, fastembed `BAAI/bge-small-en-v1.5` (ONNX, no
+      PyTorch), deterministic offline `HashingEmbedding` for tests, config-driven factory, `SqliteVectorIndex`
+      (brute-force NumPy cosine over float16, scoped **before** the dot product), and re-embedding that is
+      incremental at *chunk* granularity — vectors are keyed by chunk content hash, so text that survives a
+      reparse byte-for-byte is never embedded twice (§20)
+- [x] **15. Context-aware retrieval** — the full funnel: query analysis, exact, lexical, symbol, semantic and
+      bounded graph expansion, tier-then-RRF fusion, primary-repository bias, deduplication, hard item and token
+      budgets, `NoopReranker` seam, plus per-stage instrumentation on both retrieval and the global link pass
+
+**The core retrieval principle is enforced by a type, not a weight.** Every candidate carries an `EvidenceTier`;
+`DETERMINISTIC` covers literal-verified matches, exact entity-name matches and graph expansion, `ASSOCIATIVE`
+covers FTS recall and embedding neighbours. Fusion sorts on `(tier, -score)`, so scores are only ever compared
+within a tier and **no similarity score can displace an exact identifier, an exact error string, an exact symbol
+name, an environment variable or a graph-supported relationship**. The primary-repository boost is additive on
+the score, so it competes inside a tier and never promotes across one. A V2 reranker is bound by the same rule.
+
+**Semantic search is suppressed** when the question names literal terms and none of them exist anywhere in the
+index: the honest answer is that they do not exist, not something that reads like them (§2). Prose questions,
+which is what semantic retrieval is for, are unaffected.
+
+**Two latent defects were found and fixed while wiring the graph stage.** Interned entities — environment
+variables, packages — were unreachable through `search_entities` because of an inner join to `repositories`,
+which they belong to by construction not at all. They are first-class searchable entities (§10) and the hubs
+graph expansion travels through, so the join is now outer and repository scoping keeps them in. Exact entity
+lookup was also added alongside FTS, so a spelled-out identifier is found regardless of tokenization.
+
+**Deferred within Slice D, by design:**
+
+- Fetching the embedding model is an explicit act (`repoatlas sync --embed`), not something an ordinary sync does
+  silently. Until it is fetched, `available()` reports "not downloaded" and semantic retrieval stays off while
+  every deterministic command is unaffected — the same posture as a missing Ollama model (§3).
+- `watch` (optional in §4) is still not implemented.
 
 ### Slice E — Delivery
 
@@ -1499,3 +1529,8 @@ obtains the value from the pillar file, Bash invokes Python tooling *across a re
 - [x] The global link pass is idempotent, and every edge it owns is rebuilt rather than patched, so an
       incremental sync still equals a full reindex once cross-repository edges exist (§12) —
       `tests/test_linking.py`, `tests/test_sync.py`
+- [x] Deterministic evidence outranks semantic similarity, for every deterministic source and at any similarity
+      score (§14) — `tests/test_retrieval_ranking.py`
+- [x] Unchanged text is never re-embedded, and orphaned vectors are swept (§20) — `tests/test_embeddings.py`
+- [x] Retrieval and graph traversal are instrumented per stage, and the trace never changes the answer (§20) —
+      `tests/test_retrieval_ranking.py`

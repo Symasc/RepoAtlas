@@ -51,7 +51,11 @@ class EdgeRecord(BaseModel):
 
 
 class ChunkRecord(BaseModel):
-    """A retrievable span of a file, carrying the lines that prove it."""
+    """A retrievable span of a file, carrying the lines that prove it.
+
+    ``content_hash`` is the key vectors are stored under, so text that survives a
+    reparse unchanged is never embedded twice (V1_SPEC §20).
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -61,6 +65,7 @@ class ChunkRecord(BaseModel):
     line_end: int
     text: str
     token_estimate: int = 0
+    content_hash: str = ""
 
 
 class FileFacts(BaseModel):
@@ -73,6 +78,22 @@ class FileFacts(BaseModel):
 
 
 class ChunkHit(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    chunk_id: int
+    file_id: int
+    repo_id: int
+    repository: str
+    path: str
+    line_start: int
+    line_end: int
+    text: str
+    score: float
+
+
+class VectorHit(BaseModel):
+    """A chunk reached by vector similarity. ``score`` is cosine, in [-1, 1]."""
+
     model_config = ConfigDict(frozen=True)
 
     chunk_id: int
@@ -150,6 +171,30 @@ class SymbolRow(BaseModel):
     line_start: int | None
 
 
+class NeighborEdge(BaseModel):
+    """An edge reached by graph expansion, with both endpoints' repositories."""
+
+    model_config = ConfigDict(frozen=True)
+
+    src_id: int
+    dst_id: int
+    type: EdgeType
+    confidence: float = 1.0
+    src_repo_id: int | None = None
+    dst_repo_id: int | None = None
+
+    def other(self, entity_id: int) -> int:
+        return self.dst_id if entity_id == self.src_id else self.src_id
+
+    @property
+    def crosses_repositories(self) -> bool:
+        return (
+            self.src_repo_id is not None
+            and self.dst_repo_id is not None
+            and self.src_repo_id != self.dst_repo_id
+        )
+
+
 class EntityDescription(BaseModel):
     """An entity resolved to a citable location (V1_SPEC §11)."""
 
@@ -193,6 +238,12 @@ class KnowledgeStore(Protocol):
         edge_types: Sequence[EdgeType] | None,
         limit: int,
     ) -> list[EdgeRecord]: ...
+    def expand_neighbors(
+        self,
+        entity_ids: Sequence[int],
+        edge_types: Sequence[EdgeType] | None,
+        limit: int,
+    ) -> list[NeighborEdge]: ...
     def gc_orphan_entities(self) -> int: ...
 
 
@@ -203,10 +254,41 @@ class DependencyStore(Protocol):
     def join_view(self, repo_ids: Sequence[int] | None) -> list[DependencyView]: ...
 
 
+class VectorIndex(Protocol):
+    """Semantic neighbours of a query vector.
+
+    The V1 implementation is brute-force NumPy cosine; the interface exists so
+    ``sqlite-vec`` or FAISS can replace it without touching a caller
+    (ARCHITECTURE.md §3).
+    """
+
+    def upsert_many(
+        self, model: str, dim: int, vectors: Sequence[tuple[str, Sequence[float]]]
+    ) -> int: ...
+    def missing_hashes(self, model: str, repo_ids: Sequence[int] | None) -> list[str]: ...
+    def texts_for_hashes(self, hashes: Sequence[str]) -> list[tuple[str, str]]: ...
+    def gc_orphan_vectors(self) -> int: ...
+    def count(self, model: str | None) -> int: ...
+    def query(
+        self,
+        vector: Sequence[float],
+        model: str,
+        repo_ids: Sequence[int] | None,
+        limit: int,
+        floor: float,
+    ) -> list[VectorHit]: ...
+
+
 class SearchIndex(Protocol):
     def search_text(
         self, query: str, repo_ids: Sequence[int] | None, limit: int
     ) -> list[ChunkHit]: ...
+    def search_literal(
+        self, term: str, repo_ids: Sequence[int] | None, limit: int
+    ) -> list[ChunkHit]: ...
+    def find_entities_by_name(
+        self, names: Sequence[str], repo_ids: Sequence[int] | None, limit: int
+    ) -> list[EntityHit]: ...
     def search_entities(
         self,
         query: str,

@@ -42,11 +42,16 @@ def initialize(
         reports.append(engine.sync_repository(stored))
 
     link = engine.link_global()
+    embedding = engine.embed_pending(None)
     report = SyncReport(
         repositories=tuple(reports),
         scope="global",
         linked_references=link.resolved,
         unresolved_references=link.unresolved,
         cross_repository_edges=link.cross_repository,
+        embedded_chunks=embedding.embedded,
+        pending_embeddings=embedding.pending,
+        embedding_detail=embedding.detail,
+        link_trace=link.trace,
     )
     return report, len(candidates)
