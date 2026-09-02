@@ -39,6 +39,10 @@ packages = ["repoatlas"]
 line-length = 100
 target-version = "py313"
 src = ["repoatlas", "tests"]
+# Fixture repositories are sample content, not project code, and some of it is
+# deliberately unparseable (invalid UTF-8, truncated YAML). A parse error is not
+# suppressible by a per-file ignore, so they are excluded outright.
+extend-exclude = ["tests/fixtures/repos", "tests/adversarial/fixtures/repos"]
 
 [tool.ruff.lint]
 select = [
@@ -59,17 +63,20 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S603", "S607"]          # tests invoke git deliberately
 "tests/fixtures/repos/*" = ["ALL"]    # fixture content is sample code, not project code
+"tests/adversarial/fixtures/repos/*" = ["ALL"]
 
 [tool.pyright]
 include = ["repoatlas", "tests"]
-exclude = ["tests/fixtures/repos"]
+exclude = ["tests/fixtures/repos", "tests/adversarial/fixtures/repos"]
 pythonVersion = "3.13"
 typeCheckingMode = "standard"
 reportMissingTypeStubs = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers -m 'not slow'"
+addopts = "-q --strict-markers -m 'not slow and not scale'"
 markers = [
     "slow: exercises a real model download or network access; deselected by default",
+    "adversarial: adversarial validation; runs by default, selectable with -m adversarial",
+    "scale: builds a large synthetic tree; deselected by default",
 ]

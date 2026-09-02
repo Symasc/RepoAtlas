@@ -162,31 +162,40 @@ class Retriever:
         ranked_lists: list[list[EvidenceCandidate]] = []
 
         literal_terms = list(analysis.literal_terms)
+        # Suppression is decided on the *definite* subset: a bare dashed token in
+        # prose is searched exactly but never gets to declare a question
+        # unanswerable. See QueryAnalysis.definite_terms.
+        definite_terms = list(analysis.definite_terms)
         if literal_phrase:
             phrase = question.strip().strip("?.!").strip()
             if phrase and phrase not in literal_terms:
                 literal_terms.insert(0, phrase)
+            if phrase and phrase not in definite_terms:
+                definite_terms.insert(0, phrase)
 
         exact = self._stage_exact(literal_terms, scopes, stages)
         if exact:
             ranked_lists.append(exact)
 
-        lexical = self._stage_lexical(question, scopes, stages)
+        # A question that names something specific and does not find it is not
+        # answered by anything associative. Decided once, here, and honoured by
+        # every stage that follows. See _suppress_associative.
+        suppressed = self._suppress_associative(definite_terms, exact)
+
+        lexical = self._stage_lexical(question, scopes, stages, suppressed=suppressed)
         ranked_lists.extend(lexical)
 
         symbols, entity_ids = self._stage_symbols(
-            question, analysis.terms, literal_terms, scopes, stages
+            question, analysis.terms, literal_terms, scopes, stages, suppressed=suppressed
         )
         if symbols:
             ranked_lists.append(symbols)
 
-        # A question that names something specific and does not find it is not
-        # answered by similarity. See _suppress_semantic.
         semantic, semantic_used, semantic_detail = self._stage_semantic(
             question,
             primary_ids if context.scope is not ContextScope.GLOBAL else None,
             stages,
-            suppressed=self._suppress_semantic(literal_terms, exact),
+            suppressed=suppressed,
         )
         if semantic:
             ranked_lists.append(semantic)
@@ -298,11 +307,19 @@ class Retriever:
         return hits
 
     def _stage_lexical(
-        self, question: str, scopes: list[list[int] | None], stages: list[StageTiming]
+        self,
+        question: str,
+        scopes: list[list[int] | None],
+        stages: list[StageTiming],
+        *,
+        suppressed: str | None = None,
     ) -> list[list[EvidenceCandidate]]:
         """FTS recall over chunk text. Recall, not proof, so it is associative."""
+        lists: list[list[EvidenceCandidate]] = []
         with Stopwatch("lexical") as watch:
-            lists: list[list[EvidenceCandidate]] = []
+            if suppressed is not None:
+                watch.detail = suppressed
+                scopes = []
             for scope in scopes:
                 hits = self._search.search_text(question, scope, self._limits.per_source)
                 if hits:
@@ -325,26 +342,44 @@ class Retriever:
         literal_terms: list[str],
         scopes: list[list[int] | None],
         stages: list[StageTiming],
+        *,
+        suppressed: str | None = None,
     ) -> tuple[list[EvidenceCandidate], list[int]]:
         """Entity lookup. An exact name match is a fact; a fuzzy one is a lead.
 
         Exact-name lookup runs *first* and independently of FTS, so an environment
         variable, package or symbol the question spells out is found regardless of
-        how the tokenizer treated it. Those hits are also the graph seeds, which is
-        what makes ``env:SERVICE_HOST`` reachable as the hub connecting a service
+        how the tokenizer treated it. **Only those hits become graph seeds**, which
+        is what makes ``env:SERVICE_HOST`` reachable as the hub connecting a service
         that reads it to the Salt state that sets it (V1_SPEC §10).
+
+        The full-text half is recall: an entity whose name merely shares a token
+        with the question. It is returned as `ASSOCIATIVE`, and it is deliberately
+        **not** a graph seed. Expansion labels everything it reaches `DETERMINISTIC`
+        — correctly, since an edge is a fact — so seeding it from a fuzzy match
+        would launder a guess into the tier that outranks every genuine lead.
+        ARCHITECTURE §10 specifies expansion "from the exact entity hits" for
+        exactly this reason.
         """
         exact_names = {term.lower() for term in terms}
         with Stopwatch("symbol") as watch:
             candidates: list[EvidenceCandidate] = []
+            #: Seeds for graph expansion. Exact name matches only.
             entity_ids: list[int] = []
-            named = [*literal_terms, *terms]
+            #: Everything already returned, exact or fuzzy, for deduplication.
+            seen_entities: set[int] = set()
+            # Under suppression only the terms the user actually named may be
+            # looked up. Words lifted out of the surrounding prose are recall, and
+            # an exact-name hit on one of them would enter as DETERMINISTIC — the
+            # strongest tier — for a question whose subject does not exist.
+            named = list(literal_terms) if suppressed is not None else [*literal_terms, *terms]
             for scope in scopes:
                 for hit in self._search.find_entities_by_name(
                     named, scope, self._limits.per_source
                 ):
-                    if hit.entity_id in entity_ids:
+                    if hit.entity_id in seen_entities:
                         continue
+                    seen_entities.add(hit.entity_id)
                     entity_ids.append(hit.entity_id)
                     if hit.path is None or hit.line_start is None:
                         continue
@@ -362,16 +397,20 @@ class Retriever:
                             entity_id=hit.entity_id,
                         )
                     )
-            for scope in scopes:
+            for scope in scopes if suppressed is None else []:
                 for hit in self._search.search_entities(
                     question, scope, None, self._limits.per_source
                 ):
-                    if hit.entity_id in entity_ids:
+                    if hit.entity_id in seen_entities:
                         continue
-                    entity_ids.append(hit.entity_id)
+                    seen_entities.add(hit.entity_id)
+                    exact = hit.name.lower() in exact_names
+                    if exact:
+                        # The question named this entity outright; FTS merely found
+                        # it first. It is a fact, so it may seed expansion.
+                        entity_ids.append(hit.entity_id)
                     if hit.path is None or hit.line_start is None:
                         continue
-                    exact = hit.name.lower() in exact_names
                     candidates.append(
                         EvidenceCandidate(
                             repository=hit.repository,
@@ -389,12 +428,16 @@ class Retriever:
                         )
                     )
             watch.candidates_out = len(candidates)
+            if suppressed is not None:
+                watch.detail = suppressed
         stages.append(_recorded(watch))
         return candidates, entity_ids
 
     @staticmethod
-    def _suppress_semantic(literal_terms: list[str], exact: list[EvidenceCandidate]) -> str | None:
-        """Whether similarity would be answering a different question.
+    def _suppress_associative(
+        literal_terms: list[str], exact: list[EvidenceCandidate]
+    ) -> str | None:
+        """Whether every associative source would be answering a different question.
 
         When the question names literal terms — a quoted string, an environment
         variable, a dotted name, a path — and **none of them exist anywhere in the
@@ -402,9 +445,18 @@ class Retriever:
         merely read like the name would be plausible, unfounded output, which is
         the failure V1_SPEC §2 exists to prevent.
 
+        This holds for *every* associative source, not only for embeddings. FTS
+        recall that matches `@company` when the user asked for
+        `@company/absent-918273`, and an entity coincidentally named `retries` when
+        the user quoted an error string, are the same mistake as a cosine
+        neighbour — and the entity match is worse, because an exact-name lookup
+        marks it `DETERMINISTIC` and it then outranks everything.
+
         A question with no literal terms ("where is deployment configuration
-        generated?") is exactly what semantic retrieval is for, so nothing is
-        suppressed there.
+        generated?") is exactly what the associative half of the funnel is for, so
+        nothing is suppressed there. One term that *does* exist is likewise enough
+        to keep the funnel open: the question is answerable, and the rest of the
+        stages are how the surrounding context is found.
         """
         if literal_terms and not exact:
             named = ", ".join(literal_terms[:3])

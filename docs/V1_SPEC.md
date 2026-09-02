@@ -702,6 +702,17 @@ repo-a DEPENDS_ON repo-b
 - **Never** infer a relationship from similar or fuzzily-matching names.
 - If the target is not present in the managed set, record an unresolved reference so the edge can be created later
   when that repository is added — never invent the target.
+- If **two or more** managed repositories provide the same exact name, create no edge at all. Choosing one would be
+  a guess, and two repositories genuinely publishing `common-lib` is an ordinary situation.
+
+**Granularity (V1 limit, confirmed by validation).** Cross-repository relationships are established between
+**repositories and packages**, never between symbols. `from common_lib.settings import load_config` in one
+repository does not produce an edge to the `load_config` defined in another, even when that repository is managed
+and does define it; the reference stays in `unresolved_refs`. Resolving a bare package specifier to a file requires
+each ecosystem's own module-resolution rules, and approximating them is exactly the "similar name, assumed
+relationship" this section forbids. The consequence is a recall limit, not a correctness one — a cross-repository
+reference never resolves to the wrong same-named definition — and "which repository provides X?" is answered from
+the dependency graph and from retrieval. A per-ecosystem resolver is V2 work (§22).
 
 ---
 
@@ -927,6 +938,24 @@ relationships.
 bounded by both item count and token budget.
 
 Design the ranking layer so a **reranker can be added later** without changing callers.
+
+### When the question names something that does not exist
+
+If the question contains a term that can only be code — a quoted string, an `ALL_CAPS` name, a dotted name, a
+path, a `@scope/package`, a `snake_case` identifier — and exact search finds **none** of them anywhere in the
+index, the entire associative half of the funnel is skipped: word-overlap recall, entity-name recall and semantic
+similarity alike. The result is an empty evidence set, and the command says the term was not found.
+
+Suppressing word matching matters as much as suppressing embeddings. A question about something absent still shares
+its *other* words with unrelated files, and those hits arrive with a path and a line range — which reads as an
+answer to the person who asked. Leaving that stage on would move the fabrication one step earlier rather than
+removing it (§2).
+
+Shapes that English prose also produces — a bare dashed word such as `auto-scaling`, a `camelCase` word such as
+`TypeScript` — are still searched exactly, because §14 requires package and symbol names to be findable, but they
+may **not** declare a question unanswerable on their own. A miss on one of those must not silence a question that
+the rest of the funnel could have answered. The exception is a question that consists of nothing but such a token,
+where the miss is the whole answer.
 
 ---
 
@@ -1262,6 +1291,20 @@ citation rendering
 
 LLM tests use the deterministic `NullBackend`/scripted backend — no network, no Ollama dependency in CI.
 
+### Adversarial validation
+
+Beyond the matrix above, `tests/adversarial/` holds a second ecosystem built to make RepoAtlas fail, and
+`tests/evaluation/` holds a persistent retrieval dataset. Both follow one rule that the matrix above does not need
+and these do:
+
+> **Expected results are written by hand from the fixture construction. RepoAtlas output never defines an
+> expectation.**
+
+Recording what the system currently says turns the suite into a description of present behavior — bugs included —
+and every later regression then looks like the specification. The adversarial fixtures therefore encode what must
+**not** be found as carefully as what must, and include questions that have no answer at all, which is the case
+most suites never test. See `ARCHITECTURE.md` §13.
+
 ---
 
 ## 20. Performance principles
@@ -1513,7 +1556,8 @@ lookup was also added alongside FTS, so a spelled-out identifier is found regard
 ### Slice E — Delivery and validation — **COMPLETE**
 
 Delivered 2026-09-02. 635 tests green (plus 10 behind the `slow` marker, run separately); ruff, ruff format and
-pyright clean; the image builds and the stack starts.
+pyright clean; the image built and the stack started when the slice was delivered. The adversarial pass that
+followed raised the suite to 935 and could not re-check the container: see the note at the end of this section.
 
 - [x] **19. Docker** — multi-stage `Dockerfile` (uv build stage, `python:3.13-slim` runtime, non-root, `git` as the
       only added binary, dependencies installed `--frozen` from `uv.lock`) and `docker-compose.yml` with the
@@ -1592,6 +1636,12 @@ Nothing here is unreasonable, so nothing was optimized (§20).
   step.
 - Salt `extend:` still records the relationship rather than the merged override semantics (unchanged from Slice C).
 
+**Container verification, recorded honestly (2026-09-02).** `Dockerfile` and `docker-compose.yml` were built and
+started during Slice E. The adversarial pass that followed ran on a machine whose WSL distro has no Docker
+integration enabled, so no image was rebuilt and no stack was started afterwards. The 15 delivery invariants in
+`tests/test_docker.py` are parsed out of the two files and still pass; they are a static check, and a static check
+is not a running container. Anyone taking V1 to a real deployment should rebuild and start the stack first.
+
 ### Cross-cutting, verified continuously
 
 - [x] Provenance present on every fact type (§11) — `tests/test_storage.py`, `tests/test_retrieval.py`
@@ -1623,6 +1673,74 @@ Nothing here is unreasonable, so nothing was optimized (§20).
 - [x] Malformed Salt, Jinja and YAML fail conservatively: nothing raises, no line number falls outside the file,
       and recovered facts are marked below full confidence (§2, §7) — `tests/test_malformed_input.py`
 - [x] The container mounts repositories read-only and keeps state on a separate volume (§18) —
-      `tests/test_docker.py`, verified against a real build and a running stack
+      `tests/test_docker.py`, verified against a real build and a running stack during Slice E. **Not re-verified
+      after 2026-09-02**: no Docker daemon is reachable from the development WSL distro, so the delivery
+      invariants are currently asserted statically only
 - [x] The §21 success scenario passes through the installed console script, with real exit codes (§21) —
-      `tests/test_e2e.py`
+      `tests/test_e2e.py`, `tests/adversarial/test_cli_scenario.py`
+- [x] No git command RepoAtlas runs can execute repository-controlled code — content filters, hooks, fsmonitor,
+      pagers, credential helpers, diff drivers or aliases (§17, `ARCHITECTURE.md` §8) —
+      `tests/adversarial/test_git_execution_boundary.py`
+
+### Adversarial validation pass — **COMPLETE**
+
+Completed 2026-09-02, on top of Slice E and adding no features. Objective: find realistic ways to make RepoAtlas
+return stale, incorrect, unsupported, ambiguous, misleading or overconfident output. 935 tests green (276 of them
+adversarial), plus 12 behind `slow` and 3 behind `scale`, run separately.
+
+- [x] **A nine-repository adversarial ecosystem** (`tests/adversarial/fixtures/`) with real relationships *and*
+      deliberate misinformation: documentation that contradicts the code, two repositories both providing
+      `common-lib`, one function name defined three times, references to files that do not exist, prompt-injection
+      text addressed to the model, fake secrets, invalid UTF-8, a 200 KB single-line file, a 4000-entry generated
+      JSON document, and identifiers guaranteed to appear nowhere
+- [x] **Ground truth written by hand** (`GROUND_TRUTH.md`) from the fixture construction, never from RepoAtlas
+      output. It records what must be found, what must **not** be found, and which questions have no answer
+- [x] **A persistent evaluation dataset** (`tests/evaluation/retrieval_cases.yaml`, 26 cases) with required,
+      alternate and forbidden evidence per case, reported per category and deliberately never as one combined
+      accuracy number
+- [x] **Seven defects found and fixed**, each with a permanent regression test (listed below)
+- [x] **Two weaknesses measured and documented rather than tuned away** — cross-repository symbol resolution (§9)
+      and prose competing with structure in intra-tier ranking (`ARCHITECTURE.md` §10)
+
+**Defects found by this pass.** All seven were reachable from ordinary use and invisible to the existing suite:
+
+1. **Wrapped commands lost their target.** `env LOG_LEVEL=debug ./notify.sh` recorded `EXECUTES cmd:env` — true of
+   the text, useless about the system. Transparent wrappers (`env`, `exec`, `nohup`, `command`) are now unwrapped
+   to the real target, stopping at the first flag not known to pass through; `sudo` is excluded because its flags
+   consume arguments.
+2. **Suppression was semantic-only.** A question naming an identifier that exists nowhere still returned FTS hits
+   — with paths and line numbers — because only the embedding stage was silenced. Suppression now covers every
+   associative stage.
+3. **Package names were never literal terms.** `@company/common` was split into `company` and `common`, so §14's
+   requirement that exact search work for package names was not met, and a miss could not be detected.
+4. **A `snake_case` identifier that exists nowhere returned files.** Only visible under the real embedding model;
+   the hashing stub hid it. `snake_case` is now a definite term, `camelCase` a searched-but-not-definite one.
+5. **Tier laundering through graph expansion.** Fuzzy entity-name hits seeded the graph walk, so one approximate
+   name match produced a dozen `DETERMINISTIC` candidates that outranked every honest associative one. Expansion is
+   now seeded by exact matches only. Real-model semantic recall improved from 1/4 to 3/4 at k=3 as a side effect.
+6. **A 200 KB single line became one chunk**, consuming an entire evidence budget. Chunks are now capped in
+   characters as well as lines, splitting rather than truncating.
+7. **Rank fusion counted volume as agreement.** Chunks of a file with no line breaks all carry the same line range,
+   and each added its own reciprocal rank — so a 4000-entry generated JSON document containing none of the
+   question's words ranked **first** for "where does the backend get its hostname?", pushing the answer to rank 6.
+   Each ranked list now contributes one reciprocal rank per span. Defect 6 created this one, which is what an
+   adversarial pass is for.
+
+**Two failures traced to the fixture, not the product**, and were fixed in the fixture: a file whose docstring
+contained a literal the ground truth claimed it did not, and a race test that mutated a file's mtime without
+changing its content, so the file was never re-read. Neither produced a change to RepoAtlas.
+
+**Measured retrieval quality** on the 26-case dataset with `BAAI/bge-small-en-v1.5`, reported per category:
+
+| Category | n | r@1 | r@3 | r@5 | r@10 |
+|---|---|---|---|---|---|
+| exact | 8 | 8/8 | 8/8 | 8/8 | 8/8 |
+| semantic | 4 | 0/4 | 3/4 | 4/4 | 4/4 |
+| dependencies | 2 | 1/2 | 2/2 | 2/2 | 2/2 |
+| cross-repo | 2 | 0/2 | 1/2 | 1/2 | 2/2 |
+| misleading | 2 | 0/2 | 1/2 | 1/2 | 2/2 |
+| salt / bash / ambiguity | 3 | 3/3 | 3/3 | 3/3 | 3/3 |
+| unanswerable | 5 | — | — | — | — |
+
+Forbidden-evidence hits: 0. Unanswerable questions correctly refused: 5/5. Deterministic-precedence violations: 0.
+Cross-repository expectations met: 2/2.
