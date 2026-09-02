@@ -330,8 +330,7 @@ class RepositoryContextResolver:
         self,
         cwd: Path,
         explicit_repo: str | None = None,
-    ) -> RepositoryContext:
-        ...
+    ) -> RepositoryContext: ...
 ```
 
 ### Resolution priority
@@ -1382,28 +1381,41 @@ Status markers: `[ ]` not started · `[~]` in progress · `[x]` done.
 Work proceeds in **slices**, not in strict phase order — the point is to prove a working vertical slice before
 building breadth. Do not build all parsers before the spine works end to end.
 
-### Slice A — Spine (no LLM required)
+### Slice A — Spine (no LLM required) — **COMPLETE**
 
 Proves: `directory → discovery → context → indexing → exact retrieval → evidence`.
 
-- [ ] **1. Project foundation** — uv + Python 3.13, `pyproject.toml`, package skeleton, ruff, pyright, pytest,
-      CI-able test command
-- [ ] **2. Configuration + CLI** — Pydantic settings, YAML config load/save, XDG paths, Typer app skeleton,
-      exit codes, `--json`
-- [ ] **3. Repository discovery** — recursive walk, nested repos, exclusions, `.repoatlasignore`, language
-      detection, manifest detection, `init`
-- [ ] **4. Shared directory-context resolver** — §6 in full, including all error cases and edge cases
-- [ ] **5. File-state tracking** — safe git wrapper, file enumeration, hashing, `files` table
-- [ ] **6. Incremental sync** — §12 including forced-rehash rules and both invariants
-- [ ] **7. Parser abstraction** — `LanguageParser` protocol, registry/dispatch, `ParsedFile` / `ParsedSymbol` /
-      `ParsedReference` contract, diagnostics. **Comes before any concrete parser.**
-- [ ] **8a. Python parser** — implemented *through* the abstraction from step 7; no Python-specific path in the
-      spine
-- [ ] **11. Persistent knowledge representation** — entities, edges, provenance, cascade deletion,
+Delivered 2026-09-02. 139 tests green; ruff, ruff format and pyright clean.
+
+- [x] **1. Project foundation** — uv + CPython 3.13.15, `pyproject.toml`, package skeleton, ruff, pyright, pytest
+- [x] **2. Configuration + CLI** — Pydantic settings, YAML config load/save, XDG paths, Typer app,
+      exit codes 0/1/2/3/4, `--json`, `--verbose`
+- [x] **3. Repository discovery** — recursive walk, nested repos, exclusions, `.repoatlasignore`, language
+      detection, manifest/lockfile detection, `init`
+- [x] **4. Shared directory-context resolver** — §6 in full; 23 cases covering depth, nesting, symlinks,
+      spaces, relative paths, unmanaged repos and every error path
+- [x] **5. File-state tracking** — hardened git wrapper, `git ls-files` enumeration, blake2b hashing,
+      `files` table
+- [x] **6. Incremental sync** — §12 including all five forced-rehash triggers and both invariants
+- [x] **7. Parser abstraction** — `LanguageParser` protocol, registry/dispatch, `ParsedFile` / `ParsedSymbol` /
+      `ParsedReference` contract, diagnostics. Landed **before** any concrete parser.
+- [x] **8a. Python parser** — stdlib `ast`, implemented *through* the abstraction; no Python-specific path
+      exists in the spine
+- [x] **11. Persistent knowledge representation** — entities (two-tier), edges, provenance, cascade deletion,
       orphan GC, migrations
-- [ ] **13. Exact search** — FTS5 chunk + entity indexes, identifier-aware tokenization, exactness verification
-- [ ] **18a. `status`, `repos`, `locate`** — evidence-only rendering, no LLM
-- [ ] **A-gate:** fixture repos + tests for discovery, context, sync and exact retrieval all green
+- [x] **13. Exact search** — FTS5 chunk + entity indexes, identifier-aware tokenization, literal-substring
+      exactness verification
+- [x] **18a. `status`, `repos`, `locate`** — evidence-only rendering, no LLM required
+- [x] **A-gate:** fixture repos + tests for discovery, context, sync and exact retrieval all green, plus the
+      §21 success scenario driven end to end through the CLI
+
+**Deferred within Slice A, by design:**
+
+- Cross-file and cross-repository symbol resolution. The linker resolves environment variables, modules and
+  commands as interned entities, and symbol references within a file. Resolving a reference *across* files needs
+  the import graph, which arrives with phase 12 in Slice C. Until then such references are counted as unresolved
+  rather than guessed — see §2.
+- `watch` (optional in §4) is not implemented.
 
 ### Slice B — Reasoning
 
@@ -1437,8 +1449,8 @@ Proves: `directory → discovery → context → indexing → exact retrieval �
 
 ### Cross-cutting, verified continuously
 
-- [ ] Provenance present on every fact type (§11)
-- [ ] No-stale-facts invariants hold after every sync scenario (§12)
-- [ ] Secret exclusion applied before content is read (§17)
-- [ ] Layering rules hold — parsers touch neither storage nor LLM; CLI contains no indexing logic
-      (`ARCHITECTURE.md` §1)
+- [x] Provenance present on every fact type (§11) — `tests/test_storage.py`, `tests/test_retrieval.py`
+- [x] No-stale-facts invariants hold after every sync scenario (§12) — `tests/test_sync.py`
+- [x] Secret exclusion applied before content is read (§17) — `tests/test_sync.py`
+- [x] Layering rules hold — parsers touch neither storage nor LLM; CLI contains no indexing logic; SQL appears
+      only in `storage/sqlite/`; only `gitstate/` invokes git (`ARCHITECTURE.md` §1) — `tests/test_layering.py`
