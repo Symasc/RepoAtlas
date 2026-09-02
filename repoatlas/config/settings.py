@@ -183,15 +183,31 @@ class Settings(BaseModel):
         return self.repos.root
 
 
+def _env_overrides(settings: Settings) -> Settings:
+    """Apply the few settings a container must be able to set without a file.
+
+    Deliberately narrow. Configuration lives in YAML; these exist because the
+    values differ between running on a workstation and running as a compose
+    service (V1_SPEC §18), where the reasoning model is a sibling container
+    rather than ``localhost``. ``REPOATLAS_CONFIG`` and ``REPOATLAS_DB`` are
+    handled at path resolution for the same reason.
+    """
+    base_url = os.environ.get("REPOATLAS_LLM_BASE_URL")
+    if not base_url:
+        return settings
+    llm = settings.llm.model_copy(update={"base_url": base_url})
+    return settings.model_copy(update={"llm": llm})
+
+
 def load_settings(path: Path | None = None) -> Settings:
     """Load settings, falling back to defaults when no config file exists."""
     target = path or config_path()
     if not target.exists():
-        return Settings()
+        return _env_overrides(Settings())
     raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
-        return Settings()
-    return Settings.model_validate(raw)
+        return _env_overrides(Settings())
+    return _env_overrides(Settings.model_validate(raw))
 
 
 def save_settings(settings: Settings, path: Path | None = None) -> Path:

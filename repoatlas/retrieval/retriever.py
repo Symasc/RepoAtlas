@@ -32,7 +32,14 @@ from repoatlas.models.evidence import (
 from repoatlas.models.parsing import EdgeType
 from repoatlas.models.telemetry import RetrievalTrace, StageTiming, Stopwatch
 from repoatlas.retrieval.query import analyze
-from repoatlas.retrieval.ranking import NoopReranker, Reranker, apply_budget, deduplicate, fuse
+from repoatlas.retrieval.ranking import (
+    NoopReranker,
+    Reranker,
+    apply_budget,
+    deduplicate,
+    enforce_tier_order,
+    fuse,
+)
 from repoatlas.storage.protocols import ChunkHit, VectorHit
 from repoatlas.storage.sqlite.search import SqliteSearchIndex
 from repoatlas.storage.sqlite.stores import SqliteKnowledgeStore
@@ -219,9 +226,16 @@ class Retriever:
         stages.append(_recorded(watch))
 
         with Stopwatch("rerank", candidates_in=len(deduped)) as watch:
-            reranked = self._reranker.rerank(question, deduped)
+            # The tier order is re-imposed on whatever comes back. The reranker is
+            # a seam for code that does not exist yet, and the guarantee of
+            # V1_SPEC §14 must hold at this boundary rather than depend on every
+            # future implementation choosing to honour it.
+            reordered = self._reranker.rerank(question, deduped)
+            reranked = enforce_tier_order(reordered)
             watch.candidates_out = len(reranked)
             watch.detail = type(self._reranker).__name__
+            if [c.tier for c in reordered] != [c.tier for c in reranked]:
+                watch.detail += " (tier order restored)"
         stages.append(_recorded(watch))
 
         with Stopwatch("budget", candidates_in=len(reranked)) as watch:

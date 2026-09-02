@@ -21,6 +21,7 @@ keeps working.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from repoatlas.embeddings.protocol import EmbeddingUnavailable
@@ -147,10 +148,27 @@ class FastEmbedModel:
         return False
 
     def _cached(self) -> bool:
-        """Whether the model's files are already on disk. Never fetches."""
+        """Whether the model's files are already on disk. Never fetches.
+
+        The empty cache is checked first, and answered without importing
+        ``fastembed``. That import pulls in ONNX Runtime, which is both slow and
+        — on a read-only container filesystem — noisy, and it is pure waste when
+        the directory it would search does not exist. The mapping from a model
+        name to its Hugging Face repository is static data that only fastembed
+        knows, so the import is still needed once there is a cache to look in.
+        """
+        try:
+            from huggingface_hub import snapshot_download
+            from huggingface_hub.constants import HF_HUB_CACHE
+        except ImportError:  # pragma: no cover - dependency is required
+            return False
+
+        cache_root = Path(self._cache_dir) if self._cache_dir else Path(HF_HUB_CACHE)
+        if not cache_root.is_dir():
+            return False
+
         try:
             from fastembed import TextEmbedding
-            from huggingface_hub import snapshot_download
         except ImportError:  # pragma: no cover - dependency is required
             return False
 

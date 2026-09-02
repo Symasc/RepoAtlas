@@ -25,6 +25,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
     Severity,
 )
+from repoatlas.parsers.marks import diagnostic_line
 
 _YAML_SUFFIXES = frozenset({".yaml", ".yml"})
 _JSON_SUFFIXES = frozenset({".json"})
@@ -133,6 +134,7 @@ class StructuredParser:
             documents = list(yaml.compose_all(text, Loader=yaml.SafeLoader))
         except yaml.YAMLError as exc:
             mark = getattr(exc, "problem_mark", None)
+            failed_at = diagnostic_line(mark, content)
             return ParsedFile(
                 language=language,
                 parser=self.name,
@@ -141,7 +143,7 @@ class StructuredParser:
                     ParseDiagnostic(
                         severity=Severity.WARNING,
                         message=f"{language} parse failed: {getattr(exc, 'problem', exc)}",
-                        line=None if mark is None else mark.line + 1,
+                        line=failed_at,
                     ),
                 ),
             )

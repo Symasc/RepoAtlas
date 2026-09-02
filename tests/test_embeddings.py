@@ -325,3 +325,190 @@ def test_embedding_is_skipped_when_the_model_is_unavailable(initialized: Workspa
     assert result.embedded == 0
     assert result.pending > 0
     assert result.detail == "model not downloaded"
+
+
+# --- content addressing when several chunks share one hash (V1_SPEC §20) ------
+#
+# Vectors are keyed by ``(content_hash, model)``, not by chunk id, so identical
+# text anywhere in the managed set shares exactly one vector. That is what makes
+# re-embedding incremental, and it is also the case a chunk-keyed cascade would
+# get wrong: deleting one of several chunks that share a hash must **not** remove
+# the vector the others still rely on.
+
+
+def _shared_text() -> str:
+    return "def duplicated_helper():\n    return SHARED_MARKER_VALUE\n"
+
+
+def _plant_duplicate_files(workspace_root: Path, count: int) -> list[Path]:
+    """The same bytes in ``count`` different files across two repositories."""
+    targets = [
+        workspace_root / "python-service" / "src" / f"copy_{index}.py"
+        if index % 2 == 0
+        else workspace_root / "scripts" / f"copy_{index}.py"
+        for index in range(count)
+    ]
+    for target in targets:
+        target.write_text(_shared_text())
+    return targets
+
+
+def _shared_hash(workspace: Workspace) -> str:
+    """The hash the duplicated text actually chunked to.
+
+    Read back rather than recomputed, so the test asserts sharing rather than
+    reimplementing how a file is split into chunks.
+    """
+    row = workspace.database.execute(
+        "SELECT DISTINCT content_hash FROM chunks WHERE text LIKE '%SHARED_MARKER_VALUE%'"
+    ).fetchall()
+    assert len(row) == 1, "the planted copies must chunk identically"
+    return str(row[0]["content_hash"])
+
+
+def _vector_rows(workspace: Workspace, content_hash: str, model: str) -> int:
+    row = workspace.database.execute(
+        "SELECT COUNT(*) AS n FROM embeddings WHERE content_hash = ? AND model = ?",
+        (content_hash, model),
+    ).fetchone()
+    return int(row["n"])
+
+
+def _chunk_rows(workspace: Workspace, content_hash: str) -> int:
+    row = workspace.database.execute(
+        "SELECT COUNT(*) AS n FROM chunks WHERE content_hash = ?", (content_hash,)
+    ).fetchone()
+    return int(row["n"])
+
+
+def test_identical_text_in_many_files_is_embedded_once(
+    initialized: Workspace, workspace_root: Path
+) -> None:
+    from repoatlas.services.sync_service import sync
+
+    model = initialized.embeddings()
+    assert model is not None
+    _plant_duplicate_files(workspace_root, 6)
+    before = initialized.vectors.count(model.id)
+    sync(initialized, initialized.resolver().resolve(workspace_root))
+
+    shared = _shared_hash(initialized)
+    assert _chunk_rows(initialized, shared) == 6
+    assert _vector_rows(initialized, shared, model.id) == 1
+    # Six new chunks, one new vector: the cost of duplication is storage, not
+    # embedding work.
+    assert initialized.vectors.count(model.id) == before + 1
+
+
+def test_adding_another_copy_embeds_nothing_at_all(
+    initialized: Workspace, workspace_root: Path
+) -> None:
+    from repoatlas.services.sync_service import sync
+
+    _plant_duplicate_files(workspace_root, 2)
+    sync(initialized, initialized.resolver().resolve(workspace_root))
+
+    (workspace_root / "ts-service" / "copy.py").write_text(_shared_text())
+    report = sync(initialized, initialized.resolver().resolve(workspace_root))
+    assert report.embedded_chunks == 0
+    assert _chunk_rows(initialized, _shared_hash(initialized)) == 3
+
+
+def test_deleting_one_sharer_keeps_the_vector_the_others_need(
+    initialized: Workspace, workspace_root: Path
+) -> None:
+    """The defect a chunk-id cascade would have: removing one copy must not blind
+    the retriever to the others."""
+    from repoatlas.services.sync_service import sync
+
+    model = initialized.embeddings()
+    assert model is not None
+    targets = _plant_duplicate_files(workspace_root, 4)
+    sync(initialized, initialized.resolver().resolve(workspace_root))
+    shared = _shared_hash(initialized)
+
+    targets[0].unlink()
+    sync(initialized, initialized.resolver().resolve(workspace_root))
+    assert _chunk_rows(initialized, shared) == 3
+    assert _vector_rows(initialized, shared, model.id) == 1
+
+    # And the surviving copies are still semantically retrievable.
+    query = model.embed_query("duplicated helper")
+    hits = initialized.vectors.query(query, model.id, None, 50, -1.0)
+    assert [hit for hit in hits if hit.text.strip() == _shared_text().strip()]
+
+
+def test_the_vector_is_swept_only_when_the_last_sharer_goes(
+    initialized: Workspace, workspace_root: Path
+) -> None:
+    from repoatlas.services.sync_service import sync
+
+    model = initialized.embeddings()
+    assert model is not None
+    targets = _plant_duplicate_files(workspace_root, 3)
+    sync(initialized, initialized.resolver().resolve(workspace_root))
+    shared = _shared_hash(initialized)
+
+    for target in targets[:-1]:
+        target.unlink()
+        sync(initialized, initialized.resolver().resolve(workspace_root))
+        assert _vector_rows(initialized, shared, model.id) == 1
+
+    targets[-1].unlink()
+    sync(initialized, initialized.resolver().resolve(workspace_root))
+    assert _chunk_rows(initialized, shared) == 0
+    assert _vector_rows(initialized, shared, model.id) == 0
+
+
+def test_a_sweep_never_removes_a_vector_a_chunk_still_uses(
+    initialized: Workspace, workspace_root: Path
+) -> None:
+    """The sweep is defined by chunk membership, so running it repeatedly — and
+    when nothing changed — is a no-op."""
+    from repoatlas.services.sync_service import sync
+
+    model = initialized.embeddings()
+    assert model is not None
+    _plant_duplicate_files(workspace_root, 3)
+    sync(initialized, initialized.resolver().resolve(workspace_root))
+    before = initialized.vectors.count(model.id)
+
+    assert initialized.vectors.gc_orphan_vectors() == 0
+    assert initialized.vectors.gc_orphan_vectors() == 0
+    assert initialized.vectors.count(model.id) == before
+
+
+def test_a_shared_hash_is_offered_to_the_model_once(
+    initialized: Workspace, workspace_root: Path
+) -> None:
+    """``missing_hashes`` de-duplicates, so the backend is asked once even though
+    many chunks are waiting on the same text."""
+    from repoatlas.services.sync_service import sync
+
+    model = initialized.embeddings()
+    assert model is not None
+    _plant_duplicate_files(workspace_root, 5)
+    sync(initialized, initialized.resolver().resolve(workspace_root))
+
+    shared = _shared_hash(initialized)
+    with initialized.database.transaction() as conn:
+        conn.execute(
+            "DELETE FROM embeddings WHERE content_hash = ? AND model = ?", (shared, model.id)
+        )
+    pending = initialized.vectors.missing_hashes(model.id)
+    assert pending.count(shared) == 1
+    assert len(initialized.vectors.texts_for_hashes(pending)) == len(set(pending))
+
+
+def test_each_model_keeps_its_own_vector_for_a_shared_hash(initialized: Workspace) -> None:
+    """The key is ``(content_hash, model)``: two models coexist, and deleting one
+    leaves the other intact."""
+    shared = chunk_hash("SELECT DISTINCT content that two models both embed")
+    initialized.vectors.upsert_many("model-a", 4, [(shared, [1.0, 0.0, 0.0, 0.0])])
+    initialized.vectors.upsert_many("model-b", 4, [(shared, [0.0, 1.0, 0.0, 0.0])])
+    assert _vector_rows(initialized, shared, "model-a") == 1
+    assert _vector_rows(initialized, shared, "model-b") == 1
+
+    initialized.vectors.delete_model("model-a")
+    assert _vector_rows(initialized, shared, "model-a") == 0
+    assert _vector_rows(initialized, shared, "model-b") == 1
