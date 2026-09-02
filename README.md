@@ -14,8 +14,8 @@ answer. See [docs/V1_SPEC.md](docs/V1_SPEC.md) for the specification and
 
 ## Status
 
-**Slices A (spine), B (reasoning), C (breadth) and D (ranking) are complete.** Slice E is not yet implemented;
-see the checklist in [docs/V1_SPEC.md §23](docs/V1_SPEC.md#23-implementation-checklist).
+**V1 is complete.** All five slices — spine, reasoning, breadth, ranking and delivery — are implemented and
+validated; see the checklist in [docs/V1_SPEC.md §23](docs/V1_SPEC.md#23-implementation-checklist).
 
 | Working now | Not yet |
 |---|---|
@@ -24,7 +24,7 @@ see the checklist in [docs/V1_SPEC.md §23](docs/V1_SPEC.md#23-implementation-ch
 | Dependency detection across pypi, npm and gem — declared *and* resolved versions | — |
 | Cross-file imports and cross-repository relationships | — |
 | Exact search, semantic search, bounded graph expansion, rank fusion | — |
-| — | Docker packaging (Slice E) |
+| Docker image and compose stack, read-only repository mounts | — |
 
 ### Retrieval
 
@@ -131,17 +131,33 @@ Dockerfile    detected and indexed for text search; no structural parsing yet
 Every file above is discovered, hashed, chunked and lexically searchable today. Only Python currently yields
 symbols and relationships.
 
+## Docker
+
+```bash
+REPOS_DIR=/path/to/your/repos docker compose up -d
+REPOS_DIR=/path/to/your/repos docker compose run --rm repoatlas init /repos
+REPOS_DIR=/path/to/your/repos docker compose run --rm \
+  -w /repos/some-service repoatlas locate "Where is SERVICE_HOST configured?"
+```
+
+Repositories are mounted **read-only** and the index lives on a separate named volume, so RepoAtlas cannot write
+into the tree it is reading — enforced by the mount rather than promised by the code. The container runs as a
+non-root user with a read-only root filesystem and all capabilities dropped. `ollama` runs alongside on loopback;
+pull a model into it (`docker compose exec ollama ollama pull gpt-oss:20b`) before using `ask` or `debug`.
+
 ## Security
 
 Repositories are untrusted input and are **never executed**: no shell scripts, no Python imports, no Ruby, no
 Salt rendering, no npm lifecycle scripts, no Docker builds. Git is invoked only through a hardened read-only
 wrapper with hooks disabled. Secret files (`.env`, `*.pem`, `*.key`, `id_rsa`, `id_ed25519`) are excluded before
-any content is read.
+any content is read — asserted separately at every stage that content could otherwise reach, including the model
+prompt and `--verbose` output.
 
 ## Development
 
 ```bash
-uv run pytest          # 373 tests
+uv run pytest          # 635 tests
+uv run pytest -m slow  # 10 more; downloads the embedding model once
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright

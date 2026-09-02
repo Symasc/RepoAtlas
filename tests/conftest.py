@@ -120,3 +120,77 @@ def initialized(workspace: Workspace, workspace_root: Path, tmp_path: Path) -> I
 
     initialize(workspace, workspace_root, config_path=tmp_path / "config.yaml")
     yield workspace
+
+
+def fact_snapshot(workspace: Workspace) -> dict[str, object]:
+    """Normalized, id-independent snapshot of every fact table.
+
+    Comparing two of these is how invariant 2 of ARCHITECTURE.md §9 is asserted:
+    *a sync across any change yields the same state as a full reindex of the same
+    tree*. Row ids are excluded deliberately — they are allocation order, not
+    fact — and everything else is ordered so the comparison is stable.
+    """
+    files = workspace.database.execute(
+        "SELECT r.name, f.rel_path, f.content_hash FROM files f "
+        "JOIN repositories r ON r.id = f.repo_id ORDER BY r.name, f.rel_path"
+    ).fetchall()
+    entities = workspace.database.execute(
+        "SELECT type, key, name, qualified_name, line_start, line_end FROM entities "
+        "ORDER BY key, name, line_start"
+    ).fetchall()
+    edges = workspace.database.execute(
+        "SELECT e.type, src.key AS src_key, dst.key AS dst_key, e.line_start "
+        "FROM edges e JOIN entities src ON src.id = e.src_id "
+        "JOIN entities dst ON dst.id = e.dst_id "
+        "ORDER BY src.key, dst.key, e.type, e.line_start"
+    ).fetchall()
+    dependencies = workspace.database.execute(
+        "SELECT r.name, ecosystem, normalized_name, role, constraint_text, version "
+        "FROM dependencies d JOIN repositories r ON r.id = d.repo_id "
+        "ORDER BY r.name, ecosystem, normalized_name, role"
+    ).fetchall()
+    claims = workspace.database.execute(
+        "SELECT r.name, f.rel_path, edge_type, target_kind, target_key, u.line_start "
+        "FROM unresolved_refs u JOIN files f ON f.id = u.file_id "
+        "JOIN repositories r ON r.id = u.repo_id "
+        "ORDER BY r.name, f.rel_path, u.line_start, target_key"
+    ).fetchall()
+    chunks = workspace.database.execute(
+        "SELECT r.name, f.rel_path, c.line_start, c.line_end, c.content_hash "
+        "FROM chunks c JOIN files f ON f.id = c.file_id "
+        "JOIN repositories r ON r.id = c.repo_id "
+        "ORDER BY r.name, f.rel_path, c.line_start"
+    ).fetchall()
+    return {
+        "files": [tuple(r) for r in files],
+        "entities": [tuple(r) for r in entities],
+        "edges": [tuple(r) for r in edges],
+        "dependencies": [tuple(r) for r in dependencies],
+        "unresolved_refs": [tuple(r) for r in claims],
+        "chunks": [tuple(r) for r in chunks],
+    }
+
+
+def reindex_from_scratch(
+    settings: Settings, workspace_root: Path, tmp_path: Path, tag: str = "fresh"
+) -> dict[str, object]:
+    """Index the tree as it is now into a pristine database, and snapshot it.
+
+    The comparison target for invariant 2. A separate database is used rather
+    than ``--full`` on the same one, so nothing an incremental run wrote can
+    survive into the baseline.
+    """
+    from repoatlas.services.init_service import initialize
+    from repoatlas.services.workspace import open_workspace
+
+    fresh_settings = settings.model_copy(
+        update={
+            "storage": settings.storage.model_copy(update={"database": tmp_path / tag / "atlas.db"})
+        }
+    )
+    fresh = open_workspace(settings=fresh_settings, require_root=False)
+    try:
+        initialize(fresh, workspace_root, config_path=tmp_path / f"{tag}-config.yaml")
+        return fact_snapshot(fresh)
+    finally:
+        fresh.close()

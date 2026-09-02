@@ -1510,11 +1510,87 @@ lookup was also added alongside FTS, so a spelled-out identifier is found regard
   every deterministic command is unaffected — the same posture as a missing Ollama model (§3).
 - `watch` (optional in §4) is still not implemented.
 
-### Slice E — Delivery
+### Slice E — Delivery and validation — **COMPLETE**
 
-- [ ] **19. Docker** — `Dockerfile`, `docker-compose.yml`, read-only repo mount, separate state volume
-- [ ] **20. End-to-end tests and hardening** — the §21 success scenario as an automated test, full §19 matrix,
-      performance sanity checks
+Delivered 2026-09-02. 635 tests green (plus 10 behind the `slow` marker, run separately); ruff, ruff format and
+pyright clean; the image builds and the stack starts.
+
+- [x] **19. Docker** — multi-stage `Dockerfile` (uv build stage, `python:3.13-slim` runtime, non-root, `git` as the
+      only added binary, dependencies installed `--frozen` from `uv.lock`) and `docker-compose.yml` with the
+      `repoatlas` and `ollama` services, the repository tree mounted **read-only**, state on a **separate named
+      volume**, a read-only root filesystem, `cap_drop: ALL`, `no-new-privileges`, and the model server published
+      on loopback only. No SearXNG or other research infrastructure (§22)
+- [x] **20. End-to-end tests and hardening** — the §21 scenario driven through the **installed console script as a
+      subprocess**, the full §19 matrix, and performance sanity measured through the Slice D instrumentation
+
+**Slice E is validation, not packaging.** What it added beyond the two phases above:
+
+- [x] **The real embedding backend is exercised.** `tests/test_real_embeddings.py` runs `BAAI/bge-small-en-v1.5`
+      through factory → sync → vector index → retrieval funnel, and asserts the two properties the deterministic
+      stub structurally cannot have: semantically related text outscores unrelated text without sharing tokens, and
+      the asymmetric query prefix genuinely changes the vector. The precedence guarantee is re-checked with the real
+      model, so the tier rule is not an artifact of the stub. Behind the `slow` marker; CI still never downloads
+- [x] **Content-addressed reuse and collection when several chunks share one hash.** Identical text across
+      repositories is embedded once; adding another copy embeds nothing; deleting one sharer keeps the vector the
+      others still need; the vector is swept only when the last sharer goes; two models keep independent vectors for
+      the same hash. This is the case a `chunk_id` cascade would get wrong
+- [x] **The precedence guarantee is asserted at the final retrieval boundary**, not only inside `fuse`. Against an
+      embedding model that scores every text 1.0, and against a reranker that deliberately inverts the tiers. The
+      order is re-imposed by `enforce_tier_order` before budgeting, so a hostile order can neither outrank
+      deterministic evidence nor starve it out of the token budget
+- [x] **Stale-index stress**: diverged branches, content-only branch changes, directory deletion, a deleted file
+      that returns, renames, moves into a deeper path, moves *between repositories*, two files swapping content,
+      uncommitted edits, untracked files, staged deletions, reverting to clean, and dependency edits in both
+      directions — including a provider that appears only later and gains its edge from a standing claim. Every
+      scenario ends by comparing a fact snapshot against a from-scratch index of the same tree
+- [x] **Secret exclusion asserted stage by stage** — files, chunks, FTS, embeddings, entities, evidence sets, the
+      model prompt (inspected in the messages actually handed to the backend) and `--verbose` output — with one
+      canary per pattern, plus the converse: files with *similar* names are not excluded, because over-exclusion
+      loses real evidence silently
+- [x] **Malformed input fails conservatively.** A matrix of broken YAML, Salt and Jinja against every parser that
+      claims the extension: nothing raises, no reported line falls outside the file, anything recovered is marked
+      below full confidence, a YAML alias bomb stays linear, an unsafe `!!python/object/apply:` tag is composed but
+      never constructed (asserted with a filesystem canary), and a repository full of broken files still syncs with
+      its other facts intact
+- [x] **Performance sanity from the Slice D traces** — measured, not optimized (see below)
+
+**Three real defects were found by this work and fixed.** All three were provenance or precedence bugs that the
+happy path never reached:
+
+1. A Jinja template symbol spanned one line past the end of its file (`content.count("\n") + 1` where a trailing
+   newline terminates the last line rather than starting another), so a citation could name a line that does not
+   exist.
+2. A YAML parse failure at end-of-stream reported a diagnostic line one past the file, for the same reason. Both
+   are now clamped in `parsers/marks.py`, which is where that single invariant now lives.
+3. A Salt requisite naming nothing — `- pkg:` with an empty value — produced a reference to the empty string, an
+   edge to a state that cannot exist. It now yields no reference at all.
+
+None was caught by the existing suite because each requires input no fixture had: a file whose last line lacks a
+trailing newline, a truncated YAML document, an empty requisite value.
+
+**Measured on the fixture set** (7 repositories, 25 files) — recorded so a future regression is comparable, not as
+a target:
+
+| Operation | Cost |
+|---|---|
+| Full index (`init`) | ~0.09 s |
+| No-op sync (nothing changed) | ~0.04 s |
+| Global link pass | ~1.5 ms for 29 standing claims over 25 files / 75 symbols |
+| Retrieval, whole funnel | 1.7–2.2 ms wall, of which ~1.3–1.5 ms is traced across the nine stages |
+| Slowest retrieval stage | graph expansion, ~0.4–0.8 ms |
+| Repeated retrieval (12 runs) | flat: first four 1.5 ms, last four 1.4 ms |
+| Docker image build | ~1 min cold, ~12 s warm |
+
+Nothing here is unreasonable, so nothing was optimized (§20).
+
+**Deferred within Slice E, by design:**
+
+- `watch` (optional in §4) is still not implemented. It is the one item in §4 marked optional and the only one V1
+  does not ship.
+- The `ollama` service starts with no model pulled. `ask` therefore reports exit 4 with the `ollama pull` message,
+  which is the designed behavior (§3) rather than a gap; pulling a 20 GB model is a deployment step, not a build
+  step.
+- Salt `extend:` still records the relationship rather than the merged override semantics (unchanged from Slice C).
 
 ### Cross-cutting, verified continuously
 
@@ -1534,3 +1610,19 @@ lookup was also added alongside FTS, so a spelled-out identifier is found regard
 - [x] Unchanged text is never re-embedded, and orphaned vectors are swept (§20) — `tests/test_embeddings.py`
 - [x] Retrieval and graph traversal are instrumented per stage, and the trace never changes the answer (§20) —
       `tests/test_retrieval_ranking.py`
+- [x] Associative evidence cannot outrank deterministic evidence in a returned `EvidenceSet`, under a saturating
+      embedding model or a hostile reranker, and cannot displace it from the token budget either (§14) —
+      `tests/test_retrieval_ranking.py`
+- [x] Identical text is embedded once however many chunks share it, and its vector survives until the last sharer
+      is gone (§20) — `tests/test_embeddings.py`
+- [x] Every incremental sync scenario yields the same facts as a full reindex of the same tree, across branches,
+      deletions, renames, cross-repository moves, dirty trees and dependency edits (§12) —
+      `tests/test_stale_index.py`
+- [x] No secret file reaches enumeration, chunks, FTS, embeddings, entities, evidence, a prompt or a log (§17) —
+      `tests/test_secrets.py`
+- [x] Malformed Salt, Jinja and YAML fail conservatively: nothing raises, no line number falls outside the file,
+      and recovered facts are marked below full confidence (§2, §7) — `tests/test_malformed_input.py`
+- [x] The container mounts repositories read-only and keeps state on a separate volume (§18) —
+      `tests/test_docker.py`, verified against a real build and a running stack
+- [x] The §21 success scenario passes through the installed console script, with real exit codes (§21) —
+      `tests/test_e2e.py`
