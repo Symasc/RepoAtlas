@@ -10,6 +10,7 @@ dependencies = [
     "typer>=0.15",
     "pydantic>=2.10",
     "pyyaml>=6.0",
+    "httpx>=0.28",
 ]
 
 [project.optional-dependencies]
@@ -17,8 +18,6 @@ dependencies = [
 parsers = ["tree-sitter>=0.23", "tree-sitter-language-pack>=0.7"]
 # Slice D — local semantic retrieval.
 semantic = ["fastembed>=0.5", "numpy>=2.0"]
-# Slice B — Ollama reasoning backend.
-llm = ["httpx>=0.28"]
 
 [project.scripts]
 repoatlas = "repoatlas.cli.main:run"

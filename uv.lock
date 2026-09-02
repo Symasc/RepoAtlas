@@ -930,15 +930,13 @@ name = "repoatlas"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "typer" },
 ]
 
 [package.optional-dependencies]
-llm = [
-    { name = "httpx" },
-]
 parsers = [
     { name = "tree-sitter" },
     { name = "tree-sitter-language-pack" },
@@ -959,7 +957,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastembed", marker = "extra == 'semantic'", specifier = ">=0.5" },
-    { name = "httpx", marker = "extra == 'llm'", specifier = ">=0.28" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "numpy", marker = "extra == 'semantic'", specifier = ">=2.0" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -967,7 +965,7 @@ requires-dist = [
     { name = "tree-sitter-language-pack", marker = "extra == 'parsers'", specifier = ">=0.7" },
     { name = "typer", specifier = ">=0.15" },
 ]
-provides-extras = ["parsers", "semantic", "llm"]
+provides-extras = ["parsers", "semantic"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -14,7 +14,7 @@ from repoatlas.context.resolver import RepositoryContextResolver
 from repoatlas.errors import NotInitializedError
 from repoatlas.gitstate.client import GitClient
 from repoatlas.parsers.registry import ParserRegistry
-from repoatlas.retrieval.retriever import Retriever
+from repoatlas.retrieval.retriever import RetrievalLimits, Retriever
 from repoatlas.storage.sqlite.database import Database, open_database
 from repoatlas.storage.sqlite.search import SqliteSearchIndex
 from repoatlas.storage.sqlite.stores import (
@@ -55,8 +55,8 @@ class Workspace:
             git=self.git,
         )
 
-    def retriever(self) -> Retriever:
-        return Retriever(search=self.search, knowledge=self.knowledge)
+    def retriever(self, limits: RetrievalLimits | None = None) -> Retriever:
+        return Retriever(search=self.search, knowledge=self.knowledge, limits=limits)
 
     def close(self) -> None:
         self.database.close()
