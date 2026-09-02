@@ -269,21 +269,27 @@ class RepositoryStore(Protocol):
     def list_all(self) -> list[Repository]: ...
     def delete(self, repo_id: int) -> None: ...
 
+
 class FileStore(Protocol):
-    def list_states(self, repo_id: int) -> dict[str, FileState]: ...   # rel_path → stat+hash
+    def list_states(self, repo_id: int) -> dict[str, FileState]: ...  # rel_path → stat+hash
     def upsert(self, repo_id: int, file: IndexedFile) -> int: ...
-    def delete_many(self, file_ids: Sequence[int]) -> None: ...        # cascades to all facts
+    def delete_many(self, file_ids: Sequence[int]) -> None: ...  # cascades to all facts
+
 
 class KnowledgeStore(Protocol):
-    def replace_file_facts(self, file_id: int, facts: FileFacts) -> None: ...  # atomic delete+insert
+    def replace_file_facts(
+        self, file_id: int, facts: FileFacts
+    ) -> None: ...  # atomic delete+insert
     def intern_entity(self, key: str, type: str, **attrs) -> int: ...
     def add_edges(self, edges: Sequence[EdgeRecord]) -> None: ...
     def neighbors(self, entity_ids, edge_types, direction, limit) -> list[EdgeRecord]: ...
     def gc_orphan_entities(self) -> int: ...
 
+
 class SearchIndex(Protocol):
     def search_text(self, query: str, repo_ids, limit) -> list[ChunkHit]: ...
     def search_entities(self, query: str, repo_ids, types, limit) -> list[EntityHit]: ...
+
 
 class VectorIndex(Protocol):
     def upsert(self, chunk_ids, vectors) -> None: ...
@@ -299,13 +305,16 @@ leaves either the old facts or the new ones, never a mixture.
 ```python
 class LanguageParser(Protocol):
     name: str
-    version: str                     # bump ⇒ forces reparse (§9)
+    version: str  # bump ⇒ forces reparse (§9)
+
     def supports(self, path: Path) -> bool: ...
     def parse(self, path: Path, content: str) -> ParsedFile: ...
+
 
 class DependencyParser(Protocol):
     ecosystem: str
     kind: Literal["manifest", "lockfile"]
+
     def supports(self, path: Path) -> bool: ...
     def parse(self, path: Path, content: str) -> DependencyReport: ...
 ```
@@ -316,7 +325,9 @@ class DependencyParser(Protocol):
 class EmbeddingModel(Protocol):
     id: str
     dim: int
+
     def embed(self, texts: Sequence[str]) -> list[list[float]]: ...
+
 
 class ReasoningModel(Protocol):
     async def complete(
@@ -327,8 +338,10 @@ class ReasoningModel(Protocol):
     ) -> ModelResponse: ...
     async def available(self) -> bool: ...
 
+
 class Reranker(Protocol):
     def rerank(self, question: str, candidates: list[Candidate]) -> list[Candidate]: ...
+
 
 class Renderer(Protocol):
     def render_answer(self, answer: RepoAtlasAnswer) -> str: ...
@@ -376,7 +389,8 @@ ParsedReference(
     edge_type="READS",
     target_kind="env",
     target_key="SERVICE_HOST",
-    line_start=18, line_end=18,
+    line_start=18,
+    line_end=18,
     confidence=1.0,
 )
 ```
@@ -392,6 +406,21 @@ Consequences, all of them wanted:
 - A reference whose target does not exist yet is written to `unresolved_refs` and re-linked on every subsequent
   link pass, so adding `common-lib` later retroactively creates the `service-a DEPENDS_ON common-lib` edge without
   reparsing `service-a`.
+
+### What the linker resolves as of Slice A
+
+| Reference kind | Slice A behavior |
+|---|---|
+| environment variable, module, command | interned as a global entity; edge created |
+| symbol defined in the same file | resolved directly; edge created |
+| symbol defined in another file | **counted as unresolved, never guessed** — needs the import graph (phase 12) |
+| package → repository | not yet attempted — needs dependency parsing (phase 10) |
+
+The third row is the trust rule in practice: a `CALLS load_config` reference in `app.py` whose definition lives in
+`config.py` is *not* wired to that definition yet, because doing so correctly requires resolving
+`from src.config import load_config` against the module graph. Emitting the edge on name equality alone would
+create a fact the parser cannot support, which §2 of the specification forbids. Retrieval still surfaces both
+locations, because both are indexed and both match the query lexically.
 
 ---
 
@@ -518,6 +547,15 @@ on top.
 
 Fallback when git is unavailable or the command fails: `os.walk` with the exclusion set, and repository state
 recorded as unknown. Discovery still works; freshness reporting degrades honestly.
+
+### Repository *detection* does not invoke git
+
+Deciding whether a directory is a repository is a `.git` existence check (`gitstate.is_git_repository`), not a
+`git rev-parse`. Discovery calls it once per directory walked, and a subprocess per directory would dominate
+`init` on a root with hundreds of repositories. It is also strictly safer than invoking git — no process is
+started at all. A `.git` file (worktree or submodule pointer) counts, same as a directory. `git_toplevel`, used
+by context resolution to detect an *unmanaged* enclosing repository, walks upward with the same check, so that
+path works even when the git binary is missing entirely.
 
 ---
 
@@ -758,3 +796,6 @@ full reindex.
 | Citation verification in code | Prompt instructions alone | V1_SPEC §2 is a guarantee, and a guarantee cannot rest on model compliance |
 | `services/` layer added | Command logic in `cli/` | Keeps Typer out of the testable path without creating a god object |
 | No subtree context scope | Infer scope from repos beneath cwd | A silently-wrong scope is worse than an error naming the fix (§7) |
+| `.git` marker check for repository detection | `git rev-parse` per directory | One subprocess per walked directory would dominate `init`; the marker check is faster and starts no process (§8) |
+| Parser-version staleness handled per file | A sixth forced-rehash trigger | The stored `parser_version` is on the file row, so affected files can be reparsed directly instead of hashing the entire tree to learn that nothing changed (§9) |
+| `ask`/`debug` fail with exit 4 pre-Slice B | Fall back to `locate` output | Silently answering a different question than the one asked is worse than a clear message naming the command that does work |
