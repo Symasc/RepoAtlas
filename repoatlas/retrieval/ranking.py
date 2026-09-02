@@ -101,6 +101,25 @@ def fuse(
     ]
 
 
+def enforce_tier_order(candidates: Sequence[EvidenceCandidate]) -> list[EvidenceCandidate]:
+    """Partition by tier, preserving order within each tier.
+
+    Fusion already orders by tier, so on the V1 path this changes nothing. It
+    exists because the guarantee of V1_SPEC §14 must hold at the **boundary**, not
+    merely inside one function: between fusion and the caller sits the ``Reranker``
+    seam, and a V2 cross-encoder that reordered across tiers would silently undo
+    the rule the rest of the funnel is built on.
+
+    Applying it before budgeting matters as much as applying it before returning:
+    a hard token budget spent on embedding neighbours would starve deterministic
+    evidence out of the answer just as effectively as ranking it lower.
+
+    ``sorted`` is stable, so within a tier the incoming order — including whatever
+    a reranker decided — is preserved exactly.
+    """
+    return sorted(candidates, key=lambda candidate: candidate.tier)
+
+
 def _overlap(a: EvidenceCandidate, b: EvidenceCandidate) -> float:
     """Fraction of the shorter span that the two candidates share."""
     if a.repository != b.repository or a.path != b.path:

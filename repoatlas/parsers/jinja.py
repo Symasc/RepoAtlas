@@ -184,7 +184,10 @@ class JinjaParser:
             name=path.name,
             qualified_name=path.as_posix(),
             line_start=1,
-            line_end=max(1, content.count("\n") + 1),
+            # splitlines, not a newline count: a trailing newline terminates the
+            # last line rather than starting another. Claiming a line that does not
+            # exist is a fabricated citation, however small.
+            line_end=max(1, len(content.splitlines())),
         )
         return ParsedFile(
             language=self.language,

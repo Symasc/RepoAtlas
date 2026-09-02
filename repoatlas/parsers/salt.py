@@ -31,6 +31,7 @@ from repoatlas.models.parsing import (
     Severity,
 )
 from repoatlas.parsers.jinja import extract_references, neutralize
+from repoatlas.parsers.marks import diagnostic_line
 from repoatlas.parsers.structured import collect_config_keys
 
 _SUFFIXES = frozenset({".sls"})
@@ -270,16 +271,21 @@ class _Collector:
                 )
 
     def _requisite_targets(self, item: yaml.Node) -> list[tuple[str | None, str, yaml.Node]]:
-        """``- pkg: name`` and the bare ``- name`` form."""
+        """``- pkg: name`` and the bare ``- name`` form.
+
+        An empty target — ``- pkg:`` with nothing after it — names no state, so it
+        yields no reference. Recording one would create an edge to the empty
+        string, which is a relationship RepoAtlas cannot support with evidence.
+        """
         if isinstance(item, yaml.ScalarNode):
-            return [(None, item.value, item)]
+            return [(None, item.value, item)] if item.value.strip() else []
         if not isinstance(item, yaml.MappingNode):
             return []
         found: list[tuple[str | None, str, yaml.Node]] = []
         for key_node, value_node in item.value:
             module = _scalar(key_node)
             target = _scalar(value_node)
-            if target is not None:
+            if target is not None and target.strip():
                 found.append((module, target, value_node))
         return found
 
@@ -425,6 +431,7 @@ class SaltParser:
         except yaml.YAMLError as exc:
             symbols, references = _fallback_scan(content)
             mark = getattr(exc, "problem_mark", None)
+            failed_at = diagnostic_line(mark, content)
             diagnostics.append(
                 ParseDiagnostic(
                     severity=Severity.WARNING,
@@ -432,7 +439,7 @@ class SaltParser:
                         "YAML parse failed after Jinja neutralization; "
                         "recovered state IDs and requisites by line scan"
                     ),
-                    line=None if mark is None else mark.line + 1,
+                    line=failed_at,
                 )
             )
         else:

@@ -12,7 +12,12 @@ from pathlib import Path
 import pytest
 from repoatlas.config.settings import RetrievalSettings
 from repoatlas.models.context import ContextScope
-from repoatlas.models.evidence import EvidenceCandidate, EvidenceSource, EvidenceTier
+from repoatlas.models.evidence import (
+    EvidenceCandidate,
+    EvidenceSet,
+    EvidenceSource,
+    EvidenceTier,
+)
 from repoatlas.retrieval.ranking import NoopReranker, apply_budget, deduplicate, fuse
 from repoatlas.retrieval.retriever import RetrievalLimits, Retriever
 from repoatlas.services.query_service import locate
@@ -374,3 +379,161 @@ def test_retrieval_without_embeddings_still_works(initialized: Workspace) -> Non
     assert without.candidates
     assert without.trace is not None
     assert without.trace.semantic_used is False
+
+
+# --- the guarantee at the final boundary (V1_SPEC §14) --------------------------
+#
+# The tests above prove that `fuse` orders by tier. These prove the property that
+# actually matters: whatever any stage does, an `EvidenceSet` handed to a caller
+# never places associative evidence above deterministic evidence. Between fusion
+# and the caller sit deduplication, the reranker seam and two hard budgets, and a
+# guarantee that lives inside one function is not a guarantee about the system.
+
+QUESTIONS = (
+    "SERVICE_HOST",
+    "Where is SERVICE_HOST configured?",
+    "how does the service load its configuration",
+    "what happens when the deploy script runs",
+    "load_config",
+    "'SERVICE_TIMEOUT'",
+    "which repository provides common-lib",
+    "pillar",
+)
+
+
+def _tiers(evidence: EvidenceSet) -> list[EvidenceTier]:
+    return [c.tier for c in evidence.candidates]
+
+
+def assert_deterministic_first(evidence: EvidenceSet) -> None:
+    """No associative candidate may precede a deterministic one."""
+    tiers = _tiers(evidence)
+    assert tiers == sorted(tiers), [
+        (c.tier.name, c.source.value, c.location) for c in evidence.candidates
+    ]
+
+
+class _Saturating:
+    """An embedding model that claims every text is a perfect match.
+
+    The adversary the tier rule exists to defeat: maximal, uniform similarity. If
+    score could ever cross a tier, this would flood the evidence set.
+    """
+
+    id = "saturating"
+    dim = 8
+
+    def embed(self, texts):
+        return [[1.0] + [0.0] * (self.dim - 1) for _ in texts]
+
+    def embed_query(self, text):
+        return [1.0] + [0.0] * (self.dim - 1)
+
+    def available(self) -> bool:
+        return True
+
+    def availability_detail(self) -> str:
+        return "saturating stub"
+
+
+class _TierInverter:
+    """A reranker that deliberately violates the rule it is asked to respect."""
+
+    def rerank(self, question: str, candidates: list[EvidenceCandidate]) -> list[EvidenceCandidate]:
+        associative = [c for c in candidates if c.tier is EvidenceTier.ASSOCIATIVE]
+        deterministic = [c for c in candidates if c.tier is EvidenceTier.DETERMINISTIC]
+        return [*associative, *deterministic]
+
+
+def _retriever(workspace: Workspace, **overrides) -> Retriever:
+    return Retriever(
+        search=workspace.search,
+        knowledge=workspace.knowledge,
+        vectors=workspace.vectors,
+        embeddings=overrides.pop("embeddings", workspace.embeddings()),
+        reranker=overrides.pop("reranker", NoopReranker()),
+        limits=overrides.pop("limits", RetrievalLimits.from_settings(workspace.settings.retrieval)),
+    )
+
+
+@pytest.mark.parametrize("question", QUESTIONS)
+def test_the_returned_evidence_set_is_always_tier_ordered(
+    initialized: Workspace, question: str
+) -> None:
+    context = initialized.resolver().resolve(initialized.root or Path())
+    assert_deterministic_first(initialized.retriever().retrieve(question, context))
+
+
+@pytest.mark.parametrize("question", QUESTIONS)
+def test_saturated_similarity_displaces_nothing(initialized: Workspace, question: str) -> None:
+    """Every vector scores 1.0 against every query, and the order is unchanged."""
+    context = initialized.resolver().resolve(initialized.root or Path())
+    baseline = initialized.retriever().retrieve(question, context)
+
+    saturating = _Saturating()
+    initialized.vectors.upsert_many(
+        saturating.id,
+        saturating.dim,
+        [
+            (row["content_hash"], [1.0] + [0.0] * 7)
+            for row in initialized.database.execute(
+                "SELECT DISTINCT content_hash FROM chunks WHERE content_hash != ''"
+            ).fetchall()
+        ],
+    )
+    flooded = _retriever(initialized, embeddings=saturating).retrieve(question, context)
+
+    assert_deterministic_first(flooded)
+    # The deterministic half is exactly what it was. Saturated similarity can
+    # reinforce agreement about a span, which reorders within the tier; it can
+    # neither add to that half nor take anything out of it.
+    assert {c.location for c in flooded.deterministic} == {
+        c.location for c in baseline.deterministic
+    }
+
+
+#: A question whose evidence set is genuinely mixed, so inverting the tiers is
+#: something the boundary has to undo rather than a no-op.
+MIXED = "how does the service load its configuration"
+
+
+def test_a_reranker_that_inverts_the_tiers_is_corrected(initialized: Workspace) -> None:
+    """The V2 seam cannot break the V1 guarantee, even deliberately."""
+    context = initialized.resolver().resolve(initialized.root or Path())
+    honest = initialized.retriever().retrieve(MIXED, context)
+    assert honest.deterministic and len(honest.candidates) > len(honest.deterministic)
+
+    hostile = _retriever(initialized, reranker=_TierInverter()).retrieve(MIXED, context)
+    assert_deterministic_first(hostile)
+    assert {c.location for c in hostile.deterministic} == {c.location for c in honest.deterministic}
+
+
+def test_a_hostile_reranker_cannot_spend_the_budget_on_associative_evidence(
+    initialized: Workspace,
+) -> None:
+    """Starving the deterministic half out of a hard budget would displace it just
+    as effectively as ranking it lower."""
+    context = initialized.resolver().resolve(initialized.root or Path())
+    limits = RetrievalLimits.from_settings(
+        initialized.settings.retrieval.model_copy(update={"final": 3})
+    )
+    hostile = _retriever(initialized, reranker=_TierInverter(), limits=limits).retrieve(
+        MIXED, context
+    )
+    assert len(hostile.candidates) == 3
+    assert all(c.tier is EvidenceTier.DETERMINISTIC for c in hostile.candidates)
+
+
+def test_the_trace_records_that_the_order_was_restored(initialized: Workspace) -> None:
+    """A silent correction is a correction nobody can audit."""
+    context = initialized.resolver().resolve(initialized.root or Path())
+    evidence = _retriever(initialized, reranker=_TierInverter()).retrieve(MIXED, context)
+    assert evidence.trace is not None
+    rerank = next(stage for stage in evidence.trace.stages if stage.name == "rerank")
+    assert "tier order restored" in rerank.detail
+
+
+def test_locate_exposes_the_same_ordering_as_the_retriever(initialized: Workspace) -> None:
+    """The guarantee holds at the service boundary the CLI actually calls."""
+    context = initialized.resolver().resolve(initialized.root or Path())
+    assert_deterministic_first(locate(initialized, "SERVICE_HOST", context))

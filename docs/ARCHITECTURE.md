@@ -96,6 +96,7 @@ RepoAtlas/
 │   ├── parsers/        base protocol + registry + one module per language
 │   │   ├── base.py         LanguageParser protocol, ParsedFile contract
 │   │   ├── registry.py     extension/filename → parser dispatch
+│   │   ├── marks.py        YAML mark → line provenance, clamped to the file
 │   │   ├── treesitter.py   shared grammar loading, node helpers (lazy, cached)
 │   │   ├── python.py       stdlib ast
 │   │   ├── typescript.py   tree-sitter (ts, tsx, js, jsx, mjs, cjs)
@@ -123,7 +124,10 @@ RepoAtlas/
 │   └── models/         Pydantic domain models shared everywhere
 │
 ├── tests/
-│   └── fixtures/       synthetic repositories (§13)
+│   ├── fixtures/       synthetic repositories (§13)
+│   ├── test_e2e.py     the §21 scenario through the installed console script
+│   ├── test_docker.py  container delivery invariants, without a daemon
+│   └── test_performance.py  §20 shape properties, measured through the traces
 │
 └── docs/
     ├── V1_SPEC.md
@@ -756,7 +760,20 @@ an exact symbol name, an environment variable or a graph-supported relationship.
 retrievers takes its best tier: found deterministically once means deterministic.
 
 The primary-repository boost is additive on the score, so it competes inside a tier and never promotes across one.
-A V2 reranker is bound by the same rule: it may reorder within a tier, never across.
+
+**The rule is re-imposed at the boundary, not only inside `fuse`.** Between fusion and the caller sit deduplication,
+the `Reranker` seam and two hard budgets. `enforce_tier_order` — a stable partition by tier — is applied to whatever
+the reranker returns, before budgeting. Two things make that worth doing rather than documenting:
+
+- a V2 cross-encoder that reordered across tiers would silently undo the rule the rest of the funnel is built on,
+  and it is exactly the kind of component whose ranking is opaque;
+- the budget is spent immediately afterwards, so an order that put associative evidence first would **starve
+  deterministic evidence out of the answer** just as effectively as ranking it lower.
+
+When the order is corrected the stage trace says so (`NoopReranker (tier order restored)`), because a silent
+correction is one nobody can audit. Tests assert the guarantee against the returned `EvidenceSet` — including with
+an embedding model that scores every text 1.0, and with a reranker that deliberately inverts the tiers — rather
+than against `fuse` alone.
 
 ### Suppressing similarity when the question named something specific
 
@@ -899,6 +916,25 @@ key patterns) plugs into the same filter and gains the same guarantee, with no c
 
 Logging never includes file content — only paths, line numbers and counts.
 
+Each of these is asserted separately, at every stage the content could otherwise reach — enumeration, chunks, the
+FTS index, embeddings, entities, evidence sets, the model prompt and `--verbose` output. A single choke point is
+only a guarantee if the stages behind it genuinely depend on it, and a test per stage is what keeps that true as
+stages are added.
+
+### Container posture
+
+The image and compose file are part of the security model, not merely packaging:
+
+| Property | Why it is a deployment property rather than a code property |
+|---|---|
+| Repositories mounted `read_only: true` | "V1 never writes to a repository" is a claim about every code path forever; the mount makes the kernel enforce it |
+| State on a separate named volume | The index, config and model cache can never be written into the tree under inspection |
+| `read_only` root filesystem, tmpfs for `/tmp` and `/home` | The writable surface is exactly the state volume, and it is visible in one file |
+| Non-root user, `cap_drop: ALL`, `no-new-privileges` | Untrusted input is parsed in a process that has nothing to escalate to |
+| Only `git` installed | The one external binary RepoAtlas invokes, through the allowlist in §8 |
+| Dependencies installed `--frozen` from `uv.lock` | A build never resolves a version the test suite has not seen |
+| Model server published on loopback only | The stack is for the machine it runs on |
+
 ---
 
 ## 13. Testing strategy
@@ -930,11 +966,26 @@ Test layers:
 | Retrieval | Fixed questions with expected evidence paths; asserts primary-repo bias and cross-repo traversal |
 | LLM | `ScriptedBackend` only. Covers valid output, invalid output, repair, missing evidence, fabricated citations, unknown answers, citation rendering |
 | Layering | AST walk over the import graph asserting §1 |
-| E2E | The V1_SPEC §21 success scenario, driven through the Typer app with a temp home |
+| E2E | The V1_SPEC §21 success scenario, driven through the **installed console script as a subprocess** — real `argv`, real working directory, real exit status. Exit codes and directory-derived context are what §21 promises, and in-process invocation simulates both |
+| Stale-index stress | Branch switches, deletions, renames, cross-repository moves, content swaps, dirty and staged trees, dependency edits. Each ends by comparing a fact snapshot against a from-scratch index of the same tree — invariant 2 of §9, asserted once per failure mode |
+| Secrets | One canary per pattern in `SECRET_PATTERNS`, asserted absent at every downstream stage (§12) |
+| Malformed input | A matrix of broken YAML, Salt and Jinja fed to every parser claiming the extension. Nothing may raise, no line number may fall outside the file, and anything recovered must be marked below full confidence |
+| Performance | Shape properties from the traces (§10) plus wall-clock ceilings roughly 20× the observed cost |
+| Container | The delivery invariants of §12, parsed out of `Dockerfile` and `docker-compose.yml`, so they need no daemon |
 
 CI requires no network, no Ollama and no embedding-model download: `NullBackend`/`ScriptedBackend` cover the
-reasoning layer, and semantic-search tests use a deterministic stub `EmbeddingModel` (hash-based pseudo-vectors)
-with the real fastembed path exercised only in an opt-in marked test.
+reasoning layer, and semantic-search tests use a deterministic stub `EmbeddingModel` (hash-based pseudo-vectors).
+
+**The real model is exercised behind the `slow` marker**, which `addopts` deselects by default. `tests/test_real_embeddings.py`
+runs `BAAI/bge-small-en-v1.5` through the whole pipeline — factory, sync, vector index, retrieval funnel — and
+asserts the two properties the hashing stub structurally cannot have: that semantically related text outscores
+unrelated text without sharing tokens, and that the asymmetric query prefix actually changes the vector. It also
+re-checks the precedence guarantee with a real model, so the tier rule is not an artifact of the stub.
+
+**Performance tests assert shape, not speed.** The §20 rules — never scan every repository for a question, never
+re-index everything after one file changes, never re-embed unchanged data — are all statements about *what was
+touched*, and those are exactly reproducible. Wall-clock bounds exist only to catch a categorical regression, and
+are set far above the observed cost so a loaded CI box does not teach people to ignore the suite.
 
 ---
 
@@ -944,7 +995,7 @@ Every deferred capability (V1_SPEC §22) has a place to land that requires no re
 
 | V2 capability | Seam |
 |---|---|
-| Advanced reranking | `Reranker` protocol, stage 9 of §10. Swap `NoopReranker` for a cross-encoder — bound by the tier rule: reorder within a tier, never across one |
+| Advanced reranking | `Reranker` protocol, stage 9 of §10. Swap `NoopReranker` for a cross-encoder. The tier rule is **re-imposed on whatever it returns** by `enforce_tier_order`, so a reranker may reorder within a tier and cannot cross one even by mistake; the correction is recorded in the stage trace rather than applied silently |
 | Version-specific documentation retrieval | A `DocumentationSource` protocol fed by `ResolvedDependency`. The retrieval funnel gains a source at stage 3; fusion and budgeting are unchanged |
 | Internet research / web provenance | `Evidence` gains an optional origin discriminator; the citation verifier (§11) extends to verify web citations against the fetched set, with the same drop-and-demote logic |
 | Git-history debugging, regression introduction | The provenance columns already pin every fact to `repo/file/lines`; history analysis joins against them without schema change |
@@ -995,3 +1046,10 @@ full reindex.
 | Cross-file symbol references resolved only through a written import | Resolve on name equality within the repository | Name equality is not evidence (V1_SPEC §2). The import is the proof, and it is already in the file, so requiring it costs nothing and removes a whole class of wrong edges |
 | `salt://` sources resolved at confidence < 1.0 | Resolve at full confidence, or not at all | `file_roots` is not readable, so no `salt://` mapping is ever proven. Refusing to resolve would lose a genuinely useful link; resolving silently at 1.0 would overstate it. The confidence value carries the distinction |
 | `unresolved_refs` retained after a successful resolution | Delete rows once resolved | The row is the file's durable claim, not a work queue. Keeping it is what makes the global pass rebuildable and what lets a repository added later gain its edges without a reparse |
+| Repository mount is read-only in the container | Rely on V1 having no write path | "V1 never writes to a repository" is a claim about every code path forever. `read_only: true` makes it a property of the deployment, checked by the kernel rather than by review (§12) |
+| A tier order re-imposed after the reranker | Document the rule and trust implementations | The `Reranker` is a seam for code that does not exist yet. A guarantee that holds only while every future implementation remembers it is not a guarantee, and the budget is spent immediately after — so a hostile order would also starve deterministic evidence out of the answer (§10) |
+| `available()` answers an empty cache without importing fastembed | Always import to read the model mapping | The import pulls in ONNX Runtime: seconds of startup and, on a read-only container filesystem, a telemetry warning on every command — all to search a directory that does not exist |
+| Diagnostic and symbol line numbers clamped to the file | Report the parser's raw mark | A YAML end-of-stream mark sits one line past the last line. A citation to a line that does not exist is a fabrication, however small, and §11 makes provenance a guarantee rather than a best effort |
+| An empty Salt requisite target yields no reference | Record it and let the linker fail to resolve | `- pkg:` with nothing after it names no state. An edge to the empty string is a relationship RepoAtlas cannot support with evidence (§2) |
+| Performance asserted as shape, with generous wall-clock ceilings | Benchmark thresholds tuned to this machine | The §20 rules are shape properties — what was scanned, what was reparsed, what was re-embedded — and those are exactly reproducible. A millisecond threshold fails on a loaded CI box and teaches people to ignore the suite |
+| End-to-end tests run the installed console script as a subprocess | Drive Typer in-process, as the other CLI tests do | Exit codes, `argv`, the working directory and import-time behavior are the things §21 actually promises, and in-process invocation simulates all four |
