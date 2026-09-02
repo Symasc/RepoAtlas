@@ -1,7 +1,8 @@
 """Parser dispatch (ARCHITECTURE.md §2).
 
 The registry is the only thing the sync spine knows about parsing. Adding a
-language means registering a parser here — no spine change.
+language means registering a parser here — no spine change. Slice C proved that:
+seven parsers were added and nothing above this module was touched to accept them.
 """
 
 from __future__ import annotations
@@ -9,7 +10,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from repoatlas.parsers.base import LanguageParser
+from repoatlas.parsers.bash import BashParser
+from repoatlas.parsers.dockerfile import DockerfileParser
+from repoatlas.parsers.jinja import JinjaParser
 from repoatlas.parsers.python import PythonParser
+from repoatlas.parsers.ruby import RubyParser
+from repoatlas.parsers.salt import SaltParser
+from repoatlas.parsers.structured import StructuredParser
+from repoatlas.parsers.typescript import TypeScriptParser
 
 
 class ParserRegistry:
@@ -35,8 +43,9 @@ class ParserRegistry:
         """Aggregate parser version.
 
         A change here means stored facts are stale by definition, which forces a
-        full rehash on the next sync (V1_SPEC §12). Registering a new parser also
-        changes it, which is correct: files previously skipped now have a handler.
+        reparse of the affected files on the next sync (V1_SPEC §12). Registering a
+        new parser also changes it, which is correct: files previously skipped now
+        have a handler.
         """
         parts = sorted(f"{p.name}:{p.version}" for p in self._parsers)
         return "|".join(parts)
@@ -47,9 +56,18 @@ class ParserRegistry:
 
 
 def default_parsers() -> list[LanguageParser]:
-    """Parsers available in this build.
+    """Parsers available in this build, in dispatch order.
 
-    Slice A ships Python only. Slice C adds TypeScript/JavaScript, Bash, Ruby, Salt,
-    Jinja, structured config and Dockerfile by appending to this list.
+    Order matters exactly once: ``SaltParser`` must precede ``StructuredParser``
+    so an ``.sls`` file is never treated as ordinary YAML (V1_SPEC §7.5).
     """
-    return [PythonParser()]
+    return [
+        PythonParser(),
+        TypeScriptParser(),
+        BashParser(),
+        RubyParser(),
+        SaltParser(),
+        JinjaParser(),
+        DockerfileParser(),
+        StructuredParser(),
+    ]

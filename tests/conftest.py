@@ -25,8 +25,14 @@ MANAGED_FIXTURES = (
     "deployment",
     "scripts",
     "ts-service",
+    "common-lib",
     "nested-outer",
 )
+
+
+#: Every repository ``init`` finds beneath the root: the managed fixtures plus
+#: ``nested-inner``, which is a separate repository inside ``nested-outer``.
+MANAGED_REPOSITORY_COUNT = len(MANAGED_FIXTURES) + 1
 
 
 def git(repo: Path, *args: str) -> None:

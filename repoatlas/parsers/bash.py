@@ -1,0 +1,387 @@
+"""Bash parser using tree-sitter (V1_SPEC §7.3).
+
+Bash is **first-class code**, not a config format: shell scripts are usually where
+a deployment actually decides what runs and with which environment. This parser
+therefore extracts the same shape of facts as a programming-language parser —
+definitions, invocations, imports (``source``) and environment access.
+
+**Scripts are never executed.** Everything here is a static walk of the syntax
+tree; a command's effect is inferred from nothing beyond its written form.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from repoatlas.models.parsing import (
+    EdgeType,
+    EntityType,
+    ParsedFile,
+    ParseDiagnostic,
+    ParsedReference,
+    ParsedSymbol,
+    Severity,
+)
+from repoatlas.parsers.treesitter import (
+    GrammarUnavailable,
+    has_error,
+    line_range,
+    node_text,
+    parse_tree,
+)
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from tree_sitter import Node
+
+_SUFFIXES = frozenset({".sh", ".bash", ".zsh", ".ksh"})
+_SHEBANGS = ("#!/bin/sh", "#!/bin/bash", "#!/usr/bin/env bash", "#!/usr/bin/env sh", "#!/bin/zsh")
+
+#: An environment variable, by convention: upper snake case, at least two chars.
+_ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]+$")
+
+_SOURCE_COMMANDS = frozenset({"source", "."})
+_EXPORT_KEYWORDS = frozenset({"export", "declare", "typeset", "readonly", "local"})
+_SALT_COMMANDS = frozenset({"salt", "salt-call", "salt-ssh", "salt-run"})
+_SALT_STATE_FUNCTIONS = frozenset({"state.apply", "state.sls", "state.highstate", "state.sls_id"})
+
+#: Interpreters whose script argument is itself a repository file worth linking.
+_INTERPRETERS: dict[str, str] = {
+    "python": ".py",
+    "python2": ".py",
+    "python3": ".py",
+    "ruby": ".rb",
+    "bash": ".sh",
+    "sh": ".sh",
+    "zsh": ".sh",
+}
+
+_SCRIPT_SUFFIXES = frozenset({".sh", ".bash", ".py", ".rb", ".zsh"})
+
+
+def _looks_like_path(text: str) -> bool:
+    return text.startswith(("./", "../", "/")) or (
+        "/" in text and not text.startswith("-") and Path(text).suffix in _SCRIPT_SUFFIXES
+    )
+
+
+class _Walker:
+    """Collects definitions, invocations and environment access in one pass."""
+
+    def __init__(self, source: bytes) -> None:
+        self._source = source
+        self.symbols: list[ParsedSymbol] = []
+        self.references: list[ParsedReference] = []
+        self.exported: set[str] = set()
+        self.assigned: set[str] = set()
+        self._reads: list[ParsedReference] = []
+        self._scope: str | None = None
+
+    def run(self, root: Node) -> None:
+        self._visit(root)
+
+    # -- dispatch ------------------------------------------------------------
+
+    def _visit(self, node: Node) -> None:
+        kind = node.type
+        if kind == "function_definition":
+            self._function(node)
+            return
+        if kind == "declaration_command":
+            self._declaration(node)
+        elif kind == "variable_assignment":
+            self._assignment(node, exported=False)
+        elif kind == "command":
+            self._command(node)
+        elif kind in {"simple_expansion", "expansion"}:
+            self._expansion(node)
+
+        for child in node.children:
+            self._visit(child)
+
+    # -- definitions ---------------------------------------------------------
+
+    def _function(self, node: Node) -> None:
+        name_node = next((c for c in node.children if c.type in {"word", "command_name"}), None)
+        if name_node is None:
+            for child in node.children:
+                self._visit(child)
+            return
+        name = node_text(self._source, name_node)
+        start, end = line_range(node)
+        self.symbols.append(
+            ParsedSymbol(
+                kind=EntityType.FUNCTION,
+                name=name,
+                qualified_name=name,
+                line_start=start,
+                line_end=end,
+                signature=f"{name}()",
+            )
+        )
+        previous, self._scope = self._scope, name
+        for child in node.children:
+            self._visit(child)
+        self._scope = previous
+
+    # -- assignments and exports ---------------------------------------------
+
+    def _declaration(self, node: Node) -> None:
+        keyword = node_text(self._source, node.children[0]) if node.children else ""
+        exporting = keyword in _EXPORT_KEYWORDS and keyword != "local"
+        for child in node.children:
+            if child.type == "variable_assignment":
+                self._assignment(child, exported=exporting)
+            elif child.type == "variable_name" and exporting:
+                self._record_export(node_text(self._source, child), child)
+
+    def _assignment(self, node: Node, *, exported: bool) -> None:
+        name_node = node.child_by_field_name("name") or next(
+            (c for c in node.children if c.type == "variable_name"), None
+        )
+        if name_node is None:
+            return
+        name = node_text(self._source, name_node)
+        self.assigned.add(name)
+        if exported:
+            self._record_export(name, node)
+
+    def _record_export(self, name: str, node: Node) -> None:
+        if not _ENV_NAME.match(name):
+            return
+        self.exported.add(name)
+        start, end = line_range(node)
+        self.references.append(
+            ParsedReference(
+                edge_type=EdgeType.EXPORTS,
+                target_kind=EntityType.ENV_VAR,
+                target_key=name,
+                line_start=start,
+                line_end=end,
+                source_symbol=self._scope,
+            )
+        )
+
+    # -- environment reads ---------------------------------------------------
+
+    def _expansion(self, node: Node) -> None:
+        """``$VAR`` / ``${VAR}`` — a candidate environment read."""
+        name_node = next((c for c in node.children if c.type == "variable_name"), None)
+        if name_node is None:
+            return
+        name = node_text(self._source, name_node)
+        if not _ENV_NAME.match(name):
+            return
+        start, end = line_range(node)
+        self._reads.append(
+            ParsedReference(
+                edge_type=EdgeType.READS,
+                target_kind=EntityType.ENV_VAR,
+                target_key=name,
+                line_start=start,
+                line_end=end,
+                source_symbol=self._scope,
+            )
+        )
+
+    def finish(self) -> None:
+        """Keep only reads the script does not fully determine itself.
+
+        A variable this script assigns without exporting is a local, so reading it
+        back says nothing about the environment. A variable it *exports* stays a
+        read, because ``export X="${X:-default}"`` genuinely consults the
+        environment first — which is the common way a script takes configuration.
+        """
+        local_only = self.assigned - self.exported
+        self.references.extend(r for r in self._reads if r.target_key not in local_only)
+
+    # -- commands ------------------------------------------------------------
+
+    def _command(self, node: Node) -> None:
+        name_node = node.child_by_field_name("name") or next(
+            (c for c in node.children if c.type == "command_name"), None
+        )
+        if name_node is None:
+            return
+        command = node_text(self._source, name_node)
+        start, end = line_range(node)
+        arguments = [
+            node_text(self._source, child)
+            for child in node.children
+            if child is not name_node and child.type in {"word", "string", "concatenation"}
+        ]
+
+        if command in _SOURCE_COMMANDS:
+            self._sourced(node, arguments, start, end)
+            return
+
+        if self._executed_path(command, start, end):
+            # A path invocation is better evidence as a script reference than as a
+            # bare command name, so it is recorded once, not twice.
+            return
+
+        self.references.append(
+            ParsedReference(
+                edge_type=EdgeType.EXECUTES,
+                target_kind=EntityType.COMMAND,
+                target_key=command,
+                line_start=start,
+                line_end=end,
+                source_symbol=self._scope,
+            )
+        )
+
+        self._interpreted_script(command, arguments, start, end)
+        self._salt_invocation(command, arguments, start, end)
+
+    def _sourced(self, node: Node, arguments: list[str], start: int, end: int) -> None:
+        """``source x`` / ``. x`` imports another script."""
+        target = self._first_literal(node, arguments)
+        if target is None:
+            # A computed path cannot be resolved statically; recording a guess
+            # would be inventing evidence (V1_SPEC §2).
+            return
+        self.references.append(
+            ParsedReference(
+                edge_type=EdgeType.SOURCES,
+                target_kind=EntityType.SCRIPT,
+                target_key=target,
+                line_start=start,
+                line_end=end,
+                source_symbol=self._scope,
+            )
+        )
+
+    def _first_literal(self, node: Node, arguments: list[str]) -> str | None:
+        for argument in arguments:
+            if "$" in argument or "`" in argument:
+                return None
+            return argument.strip("\"'")
+        return None
+
+    def _interpreted_script(self, command: str, arguments: list[str], start: int, end: int) -> None:
+        """``python3 x.py`` / ``ruby x.rb`` executes a script in the tree."""
+        suffix = _INTERPRETERS.get(Path(command).name)
+        if suffix is None:
+            return
+        for argument in arguments:
+            if argument.startswith("-") or "$" in argument:
+                continue
+            cleaned = argument.strip("\"'")
+            if Path(cleaned).suffix != suffix:
+                continue
+            self.references.append(
+                ParsedReference(
+                    edge_type=EdgeType.EXECUTES,
+                    target_kind=EntityType.SCRIPT,
+                    target_key=cleaned,
+                    line_start=start,
+                    line_end=end,
+                    source_symbol=self._scope,
+                    meta={"interpreter": command},
+                )
+            )
+            return
+
+    def _salt_invocation(self, command: str, arguments: list[str], start: int, end: int) -> None:
+        """``salt-call state.apply service`` references a Salt state."""
+        if Path(command).name not in _SALT_COMMANDS:
+            return
+        words = [a.strip("\"'") for a in arguments if not a.startswith("-")]
+        for index, word in enumerate(words):
+            if word not in _SALT_STATE_FUNCTIONS:
+                continue
+            if index + 1 >= len(words):
+                return
+            state = words[index + 1]
+            if "$" in state:
+                return
+            self.references.append(
+                ParsedReference(
+                    edge_type=EdgeType.REFERENCES,
+                    target_kind=EntityType.SALT_STATE,
+                    target_key=state,
+                    line_start=start,
+                    line_end=end,
+                    source_symbol=self._scope,
+                    meta={"via": word},
+                )
+            )
+            return
+
+    def _executed_path(self, command: str, start: int, end: int) -> bool:
+        """``./deploy.sh`` executes a script rather than a ``PATH`` command."""
+        if not _looks_like_path(command) or "$" in command:
+            return False
+        self.references.append(
+            ParsedReference(
+                edge_type=EdgeType.EXECUTES,
+                target_kind=EntityType.SCRIPT,
+                target_key=command,
+                line_start=start,
+                line_end=end,
+                source_symbol=self._scope,
+            )
+        )
+        return True
+
+
+class BashParser:
+    """Deterministic shell structure extraction."""
+
+    name = "tree-sitter-bash"
+    version = "1"
+    language = "Bash"
+
+    def supports(self, path: Path) -> bool:
+        return path.suffix in _SUFFIXES
+
+    def parse(self, path: Path, content: str) -> ParsedFile:
+        try:
+            tree, source = parse_tree("bash", content)
+        except GrammarUnavailable as exc:
+            return ParsedFile(
+                language=self.language,
+                parser=self.name,
+                parser_version=self.version,
+                diagnostics=(ParseDiagnostic(severity=Severity.ERROR, message=str(exc)),),
+            )
+
+        walker = _Walker(source)
+        walker.run(tree.root_node)
+        walker.finish()
+
+        script = ParsedSymbol(
+            kind=EntityType.SCRIPT,
+            name=path.name,
+            qualified_name=path.as_posix(),
+            line_start=1,
+            line_end=max(1, content.count("\n") + 1),
+        )
+
+        diagnostics = (
+            (
+                ParseDiagnostic(
+                    severity=Severity.WARNING,
+                    message="syntax errors recovered; results may be partial",
+                ),
+            )
+            if has_error(tree)
+            else ()
+        )
+
+        return ParsedFile(
+            language=self.language,
+            parser=self.name,
+            parser_version=self.version,
+            symbols=(script, *walker.symbols),
+            references=tuple(walker.references),
+            diagnostics=diagnostics,
+        )
+
+
+def looks_like_shell(content: str) -> bool:
+    """Whether an extension-less file declares a shell interpreter."""
+    first = content.split("\n", 1)[0].strip()
+    return first.startswith(_SHEBANGS)

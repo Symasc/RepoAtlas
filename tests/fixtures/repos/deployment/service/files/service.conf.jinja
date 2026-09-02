@@ -1,0 +1,5 @@
+{% extends "base.conf.jinja" %}
+host = {{ SERVICE_HOST }}
+port = {{ SERVICE_PORT }}
+timeout = {{ salt['pillar.get']('service:timeout') }}
+os = {{ grains['os'] }}

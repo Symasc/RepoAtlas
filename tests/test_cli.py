@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from repoatlas.cli.main import app
 from repoatlas.errors import ExitCode
+from tests.conftest import MANAGED_REPOSITORY_COUNT
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -37,7 +38,7 @@ def run_in(directory: Path, *args: str):
 def test_init_discovers_everything(cli_env: Path, workspace_root: Path) -> None:
     result = run_in(workspace_root, "init", str(workspace_root))
     assert result.exit_code == ExitCode.OK, result.output
-    assert "Repositories discovered: 6" in result.output
+    assert f"Repositories discovered: {MANAGED_REPOSITORY_COUNT}" in result.output
     assert cli_env.exists()
 
 
@@ -107,7 +108,7 @@ def test_sync_at_root_syncs_everything(cli_env: Path, workspace_root: Path) -> N
     run_in(workspace_root, "init", str(workspace_root))
     result = run_in(workspace_root, "sync")
     assert result.exit_code == ExitCode.OK
-    assert "Syncing 6 repositories" in result.output
+    assert f"Syncing {MANAGED_REPOSITORY_COUNT} repositories" in result.output
 
 
 def test_sync_outside_managed_tree_errors(
@@ -163,7 +164,7 @@ def test_json_output_is_valid(cli_env: Path, workspace_root: Path) -> None:
     assert result.exit_code == ExitCode.OK
     payload = json.loads(result.output)
     assert payload["scope"] == "global"
-    assert payload["repository_count"] == 6
+    assert payload["repository_count"] == MANAGED_REPOSITORY_COUNT
 
 
 def test_locate_json_output_carries_provenance(cli_env: Path, workspace_root: Path) -> None:
@@ -202,7 +203,7 @@ def test_end_to_end_success_scenario(cli_env: Path, workspace_root: Path) -> Non
     # From the root, everything syncs.
     everything = run_in(workspace_root, "sync")
     assert everything.exit_code == 0
-    assert "Syncing 6 repositories" in everything.output
+    assert f"Syncing {MANAGED_REPOSITORY_COUNT} repositories" in everything.output
 
     # From outside, RepoAtlas refuses to guess.
     outside = workspace_root.parent / "elsewhere-entirely"

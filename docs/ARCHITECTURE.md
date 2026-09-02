@@ -91,17 +91,27 @@ RepoAtlas/
 │   ├── embeddings/     EmbeddingModel protocol, fastembed backend, deterministic stub
 │   ├── parsers/        base protocol + registry + one module per language
 │   │   ├── base.py         LanguageParser protocol, ParsedFile contract
-│   │   ├── registry.py     extension/shebang → parser dispatch
+│   │   ├── registry.py     extension/filename → parser dispatch
+│   │   ├── treesitter.py   shared grammar loading, node helpers (lazy, cached)
 │   │   ├── python.py       stdlib ast
-│   │   ├── typescript.py   tree-sitter (ts, tsx, js, jsx)
+│   │   ├── typescript.py   tree-sitter (ts, tsx, js, jsx, mjs, cjs)
 │   │   ├── bash.py         tree-sitter
 │   │   ├── ruby.py         tree-sitter
-│   │   ├── salt.py         Jinja neutralization + lenient YAML + fallback scan
-│   │   ├── jinja.py
-│   │   ├── structured.py   YAML / JSON
+│   │   ├── salt.py         Jinja neutralization + lenient YAML + fallback line scan
+│   │   ├── jinja.py        template relationships; owns neutralize()
+│   │   ├── structured.py   YAML / JSON config keys; owns collect_config_keys()
 │   │   └── dockerfile.py
 │   ├── dependencies/   manifest and lockfile parsers; declared↔resolved join; name normalization
+│   │   ├── base.py         DependencyParser protocol
+│   │   ├── registry.py     filename → dependency parser dispatch
+│   │   ├── normalize.py    PEP 503, npm scope-aware, gem
+│   │   ├── python.py       pyproject, requirements, setup.py (ast), setup.cfg, uv/poetry locks
+│   │   ├── node.py         package.json, package-lock, pnpm-lock, yarn.lock
+│   │   └── ruby.py         Gemfile, gemspec, Gemfile.lock
 │   ├── graph/          reference linker, cross-repo resolution, bounded traversal
+│   │   ├── keys.py         natural keys for every entity tier
+│   │   ├── resolution.py   ResolutionIndex — every match rule, in one place
+│   │   └── linker.py       the two link passes
 │   ├── retrieval/      query analysis, exact/semantic/graph retrievers, fusion, reranker seam
 │   ├── storage/        Protocols + sqlite implementation + migrations
 │   ├── llm/            ReasoningModel protocol, ollama backend, null backend, prompts, grounding
@@ -170,6 +180,15 @@ unresolved_refs(
   src_id, edge_type, target_kind, target_key, line_start, line_end, confidence, meta_json
 )
 
+dependencies(
+  id, repo_id → repositories ON DELETE CASCADE,
+  file_id → files ON DELETE CASCADE,
+  ecosystem, name, normalized_name,
+  role,                            -- declared | resolved | provided
+  constraint_text, version, group_name,
+  line_start, line_end, parser
+)
+
 chunks(
   id, file_id → files ON DELETE CASCADE,
   line_start, line_end, text, token_estimate, content_hash
@@ -222,11 +241,22 @@ An edge is provenanced by the file that *asserted* it, not by its endpoints. `se
 `common` produces an edge owned by `app.py`; deleting `app.py` removes the claim, while `common` itself is
 untouched.
 
+#### Why declared and resolved are separate rows
+
+A package can be declared without being locked (no lockfile yet) and locked without being declared (a transitive
+dependency). One row per package with both columns would force inventing one half of every such pair. Three roles
+share one table instead: `declared` (a manifest's constraint), `resolved` (a lockfile's exact version) and
+`provided` (the package this repository *is*). `provided` is the other half of cross-repository matching — an edge
+from `repo-a` to `repo-b` exists only when `repo-a` declares a name `repo-b` provides, in the same ecosystem, and
+only when exactly one repository provides it. The join back into a single view is a query, not a schema decision,
+so both halves survive.
+
 ### Indexes
 
 `files(repo_id, rel_path)`, `files(content_hash)`, `entities(key)`, `entities(file_id)`,
 `entities(repo_id, type, name)`, `edges(src_id, type)`, `edges(dst_id, type)`, `edges(file_id)`,
-`chunks(file_id)`, `unresolved_refs(target_kind, target_key)`.
+`chunks(file_id)`, `unresolved_refs(target_kind, target_key)`,
+`dependencies(repo_id, ecosystem, normalized_name)`, `dependencies(ecosystem, normalized_name, role)`.
 
 ### Vectors
 
@@ -407,20 +437,47 @@ Consequences, all of them wanted:
   link pass, so adding `common-lib` later retroactively creates the `service-a DEPENDS_ON common-lib` edge without
   reparsing `service-a`.
 
-### What the linker resolves as of Slice A
+### The two link passes
 
-| Reference kind | Slice A behavior |
+Linking runs twice, and the split is what keeps the trust rule enforceable.
+
+**Per file**, during indexing, creates only what one file can prove alone: its definitions, its interned global
+targets (environment variables, modules, commands, config keys) and references to symbols it defines itself.
+Everything else becomes a row in `unresolved_refs` — the durable record of a claim, provenanced to the file that
+made it.
+
+**Globally**, once at the end of a sync run, resolves those standing claims against everything currently indexed.
+The pass first deletes every edge it previously created (they carry `parser = 'linker:global'`) and then rebuilds,
+which makes it **idempotent**: running it twice gives the same graph as running it once. That is what lets an
+incremental sync equal a full reindex (§9) even though cross-repository edges depend on repositories the current
+sync never touched.
+
+| Reference kind | How it resolves |
 |---|---|
-| environment variable, module, command | interned as a global entity; edge created |
-| symbol defined in the same file | resolved directly; edge created |
-| symbol defined in another file | **counted as unresolved, never guessed** — needs the import graph (phase 12) |
-| package → repository | not yet attempted — needs dependency parsing (phase 10) |
+| environment variable, module, command, config key | interned as a global entity in the per-file pass |
+| symbol defined in the same file | resolved directly in the per-file pass |
+| symbol defined in another file | resolved **only through an import this file actually wrote** |
+| module specifier | resolved to a file: Python dotted and relative, TS/JS relative with index resolution, Ruby `require_relative` |
+| script / file path | joined against the referencing file's directory, then matched to a managed repository — including paths that climb out of one repository into another |
+| Salt `include:` | dotted state path → `x/y.sls` or `x/y/init.sls` |
+| Salt requisite | state ID, unique within the repository |
+| `salt://` source | unique matching managed path, at reduced confidence |
+| `pillar[...]` key | the config key that defines it, searched only in files this one provably includes |
+| declared package | interned `pkg:<ecosystem>:<name>`, plus a repository edge when exactly one managed repository provides that exact normalized name |
 
-The third row is the trust rule in practice: a `CALLS load_config` reference in `app.py` whose definition lives in
-`config.py` is *not* wired to that definition yet, because doing so correctly requires resolving
-`from src.config import load_config` against the module graph. Emitting the edge on name equality alone would
-create a fact the parser cannot support, which §2 of the specification forbids. Retrieval still surfaces both
-locations, because both are indexed and both match the query lexically.
+Three rules hold across every row, and they are the trust rule in practice:
+
+- **A computed target resolves to nothing.** `source "$CONFIG_FILE"`, `process.env[key]`, a templated Salt ID and a
+  `setup.py` whose `install_requires` is built at runtime all produce no fact, because the value is not knowable
+  without executing the repository.
+- **An ambiguous target resolves to nothing.** Two managed repositories providing `common-lib` is a real situation;
+  picking one would be a guess, so neither edge is created.
+- **A symbol reference is resolved only through an import.** A `CALLS load_config` in `app.py` is wired to
+  `config.py` because `app.py` wrote `from src.config import load_config`; the same call in a file that never
+  imported the name stays unresolved. Name equality alone is not evidence (V1_SPEC §2).
+
+Everything unresolved stays in `unresolved_refs` rather than being discarded, so adding `common-lib` to the managed
+set later retroactively creates the `python-service DEPENDS_ON common-lib` edge without reparsing `python-service`.
 
 ---
 
@@ -439,21 +496,27 @@ parse           registry dispatch → LanguageParser.parse(path, content)     (p
    ↓
 persist         KnowledgeStore.replace_file_facts(file_id, facts)           (transactional)
    ↓
-dependencies    manifest + lockfile parsers → declared↔resolved join
+dependencies    manifest + lockfile parsers → declared / resolved / provided rows
    ↓
-link            resolve ParsedReferences → intern entities → write edges;
-                retry unresolved_refs; cross-repo resolution                 (§5)
+link (file)     intern global targets; resolve intra-file symbols; record the
+                remaining claims in unresolved_refs                          (§5)
    ↓
 chunk           symbol-aligned where line ranges exist, else fixed windows
    ↓
 index           FTS upsert; embed only chunks whose content_hash changed
    ↓
+─── once per run, after every repository ────────────────────────────────────
+   ↓
+link (global)   drop the previous global edges; resolve every standing claim
+                against the whole managed set; join declared packages to the
+                repositories that provide them                               (§5)
+   ↓
 gc              drop global entities with no remaining edges
 ```
 
-The link stage is **idempotent and global**: it runs at the end of any sync, including a single-repository sync,
-because a change in one repository can create or invalidate a cross-repository edge. It is cheap because it only
-processes references belonging to touched files plus the standing `unresolved_refs` set.
+The global link stage runs at the end of any sync, including a single-repository sync, because a change in one
+repository can create or invalidate a cross-repository edge in another. It reads the standing `unresolved_refs`
+set and the file and symbol tables, all of which are indexed, and rebuilds only edges it owns.
 
 ### Chunking
 
@@ -819,3 +882,10 @@ full reindex.
 | `httpx` promoted to a core dependency | Keep it behind the `llm` extra | The Ollama backend is the V1 default; failing at import time behind an extra is a worse experience than one small dependency |
 | Ollama availability includes "model is pulled" | Probe reachability only | A running server without the model fails at request time; checking early turns a mid-query failure into an actionable `ollama pull` message |
 | FACTS = retrieved evidence, HYPOTHESES = model findings | Split model findings by a confidence threshold | The model is never a source of facts (§2); mapping its output to "hypothesis" and retrieval to "fact" states that structurally instead of by numeric convention |
+| tree-sitter promoted to a core dependency | Keep it behind the `parsers` extra | Six of the eight V1 languages need it; a parser that silently does not exist would make the index quietly incomplete, which is worse than one dependency (the same reasoning as `httpx`) |
+| Jinja neutralized with same-length filler | Strip Jinja, or blank whole lines | Preserving every character position keeps YAML line *and* column marks identical to the original file, so a Salt fact cites the line a human would point at. Stripping shifts every position after the first `{{` |
+| An `.sls` top-level key is a state or config data, decided structurally | Treat every `.sls` as states, or infer from the path | Salt itself distinguishes them only through the top file, which RepoAtlas cannot read. What *is* in the text is whether the key declares a `module.function`; that test is deterministic and is what lets `pillar['service']['host']` resolve to the line defining it |
+| Two link passes, the global one idempotent by delete-and-rebuild | Incrementally patch cross-repository edges | Cross-repository edges depend on repositories the current sync never touched. Rebuilding from the standing claims is the only cheap way to keep "incremental sync equals full reindex" true for them (§9) |
+| Cross-file symbol references resolved only through a written import | Resolve on name equality within the repository | Name equality is not evidence (V1_SPEC §2). The import is the proof, and it is already in the file, so requiring it costs nothing and removes a whole class of wrong edges |
+| `salt://` sources resolved at confidence < 1.0 | Resolve at full confidence, or not at all | `file_roots` is not readable, so no `salt://` mapping is ever proven. Refusing to resolve would lose a genuinely useful link; resolving silently at 1.0 would overstate it. The confidence value carries the distinction |
+| `unresolved_refs` retained after a successful resolution | Delete rows once resolved | The row is the file's durable claim, not a work queue. Keeping it is what makes the global pass rebuildable and what lets a repository added later gain its edges without a reparse |

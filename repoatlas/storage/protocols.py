@@ -12,6 +12,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
+from repoatlas.models.dependencies import DependencyRecord, DependencyView
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.models.repository import FileState, IndexedFile, Repository
 
@@ -99,6 +100,56 @@ class EntityHit(BaseModel):
     score: float
 
 
+class UnresolvedRefRecord(BaseModel):
+    """A reference whose target is not resolvable from the asserting file alone.
+
+    These rows are the durable record of a claim, retried on every link pass, so a
+    repository added later retroactively gains the edges that were always implied
+    (ARCHITECTURE.md §5).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int | None = None
+    repo_id: int
+    file_id: int
+    src_id: int
+    edge_type: EdgeType
+    target_kind: EntityType
+    target_key: str
+    line_start: int | None = None
+    line_end: int | None = None
+    confidence: float = 1.0
+    meta_json: str | None = None
+
+
+class FileRow(BaseModel):
+    """One indexed file joined to its repository and its file entity."""
+
+    model_config = ConfigDict(frozen=True)
+
+    file_id: int
+    file_entity_id: int
+    repo_id: int
+    repo_name: str
+    repo_path: Path
+    rel_path: str
+
+
+class SymbolRow(BaseModel):
+    """A file-scoped definition, for cross-file resolution."""
+
+    model_config = ConfigDict(frozen=True)
+
+    entity_id: int
+    file_id: int
+    repo_id: int
+    type: EntityType
+    name: str
+    qualified_name: str | None
+    line_start: int | None
+
+
 class EntityDescription(BaseModel):
     """An entity resolved to a citable location (V1_SPEC §11)."""
 
@@ -131,6 +182,11 @@ class KnowledgeStore(Protocol):
     def replace_file_facts(self, file_id: int, facts: FileFacts) -> None: ...
     def intern_entity(self, entity: EntityRecord) -> int: ...
     def add_edges(self, edges: Sequence[EdgeRecord]) -> None: ...
+    def add_unresolved_refs(self, refs: Sequence[UnresolvedRefRecord]) -> None: ...
+    def list_unresolved_refs(self) -> list[UnresolvedRefRecord]: ...
+    def delete_edges_by_parser(self, parser: str) -> int: ...
+    def list_file_rows(self) -> list[FileRow]: ...
+    def list_symbols(self, types: Sequence[EntityType] | None) -> list[SymbolRow]: ...
     def neighbors(
         self,
         entity_ids: Sequence[int],
@@ -138,6 +194,13 @@ class KnowledgeStore(Protocol):
         limit: int,
     ) -> list[EdgeRecord]: ...
     def gc_orphan_entities(self) -> int: ...
+
+
+class DependencyStore(Protocol):
+    def replace_for_file(self, file_id: int, records: Sequence[DependencyRecord]) -> None: ...
+    def providers(self, ecosystem: str, normalized_name: str) -> list[tuple[int, str]]: ...
+    def list_for_repos(self, repo_ids: Sequence[int] | None) -> list[DependencyRecord]: ...
+    def join_view(self, repo_ids: Sequence[int] | None) -> list[DependencyView]: ...
 
 
 class SearchIndex(Protocol):
