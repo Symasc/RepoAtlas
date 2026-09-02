@@ -13,8 +13,16 @@ from typing import Annotated
 import typer
 
 from repoatlas import services
-from repoatlas.errors import ExitCode, ReasoningModelUnavailableError, RepoAtlasError
-from repoatlas.rendering import render_evidence, render_repos, render_status, render_sync
+from repoatlas.errors import ExitCode, RepoAtlasError
+from repoatlas.llm.reasoner import QueryIntent, ReasoningResult
+from repoatlas.rendering import (
+    render_answer,
+    render_diagnosis,
+    render_evidence,
+    render_repos,
+    render_status,
+    render_sync,
+)
 from repoatlas.services.workspace import Workspace, open_workspace
 
 app = typer.Typer(
@@ -30,6 +38,9 @@ _VerboseOption = Annotated[
 ]
 _RepoOption = Annotated[
     str | None, typer.Option("--repo", help="Explicit repository; overrides the current directory.")
+]
+_NoLlmOption = Annotated[
+    bool, typer.Option("--no-llm", help="Evidence-only mode; do not consult a reasoning model.")
 ]
 
 
@@ -173,43 +184,78 @@ def locate(
 def ask(
     question: Annotated[str, typer.Argument(help="Engineering question.")],
     repo: _RepoOption = None,
+    no_llm: _NoLlmOption = False,
     json_output: _JsonOption = False,
     verbose: _VerboseOption = False,
 ) -> None:
     """Answer an engineering question with grounded evidence."""
-    _reasoning_command(question, repo, json_output, verbose)
+    _reasoning_command(question, repo, QueryIntent.ASK, no_llm, json_output, verbose)
 
 
 @app.command()
 def debug(
     question: Annotated[str, typer.Argument(help="Symptom or error to investigate.")],
     repo: _RepoOption = None,
+    no_llm: _NoLlmOption = False,
     json_output: _JsonOption = False,
     verbose: _VerboseOption = False,
 ) -> None:
     """Investigate a failure, separating facts from hypotheses."""
-    _reasoning_command(question, repo, json_output, verbose)
+    _reasoning_command(question, repo, QueryIntent.DEBUG, no_llm, json_output, verbose)
 
 
-def _reasoning_command(question: str, repo: str | None, json_output: bool, verbose: bool) -> None:
-    """``ask`` and ``debug`` need a reasoning model, which Slice B provides.
+def _reasoning_command(
+    question: str,
+    repo: str | None,
+    intent: QueryIntent,
+    no_llm: bool,
+    json_output: bool,
+    verbose: bool,
+) -> None:
+    workspace = _open()
+    try:
+        context = _resolve(workspace, repo, str(intent), verbose)
 
-    Failing with exit code 4 and a clear message is the specified behavior when no
-    model is available (V1_SPEC §4); returning evidence-only output here would
-    silently answer a different question than the one asked.
-    """
-    del question, repo, json_output, verbose
-    _fail(
-        ReasoningModelUnavailableError(
-            "No reasoning model is configured.",
-            detail=(
-                "`ask` and `debug` require a local reasoning model, which arrives in\n"
-                "Slice B of docs/V1_SPEC.md.\n\n"
-                "Available now, with no model required:\n\n"
-                '  repoatlas locate "<question>"'
-            ),
+        if no_llm:
+            # Evidence-only mode: skip reasoning entirely rather than narrate
+            # around a model that was not consulted (V1_SPEC §4).
+            evidence = services.retrieve_for(workspace, question, context, intent)
+            _emit(evidence, render_evidence(evidence), json_output)
+            workspace.close()
+            return
+
+        evidence, result = services.reason(workspace, question, context, intent)
+    except RepoAtlasError as exc:
+        _fail(exc)
+        return
+
+    if verbose:
+        _report_grounding(result)
+
+    if json_output:
+        typer.echo(_to_json(result.answer))
+    elif intent is QueryIntent.DEBUG:
+        typer.echo(render_diagnosis(result.answer, evidence))
+    else:
+        typer.echo(render_answer(result.answer))
+    workspace.close()
+
+
+def _report_grounding(result: ReasoningResult) -> None:
+    """Surface what citation verification changed (ARCHITECTURE.md §11)."""
+    grounding = result.grounding
+    typer.echo(f"model: {result.model}", err=True)
+    if result.repaired:
+        typer.echo("model output required a repair attempt", err=True)
+    if grounding.modified:
+        typer.echo(
+            f"grounding: {grounding.dropped_citations} citation(s) dropped, "
+            f"{grounding.clamped_citations} clamped, "
+            f"{grounding.demoted_findings} finding(s) demoted to unknown",
+            err=True,
         )
-    )
+    else:
+        typer.echo("grounding: all citations verified", err=True)
 
 
 def _open() -> Workspace:

@@ -6,7 +6,7 @@ action. Expanded reasoning belongs behind ``--verbose``, not in the default view
 
 from __future__ import annotations
 
-from repoatlas.models.evidence import EvidenceSet
+from repoatlas.models.evidence import EvidenceSet, Finding, RepoAtlasAnswer
 from repoatlas.models.reports import StatusReport, SyncReport
 from repoatlas.models.repository import Repository
 
@@ -136,3 +136,95 @@ def _format_time(value: object) -> str:
     if value is None:
         return "never"
     return str(value).split(".")[0].replace("+00:00", "Z")
+
+
+#: Numeric confidence to the word shown in the terminal (V1_SPEC §16).
+_HIGH = 0.75
+_MEDIUM = 0.45
+
+
+def confidence_label(value: float) -> str:
+    if value >= _HIGH:
+        return "HIGH"
+    if value >= _MEDIUM:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _citation_lines(finding: Finding) -> list[str]:
+    lines: list[str] = []
+    for item in finding.evidence:
+        location = f"{item.repository}/{item.path}"
+        if item.line_start is not None:
+            span = (
+                str(item.line_start)
+                if item.line_end in (None, item.line_start)
+                else f"{item.line_start}-{item.line_end}"
+            )
+            location = f"{location}:{span}"
+        lines.append(location)
+        if item.description:
+            lines.append(f"  {item.description}")
+    return lines
+
+
+def render_answer(answer: RepoAtlasAnswer) -> str:
+    """``ask`` output: answer, evidence, confidence, next action (V1_SPEC §16)."""
+    lines = ["ANSWER", "", answer.summary]
+
+    if answer.findings:
+        lines.extend(["", "EVIDENCE", ""])
+        for finding in answer.findings:
+            lines.append(finding.statement)
+            lines.extend(f"  {line}" for line in _citation_lines(finding))
+            lines.append("")
+        lines.pop()
+
+        best = max(f.confidence for f in answer.findings)
+        lines.extend(["", "CONFIDENCE", "", confidence_label(best)])
+
+    if answer.unknowns:
+        lines.extend(["", "UNKNOWN", ""])
+        lines.extend(f"- {unknown}" for unknown in answer.unknowns)
+
+    if answer.next_check:
+        lines.extend(["", "NEXT", "", answer.next_check])
+
+    return "\n".join(lines)
+
+
+def render_diagnosis(answer: RepoAtlasAnswer, evidence: EvidenceSet) -> str:
+    """``debug`` output, separating facts from hypotheses (V1_SPEC §15, §16).
+
+    The split is not a confidence threshold on model output. FACTS are the
+    deterministic evidence RepoAtlas retrieved, which carries provenance;
+    HYPOTHESES are the model's findings, which are interpretations of it. That
+    mapping is the trust rule made visible: the model never contributes a fact.
+    """
+    lines = ["SUMMARY", "", answer.summary]
+
+    if evidence.candidates:
+        lines.extend(["", "FACTS", ""])
+        for candidate in evidence.candidates:
+            lines.append(candidate.location)
+            detail = candidate.description or _first_meaningful_line(candidate.text)
+            if detail:
+                lines.append(f"  {detail}")
+
+    if answer.findings:
+        lines.extend(["", "HYPOTHESES", ""])
+        for finding in sorted(answer.findings, key=lambda f: f.confidence, reverse=True):
+            lines.append(finding.statement)
+            lines.append(
+                f"  confidence: {confidence_label(finding.confidence)} ({finding.confidence:.2f})"
+            )
+            lines.extend(f"  {line}" for line in _citation_lines(finding))
+            lines.append("")
+        lines.pop()
+
+    if answer.unknowns:
+        lines.extend(["", "UNKNOWNS", ""])
+        lines.extend(f"- {unknown}" for unknown in answer.unknowns)
+
+    lines.extend(["", "NEXT", "", answer.next_check or "No further check suggested."])
+    return "\n".join(lines)
