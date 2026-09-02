@@ -59,6 +59,26 @@ _INTERPRETERS: dict[str, str] = {
 
 _SCRIPT_SUFFIXES = frozenset({".sh", ".bash", ".py", ".rb", ".zsh"})
 
+#: Commands that run *another* command, transparently. Recording only the wrapper
+#: would state that the script executes ``env``, which hides the relationship the
+#: question "what does this script run?" is actually about (V1_SPEC §7.3).
+#:
+#: ``sudo`` is deliberately absent: its flags consume arguments (``-u user``,
+#: ``-g group``) and it accepts ``--``, so identifying the wrapped command means
+#: guessing. Everything here takes only flags that stand alone.
+_WRAPPER_COMMANDS = frozenset({"env", "exec", "nohup", "command"})
+
+#: Flags a wrapper may carry without changing which word is the command. Anything
+#: else — including every flag that consumes the following word — stops the
+#: unwrap, because the alternative is inventing a target.
+_TRANSPARENT_WRAPPER_FLAGS = frozenset(
+    {"-i", "--ignore-environment", "-", "--", "-c", "-l", "-p", "-0", "--null"}
+)
+
+#: ``NAME=value`` placed before a command: POSIX puts NAME in that command's
+#: environment, which is the relationship ``export NAME=value`` also creates.
+_PREFIX_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
+
 
 def _looks_like_path(text: str) -> bool:
     return text.startswith(("./", "../", "/")) or (
@@ -148,10 +168,13 @@ class _Walker:
             self._record_export(name, node)
 
     def _record_export(self, name: str, node: Node) -> None:
+        start, end = line_range(node)
+        self._export(name, start, end)
+
+    def _export(self, name: str, start: int, end: int) -> None:
         if not _ENV_NAME.match(name):
             return
         self.exported.add(name)
-        start, end = line_range(node)
         self.references.append(
             ParsedReference(
                 edge_type=EdgeType.EXPORTS,
@@ -216,6 +239,20 @@ class _Walker:
             self._sourced(node, arguments, start, end)
             return
 
+        # `NAME=value cmd` puts NAME in the environment of `cmd` alone. That is the
+        # same relationship `export NAME=value` creates, scoped to one command, so
+        # it is recorded as one (V1_SPEC §10).
+        for child in node.children:
+            if child.type == "variable_assignment":
+                name_child = child.child_by_field_name("name")
+                if name_child is not None:
+                    self._export(node_text(self._source, name_child), start, end)
+
+        if Path(command).name in _WRAPPER_COMMANDS and self._unwrapped(
+            command, arguments, start, end
+        ):
+            return
+
         if self._executed_path(command, start, end):
             # A path invocation is better evidence as a script reference than as a
             # bare command name, so it is recorded once, not twice.
@@ -234,6 +271,56 @@ class _Walker:
 
         self._interpreted_script(command, arguments, start, end)
         self._salt_invocation(command, arguments, start, end)
+
+    def _unwrapped(self, wrapper: str, arguments: list[str], start: int, end: int) -> bool:
+        """Record what ``env``/``exec``/``nohup``/``command`` actually runs.
+
+        Returns whether the wrapped command was identified. When it was not — an
+        unrecognized flag, a computed target, or no command at all — nothing is
+        recorded here and the caller falls back to reporting the wrapper itself,
+        which is a true statement rather than a guess (V1_SPEC §2).
+        """
+        rest = list(arguments)
+        assignments: list[tuple[str, str]] = []
+
+        while rest:
+            word = rest[0]
+            if word.startswith("-"):
+                if word not in _TRANSPARENT_WRAPPER_FLAGS:
+                    return False
+                rest.pop(0)
+                continue
+            match = _PREFIX_ASSIGNMENT.match(word)
+            if match is None:
+                break
+            assignments.append((match.group(1), match.group(2)))
+            rest.pop(0)
+
+        if not rest:
+            return False
+
+        inner, inner_arguments = rest[0].strip("\"'"), rest[1:]
+        if not inner or "$" in inner or "`" in inner:
+            return False
+
+        for name, _ in assignments:
+            self._export(name, start, end)
+
+        if not self._executed_path(inner, start, end):
+            self.references.append(
+                ParsedReference(
+                    edge_type=EdgeType.EXECUTES,
+                    target_kind=EntityType.COMMAND,
+                    target_key=inner,
+                    line_start=start,
+                    line_end=end,
+                    source_symbol=self._scope,
+                    meta={"wrapper": wrapper},
+                )
+            )
+            self._interpreted_script(inner, inner_arguments, start, end)
+            self._salt_invocation(inner, inner_arguments, start, end)
+        return True
 
     def _sourced(self, node: Node, arguments: list[str], start: int, end: int) -> None:
         """``source x`` / ``. x`` imports another script."""

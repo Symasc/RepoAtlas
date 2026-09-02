@@ -517,6 +517,21 @@ Three rules hold across every row, and they are the trust rule in practice:
 Everything unresolved stays in `unresolved_refs` rather than being discarded, so adding `common-lib` to the managed
 set later retroactively creates the `python-service DEPENDS_ON common-lib` edge without reparsing `python-service`.
 
+**Symbol and module resolution are within one repository.** The two rows above describe what the linker does inside
+a repository; neither crosses a repository boundary. `from common_lib.settings import load_config` in
+`python-service` and `import { loadConfig } from "@company/common"` in `ts-service` both stay in `unresolved_refs`,
+even when `common-lib` is managed and does define that name. V1 therefore relates the two repositories at package
+granularity — `repo:python-service DEPENDS_ON repo:common-lib`, from the manifest — and never at symbol
+granularity.
+
+This is a deliberate boundary rather than an oversight: resolving a bare package specifier to a file needs the
+ecosystem's own module-resolution rules (`node_modules` layout and `exports` maps, `sys.path` and installed
+distributions, gem paths), and guessing at them would produce exactly the "similar name, assumed relationship" edge
+V1_SPEC §9 forbids. The safe half of the guarantee holds and is tested: a cross-repository reference never resolves
+to a *wrong* same-named definition. The missing half is recall, not correctness — "which repository provides
+`load_config`?" is answered at package level and by retrieval, not by an `IMPORTS` edge. Closing it is V2 work and
+needs a real resolver per ecosystem (§14).
+
 ---
 
 ## 6. The indexing pipeline
@@ -563,6 +578,14 @@ order: one chunk per top-level symbol where the parser supplied a range (bounded
 otherwise fixed windows of ~40 lines with ~8 lines of overlap. Files over a size cap, detected-binary files, and
 lockfiles are not chunked — lockfiles are represented by the dependency layer instead, which is both smaller and
 more useful.
+
+Line-based spans cannot bound a file that has no line breaks, so a second cap applies in characters
+(`indexing.max_chunk_chars`, 8000 — roughly 2000 tokens, a third of the default evidence budget). A minified
+bundle, a base64 blob or a generated one-line JSON document is split into pieces of that size instead of arriving
+as a single chunk that would consume the whole prompt. Each piece keeps the line range of the span it came from,
+which stays true — every piece really is on those lines — so the citation is coarser than the text but never wrong
+about it. Truncating instead would silently lose whatever sat past the cap, and an exact search for it would then
+return nothing while the file plainly contains it (V1_SPEC §14).
 
 ---
 
@@ -631,9 +654,72 @@ Repositories are untrusted (§12). All git access goes through `gitstate/`, whic
   `core.hooksPath=/dev/null` guarantees no repository-supplied hook can run even if a future command would
   normally trigger one; `--no-optional-locks` avoids mutating a repository we only read; `safe.directory=*` is
   required for the read-only container mount, where the repository is owned by a different uid;
-- restricts itself to a **fixed allowlist of read-only plumbing**: `rev-parse`, `status --porcelain`, `ls-files`;
+- restricts itself to a **fixed allowlist of subcommands that cannot spawn a process**: `rev-parse`, `ls-files`,
+  `ls-tree` — see the trust boundary below;
 - uses `--` and argument arrays; no shell interpolation of repository-derived strings, ever;
 - applies a timeout and treats any failure as "git state unknown" rather than raising.
+
+### The Git trust boundary
+
+> **Repository-local Git configuration is untrusted and must not be allowed to cause external program execution
+> during RepoAtlas inspection.**
+
+A repository directory is not only its tracked files. It is also `.git/config` and `.gitattributes`, and those two
+together are a program-launching mechanism: `.gitattributes` assigns a *driver* to a path, `.git/config` says what
+command that driver runs. Neither arrives through `git clone`, but both arrive through every other way a repository
+reaches a disk — an archive, a shared or network mount, a container bind-mount, a restored backup, a copied working
+tree.
+
+The original allowlist was chosen on the axis "is this subcommand read-only". That is the wrong question. The right
+one is **can this subcommand spawn a process**, and the two are not the same: `git status --porcelain` mutates
+nothing and yet executed arbitrary shell during `repoatlas init`, because deciding whether a working-tree file
+still matches the index means re-hashing it *through the repository's clean filter*.
+
+Measured against the installed git (2.43.0), with hooks and fsmonitor already neutralized:
+
+| Repository-local configuration | `rev-parse` | `ls-files` (`--cached/--others/--stage/--deleted`) | `ls-tree` | `ls-files -m` | `status --porcelain` |
+|---|---|---|---|---|---|
+| `filter.<d>.clean` | safe | safe | safe | **executes** | **executes** |
+| `filter.<d>.process` | safe | safe | safe | **executes** | **executes** |
+| `filter.<d>.smudge` | safe | safe | safe | safe | safe |
+| `diff.external`, `diff.<d>.textconv` | safe | safe | safe | safe | safe |
+| `core.fsmonitor`, `core.pager`, `credential.helper` | safe | safe | safe | safe | safe |
+| hooks in `.git/hooks` | safe | safe | safe | safe | safe |
+| `alias.<name>` shadowing a built-in | safe | safe | safe | safe | safe |
+
+Two conclusions follow, and both are structural rather than advisory:
+
+- **No command that compares working-tree content to the index may be invoked.** `status` is out of the allowlist
+  entirely; `ls-files` stays in but `-m`/`--modified`/`-k`/`--killed` are rejected by the same guard, because the
+  hazard is the *mode*, not the subcommand — `ls-files -m` executes the identical payload.
+- **Dirty state is computed without asking git to look.** See §9.
+
+Aliases cannot shadow built-ins in git, and `diff` drivers are unreachable because RepoAtlas runs no diff. Those
+rows are tested rather than assumed: an allowlist is a security control only if a repository cannot redefine what
+the allowed words mean.
+
+Beyond the allowlist, each invocation runs with the whole environment replaced — no `HOME`, plus
+`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null` and `GIT_ATTR_NOSYSTEM` — so
+system and per-user configuration cannot contribute either. `core.hooksPath=/dev/null`, `core.fsmonitor=false` and
+`--no-pager` are kept as defence in depth: the table says they are unreachable *today*, and a future git that
+consults them earlier should not silently reopen this.
+
+### Why `safe.directory=*` is retained
+
+Git normally refuses to operate in a repository whose worktree is owned by another user, and the protection it
+provides is exactly the one at issue here: it stops git from reading and acting on a `.git/config` you do not own.
+`safe.directory=*` opts out of it, which unambiguously widens the attack surface along the axis this section is
+about.
+
+It is retained anyway, for a concrete deployment reason: the container mounts repositories read-only from the host
+(§12) and runs as uid 10001, so the repositories are owned by a different uid essentially always. Without it,
+`rev-parse` and `ls-files` fail, RepoAtlas silently falls back to `os.walk`, and branch/HEAD reporting degrades —
+a functional regression on the primary supported deployment.
+
+The decision is therefore to **keep it and stop depending on it**: git's ownership check is treated as unavailable,
+and safety comes from the allowlist and the neutralized configuration above, which hold whoever owns the
+repository. That is the stronger position regardless — `safe.directory` never protected against a hostile
+repository the user *does* own, which is the ordinary case for a cloned or unpacked tree.
 
 ### File enumeration
 
@@ -682,6 +768,42 @@ the hash actually changed. A coarse-mtime filesystem therefore costs an unnecess
 The rule stated positively: *we may skip work only when we can prove nothing changed. Whenever proof is
 unavailable, we do the work.*
 
+### Dirty state is computed, not asked for
+
+The dirty flag above cannot come from `git status`: that command executes repository-supplied filters (§8). It is
+decomposed instead into the differences git reports, each answerable from refs, the object database and the index
+— none of which requires git to read working-tree content:
+
+| Difference | How it is answered |
+|---|---|
+| an untracked, non-ignored file exists | `ls-files --others --exclude-standard` |
+| a tracked file is missing | `ls-files --deleted` |
+| the index differs from HEAD (something staged) | `ls-files --stage` compared to `ls-tree -r HEAD` |
+| a tracked file differs from its index blob | the file's git blob hash, computed here, compared to the SHA git already recorded in the index |
+
+The last row is the one that used to be worth a subprocess. Git's blob hash is `sha1("blob <len>\0" + content)` —
+a content address defined by git's object format, not a security primitive — and it is compared against a hash git
+hands over without running anything. The comparison stops at the first difference.
+
+Two behavioural consequences, both deliberate:
+
+- A repository that uses a **genuine** clean filter, or CRLF normalization, stores a blob that is not
+  byte-identical to the file on disk, so this reports dirty where git would report clean. That is conservative in
+  the direction the rule above already prefers: it forces a rehash, and a rehash of unchanged content changes
+  nothing.
+- A mode-only change (`chmod +x`) is not content, so it is not reported. No fact RepoAtlas stores depends on it.
+
+Cost, measured over 20 repositories / 1000 files: 128 ms against 38 ms for the `git status` call it replaces
+(3.4×, ~9 ms per repository at 50 files each). Paid once per repository per sync, in exchange for closing the
+execution path.
+
+The same rule decides what to do when a file cannot be read at all. Hashing returns `None` on `OSError` — a mode
+change, a vanished symlink target, a file deleted between enumeration and hashing, a permission change are all
+ordinary events between one sync and the next — and a file with no hash compares unequal to its stored one, so it
+is treated as **changed**. Parsing then fails conservatively for that file and its previous facts are replaced by
+nothing. The alternative, letting the error escape, would abort the whole sync over one unreadable file and leave
+every other repository's facts stale.
+
 Schema and parser versions are handled **per file** rather than as a sixth global trigger: the version is stored on
 the file row, so affected files are reparsed directly instead of hashing the entire tree to learn that nothing
 moved. The embedding model is not part of that version at all — vectors are keyed by the model that produced them
@@ -725,7 +847,8 @@ question + RepositoryContext
    │
    ├─ 1. query analysis (deterministic)
    │     quoted strings · ALL_CAPS env candidates · dotted.qualified.names
-   │     path-like tokens · package names · error-shaped substrings
+   │     path-like tokens · package names · snake_case and camelCase identifiers
+   │     error-shaped substrings
    │
    ├─ 2. exact          literal-substring verified chunk matches      → DETERMINISTIC
    ├─ 3. lexical        chunks_fts recall over the whole question     → ASSOCIATIVE
@@ -777,12 +900,47 @@ than against `fuse` alone.
 
 ### Suppressing similarity when the question named something specific
 
-When query analysis extracts literal terms — a quoted string, an environment variable, a dotted name, a path — and
-the exact stage finds **none** of them anywhere in the index, the semantic stage is skipped entirely. The user
-named something specific; the honest answer is that it does not exist. Returning spans that merely read like the
-name would be plausible, unfounded output, which is the failure V1_SPEC §2 exists to prevent. A question with no
-literal terms ("where is deployment configuration generated?") is exactly what semantic retrieval is for, and
-nothing is suppressed there.
+When query analysis extracts literal terms and the exact stage finds **none** of them anywhere in the index, the
+whole **associative half of the funnel** is skipped: FTS recall over chunks, entity-name recall and the embedding
+stage alike. The user named something specific; the honest answer is that it does not exist. Returning spans that
+merely read like the name would be plausible, unfounded output, which is the failure V1_SPEC §2 exists to prevent.
+A question with no literal terms ("where is deployment configuration generated?") is exactly what semantic
+retrieval is for, and nothing is suppressed there.
+
+Suppressing the lexical stage matters as much as suppressing the semantic one, and for a sharper reason: FTS ranks
+by word overlap, so a question about something absent still matches whatever files happen to share its *other*
+words — and those hits arrive with a location and a line range, which reads as an answer. Silencing embeddings
+while leaving word matching on would have moved the fabrication one stage earlier, not removed it.
+
+**Not every literal term may declare a question unanswerable.** Two `QueryAnalysis` properties are therefore
+distinguished:
+
+| Property | Contents | Used for |
+|---|---|---|
+| `literal_terms` | quoted strings, `ALL_CAPS` names, dotted names, paths, `@scope/package`, `snake_case`, dashed names, `camelCase` | what the exact stage searches for |
+| `definite_terms` | the same, **minus** dashed and `camelCase` tokens | whether a total miss suppresses the associative stages |
+
+The subset exists because the shapes differ in how reliably they indicate code. `SERVICE_HOST`, `"connection
+refused"`, `src/config.py`, `@company/common` and `load_config` are shapes English prose does not produce by
+accident, so their absence really is proof. A bare dashed word is not: "where is auto-scaling handled?" must not
+return nothing merely because no file contains that exact hyphenation, and `TypeScript`, `JavaScript` and
+`RepoAtlas` are `camelCase` by the same rule that matches `loadConfig`. Those tokens are still searched exactly —
+V1_SPEC §14 requires package and symbol names to be findable — they simply do not get to silence the question. The
+one exception is a question that *is* the token (`repoatlas locate "@company/absent"`), where nothing else was
+asked and a miss is the whole answer.
+
+### Graph expansion is seeded by exact matches only
+
+Stage 6 walks out from the entities the **exact-name** lookup produced, never from the entity-FTS recall beside it.
+Both stages read the same table, and it is tempting to seed expansion from all of it — more seeds, more recall. It
+is also how the tier guarantee gets laundered: an FTS entity hit is `ASSOCIATIVE` because a fuzzy name match is a
+lead, but everything reached from it is labelled `DETERMINISTIC` because graph edges are facts. A single fuzzy
+name would then generate a dozen deterministic candidates that outrank every honest associative one, and the
+guarantee of V1_SPEC §14 would be satisfied on paper while being violated in effect.
+
+The rule is therefore structural: a fuzzy entity match may be returned as a candidate in its own right, and may
+not be used as a seed. A span found by exact match and by FTS is still exact, so nothing that genuinely deserves
+expansion loses it.
 
 ### Bounded graph expansion
 
@@ -811,9 +969,34 @@ repository is searched first; other repositories stay reachable, so primary scop
 Reciprocal-rank fusion is chosen over score normalization because BM25 ranks, cosine similarities, literal-match
 scores and graph distances are not commensurable, and RRF needs no per-source calibration to combine them stably.
 
+**Each ranked list contributes one reciprocal rank per span, its best.** RRF is defined over *items*, and the item
+here is a span — `(repository, path, line_start, line_end)` — while a retriever returns *chunks*. The two are
+usually one-to-one, but not always: a file with no line breaks becomes many chunks that all carry the same line
+range, so a single retriever can return the same span a dozen times. Summing those reciprocal ranks would make the
+fused score a measure of how large a file is rather than of how strongly the retrievers agree about it, and a
+142 KB generated JSON document containing none of the question's words would outrank the file that answers it. A
+span reached by two different retrievers still earns two contributions — that is the agreement RRF is there to
+measure — and two distinct line ranges of one file remain two spans.
+
 Deduplication drops a span contained in a higher-ranked one, or overlapping it by more than half of the shorter
 span — chunk windows overlap by design, so the same lines arrive repeatedly. Spans are never merged into a
 synthetic range: a citation must point at text that was actually retrieved (V1_SPEC §11).
+
+### Known ranking limitations
+
+Two are measured and accepted in V1 rather than tuned away, because every fix considered was a heuristic that would
+have improved the fixture set and told us nothing about a real one:
+
+- **Prose about a topic competes with the code that implements it.** A README or a design note that repeats an
+  identifier is a legitimate lexical and semantic match for it, and the primary-repository boost (V1_SPEC §6)
+  applies to it as much as to source. A question whose answer is structural can therefore find the narrative first.
+  Nothing here is *wrong* — every candidate contains what was asked about, and provenance says exactly what each
+  one is — but rank 1 may be a paragraph rather than a definition. Demoting a file type by extension is precisely
+  the kind of arbitrary bonus V1_SPEC §14 keeps out of the funnel; a reranker (§14 seam) is the honest fix.
+- **A span is represented by one chunk.** When several chunks of one span match, the strongest is kept and the rest
+  are dropped as redundant. For a file with no line breaks — where the whole file is one span — this means the
+  evidence quotes one window of it, not every matching window. The citation stays true and the file is still found;
+  the quoted extract is simply not exhaustive.
 
 ### Instrumentation
 
@@ -987,6 +1170,38 @@ re-index everything after one file changes, never re-embed unchanged data — ar
 touched*, and those are exactly reproducible. Wall-clock bounds exist only to catch a categorical regression, and
 are set far above the observed cost so a loaded CI box does not teach people to ignore the suite.
 
+### The adversarial ecosystem and the evaluation dataset
+
+Two further trees exist beside `tests/fixtures/`, and they answer a different question. The fixtures above ask
+"does the documented behavior work?"; these ask "what does it take to make RepoAtlas say something false?"
+
+```
+tests/adversarial/fixtures/
+├── GROUND_TRUTH.md     hand-written truth for the whole ecosystem
+└── repos/              nine synthetic repositories
+tests/evaluation/
+├── retrieval_cases.yaml  hand-written retrieval expectations
+└── runner.py             per-category metrics
+```
+
+The nine repositories carry deliberate *misinformation* alongside their real relationships: documentation that
+contradicts the code, two repositories that both provide `common-lib`, a same-named function defined in three
+places, references to files that do not exist, prompt-injection text addressed to the model, fake secrets, invalid
+UTF-8, a 200 KB single-line file, a 4000-entry generated JSON document, and identifiers guaranteed to appear
+nowhere.
+
+**`GROUND_TRUTH.md` is written by hand from the fixture construction, and RepoAtlas output never defines an
+expectation.** Asking the system what it thinks and recording the answer is circular testing: it locks in current
+behavior, including current bugs, and every future regression then looks like the spec. The document therefore
+records what must be found, what must *not* be found, and which questions have no answer at all — the last being
+the category most tests never have.
+
+`retrieval_cases.yaml` is that discipline applied to ranking. Each case names required evidence, optional
+alternates, forbidden evidence, an expected rank window, and whether the honest result is "unknown". The runner
+reports recall at 1/3/5/10 **per category**, alongside forbidden-evidence hits, unknown-rejection and
+tier-precedence violations. It deliberately never reports one combined accuracy: exact lookup, prose questions and
+unanswerable queries fail differently and for different reasons, and one number hides which of them regressed.
+
 ---
 
 ## 14. V2 seams
@@ -1033,7 +1248,7 @@ full reindex.
 | Ollama availability includes "model is pulled" | Probe reachability only | A running server without the model fails at request time; checking early turns a mid-query failure into an actionable `ollama pull` message |
 | Deterministic evidence outranks similarity via an `EvidenceTier`, not a weight | A large additive boost for exact matches | A weight is a value someone will tune until it is wrong. A tier is a guarantee: fusion compares scores only within a tier, so no cosine can displace an exact identifier — which is what V1_SPEC §14 actually requires |
 | Vectors keyed by `(content_hash, model)` | Keyed by `chunk_id` with a cascade | Chunk rows are replaced wholesale on reparse, so `chunk_id` keying re-embeds unchanged text — forbidden by V1_SPEC §20. A vector carries no provenance and is never cited, so sweeping orphans is safe where facts must cascade (§3) |
-| Semantic stage suppressed when named terms exist nowhere | Always run it | A question naming a specific identifier that is not in the index is answered by "it is not here", not by something that reads like it. Offering the latter is exactly the plausible-but-unfounded output §2 forbids |
+| **Every associative stage** suppressed when named terms exist nowhere | Suppress the semantic stage only | A question naming a specific identifier that is not in the index is answered by "it is not here", not by something that reads like it. Silencing embeddings while leaving FTS on moves the fabrication one stage earlier rather than removing it — word overlap on the question's *other* words still returns files with line numbers, which reads as an answer (§2, §10) |
 | `EmbeddingModel.available()` never downloads | Load (and fetch) on first use | A 67 MB fetch inside `sync` is a multi-minute stall with no explanation. Reporting "not downloaded, run `sync --embed`" mirrors how a missing Ollama model is reported rather than pulled |
 | Graph traversal excludes `DEFINES`/`CONTAINS` | Traverse every edge type | Containment edges turn one file node into a fan-out over every symbol it declares; two hops of that buries the relationship the question was about under an inventory of the neighbourhood |
 | Graph evidence labelled by the edge that reached it | Reuse the entity's own description | The reader asked about a relationship. "exports (hop 1)" answers that; "defines builder" answers a different question |
@@ -1053,3 +1268,10 @@ full reindex.
 | An empty Salt requisite target yields no reference | Record it and let the linker fail to resolve | `- pkg:` with nothing after it names no state. An edge to the empty string is a relationship RepoAtlas cannot support with evidence (§2) |
 | Performance asserted as shape, with generous wall-clock ceilings | Benchmark thresholds tuned to this machine | The §20 rules are shape properties — what was scanned, what was reparsed, what was re-embedded — and those are exactly reproducible. A millisecond threshold fails on a loaded CI box and teaches people to ignore the suite |
 | End-to-end tests run the installed console script as a subprocess | Drive Typer in-process, as the other CLI tests do | Exit codes, `argv`, the working directory and import-time behavior are the things §21 actually promises, and in-process invocation simulates all four |
+| Only *definite* literal shapes may declare a question unanswerable | Any extracted literal term suppresses | `SERVICE_HOST`, a quoted string, a path, `@scope/name` and `snake_case` are shapes prose does not produce by accident. A bare dashed word ("auto-scaling") and `camelCase` ("TypeScript") are — and suppressing on those would answer an answerable question with silence. They are still searched exactly; they just do not get a veto (§10) |
+| Graph expansion seeded only by exact entity matches | Seed from every entity hit, including FTS recall | Everything reached through an edge is labelled deterministic. Seeding from a fuzzy name match therefore launders one associative lead into a dozen deterministic candidates that outrank every honest one — the tier guarantee satisfied on paper and violated in effect (§10) |
+| One reciprocal rank per span per ranked list | Sum every chunk a list returns for that span | RRF ranks items; a retriever returns chunks, and a file with no line breaks yields many chunks carrying one line range. Summing them makes the fused score measure file size rather than retriever agreement, and content-free generated data outranks the answer (§10) |
+| Chunks capped in characters as well as lines | Cap lines only, or truncate an oversized chunk | A minified bundle or a generated one-liner has no line structure to cap. Truncating would silently lose everything past the cap while exact search reported the file as containing it; splitting keeps every character, at a coarser — never wrong — line citation (§6) |
+| An unreadable file counts as changed | Let the `OSError` propagate | A file can stop being readable between one sync and the next for entirely ordinary reasons. Aborting the whole run over one of them leaves every other repository's facts stale, which is the failure §9 exists to prevent |
+| Transparent command wrappers are unwrapped in Bash | Record the wrapper as the command executed | `env LOG_LEVEL=debug ./notify.sh` executes `notify.sh`; recording `EXECUTES cmd:env` is true of the text and useless about the system. Unwrapping stops at the first flag the wrapper is not known to pass through, and `sudo` is excluded entirely because its flags consume arguments (§7 of V1_SPEC) |
+| Cross-repository references resolve at package granularity only | Resolve a bare package specifier to a file in the providing repository | Doing it correctly needs each ecosystem's own resolution rules (`node_modules` and `exports`, `sys.path`, gem paths); doing it approximately produces the assumed-relationship edge V1_SPEC §9 forbids. The safe half — never resolving to a wrong same-named definition — holds today; the missing half is recall, and it is a V2 resolver (§5) |

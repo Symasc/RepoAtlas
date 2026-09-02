@@ -87,7 +87,7 @@ def plan_sync(
     *,
     rehash: RehashDecision,
     parser_version: str,
-    hash_of: Callable[[str], str],
+    hash_of: Callable[[str], str | None],
 ) -> SyncPlan:
     """Classify every file as unchanged, changed, new or deleted.
 
@@ -118,9 +118,10 @@ def plan_sync(
             continue
 
         # The hash decides. A coarse-mtime filesystem costs a rehash here, never a
-        # missed update.
+        # missed update. An unreadable file hashes to None, which never equals a
+        # stored hash, so it is treated as changed and the indexer reports why.
         digest = hash_of(scanned_file.rel_path)
-        if digest == previous.content_hash:
+        if digest is not None and digest == previous.content_hash:
             plan.unchanged.append(scanned_file.rel_path)
         else:
             plan.changed.append(scanned_file)

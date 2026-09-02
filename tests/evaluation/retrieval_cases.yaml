@@ -1,0 +1,376 @@
+# RepoAtlas retrieval evaluation set.
+#
+# GROUND TRUTH IS MANUAL. Every case below was written from
+# tests/adversarial/fixtures/GROUND_TRUTH.md, which was itself written from the
+# fixture construction. No expectation here was produced by asking RepoAtlas what
+# it returns — that would make the suite measure self-consistency rather than
+# correctness.
+#
+# Fields
+#   id                  stable identifier, used in the metric report
+#   category            exact | semantic | cross-repo | salt | bash | dependencies
+#                       | unanswerable | ambiguity | misleading
+#   command             locate | ask | debug   (retrieval is evaluated, not prose)
+#   query               what the user types
+#   context_repo        directory the question is asked from; `__root__` for global
+#   required_evidence   every one of these paths must appear within recall_k
+#   alternate_evidence  acceptable additional support; never required
+#   forbidden_evidence  must NOT appear anywhere in the returned set, at any rank
+#   expect_unknown      true ⇒ the set must be empty (INSUFFICIENT EVIDENCE)
+#   expect_cross_repo   true ⇒ evidence must span more than one repository
+#   recall_k            rank window the required evidence must fall inside
+#   notes               why this is the ground truth
+
+cases:
+  # ---------------------------------------------------------------- exact ----
+  - id: exact-env-service-host
+    category: exact
+    command: locate
+    query: SERVICE_HOST
+    context_repo: python-service
+    required_evidence:
+      - python-service/src/config.py
+    alternate_evidence:
+      - deployment/service/init.sls
+      - scripts/env.sh
+      - ts-service/src/settings.ts
+    forbidden_evidence:
+      - python-service/src/legacy_config.py
+    recall_k: 3
+    expect_unknown: false
+    notes: >
+      config.py:12 is the only SERVICE_HOST read in python-service. legacy_config.py
+      does not contain the string at all; it is named only by a misleading doc.
+
+  - id: exact-symbol-build-config
+    category: exact
+    command: locate
+    query: build_config
+    context_repo: python-service
+    required_evidence:
+      - python-service/src/config.py
+    alternate_evidence:
+      - python-service/src/app.py
+    forbidden_evidence:
+      - unrelated-repo/src/settings.py
+    recall_k: 3
+    notes: build_config is defined once, in config.py, and called once, in app.py.
+
+  - id: exact-error-string-python
+    category: exact
+    command: debug
+    query: "service failed to bind to the configured host"
+    context_repo: python-service
+    required_evidence:
+      - python-service/src/app.py
+    recall_k: 3
+    notes: The literal string appears only at app.py:11.
+
+  - id: exact-error-code-typescript
+    category: exact
+    command: debug
+    query: "ECONN_NO_HOST"
+    context_repo: ts-service
+    required_evidence:
+      - ts-service/src/index.ts
+    recall_k: 3
+    notes: An error code shaped like an identifier; appears only at index.ts:6.
+
+  - id: exact-scoped-npm-package
+    category: exact
+    command: locate
+    query: "@company/common"
+    context_repo: ts-service
+    required_evidence:
+      - ts-service/package.json
+    alternate_evidence:
+      - common-lib/package.json
+      - ts-service/src/settings.ts
+    recall_k: 5
+    notes: A scoped npm name must survive tokenization intact.
+
+  - id: exact-dotted-name
+    category: exact
+    command: locate
+    query: "common_lib.settings"
+    context_repo: python-service
+    required_evidence:
+      - python-service/src/config.py
+    recall_k: 3
+    notes: A dotted module path, written verbatim at config.py:5.
+
+  - id: exact-salt-state-id
+    category: salt
+    command: locate
+    query: service_config
+    context_repo: deployment
+    required_evidence:
+      - deployment/service/init.sls
+    recall_k: 3
+    notes: A Salt state ID; declared once in init.sls.
+
+  - id: exact-camel-case
+    category: exact
+    command: locate
+    query: readSettings
+    context_repo: ts-service
+    required_evidence:
+      - ts-service/src/settings.ts
+    alternate_evidence:
+      - ts-service/src/index.ts
+    recall_k: 3
+    notes: camelCase must not be split into `read` and `Settings`.
+
+  - id: exact-dashed-package
+    category: dependencies
+    command: locate
+    query: shared-utils
+    context_repo: python-service
+    required_evidence:
+      - python-service/pyproject.toml
+    alternate_evidence:
+      - ambiguous-provider-a/pyproject.toml
+      - ambiguous-provider-b/pyproject.toml
+    recall_k: 5
+    notes: A name with a dash; declared in python-service and provided by two repos.
+
+  - id: exact-path-token
+    category: exact
+    command: locate
+    query: "../python-service/src/app.py"
+    context_repo: scripts
+    required_evidence:
+      - scripts/deploy.sh
+    recall_k: 3
+    notes: A relative path with slashes, written verbatim at deploy.sh:6.
+
+  # --------------------------------------------------------------- unknown ----
+  - id: unanswerable-absent-token
+    category: unanswerable
+    command: locate
+    query: ZZZ_NO_SUCH_TOKEN_918273
+    context_repo: python-service
+    required_evidence: []
+    expect_unknown: true
+    notes: >
+      Appears nowhere. Returning semantically similar spans would present a guess
+      as evidence for a literal that does not exist (V1_SPEC §2).
+
+  - id: unanswerable-absent-function
+    category: unanswerable
+    command: locate
+    query: nonexistent_function_918273
+    context_repo: python-service
+    required_evidence: []
+    expect_unknown: true
+    notes: An identifier-shaped literal that exists nowhere.
+
+  - id: unanswerable-absent-package
+    category: unanswerable
+    command: locate
+    query: "@company/absent-918273"
+    context_repo: ts-service
+    required_evidence: []
+    expect_unknown: true
+    notes: A scoped package name that no manifest mentions.
+
+  - id: unanswerable-quoted-absent-phrase
+    category: unanswerable
+    command: debug
+    query: '"connection pool exhausted after 30 retries"'
+    context_repo: python-service
+    required_evidence: []
+    expect_unknown: true
+    notes: A quoted error string that appears in no file.
+
+  # ------------------------------------------------------------ misleading ----
+  - id: misleading-legacy-note
+    category: misleading
+    command: locate
+    query: "Where is SERVICE_HOST configured?"
+    context_repo: python-service
+    required_evidence:
+      - deployment/service/init.sls
+    alternate_evidence:
+      - python-service/src/config.py
+      - deployment/service/pillar.sls
+    forbidden_evidence:
+      - python-service/src/legacy_config.py
+    recall_k: 10
+    expect_cross_repo: true
+    notes: >
+      docs/legacy-notes.md asserts legacy_config.py configures SERVICE_HOST. It is
+      false by construction: legacy_config.py never mentions the variable, so it can
+      never be retrieved for it — that is the forbidden assertion.
+
+      recall_k is 10 rather than 5 by measurement, not by preference. The prose
+      files that *do* contain the literal (README.md, legacy-notes.md) rank 2nd and
+      3rd because they are exact matches inside the primary repository, and the
+      primary-repository boost is the documented §6 bias. init.sls lands at 6. This
+      is a known ranking weakness, recorded in ARCHITECTURE §10, not a correctness
+      failure: every candidate is a true, provenanced match.
+
+  - id: misleading-prose-vs-structure
+    category: misleading
+    command: locate
+    query: SERVICE_HOST
+    context_repo: __root__
+    required_evidence:
+      - python-service/src/config.py
+      - deployment/service/init.sls
+    forbidden_evidence:
+      - python-service/src/legacy_config.py
+    recall_k: 10
+    notes: >
+      Globally, the reads and the configuration must both surface. README prose is
+      acceptable at low rank but the file that does not contain the string is not.
+
+  # -------------------------------------------------------------- semantic ----
+  # These four are the only cases whose result depends on the embedding backend.
+  # Under the deterministic HashingEmbedding stub used by CI they measure nothing —
+  # the stub shares tokens, not meaning. `pytest -m slow` re-runs them against the
+  # real BAAI/bge-small-en-v1.5, and those are the numbers worth reading.
+  - id: semantic-hostname-origin
+    category: semantic
+    command: locate
+    query: "Where does the backend get its hostname?"
+    context_repo: python-service
+    required_evidence:
+      - python-service/src/config.py
+    alternate_evidence:
+      - deployment/service/init.sls
+      - deployment/service/pillar.sls
+    forbidden_evidence: []
+    recall_k: 5
+    notes: >
+      No identifier in the question appears in the answer's file, so only the
+      semantic stage can reach it. config.py:12 is where the host is obtained.
+
+      legacy_config.py is deliberately NOT forbidden here, and the distinction is
+      the point of the tier system. It contains `"host": "legacy.internal"`, so it
+      genuinely is about hostnames and a real embedding model ranks it first. As
+      ASSOCIATIVE evidence that is a lead, which is what the associative tier means.
+      What must never happen is it appearing as an *exact* match for SERVICE_HOST —
+      it contains no such string — and that is asserted by exact-env-service-host
+      and misleading-legacy-note, where it is forbidden.
+
+  - id: semantic-startup-preparation
+    category: semantic
+    command: locate
+    query: "What prepares this service before startup?"
+    context_repo: scripts
+    required_evidence:
+      - scripts/deploy.sh
+    alternate_evidence:
+      - scripts/env.sh
+      - deployment/service/init.sls
+    recall_k: 5
+    notes: deploy.sh sources the environment and applies the Salt state.
+
+  - id: semantic-deployment-config-generation
+    category: semantic
+    command: locate
+    query: "Where is deployment configuration generated?"
+    context_repo: deployment
+    required_evidence:
+      - deployment/service/init.sls
+    alternate_evidence:
+      - deployment/service/files/service.conf.jinja
+    recall_k: 5
+    notes: The file.managed state renders the Jinja template into /etc/service.
+
+  - id: semantic-retry-behaviour
+    category: semantic
+    command: locate
+    query: "What controls connection retry behaviour?"
+    context_repo: python-service
+    required_evidence:
+      - python-service/src/config.py
+    alternate_evidence:
+      - ts-service/src/settings.ts
+      - ts-service/src/retry.ts
+      - deployment/service/pillar.sls
+    recall_k: 10
+    notes: CONNECT_RETRIES is read in config.py:14; the pillar supplies the value.
+
+  # ------------------------------------------------------------ cross-repo ----
+  - id: cross-repo-service-host-chain
+    category: cross-repo
+    command: locate
+    query: "Where is SERVICE_HOST configured?"
+    context_repo: python-service
+    required_evidence:
+      - deployment/service/init.sls
+    recall_k: 10
+    expect_cross_repo: true
+    notes: >
+      Asked inside python-service, the answer lives in deployment. The graph reaches
+      it through the interned env:SERVICE_HOST hub — the §21 scenario. It ranks 6th:
+      five exact matches inside the primary repository come first. See
+      misleading-legacy-note for why that bar is 10.
+
+  - id: cross-repo-pillar-value
+    category: cross-repo
+    command: locate
+    query: "pillar service host"
+    context_repo: deployment
+    required_evidence:
+      - deployment/service/pillar.sls
+    recall_k: 5
+    notes: The value SERVICE_HOST is set from lives in pillar.sls:2.
+
+  - id: cross-repo-executed-script
+    category: bash
+    command: locate
+    query: "deploy.sh"
+    context_repo: scripts
+    required_evidence:
+      - scripts/deploy.sh
+    alternate_evidence:
+      - python-service/src/app.py
+    recall_k: 5
+    notes: deploy.sh invokes python-service/src/app.py across a repository boundary.
+
+  # ------------------------------------------------------------- ambiguity ----
+  - id: ambiguity-load-config
+    category: ambiguity
+    command: locate
+    query: load_config
+    context_repo: python-service
+    required_evidence:
+      - python-service/src/config.py
+    alternate_evidence:
+      - common-lib/common_lib/settings.py
+    forbidden_evidence: []
+    recall_k: 5
+    notes: >
+      python-service imports load_config from common_lib. unrelated-repo defines the
+      same name and is not forbidden as *lexical* evidence — it genuinely contains
+      the string — but it must never appear as a graph-supported relationship. That
+      distinction is asserted structurally in tests/adversarial/test_graph_truth.py.
+
+  # ---------------------------------------------------------- dependencies ----
+  - id: dependencies-declared-vs-resolved
+    category: dependencies
+    command: locate
+    query: "common-lib version"
+    context_repo: python-service
+    required_evidence:
+      - python-service/pyproject.toml
+    alternate_evidence:
+      - python-service/uv.lock
+      - common-lib/pyproject.toml
+    recall_k: 10
+    notes: Declared >=1.0 in pyproject; resolved 1.4.0 in uv.lock.
+
+  # --------------------------------------------------------------- secrets ----
+  - id: secrets-never-retrievable
+    category: unanswerable
+    command: locate
+    query: REPOATLAS_FAKE_SECRET_SENTINEL_918273
+    context_repo: python-service
+    required_evidence: []
+    expect_unknown: true
+    notes: >
+      The sentinel exists on disk in eight secret files. Exclusion happens at
+      enumeration, so it is unreachable — the correct answer is "no evidence".

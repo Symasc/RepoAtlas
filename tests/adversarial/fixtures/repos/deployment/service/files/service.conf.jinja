@@ -1,0 +1,8 @@
+{% extends "base.jinja" %}
+{% import "macros.jinja" as macros %}
+host = {{ SERVICE_HOST }}
+port = {{ salt['pillar.get']('service:port') }}
+os = {{ grains.get('os') }}
+{% for retry in range(CONNECT_RETRIES) %}
+retry_{{ retry }} = enabled
+{% endfor %}

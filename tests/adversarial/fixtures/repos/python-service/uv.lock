@@ -1,0 +1,13 @@
+version = 1
+
+[[package]]
+name = "common-lib"
+version = "1.4.0"
+
+[[package]]
+name = "requests"
+version = "2.31.0"
+
+[[package]]
+name = "shared-utils"
+version = "3.2.1"

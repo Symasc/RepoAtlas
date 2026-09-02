@@ -66,15 +66,24 @@ def fuse(
     asked in without walling off other repositories — "primary scope, not a wall"
     (V1_SPEC §6). It is added to the score, so it competes inside a tier and never
     promotes a candidate across one.
+
+    Each list contributes **one** reciprocal rank per span, its best. A span can
+    reach a single retriever's list several times — a file whose lines cannot be
+    split becomes many chunks sharing one line range — and summing those would
+    make the fused score a measure of file size rather than of agreement between
+    retrievers, letting generated data outrank the answer purely by volume.
     """
     scores: dict[_Key, float] = {}
     tiers: dict[_Key, EvidenceTier] = {}
     best: dict[_Key, EvidenceCandidate] = {}
 
     for ranked in ranked_lists:
+        counted: set[_Key] = set()
         for rank, candidate in enumerate(ranked, start=1):
             key = _key(candidate)
-            scores[key] = scores.get(key, 0.0) + 1.0 / (_RRF_K + rank)
+            if key not in counted:
+                counted.add(key)
+                scores[key] = scores.get(key, 0.0) + 1.0 / (_RRF_K + rank)
 
             # A span found by several retrievers takes its strongest claim: if any
             # of them reached it deterministically, it is deterministic.
