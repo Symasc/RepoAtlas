@@ -11,6 +11,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from repoatlas.models.parsing import ParseDiagnostic
+from repoatlas.models.telemetry import LinkTrace
 
 
 class RepositorySyncReport(BaseModel):
@@ -53,6 +54,10 @@ class SyncReport(BaseModel):
     linked_references: int = 0
     unresolved_references: int = 0
     cross_repository_edges: int = 0
+    embedded_chunks: int = 0
+    pending_embeddings: int = 0
+    embedding_detail: str = ""
+    link_trace: LinkTrace | None = None
 
     @property
     def files_indexed(self) -> int:

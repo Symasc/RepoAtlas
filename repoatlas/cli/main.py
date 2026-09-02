@@ -15,6 +15,8 @@ import typer
 from repoatlas import services
 from repoatlas.errors import ExitCode, RepoAtlasError
 from repoatlas.llm.reasoner import QueryIntent, ReasoningResult
+from repoatlas.models.evidence import EvidenceSet
+from repoatlas.models.reports import SyncReport
 from repoatlas.rendering import (
     render_answer,
     render_diagnosis,
@@ -114,11 +116,28 @@ def sync(
     repository: Annotated[str | None, typer.Argument(help="Repository to sync.")] = None,
     repo: _RepoOption = None,
     full: Annotated[bool, typer.Option("--full", help="Rehash every file.")] = False,
+    embed: Annotated[
+        bool,
+        typer.Option(
+            "--embed",
+            help="Download the embedding model if needed, then embed pending chunks.",
+        ),
+    ] = False,
     json_output: _JsonOption = False,
     verbose: _VerboseOption = False,
 ) -> None:
     """Incrementally synchronize the index with the working tree."""
     workspace = _open()
+    if embed:
+        # Fetching the model is an explicit act, never a silent stall inside an
+        # ordinary sync (ARCHITECTURE.md §10).
+        workspace.settings = workspace.settings.model_copy(
+            update={
+                "embeddings": workspace.settings.embeddings.model_copy(
+                    update={"allow_download": True}
+                )
+            }
+        )
     try:
         context = _resolve(workspace, repo or repository, "sync", verbose)
         report = services.sync(workspace, context, full=full)
@@ -126,6 +145,8 @@ def sync(
         _fail(exc)
         return
     _emit(report, render_sync(report), json_output)
+    if verbose:
+        _report_sync_telemetry(report)
     workspace.close()
 
 
@@ -177,6 +198,8 @@ def locate(
         _fail(exc)
         return
     _emit(evidence, render_evidence(evidence), json_output)
+    if verbose:
+        _report_retrieval(evidence)
     workspace.close()
 
 
@@ -239,6 +262,47 @@ def _reasoning_command(
     else:
         typer.echo(render_answer(result.answer))
     workspace.close()
+
+
+def _report_sync_telemetry(report: SyncReport) -> None:
+    """Stage costs of the global link and embedding passes (V1_SPEC §20)."""
+    if report.link_trace is not None:
+        trace = report.link_trace
+        typer.echo(
+            f"link: {trace.duration_ms:.1f}ms over {trace.claims_considered} claim(s), "
+            f"{trace.files_indexed} file(s), {trace.symbols_indexed} symbol(s)",
+            err=True,
+        )
+        for stage in trace.stages:
+            typer.echo(
+                f"  {stage.name:<13} {stage.duration_ms:>8.2f}ms  "
+                f"{stage.candidates_in:>6} -> {stage.candidates_out:<6} {stage.detail}",
+                err=True,
+            )
+    if report.embedding_detail:
+        typer.echo(
+            f"embeddings: {report.embedded_chunks} embedded, "
+            f"{report.pending_embeddings} pending ({report.embedding_detail})",
+            err=True,
+        )
+
+
+def _report_retrieval(evidence: EvidenceSet) -> None:
+    """Per-stage retrieval instrumentation (ARCHITECTURE.md §10, V1_SPEC §20)."""
+    trace = evidence.trace
+    if trace is None:
+        return
+    typer.echo(
+        f"retrieval: {trace.total_ms:.1f}ms, {trace.deterministic_candidates} deterministic + "
+        f"{trace.associative_candidates} associative, ~{trace.token_estimate} tokens",
+        err=True,
+    )
+    for stage in trace.stages:
+        typer.echo(
+            f"  {stage.name:<8} {stage.duration_ms:>8.2f}ms  "
+            f"{stage.candidates_in:>5} -> {stage.candidates_out:<5} {stage.detail}",
+            err=True,
+        )
 
 
 def _report_grounding(result: ReasoningResult) -> None:

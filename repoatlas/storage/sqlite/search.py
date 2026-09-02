@@ -159,6 +159,68 @@ class SqliteSearchIndex:
             if term in row["text"]
         ]
 
+    def find_entities_by_name(
+        self,
+        names: Sequence[str],
+        repo_ids: Sequence[int] | None = None,
+        limit: int = 50,
+    ) -> list[EntityHit]:
+        """Entities whose name, qualified name or key matches ``names`` exactly.
+
+        Deterministic by construction — no tokenizer, no ranking function. This is
+        what guarantees that an environment variable, a package name or a symbol
+        the question spells out is *found*, rather than left to whether FTS
+        happened to tokenize it the same way (V1_SPEC §10, §14).
+        """
+        wanted = [name for name in names if name]
+        if not wanted:
+            return []
+
+        keys = [*wanted, *(f"env:{n}" for n in wanted), *(f"module:{n}" for n in wanted)]
+        name_placeholders = ",".join("?" * len(wanted))
+        key_placeholders = ",".join("?" * len(keys))
+        params: list[object] = [*wanted, *wanted, *keys]
+
+        scope = ""
+        if repo_ids is not None:
+            if not repo_ids:
+                return []
+            repo_placeholders = ",".join("?" * len(repo_ids))
+            scope = f" AND (e.repo_id IN ({repo_placeholders}) OR e.repo_id IS NULL)"
+            params.extend(repo_ids)
+        params.append(limit)
+
+        rows = self._db.execute(
+            f"""
+            SELECT e.id AS entity_id, e.type, e.name, e.qualified_name,
+                   e.line_start, e.line_end,
+                   f.rel_path AS path, r.name AS repository
+            FROM entities e
+            LEFT JOIN files        f ON f.id = e.file_id
+            LEFT JOIN repositories r ON r.id = e.repo_id
+            WHERE (e.name IN ({name_placeholders})
+                   OR e.qualified_name IN ({name_placeholders})
+                   OR e.key IN ({key_placeholders})){scope}
+            LIMIT ?
+            """,  # noqa: S608 - placeholders are generated counts, values are bound
+            tuple(params),
+        ).fetchall()
+
+        return [
+            EntityHit(
+                entity_id=row["entity_id"],
+                type=EntityType(row["type"]),
+                name=row["name"],
+                qualified_name=row["qualified_name"],
+                repository=row["repository"] or "",
+                path=row["path"],
+                line_start=row["line_start"],
+                line_end=row["line_end"],
+                score=100.0,
+            )
+            for row in rows
+        ]
+
     def search_entities(
         self,
         query: str,
@@ -179,7 +241,10 @@ class SqliteSearchIndex:
             if not repo_ids:
                 return []
             placeholders = ",".join("?" * len(repo_ids))
-            scope += f" AND e.repo_id IN ({placeholders})"
+            # ``OR e.repo_id IS NULL`` keeps interned entities in scope: an
+            # environment variable is global by construction, and scoping it out
+            # would hide exactly the hub that connects two repositories.
+            scope += f" AND (e.repo_id IN ({placeholders}) OR e.repo_id IS NULL)"
             params.extend(repo_ids)
         if types:
             type_placeholders = ",".join("?" * len(types))
@@ -194,9 +259,9 @@ class SqliteSearchIndex:
                    f.rel_path AS path, r.name AS repository,
                    bm25(entities_fts) AS rank
             FROM entities_fts
-            JOIN entities     e ON e.id = entities_fts.rowid
-            LEFT JOIN files   f ON f.id = e.file_id
-            JOIN repositories r ON r.id = e.repo_id
+            JOIN entities          e ON e.id = entities_fts.rowid
+            LEFT JOIN files        f ON f.id = e.file_id
+            LEFT JOIN repositories r ON r.id = e.repo_id
             WHERE entities_fts MATCH ?{scope}
             ORDER BY rank
             LIMIT ?
@@ -214,7 +279,11 @@ class SqliteSearchIndex:
                     type=EntityType(row["type"]),
                     name=name,
                     qualified_name=row["qualified_name"],
-                    repository=row["repository"],
+                    # Interned entities — environment variables, packages — belong
+                    # to no repository. They are still first-class searchable
+                    # entities (V1_SPEC §10) and are the hubs graph expansion
+                    # travels through, so they must not be joined away.
+                    repository=row["repository"] or "",
                     path=row["path"],
                     line_start=row["line_start"],
                     line_end=row["line_end"],

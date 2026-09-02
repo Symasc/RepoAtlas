@@ -89,6 +89,10 @@ RepoAtlas/
 │   ├── sync/           file-state diffing, sync planning, run orchestration (§9)
 │   ├── indexing/       chunking, FTS population, embedding population, orphan GC
 │   ├── embeddings/     EmbeddingModel protocol, fastembed backend, deterministic stub
+│   │   ├── protocol.py     EmbeddingModel; a ranking aid, never a source of facts
+│   │   ├── fastembed_backend.py  bge-small-en-v1.5 via ONNX; availability never downloads
+│   │   ├── hashing.py      deterministic, offline stub used by every test
+│   │   └── factory.py      config-driven selection
 │   ├── parsers/        base protocol + registry + one module per language
 │   │   ├── base.py         LanguageParser protocol, ParsedFile contract
 │   │   ├── registry.py     extension/filename → parser dispatch
@@ -198,8 +202,8 @@ chunks_fts     -- FTS5, external content over chunks
 entities_fts   -- FTS5, over name + qualified_name
 
 embeddings(
-  chunk_id → chunks ON DELETE CASCADE,
-  model, dim, vector BLOB          -- float16
+  content_hash, model, dim, vector BLOB,   -- float16
+  PRIMARY KEY (content_hash, model)
 )
 
 meta(key, value)   -- schema_version, parser_version, embedding_model, last_global_sync
@@ -264,6 +268,23 @@ so both halves survive.
 to the repositories in scope *before* the dot product. At ~10^5 chunks × 384 dims, float16 storage is ~77 MB and a
 scoped query is single-digit milliseconds — not worth a dependency. The interface hides this completely, so
 `sqlite-vec` or FAISS can replace it without touching a caller.
+
+**Vectors are keyed by `(content_hash, model)`, not by `chunk_id`.** A file is reparsed as a whole, so its chunk
+rows are deleted and reinserted with fresh ids even when the text did not move. Keying by `chunk_id` would
+therefore re-embed every chunk of any touched file — editing one line of a large file would re-embed all of it —
+which V1_SPEC §20 forbids outright ("never re-embed unchanged data"). Keying by the hash of the chunk text makes
+re-embedding genuinely incremental, and deduplicates identical chunks across the whole managed set for free.
+
+The cost is that cleanup is a sweep (`content_hash NOT IN (SELECT content_hash FROM chunks)`) rather than a
+cascade. That is safe precisely because **a vector is not a fact**: it carries no provenance and is never cited, so
+an orphaned vector wastes space but can never become a stale claim. Contrast entities and edges, which do cascade,
+because they are facts and §9's no-stale-facts invariant is about them.
+
+`chunks.content_hash` is the column this rests on, and it is also the reason the schema version participates in the
+per-file `parser_version` (§9): bumping it reparses every file, which is how existing chunks acquire hashes.
+
+The **embedding model id** is deliberately *not* part of that version. Vectors are keyed by the model that produced
+them, so switching models finds none for the new id and re-embeds — without reparsing anything.
 
 ### FTS tokenization
 
@@ -357,6 +378,9 @@ class EmbeddingModel(Protocol):
     dim: int
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]: ...
+    def embed_query(self, text: str) -> list[float]: ...
+    def available(self) -> bool: ...
+    def availability_detail(self) -> str: ...
 
 
 class ReasoningModel(Protocol):
@@ -381,6 +405,16 @@ class Renderer(Protocol):
 
 `Reranker` ships as `NoopReranker` — the explicit V2 slot (§14). `ReasoningModel.available()` is what turns a
 missing Ollama into a clean exit code 4 rather than a stack trace.
+
+`embed_query` is separate from `embed` because retrieval models are asymmetric: bge-small-en-v1.5 expects a query
+prefix that documents must not receive, and embedding both sides identically measurably degrades recall.
+
+`EmbeddingModel.available()` is the same seam as `ReasoningModel.available()`, with one deliberate difference:
+**it never goes to the network.** It probes the local cache and reports "not downloaded" rather than fetching
+67 MB in the middle of a sync. Fetching is an explicit act — `repoatlas sync --embed` — exactly as a missing Ollama
+model is reported with `ollama pull` rather than pulled automatically. Until then semantic retrieval is off and
+every deterministic command is unaffected, because V1_SPEC §14 makes exact search the mandatory half and semantic
+search the aid.
 
 ---
 
@@ -635,7 +669,7 @@ anything makes stat untrustworthy:
 | `head_sha != last_indexed_head` | `checkout`, `switch`, `pull`, `rebase`, `reset` rewrite files with arbitrary mtimes, and can restore a file to a previous state with a previous size |
 | dirty-state changed since last sync | editor/tool writes that stat may not distinguish |
 | previous sync did not complete cleanly | recorded state may not reflect what was actually indexed |
-| `schema_version`, `parser_version` or `embedding_model` changed | stored facts are stale by definition even though files are not |
+| `schema_version` or `parser_version` changed | stored facts are stale by definition even though files are not — handled per file, see below |
 | `--full` / `--rehash` passed | explicit user override |
 
 Under any trigger, **every file is hashed**. Otherwise: stat match ⇒ skip; stat mismatch ⇒ hash ⇒ reparse only if
@@ -643,6 +677,11 @@ the hash actually changed. A coarse-mtime filesystem therefore costs an unnecess
 
 The rule stated positively: *we may skip work only when we can prove nothing changed. Whenever proof is
 unavailable, we do the work.*
+
+Schema and parser versions are handled **per file** rather than as a sixth global trigger: the version is stored on
+the file row, so affected files are reparsed directly instead of hashing the entire tree to learn that nothing
+moved. The embedding model is not part of that version at all — vectors are keyed by the model that produced them
+(§3), so a model change re-embeds without reparsing anything.
 
 ### Deletion
 
@@ -684,29 +723,88 @@ question + RepositoryContext
    │     quoted strings · ALL_CAPS env candidates · dotted.qualified.names
    │     path-like tokens · package names · error-shaped substrings
    │
-   ├─ 2. exact / lexical      chunks_fts + entities_fts, scoped to context repos
-   │                          → literal-substring verification for exactness
-   ├─ 3. semantic             embed(question) → VectorIndex.query(scoped)
-   ├─ 4. graph expansion      from top entities: ≤2 hops, capped fan-out per node,
-   │                          cross-repo only via resolved DEPENDS_ON / REFERENCES
+   ├─ 2. exact          literal-substring verified chunk matches      → DETERMINISTIC
+   ├─ 3. lexical        chunks_fts recall over the whole question     → ASSOCIATIVE
+   ├─ 4. symbol         exact entity-name lookup                      → DETERMINISTIC
+   │                    entities_fts recall                           → ASSOCIATIVE
+   ├─ 5. semantic       embed(question) → VectorIndex.query(scoped)   → ASSOCIATIVE
+   ├─ 6. graph          ≤2 hops from the exact entity hits,           → DETERMINISTIC
+   │                    capped fan-out, cross-repo only via typed edges
    │
-   ├─ 5. fusion               reciprocal-rank fusion across sources
-   │                          + primary-repository boost
-   │                          + exact-match boost
-   │                          + definition-over-reference boost
-   ├─ 6. dedup                merge overlapping line ranges within a file
-   ├─ 7. rerank               Reranker (NoopReranker in V1)
-   └─ 8. budget               hard caps on candidate count and total tokens
+   ├─ 7. fusion         tier first, then reciprocal-rank fusion
+   │                    + primary-repository boost (inside a tier)
+   ├─ 8. dedup          drop spans that repeat a higher-ranked one
+   ├─ 9. rerank         Reranker (NoopReranker in V1)
+   └─ 10. budget        hard caps on candidate count and total tokens
          ↓
-      EvidenceSet
+      EvidenceSet (+ RetrievalTrace)
 ```
 
-Scoping happens at stages 2 and 3, *before* scoring — this is what satisfies "never scan every repo for every
-question" (V1_SPEC §20). In `REPOSITORY` scope the primary repository is searched first and related repositories
-are reachable only through stage 4's typed edges, so a cross-repository answer always has a structural reason.
+### Deterministic evidence outranks semantic similarity
 
-Reciprocal-rank fusion is chosen over score normalization because FTS ranks (BM25), cosine similarities and graph
-distances are not commensurable, and RRF needs no per-source calibration to combine them stably.
+This is the funnel's governing rule (V1_SPEC §14: *vector search must not replace exact search*), and it is
+enforced by a type rather than by a weight. Every candidate carries an `EvidenceTier`:
+
+| Tier | Sources | Why |
+|---|---|---|
+| `DETERMINISTIC` | literal-verified chunk matches, exact entity-name matches, graph expansion | facts about the code, each with provenance |
+| `ASSOCIATIVE` | FTS recall, embedding neighbours | leads about what the question might have meant |
+
+`fuse` sorts on `(tier, -score)`. Scores are therefore only ever compared **within** a tier, so no cosine
+similarity — 0.99 or otherwise — can move an embedding neighbour above an exact identifier, an exact error string,
+an exact symbol name, an environment variable or a graph-supported relationship. A span reached by several
+retrievers takes its best tier: found deterministically once means deterministic.
+
+The primary-repository boost is additive on the score, so it competes inside a tier and never promotes across one.
+A V2 reranker is bound by the same rule: it may reorder within a tier, never across.
+
+### Suppressing similarity when the question named something specific
+
+When query analysis extracts literal terms — a quoted string, an environment variable, a dotted name, a path — and
+the exact stage finds **none** of them anywhere in the index, the semantic stage is skipped entirely. The user
+named something specific; the honest answer is that it does not exist. Returning spans that merely read like the
+name would be plausible, unfounded output, which is the failure V1_SPEC §2 exists to prevent. A question with no
+literal terms ("where is deployment configuration generated?") is exactly what semantic retrieval is for, and
+nothing is suppressed there.
+
+### Bounded graph expansion
+
+Expansion is bounded on three axes at once — hop count (2), fan-out per hop, and total nodes — because a popular
+hub such as `env:SERVICE_HOST` legitimately touches every repository, and an unbounded walk from it returns the
+world.
+
+Two hops is the useful minimum rather than an arbitrary depth. An interned entity has no location of its own, so
+hop one reaches the hub and hop two reaches the files on the other side of it. That is precisely what makes "where
+is SERVICE_HOST configured?" answerable from inside a service that only reads it.
+
+Traversal follows **relationship** edges. `DEFINES` and `CONTAINS` are excluded even though they are perfectly good
+facts: they are containment, so traversing them turns any file node into a fan-out over every symbol it declares,
+and two hops of that buries the relationship the question was about. Crossing a repository boundary additionally
+requires `DEPENDS_ON`, `REFERENCES`, `EXECUTES`, `SOURCES` or `IMPORTS` — every one produced by the linker's global
+pass from an exact match — so a cross-repository answer always has a structural reason (V1_SPEC §9). Each reached
+entity is labelled with the edge that reached it, because the reader asked about a relationship, not about what the
+file happens to declare.
+
+### Scoping, fusion and deduplication
+
+Scoping happens at stages 2-6, *before* scoring — this is what satisfies "never scan every repo for every
+question" (V1_SPEC §20), for the vector stage as much as the lexical one. In `REPOSITORY` scope the primary
+repository is searched first; other repositories stay reachable, so primary scope is a bias rather than a wall.
+
+Reciprocal-rank fusion is chosen over score normalization because BM25 ranks, cosine similarities, literal-match
+scores and graph distances are not commensurable, and RRF needs no per-source calibration to combine them stably.
+
+Deduplication drops a span contained in a higher-ranked one, or overlapping it by more than half of the shorter
+span — chunk windows overlap by design, so the same lines arrive repeatedly. Spans are never merged into a
+synthetic range: a citation must point at text that was actually retrieved (V1_SPEC §11).
+
+### Instrumentation
+
+Every stage records its duration and its effect on the candidate count into a `RetrievalTrace`, and the global link
+pass fills a `LinkTrace` the same way. Both are attached to the result and shown under `--verbose` and `--json`.
+They are **observations, never inputs**: nothing reads a trace to make a decision, so instrumentation cannot change
+an answer. This is what lets retrieval and traversal performance be measured later without changing anything
+structural (V1_SPEC §20).
 
 `locate` stops here and renders the `EvidenceSet` directly — which is why it needs no LLM.
 
@@ -846,13 +944,14 @@ Every deferred capability (V1_SPEC §22) has a place to land that requires no re
 
 | V2 capability | Seam |
 |---|---|
-| Advanced reranking | `Reranker` protocol, stage 7 of §10. Swap `NoopReranker` for a cross-encoder |
+| Advanced reranking | `Reranker` protocol, stage 9 of §10. Swap `NoopReranker` for a cross-encoder — bound by the tier rule: reorder within a tier, never across one |
 | Version-specific documentation retrieval | A `DocumentationSource` protocol fed by `ResolvedDependency`. The retrieval funnel gains a source at stage 3; fusion and budgeting are unchanged |
 | Internet research / web provenance | `Evidence` gains an optional origin discriminator; the citation verifier (§11) extends to verify web citations against the fetched set, with the same drop-and-demote logic |
 | Git-history debugging, regression introduction | The provenance columns already pin every fact to `repo/file/lines`; history analysis joins against them without schema change |
 | Blast-radius analysis | A traversal over existing `edges` — a new query, not new data |
 | Alternative model backends (vLLM, llama.cpp, OpenAI-compatible) | `ReasoningModel` protocol + config-driven provider selection |
-| Alternative vector backends | `VectorIndex` protocol |
+| Alternative vector backends | `VectorIndex` protocol; `sqlite-vec` or FAISS replaces `SqliteVectorIndex` without touching a caller |
+| Performance work of any kind | `RetrievalTrace` and `LinkTrace` already report per-stage cost and candidate counts, so a regression is measurable before anything is restructured |
 
 **Resolved dependency versions are stored in V1 despite being unused** precisely because the V2 documentation flow
 needs them: `question mentions dependency → identify repository → determine resolved version → retrieve docs for
@@ -881,6 +980,13 @@ full reindex.
 | `ask`/`debug` fail with exit 4 when no model is reachable | Fall back to `locate` output | Silently answering a different question than the one asked is worse than a clear message naming the command that does work; `--no-llm` makes the fallback explicit and opt-in |
 | `httpx` promoted to a core dependency | Keep it behind the `llm` extra | The Ollama backend is the V1 default; failing at import time behind an extra is a worse experience than one small dependency |
 | Ollama availability includes "model is pulled" | Probe reachability only | A running server without the model fails at request time; checking early turns a mid-query failure into an actionable `ollama pull` message |
+| Deterministic evidence outranks similarity via an `EvidenceTier`, not a weight | A large additive boost for exact matches | A weight is a value someone will tune until it is wrong. A tier is a guarantee: fusion compares scores only within a tier, so no cosine can displace an exact identifier — which is what V1_SPEC §14 actually requires |
+| Vectors keyed by `(content_hash, model)` | Keyed by `chunk_id` with a cascade | Chunk rows are replaced wholesale on reparse, so `chunk_id` keying re-embeds unchanged text — forbidden by V1_SPEC §20. A vector carries no provenance and is never cited, so sweeping orphans is safe where facts must cascade (§3) |
+| Semantic stage suppressed when named terms exist nowhere | Always run it | A question naming a specific identifier that is not in the index is answered by "it is not here", not by something that reads like it. Offering the latter is exactly the plausible-but-unfounded output §2 forbids |
+| `EmbeddingModel.available()` never downloads | Load (and fetch) on first use | A 67 MB fetch inside `sync` is a multi-minute stall with no explanation. Reporting "not downloaded, run `sync --embed`" mirrors how a missing Ollama model is reported rather than pulled |
+| Graph traversal excludes `DEFINES`/`CONTAINS` | Traverse every edge type | Containment edges turn one file node into a fan-out over every symbol it declares; two hops of that buries the relationship the question was about under an inventory of the neighbourhood |
+| Graph evidence labelled by the edge that reached it | Reuse the entity's own description | The reader asked about a relationship. "exports (hop 1)" answers that; "defines builder" answers a different question |
+| Instrumentation as models attached to results | A logging framework, or none | A trace that is part of the result is testable, serializable through `--json`, and provably inert — nothing reads it to decide anything, so it cannot change an answer |
 | FACTS = retrieved evidence, HYPOTHESES = model findings | Split model findings by a confidence threshold | The model is never a source of facts (§2); mapping its output to "hypothesis" and retrieval to "fact" states that structurally instead of by numeric convention |
 | tree-sitter promoted to a core dependency | Keep it behind the `parsers` extra | Six of the eight V1 languages need it; a parser that silently does not exist would make the index quietly incomplete, which is worse than one dependency (the same reasoning as `httpx`) |
 | Jinja neutralized with same-length filler | Strip Jinja, or blank whole lines | Preserving every character position keeps YAML line *and* column marks identical to the original file, so a Salt fact cites the line a human would point at. Stripping shifts every position after the first `{{` |
