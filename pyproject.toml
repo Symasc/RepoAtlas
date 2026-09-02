@@ -1,0 +1,78 @@
+[project]
+name = "repoatlas"
+version = "0.1.0"
+description = "Local multi-repository engineering intelligence system"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+
+dependencies = [
+    "typer>=0.15",
+    "pydantic>=2.10",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# Slice C — tree-sitter based parsers.
+parsers = ["tree-sitter>=0.23", "tree-sitter-language-pack>=0.7"]
+# Slice D — local semantic retrieval.
+semantic = ["fastembed>=0.5", "numpy>=2.0"]
+# Slice B — Ollama reasoning backend.
+llm = ["httpx>=0.28"]
+
+[project.scripts]
+repoatlas = "repoatlas.cli.main:run"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
+    "pyright>=1.1.390",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["repoatlas"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["repoatlas", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",      # pycodestyle / pyflakes
+    "I",                # isort
+    "UP",               # pyupgrade
+    "B",                # bugbear
+    "SIM",              # simplify
+    "RUF",              # ruff-specific
+    "PTH",              # prefer pathlib
+    "S",                # bandit (security; repositories are untrusted input)
+    "TID",              # tidy imports
+]
+ignore = [
+    "S101",   # assert — used extensively and legitimately in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S603", "S607"]          # tests invoke git deliberately
+"tests/fixtures/repos/*" = ["ALL"]    # fixture content is sample code, not project code
+
+[tool.pyright]
+include = ["repoatlas", "tests"]
+exclude = ["tests/fixtures/repos"]
+pythonVersion = "3.13"
+typeCheckingMode = "standard"
+reportMissingTypeStubs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "slow: exercises a real model download or network access; deselected by default",
+]
