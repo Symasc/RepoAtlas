@@ -11,9 +11,18 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from repoatlas.models.dependencies import DependencyRecord, DependencyView
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.models.repository import FileState, IndexedFile, Repository, SyncStatus
-from repoatlas.storage.protocols import EdgeRecord, EntityDescription, EntityRecord, FileFacts
+from repoatlas.storage.protocols import (
+    EdgeRecord,
+    EntityDescription,
+    EntityRecord,
+    FileFacts,
+    FileRow,
+    SymbolRow,
+    UnresolvedRefRecord,
+)
 from repoatlas.storage.sqlite.database import Database
 
 
@@ -279,6 +288,7 @@ class SqliteKnowledgeStore:
             conn.execute("DELETE FROM entities WHERE file_id = ?", (file_id,))
             conn.execute("DELETE FROM edges WHERE file_id = ?", (file_id,))
             conn.execute("DELETE FROM unresolved_refs WHERE file_id = ?", (file_id,))
+            conn.execute("DELETE FROM dependencies WHERE file_id = ?", (file_id,))
             conn.execute("DELETE FROM chunks WHERE file_id = ?", (file_id,))
 
             for entity in facts.entities:
@@ -375,6 +385,124 @@ class SqliteKnowledgeStore:
                     for e in edges
                 ],
             )
+
+    def add_unresolved_refs(self, refs: Sequence[UnresolvedRefRecord]) -> None:
+        """Record claims whose target the asserting file cannot resolve alone."""
+        if not refs:
+            return
+        with self._db.transaction() as conn:
+            conn.executemany(
+                """
+                INSERT INTO unresolved_refs (
+                    repo_id, file_id, src_id, edge_type, target_kind, target_key,
+                    line_start, line_end, confidence, meta_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        r.repo_id,
+                        r.file_id,
+                        r.src_id,
+                        str(r.edge_type),
+                        str(r.target_kind),
+                        r.target_key,
+                        r.line_start,
+                        r.line_end,
+                        r.confidence,
+                        r.meta_json,
+                    )
+                    for r in refs
+                ],
+            )
+
+    def list_unresolved_refs(self) -> list[UnresolvedRefRecord]:
+        rows = self._db.execute(
+            """
+            SELECT id, repo_id, file_id, src_id, edge_type, target_kind, target_key,
+                   line_start, line_end, confidence, meta_json
+            FROM unresolved_refs
+            ORDER BY id
+            """
+        ).fetchall()
+        return [
+            UnresolvedRefRecord(
+                id=row["id"],
+                repo_id=row["repo_id"],
+                file_id=row["file_id"],
+                src_id=row["src_id"],
+                edge_type=EdgeType(row["edge_type"]),
+                target_kind=EntityType(row["target_kind"]),
+                target_key=row["target_key"],
+                line_start=row["line_start"],
+                line_end=row["line_end"],
+                confidence=row["confidence"],
+                meta_json=row["meta_json"],
+            )
+            for row in rows
+        ]
+
+    def delete_edges_by_parser(self, parser: str) -> int:
+        """Drop every edge a given producer created.
+
+        The global link pass owns its edges exclusively, so deleting them by
+        producer and rebuilding makes the pass idempotent: running it twice gives
+        the same graph as running it once, which is what makes an incremental sync
+        equal a full reindex (V1_SPEC §12).
+        """
+        with self._db.transaction() as conn:
+            cursor = conn.execute("DELETE FROM edges WHERE parser = ?", (parser,))
+        return cursor.rowcount or 0
+
+    def list_file_rows(self) -> list[FileRow]:
+        """Every indexed file joined to its repository and its file entity."""
+        rows = self._db.execute(
+            """
+            SELECT f.id AS file_id, e.id AS file_entity_id, f.repo_id AS repo_id,
+                   r.name AS repo_name, r.path AS repo_path, f.rel_path AS rel_path
+            FROM files f
+            JOIN repositories r ON r.id = f.repo_id
+            JOIN entities e ON e.file_id = f.id AND e.type = 'file'
+            """
+        ).fetchall()
+        return [
+            FileRow(
+                file_id=row["file_id"],
+                file_entity_id=row["file_entity_id"],
+                repo_id=row["repo_id"],
+                repo_name=row["repo_name"],
+                repo_path=Path(row["repo_path"]),
+                rel_path=row["rel_path"],
+            )
+            for row in rows
+        ]
+
+    def list_symbols(self, types: Sequence[EntityType] | None = None) -> list[SymbolRow]:
+        """File-scoped definitions, for cross-file and cross-repository resolution."""
+        sql = """
+            SELECT id, file_id, repo_id, type, name, qualified_name, line_start
+            FROM entities
+            WHERE file_id IS NOT NULL
+        """
+        params: tuple[object, ...] = ()
+        if types is not None:
+            if not types:
+                return []
+            placeholders = ",".join("?" * len(types))
+            sql += f" AND type IN ({placeholders})"
+            params = tuple(str(t) for t in types)
+        rows = self._db.execute(sql, params).fetchall()
+        return [
+            SymbolRow(
+                entity_id=row["id"],
+                file_id=row["file_id"],
+                repo_id=row["repo_id"],
+                type=EntityType(row["type"]),
+                name=row["name"],
+                qualified_name=row["qualified_name"],
+                line_start=row["line_start"],
+            )
+            for row in rows
+        ]
 
     def neighbors(
         self,
@@ -488,3 +616,136 @@ class SqliteKnowledgeStore:
                 tuple(repo_ids),
             ).fetchone()
         return int(row["n"])
+
+
+class SqliteDependencyStore:
+    """Declared, resolved and provided packages, with per-file provenance."""
+
+    def __init__(self, database: Database) -> None:
+        self._db = database
+
+    def replace_for_file(self, file_id: int, records: Sequence[DependencyRecord]) -> None:
+        """Replace everything one manifest or lockfile asserts. Atomic."""
+        with self._db.transaction() as conn:
+            conn.execute("DELETE FROM dependencies WHERE file_id = ?", (file_id,))
+            if not records:
+                return
+            conn.executemany(
+                """
+                INSERT INTO dependencies (
+                    repo_id, file_id, ecosystem, name, normalized_name, role,
+                    constraint_text, version, group_name, line_start, line_end, parser
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        r.repo_id,
+                        r.file_id,
+                        r.ecosystem,
+                        r.name,
+                        r.normalized_name,
+                        r.role,
+                        r.constraint,
+                        r.version,
+                        r.group,
+                        r.line_start,
+                        r.line_end,
+                        r.parser,
+                    )
+                    for r in records
+                ],
+            )
+
+    def providers(self, ecosystem: str, normalized_name: str) -> list[tuple[int, str]]:
+        """Repositories that provide this exact package (V1_SPEC §9)."""
+        rows = self._db.execute(
+            """
+            SELECT DISTINCT d.repo_id AS repo_id, r.name AS repo_name
+            FROM dependencies d
+            JOIN repositories r ON r.id = d.repo_id
+            WHERE d.role = 'provided' AND d.ecosystem = ? AND d.normalized_name = ?
+            """,
+            (ecosystem, normalized_name),
+        ).fetchall()
+        return [(int(row["repo_id"]), str(row["repo_name"])) for row in rows]
+
+    def list_for_repos(self, repo_ids: Sequence[int] | None = None) -> list[DependencyRecord]:
+        sql = """
+            SELECT repo_id, file_id, ecosystem, name, normalized_name, role,
+                   constraint_text, version, group_name, line_start, line_end, parser
+            FROM dependencies
+        """
+        params: tuple[object, ...] = ()
+        if repo_ids is not None:
+            if not repo_ids:
+                return []
+            placeholders = ",".join("?" * len(repo_ids))
+            sql += f" WHERE repo_id IN ({placeholders})"
+            params = tuple(repo_ids)
+        rows = self._db.execute(sql, params).fetchall()
+        return [
+            DependencyRecord(
+                repo_id=row["repo_id"],
+                file_id=row["file_id"],
+                ecosystem=row["ecosystem"],
+                name=row["name"],
+                normalized_name=row["normalized_name"],
+                role=row["role"],
+                constraint=row["constraint_text"],
+                version=row["version"],
+                group=row["group_name"],
+                line_start=row["line_start"],
+                line_end=row["line_end"],
+                parser=row["parser"] or "",
+            )
+            for row in rows
+        ]
+
+    def join_view(self, repo_ids: Sequence[int] | None = None) -> list[DependencyView]:
+        """Declared constraints joined to resolved versions, per repository.
+
+        The join is a LEFT JOIN in both directions by design: a declared package
+        with no lockfile entry and a locked transitive package with no declaration
+        are both real states, and neither may be silently dropped (V1_SPEC §13).
+        """
+        records = self.list_for_repos(repo_ids)
+        names = {
+            row["id"]: row["name"]
+            for row in self._db.execute("SELECT id, name FROM repositories").fetchall()
+        }
+        paths = {
+            row["id"]: row["rel_path"]
+            for row in self._db.execute("SELECT id, rel_path FROM files").fetchall()
+        }
+
+        merged: dict[tuple[int, str, str], dict[str, object]] = {}
+        for record in records:
+            if record.role == "provided":
+                continue
+            key = (record.repo_id, record.ecosystem, record.normalized_name)
+            entry = merged.setdefault(
+                key,
+                {
+                    "repository": names.get(record.repo_id, ""),
+                    "ecosystem": record.ecosystem,
+                    "name": record.name,
+                    "normalized_name": record.normalized_name,
+                },
+            )
+            if record.role == "declared":
+                entry["constraint"] = record.constraint
+                entry["group"] = record.group
+                entry["manifest_path"] = paths.get(record.file_id)
+                entry["manifest_line"] = record.line_start
+            else:
+                entry["version"] = record.version
+                entry["lockfile_path"] = paths.get(record.file_id)
+                entry["lockfile_line"] = record.line_start
+
+        return sorted(
+            (DependencyView.model_validate(entry) for entry in merged.values()),
+            key=lambda v: (v.repository, v.ecosystem, v.normalized_name),
+        )
+
+    def count(self, repo_ids: Sequence[int] | None = None) -> int:
+        return len(self.list_for_repos(repo_ids))

@@ -28,6 +28,7 @@ class RepositorySyncReport(BaseModel):
     files_indexed: int = 0
     symbols: int = 0
     relationships: int = 0
+    dependencies: int = 0
     full_rehash: bool = False
     rehash_reason: str | None = None
     diagnostics: tuple[ParseDiagnostic, ...] = ()
@@ -38,10 +39,20 @@ class RepositorySyncReport(BaseModel):
 
 
 class SyncReport(BaseModel):
+    """A sync run, including the one global link pass that closes it.
+
+    The link counts are per run rather than per repository: the pass is global by
+    necessity, because a change in one repository can create or invalidate an edge
+    in another (ARCHITECTURE.md §6).
+    """
+
     model_config = ConfigDict(frozen=True)
 
     repositories: tuple[RepositorySyncReport, ...] = ()
     scope: str = ""
+    linked_references: int = 0
+    unresolved_references: int = 0
+    cross_repository_edges: int = 0
 
     @property
     def files_indexed(self) -> int:
@@ -53,7 +64,11 @@ class SyncReport(BaseModel):
 
     @property
     def relationships(self) -> int:
-        return sum(r.relationships for r in self.repositories)
+        return sum(r.relationships for r in self.repositories) + self.linked_references
+
+    @property
+    def dependencies(self) -> int:
+        return sum(r.dependencies for r in self.repositories)
 
 
 class RepositoryStatus(BaseModel):

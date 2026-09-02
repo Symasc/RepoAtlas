@@ -24,7 +24,15 @@ def test_parser_satisfies_the_protocol() -> None:
 def test_registry_dispatches_by_extension() -> None:
     registry = ParserRegistry()
     assert registry.for_path(Path("a/b/c.py")) is not None
-    assert registry.for_path(Path("a/b/c.rb")) is None
+    assert registry.for_path(Path("a/b/c.bin")) is None
+
+
+def test_salt_wins_over_structured_config_for_sls() -> None:
+    """``.sls`` is Jinja-templated YAML, never ordinary YAML (V1_SPEC §7.5)."""
+    registry = ParserRegistry()
+    parser = registry.for_path(Path("service/init.sls"))
+    assert parser is not None
+    assert parser.name == "salt-sls"
 
 
 def test_registry_version_changes_when_a_parser_is_added() -> None:

@@ -41,4 +41,12 @@ def initialize(
         engine.ensure_repository_entity(stored)
         reports.append(engine.sync_repository(stored))
 
-    return SyncReport(repositories=tuple(reports), scope="global"), len(candidates)
+    link = engine.link_global()
+    report = SyncReport(
+        repositories=tuple(reports),
+        scope="global",
+        linked_references=link.resolved,
+        unresolved_references=link.unresolved,
+        cross_repository_edges=link.cross_repository,
+    )
+    return report, len(candidates)

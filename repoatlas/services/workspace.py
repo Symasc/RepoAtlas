@@ -11,6 +11,7 @@ from pathlib import Path
 
 from repoatlas.config.settings import Settings, database_path, load_settings
 from repoatlas.context.resolver import RepositoryContextResolver
+from repoatlas.dependencies.registry import DependencyRegistry
 from repoatlas.errors import NotInitializedError
 from repoatlas.gitstate.client import GitClient
 from repoatlas.parsers.registry import ParserRegistry
@@ -18,6 +19,7 @@ from repoatlas.retrieval.retriever import RetrievalLimits, Retriever
 from repoatlas.storage.sqlite.database import Database, open_database
 from repoatlas.storage.sqlite.search import SqliteSearchIndex
 from repoatlas.storage.sqlite.stores import (
+    SqliteDependencyStore,
     SqliteFileStore,
     SqliteKnowledgeStore,
     SqliteRepositoryStore,
@@ -34,8 +36,10 @@ class Workspace:
     repositories: SqliteRepositoryStore
     files: SqliteFileStore
     knowledge: SqliteKnowledgeStore
+    dependencies: SqliteDependencyStore
     search: SqliteSearchIndex
     registry: ParserRegistry
+    dependency_registry: DependencyRegistry
     git: GitClient
 
     @property
@@ -50,7 +54,9 @@ class Workspace:
             repositories=self.repositories,
             files=self.files,
             knowledge=self.knowledge,
+            dependencies=self.dependencies,
             registry=self.registry,
+            dependency_registry=self.dependency_registry,
             settings=self.settings,
             git=self.git,
         )
@@ -75,7 +81,9 @@ def open_workspace(*, settings: Settings | None = None, require_root: bool = Tru
         repositories=SqliteRepositoryStore(database),
         files=SqliteFileStore(database),
         knowledge=SqliteKnowledgeStore(database),
+        dependencies=SqliteDependencyStore(database),
         search=SqliteSearchIndex(database),
         registry=ParserRegistry(),
+        dependency_registry=DependencyRegistry(),
         git=GitClient(),
     )

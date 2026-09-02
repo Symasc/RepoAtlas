@@ -1,14 +1,18 @@
 from repoatlas.storage.protocols import (
     ChunkHit,
     ChunkRecord,
+    DependencyStore,
     EdgeRecord,
     EntityDescription,
     EntityHit,
     EntityRecord,
     FileFacts,
+    FileRow,
     KnowledgeStore,
     RepositoryStore,
     SearchIndex,
+    SymbolRow,
+    UnresolvedRefRecord,
 )
 from repoatlas.storage.sqlite.database import Database, open_database
 
@@ -16,13 +20,17 @@ __all__ = [
     "ChunkHit",
     "ChunkRecord",
     "Database",
+    "DependencyStore",
     "EdgeRecord",
     "EntityDescription",
     "EntityHit",
     "EntityRecord",
     "FileFacts",
+    "FileRow",
     "KnowledgeStore",
     "RepositoryStore",
     "SearchIndex",
+    "SymbolRow",
+    "UnresolvedRefRecord",
     "open_database",
 ]

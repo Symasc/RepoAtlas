@@ -933,14 +933,12 @@ dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "tree-sitter" },
+    { name = "tree-sitter-language-pack" },
     { name = "typer" },
 ]
 
 [package.optional-dependencies]
-parsers = [
-    { name = "tree-sitter" },
-    { name = "tree-sitter-language-pack" },
-]
 semantic = [
     { name = "fastembed" },
     { name = "numpy" },
@@ -961,11 +959,11 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'semantic'", specifier = ">=2.0" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "tree-sitter", marker = "extra == 'parsers'", specifier = ">=0.23" },
-    { name = "tree-sitter-language-pack", marker = "extra == 'parsers'", specifier = ">=0.7" },
+    { name = "tree-sitter", specifier = ">=0.23" },
+    { name = "tree-sitter-language-pack", specifier = ">=0.7" },
     { name = "typer", specifier = ">=0.15" },
 ]
-provides-extras = ["parsers", "semantic"]
+provides-extras = ["semantic"]
 
 [package.metadata.requires-dev]
 dev = [

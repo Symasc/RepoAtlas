@@ -14,16 +14,17 @@ answer. See [docs/V1_SPEC.md](docs/V1_SPEC.md) for the specification and
 
 ## Status
 
-**Slices A (the deterministic spine) and B (reasoning) are complete.** Slices C–E are not yet implemented; see
-the checklist in [docs/V1_SPEC.md §23](docs/V1_SPEC.md#23-implementation-checklist).
+**Slices A (the deterministic spine), B (reasoning) and C (breadth) are complete.** Slices D and E are not yet
+implemented; see the checklist in [docs/V1_SPEC.md §23](docs/V1_SPEC.md#23-implementation-checklist).
 
 | Working now | Not yet |
 |---|---|
 | `init`, `sync`, `status`, `repos`, `locate`, `ask`, `debug` | `watch` (optional) |
-| Python parsing | TypeScript, Bash, Ruby, Salt, Jinja, Dockerfile (Slice C) |
-| Exact/lexical search | Semantic search (Slice D) |
-| Environment-variable and same-file symbol relationships | Cross-file and cross-repository relationships (Slice C) |
-| — | Dependency versions, Docker (Slices C, E) |
+| Python, TypeScript/JavaScript, Bash, Ruby, Salt, Jinja, YAML/JSON, Dockerfile | — |
+| Dependency detection across pypi, npm and gem — declared *and* resolved versions | — |
+| Cross-file imports and cross-repository relationships | — |
+| Exact/lexical search | Semantic search and rank fusion (Slice D) |
+| — | Docker packaging (Slice E) |
 
 `init`, `sync`, `status`, `repos` and `locate` need no LLM at all. `ask` and `debug` need a local reasoning
 model; without one they exit 4 and name the command that works. `--no-llm` gives either of them evidence-only
@@ -122,7 +123,7 @@ any content is read.
 ## Development
 
 ```bash
-uv run pytest          # 204 tests
+uv run pytest          # 312 tests
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright

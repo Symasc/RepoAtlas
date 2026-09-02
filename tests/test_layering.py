@@ -14,6 +14,22 @@ PACKAGE_ROOT = Path(__file__).parent.parent / "repoatlas"
 _FORBIDDEN: dict[str, set[str]] = {
     # A parser is a pure function of (path, content).
     "parsers": {"storage", "llm", "sync", "retrieval", "services", "cli", "indexing", "graph"},
+    # So is a dependency parser, for the same reason (ARCHITECTURE.md §4).
+    "dependencies": {
+        "storage",
+        "llm",
+        "sync",
+        "retrieval",
+        "services",
+        "cli",
+        "indexing",
+        "graph",
+        "gitstate",
+        "discovery",
+        "context",
+    },
+    # The linker sits above storage and beside the parsers; it is below the spine.
+    "graph": {"cli", "services", "sync", "retrieval", "llm", "indexing", "rendering", "context"},
     # models/ underpins everything, so it may import nothing internal.
     "models": {
         "cli",
@@ -117,12 +133,23 @@ def test_sql_appears_only_in_the_sqlite_package() -> None:
 
 
 def test_parsers_do_not_perform_io() -> None:
-    """Parsers never read the filesystem or execute anything (V1_SPEC §7, §17)."""
+    """Parsers never read the filesystem or execute anything (V1_SPEC §7, §17).
+
+    ``dependencies/`` is held to the same rule: ``setup.py`` is the case that makes
+    it load-bearing, since parsing it is safe and importing it is not.
+    """
     banned = ("subprocess", "open(", "read_text", "read_bytes", "os.system", "eval(", "exec(")
+    for package in ("parsers", "dependencies"):
+        for path in sorted((PACKAGE_ROOT / package).rglob("*.py")):
+            source = path.read_text(encoding="utf-8")
+            for marker in banned:
+                assert marker not in source, f"{package}/{path.name} contains {marker!r}"
+
+
+def test_language_parsers_never_import_the_dependency_layer() -> None:
+    """The two answer different questions about the same file and stay separate."""
     for path in sorted((PACKAGE_ROOT / "parsers").rglob("*.py")):
-        source = path.read_text(encoding="utf-8")
-        for marker in banned:
-            assert marker not in source, f"{path.name} contains {marker!r}"
+        assert "repoatlas.dependencies" not in path.read_text(encoding="utf-8"), path.name
 
 
 def test_only_gitstate_invokes_git() -> None:
