@@ -1438,14 +1438,40 @@ an unsupported citation.
 than routing through `NullBackend`. `NullBackend` remains the `llm.provider: none` backend and a test double.
 `ARCHITECTURE.md` §11 was corrected to match.
 
-### Slice C — Breadth
+### Slice C — Breadth — **COMPLETE**
 
-- [ ] **8b. TypeScript / JavaScript parser** — tree-sitter; must require **zero** changes to the spine
-- [ ] **8c. Bash parser** — tree-sitter, first-class treatment
-- [ ] **9. Ruby / Salt / Jinja / structured config parsers** — including the Salt Jinja-neutralization strategy
-      and fallback
-- [ ] **10. Dependency detection and version resolution** — manifests, lockfiles, declared↔resolved join
-- [ ] **12. Cross-repository relationships** — exact normalized-name matching, unresolved-reference re-linking
+Delivered 2026-09-02. 312 tests green; ruff, ruff format and pyright clean.
+
+- [x] **8b. TypeScript / JavaScript parser** — tree-sitter (ts, tsx, js, jsx, mjs, cjs); imports with
+      package/relative distinction, exports, classes, interfaces, types, methods, heritage, calls,
+      `require`/dynamic `import`, and `process.env` in both forms
+- [x] **8c. Bash parser** — tree-sitter, first-class treatment: functions, `source`, executed commands and
+      scripts, interpreter invocations, Salt state invocations, and exported vs read environment variables
+- [x] **9. Ruby / Salt / Jinja / structured config parsers** — Ruby via tree-sitter; Salt via Jinja
+      neutralization → lenient YAML → line-scan fallback at reduced confidence, with the state/pillar-data
+      split; Jinja relationships from the raw text; YAML/JSON keys with line provenance; Dockerfile
+- [x] **10. Dependency detection and version resolution** — twelve parsers across three ecosystems,
+      `declared` / `resolved` / `provided` rows with provenance, and the join view that keeps both halves
+- [x] **12. Cross-repository relationships** — exact normalized-name matching (PEP 503, npm scope-aware, gem),
+      the two link passes, and `unresolved_refs` retained so a repository added later gains its edges without
+      a reparse
+
+**The Slice A deferral is closed.** Cross-file and cross-repository symbol resolution now works, through the
+import graph rather than through name equality: a call is wired to a definition in another file only when the
+calling file actually imported that name. `ARCHITECTURE.md` §5 replaces the Slice A table with the full set of
+resolution rules and the three refusals — computed targets, ambiguous targets and unimported names all resolve
+to nothing.
+
+**Verified end to end** against the §21 fixture set: Python reads `SERVICE_HOST`, Salt configures it, Salt
+obtains the value from the pillar file, Bash invokes Python tooling *across a repository boundary*, and both
+`python-service` and `ts-service` are linked to `common-lib` — one through PEP 503 normalization
+(`common_lib` ≡ `common-lib`), one through a scoped npm name.
+
+**Deferred within Slice C, by design:**
+
+- `watch` (optional in §4) is still not implemented.
+- Salt `extend:` produces a reference but the linker does not apply the override semantics; V1 records the
+  relationship, not the merged result.
 
 ### Slice D — Ranking
 
@@ -1467,3 +1493,9 @@ than routing through `NullBackend`. `NullBackend` remains the `llm.provider: non
 - [x] Secret exclusion applied before content is read (§17) — `tests/test_sync.py`
 - [x] Layering rules hold — parsers touch neither storage nor LLM; CLI contains no indexing logic; SQL appears
       only in `storage/sqlite/`; only `gitstate/` invokes git (`ARCHITECTURE.md` §1) — `tests/test_layering.py`
+- [x] Both parser layers are pure functions of `(path, content)` — no I/O and no execution anywhere in
+      `parsers/` or `dependencies/`, which is what makes reading an untrusted `setup.py` safe (§17) —
+      `tests/test_layering.py`
+- [x] The global link pass is idempotent, and every edge it owns is rebuilt rather than patched, so an
+      incremental sync still equals a full reindex once cross-repository edges exist (§12) —
+      `tests/test_linking.py`, `tests/test_sync.py`

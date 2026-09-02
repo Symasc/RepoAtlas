@@ -90,10 +90,17 @@ def render_sync(report: SyncReport) -> str:
             f"  {report.files_indexed} files",
             f"  {report.symbols} symbols",
             f"  {report.relationships} relationships",
-            "",
-            "Sync complete.",
         ]
     )
+    if report.dependencies:
+        lines.append(f"  {report.dependencies} dependencies")
+    if report.cross_repository_edges:
+        lines.append(f"  {report.cross_repository_edges} cross-repository links")
+    if report.unresolved_references:
+        # Not a failure: a reference to something outside the managed set stays a
+        # recorded claim, and is resolved if that repository is added later.
+        lines.append(f"  {report.unresolved_references} references still unresolved")
+    lines.extend(["", "Sync complete."])
     return "\n".join(lines)
 
 

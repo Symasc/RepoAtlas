@@ -37,6 +37,10 @@ def command_key(name: str) -> str:
     return f"cmd:{name}"
 
 
+def config_key(name: str) -> str:
+    return f"cfgkey:{name}"
+
+
 def global_key(kind: EntityType, target: str) -> str:
     """Key for an interned target of the given kind."""
     match kind:
@@ -46,6 +50,8 @@ def global_key(kind: EntityType, target: str) -> str:
             return module_key(target)
         case EntityType.COMMAND:
             return command_key(target)
+        case EntityType.CONFIG:
+            return config_key(target)
         case EntityType.REPOSITORY:
             return repository_key(target)
         case _:

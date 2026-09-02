@@ -342,10 +342,23 @@ def _dump(workspace: Workspace) -> dict[str, object]:
         "JOIN entities dst ON dst.id = e.dst_id "
         "ORDER BY src.key, dst.key, e.type, e.line_start"
     ).fetchall()
+    dependencies = workspace.database.execute(
+        "SELECT r.name, ecosystem, normalized_name, role, constraint_text, version "
+        "FROM dependencies d JOIN repositories r ON r.id = d.repo_id "
+        "ORDER BY r.name, ecosystem, normalized_name, role"
+    ).fetchall()
+    claims = workspace.database.execute(
+        "SELECT r.name, f.rel_path, edge_type, target_kind, target_key, u.line_start "
+        "FROM unresolved_refs u JOIN files f ON f.id = u.file_id "
+        "JOIN repositories r ON r.id = u.repo_id "
+        "ORDER BY r.name, f.rel_path, u.line_start, target_key"
+    ).fetchall()
     return {
         "files": [tuple(r) for r in files],
         "entities": [tuple(r) for r in entities],
         "edges": [tuple(r) for r in edges],
+        "dependencies": [tuple(r) for r in dependencies],
+        "unresolved_refs": [tuple(r) for r in claims],
     }
 
 

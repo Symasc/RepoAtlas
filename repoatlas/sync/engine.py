@@ -10,17 +10,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from repoatlas.config.settings import Settings
+from repoatlas.dependencies.registry import DependencyRegistry
 from repoatlas.discovery.languages import detect_language, is_lockfile, is_manifest
 from repoatlas.gitstate.client import GitClient
 from repoatlas.graph.keys import file_key, repository_key, symbol_key
-from repoatlas.graph.linker import ReferenceLinker
+from repoatlas.graph.linker import GlobalLinkResult, ReferenceLinker
 from repoatlas.indexing.chunking import chunk_content
+from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.parsing import EntityType, ParsedFile, ParseDiagnostic, Severity
 from repoatlas.models.reports import RepositorySyncReport
 from repoatlas.models.repository import IndexedFile, Repository
 from repoatlas.parsers.registry import ParserRegistry
 from repoatlas.storage.protocols import ChunkRecord, EntityRecord, FileFacts
 from repoatlas.storage.sqlite.stores import (
+    SqliteDependencyStore,
     SqliteFileStore,
     SqliteKnowledgeStore,
     SqliteRepositoryStore,
@@ -41,17 +44,31 @@ class SyncEngine:
         repositories: SqliteRepositoryStore,
         files: SqliteFileStore,
         knowledge: SqliteKnowledgeStore,
+        dependencies: SqliteDependencyStore,
         registry: ParserRegistry,
         settings: Settings,
         git: GitClient | None = None,
+        dependency_registry: DependencyRegistry | None = None,
     ) -> None:
         self._repositories = repositories
         self._files = files
         self._knowledge = knowledge
+        self._dependencies = dependencies
         self._registry = registry
+        self._dependency_registry = dependency_registry or DependencyRegistry()
         self._settings = settings
         self._git = git or GitClient()
-        self._linker = ReferenceLinker(knowledge)
+        self._linker = ReferenceLinker(knowledge, dependencies)
+
+    @property
+    def facts_version(self) -> str:
+        """Version of everything that turns a file into facts.
+
+        Both registries contribute, because a change to either makes stored facts
+        stale even though the file on disk is untouched (V1_SPEC §12). It is stored
+        per file, so only files with a handler are reparsed.
+        """
+        return f"{self._registry.version}||{self._dependency_registry.version}"
 
     def sync_repository(self, repo: Repository, *, full: bool = False) -> RepositorySyncReport:
         """Bring one repository's index in line with its current working tree."""
@@ -80,7 +97,7 @@ class SyncEngine:
             scanned,
             known,
             rehash=rehash,
-            parser_version=self._registry.version,
+            parser_version=self.facts_version,
             hash_of=lambda rel: hash_file(repo_path / rel),
         )
 
@@ -90,6 +107,7 @@ class SyncEngine:
         diagnostics: list[ParseDiagnostic] = []
         symbols_total = 0
         edges_total = 0
+        dependencies_total = 0
         indexed = 0
         languages: set[str] = set()
         manifests: set[str] = set()
@@ -108,6 +126,7 @@ class SyncEngine:
             diagnostics.extend(outcome.diagnostics)
             symbols_total += outcome.symbols
             edges_total += outcome.edges
+            dependencies_total += outcome.dependencies
             indexed += 1
             if outcome.language:
                 languages.add(outcome.language)
@@ -138,6 +157,7 @@ class SyncEngine:
             files_indexed=indexed,
             symbols=symbols_total,
             relationships=edges_total,
+            dependencies=dependencies_total,
             full_rehash=plan.rehash.forced,
             rehash_reason=plan.rehash.reason,
             diagnostics=tuple(diagnostics),
@@ -184,7 +204,7 @@ class SyncEngine:
                 content_hash=content_hash,
                 language=language,
                 parser=parser.name if parser else None,
-                parser_version=self._registry.version,
+                parser_version=self.facts_version,
                 is_binary=is_binary,
                 indexed_at=datetime.now(UTC),
             ),
@@ -257,12 +277,97 @@ class SyncEngine:
             parsed=parsed,
         )
 
+        dependency_outcome = self._index_dependencies(repo.id, file_id, rel_path, content)
+
         return _FileOutcome(
             language=parsed.language if parser else language,
             symbols=len(parsed.symbols),
             edges=link.edges,
-            diagnostics=list(parsed.diagnostics),
+            dependencies=dependency_outcome[0],
+            diagnostics=[*parsed.diagnostics, *dependency_outcome[1]],
         )
+
+    def _index_dependencies(
+        self, repo_id: int, file_id: int, rel_path: str, content: str
+    ) -> tuple[int, list[ParseDiagnostic]]:
+        """Extract declared, resolved and provided packages from one file.
+
+        Runs for every indexed file, not only those the language registry claimed:
+        a manifest such as ``package.json`` is parsed twice on purpose, once as
+        configuration keys and once as dependencies, and the two answer different
+        questions.
+        """
+        path = Path(rel_path)
+        parsers = self._dependency_registry.for_path(path)
+        if not parsers:
+            return 0, []
+
+        records: list[DependencyRecord] = []
+        diagnostics: list[ParseDiagnostic] = []
+
+        for parser in parsers:
+            report = parser.parse(path, content)
+            diagnostics.extend(report.diagnostics)
+            for declared in report.declared:
+                records.append(
+                    DependencyRecord(
+                        repo_id=repo_id,
+                        file_id=file_id,
+                        ecosystem=declared.ecosystem,
+                        name=declared.name,
+                        normalized_name=declared.normalized_name,
+                        role="declared",
+                        constraint=declared.constraint,
+                        group=declared.group,
+                        line_start=declared.line,
+                        line_end=declared.line,
+                        parser=parser.name,
+                    )
+                )
+            for resolved in report.resolved:
+                records.append(
+                    DependencyRecord(
+                        repo_id=repo_id,
+                        file_id=file_id,
+                        ecosystem=resolved.ecosystem,
+                        name=resolved.name,
+                        normalized_name=resolved.normalized_name,
+                        role="resolved",
+                        version=resolved.version,
+                        line_start=resolved.line,
+                        line_end=resolved.line,
+                        parser=parser.name,
+                    )
+                )
+            for provided in report.provides:
+                records.append(
+                    DependencyRecord(
+                        repo_id=repo_id,
+                        file_id=file_id,
+                        ecosystem=provided.ecosystem,
+                        name=provided.name,
+                        normalized_name=provided.normalized_name,
+                        role="provided",
+                        version=provided.version,
+                        line_start=provided.line,
+                        line_end=provided.line,
+                        parser=parser.name,
+                    )
+                )
+
+        self._dependencies.replace_for_file(file_id, records)
+        return len(records), diagnostics
+
+    def link_global(self) -> GlobalLinkResult:
+        """Resolve every standing reference against everything now indexed.
+
+        Runs once at the end of a sync run, including a single-repository sync,
+        because a change in one repository can create or invalidate a
+        cross-repository edge in another (ARCHITECTURE.md §6).
+        """
+        result = self._linker.link_global()
+        self._knowledge.gc_orphan_entities()
+        return result
 
     @staticmethod
     def _file_entity(repo: Repository, file_id: int, rel_path: str) -> EntityRecord:
@@ -289,7 +394,7 @@ class SyncEngine:
 
 
 class _FileOutcome:
-    __slots__ = ("diagnostics", "edges", "language", "symbols")
+    __slots__ = ("dependencies", "diagnostics", "edges", "language", "symbols")
 
     def __init__(
         self,
@@ -297,9 +402,11 @@ class _FileOutcome:
         language: str | None = None,
         symbols: int = 0,
         edges: int = 0,
+        dependencies: int = 0,
         diagnostics: list[ParseDiagnostic] | None = None,
     ) -> None:
         self.language = language
         self.symbols = symbols
         self.edges = edges
+        self.dependencies = dependencies
         self.diagnostics = diagnostics or []

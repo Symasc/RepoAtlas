@@ -1,0 +1,7 @@
+source "https://rubygems.org"
+
+gem "rack", "~> 3.0"
+
+group :development, :test do
+  gem "rspec"
+end
