@@ -11,14 +11,35 @@ import enum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from repoatlas.models.telemetry import RetrievalTrace
+
 
 class EvidenceSource(enum.StrEnum):
     """Which retriever produced a candidate. Used by rank fusion and by --verbose."""
 
     EXACT = "exact"
+    LEXICAL = "lexical"
     SYMBOL = "symbol"
     SEMANTIC = "semantic"
     GRAPH = "graph"
+
+
+class EvidenceTier(enum.IntEnum):
+    """Precedence class. **Lower wins, unconditionally.**
+
+    This is the core retrieval principle of V1_SPEC §14 expressed as a type rather
+    than as a weight: *deterministic evidence outranks semantic similarity*. An
+    exact identifier, an exact error string, an exact symbol name, an environment
+    variable and a graph-supported relationship are all facts about the code. An
+    embedding neighbour is a guess about what the question meant.
+
+    Scores are only ever compared **within** a tier, so no amount of cosine
+    similarity can displace a deterministic match. A candidate found by several
+    retrievers takes its best (lowest) tier.
+    """
+
+    DETERMINISTIC = 0
+    ASSOCIATIVE = 1
 
 
 class EvidenceCandidate(BaseModel):
@@ -33,6 +54,7 @@ class EvidenceCandidate(BaseModel):
     text: str
     score: float = 0.0
     source: EvidenceSource = EvidenceSource.EXACT
+    tier: EvidenceTier = EvidenceTier.DETERMINISTIC
     description: str = ""
     entity_id: int | None = None
 
@@ -54,6 +76,12 @@ class EvidenceSet(BaseModel):
     scope: str = ""
     primary_repository: str | None = None
     truncated: bool = False
+    #: Stage instrumentation. An observation about the search, never evidence.
+    trace: RetrievalTrace | None = None
+
+    @property
+    def deterministic(self) -> tuple[EvidenceCandidate, ...]:
+        return tuple(c for c in self.candidates if c.tier is EvidenceTier.DETERMINISTIC)
 
 
 class Evidence(BaseModel):

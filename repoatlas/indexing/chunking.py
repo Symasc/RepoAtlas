@@ -7,6 +7,7 @@ fixed windows otherwise.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 from repoatlas.config.settings import IndexingSettings
@@ -25,6 +26,21 @@ class Chunk:
     @property
     def token_estimate(self) -> int:
         return max(1, len(self.text) // _CHARS_PER_TOKEN)
+
+    @property
+    def content_hash(self) -> str:
+        """Hash of the chunk text alone.
+
+        Deliberately independent of the file, the line range and the repository:
+        two chunks with identical text share a vector, and a chunk that survives a
+        reparse unchanged keeps its vector even though its row id did not survive
+        (V1_SPEC §20, ARCHITECTURE.md §3).
+        """
+        return chunk_hash(self.text)
+
+
+def chunk_hash(text: str) -> str:
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=16).hexdigest()
 
 
 def chunk_content(

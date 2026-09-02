@@ -91,8 +91,18 @@ def unmanaged_repo(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    """Settings pointing storage at the temp directory."""
-    return Settings.model_validate({"storage": {"database": str(tmp_path / "state" / "atlas.db")}})
+    """Settings pointing storage at the temp directory.
+
+    Embeddings use the deterministic hashing backend. Tests must not download a
+    model or touch the network (V1_SPEC §19), and a stub also makes the semantic
+    stage assertable: the same text always yields the same vector.
+    """
+    return Settings.model_validate(
+        {
+            "storage": {"database": str(tmp_path / "state" / "atlas.db")},
+            "embeddings": {"provider": "hashing", "dim": 128},
+        }
+    )
 
 
 @pytest.fixture

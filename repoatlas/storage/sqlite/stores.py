@@ -20,6 +20,7 @@ from repoatlas.storage.protocols import (
     EntityRecord,
     FileFacts,
     FileRow,
+    NeighborEdge,
     SymbolRow,
     UnresolvedRefRecord,
 )
@@ -317,8 +318,9 @@ class SqliteKnowledgeStore:
                 conn.execute(
                     """
                     INSERT INTO chunks (
-                        file_id, repo_id, line_start, line_end, text, token_estimate
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        file_id, repo_id, line_start, line_end, text,
+                        token_estimate, content_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chunk.file_id,
@@ -327,6 +329,7 @@ class SqliteKnowledgeStore:
                         chunk.line_end,
                         chunk.text,
                         chunk.token_estimate,
+                        chunk.content_hash,
                     ),
                 )
 
@@ -543,6 +546,54 @@ class SqliteKnowledgeStore:
                 line_start=row["line_start"],
                 line_end=row["line_end"],
                 parser=row["parser"],
+            )
+            for row in rows
+        ]
+
+    def expand_neighbors(
+        self,
+        entity_ids: Sequence[int],
+        edge_types: Sequence[EdgeType] | None = None,
+        limit: int = 200,
+    ) -> list[NeighborEdge]:
+        """One hop out of ``entity_ids``, with both endpoints' repositories.
+
+        The repository of each endpoint comes back with the edge so the caller can
+        enforce the cross-repository traversal rule without a second query
+        (ARCHITECTURE.md §10 stage 4).
+        """
+        if not entity_ids:
+            return []
+        placeholders = ",".join("?" * len(entity_ids))
+        params: list[object] = [*entity_ids, *entity_ids]
+        type_clause = ""
+        if edge_types:
+            type_placeholders = ",".join("?" * len(edge_types))
+            type_clause = f" AND e.type IN ({type_placeholders})"
+            params.extend(str(t) for t in edge_types)
+        params.append(limit)
+
+        rows = self._db.execute(
+            f"""
+            SELECT e.src_id, e.dst_id, e.type, e.confidence,
+                   src.repo_id AS src_repo_id, dst.repo_id AS dst_repo_id
+            FROM edges e
+            JOIN entities src ON src.id = e.src_id
+            JOIN entities dst ON dst.id = e.dst_id
+            WHERE (e.src_id IN ({placeholders}) OR e.dst_id IN ({placeholders})){type_clause}
+            ORDER BY e.confidence DESC, e.id
+            LIMIT ?
+            """,  # noqa: S608 - placeholders are generated counts, values are bound
+            tuple(params),
+        ).fetchall()
+        return [
+            NeighborEdge(
+                src_id=row["src_id"],
+                dst_id=row["dst_id"],
+                type=EdgeType(row["type"]),
+                confidence=row["confidence"],
+                src_repo_id=row["src_repo_id"],
+                dst_repo_id=row["dst_repo_id"],
             )
             for row in rows
         ]

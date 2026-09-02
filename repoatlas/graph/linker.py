@@ -37,6 +37,7 @@ from repoatlas.models.parsing import (
     ParsedReference,
     ParsedSymbol,
 )
+from repoatlas.models.telemetry import LinkTrace, StageTiming, Stopwatch
 from repoatlas.storage.protocols import (
     EdgeRecord,
     EntityRecord,
@@ -78,12 +79,13 @@ class LinkResult:
 
 @dataclass(frozen=True, slots=True)
 class GlobalLinkResult:
-    """What one global link pass produced."""
+    """What one global link pass produced, and what it cost."""
 
     edges: int
     resolved: int
     unresolved: int
     cross_repository: int
+    trace: LinkTrace | None = None
 
 
 class ReferenceLinker:
@@ -259,43 +261,77 @@ class ReferenceLinker:
     # -- global pass ---------------------------------------------------------
 
     def link_global(self) -> GlobalLinkResult:
-        """Resolve every standing claim against everything currently indexed."""
-        self._knowledge.delete_edges_by_parser(GLOBAL_PARSER)
+        """Resolve every standing claim against everything currently indexed.
 
-        file_rows = self._knowledge.list_file_rows()
-        symbols = self._knowledge.list_symbols()
-        index = ResolutionIndex.build(file_rows, symbols)
+        Instrumented per stage so the traversal's cost is measurable without
+        anyone restructuring it to find out (V1_SPEC §20).
+        """
+        stages: list[StageTiming] = []
+
+        with Stopwatch("reset") as watch:
+            watch.candidates_in = self._knowledge.delete_edges_by_parser(GLOBAL_PARSER)
+            watch.detail = "previous global edges dropped"
+        stages.append(_timing(watch))
+
+        with Stopwatch("index") as watch:
+            file_rows = self._knowledge.list_file_rows()
+            symbols = self._knowledge.list_symbols()
+            index = ResolutionIndex.build(file_rows, symbols)
+            watch.candidates_out = len(file_rows)
+            watch.detail = f"{len(file_rows)} file(s), {len(symbols)} symbol(s)"
+        stages.append(_timing(watch))
+
         by_id = {row.file_id: row for row in file_rows}
 
-        claims = self._knowledge.list_unresolved_refs()
-        by_file: dict[int, list[UnresolvedRefRecord]] = {}
-        for claim in claims:
-            by_file.setdefault(claim.file_id, []).append(claim)
+        with Stopwatch("resolve") as watch:
+            claims = self._knowledge.list_unresolved_refs()
+            watch.candidates_in = len(claims)
+            by_file: dict[int, list[UnresolvedRefRecord]] = {}
+            for claim in claims:
+                by_file.setdefault(claim.file_id, []).append(claim)
 
-        edges: list[EdgeRecord] = []
-        resolved = 0
-        unresolved = 0
+            edges: list[EdgeRecord] = []
+            resolved = 0
+            unresolved = 0
 
-        for claim in claims:
-            origin = by_id.get(claim.file_id)
-            if origin is None:
-                unresolved += 1
-                continue
-            edge = self._resolve(claim, origin, index, by_file.get(claim.file_id, []))
-            if edge is None:
-                unresolved += 1
-                continue
-            resolved += 1
-            edges.append(edge)
+            for claim in claims:
+                origin = by_id.get(claim.file_id)
+                if origin is None:
+                    unresolved += 1
+                    continue
+                edge = self._resolve(claim, origin, index, by_file.get(claim.file_id, []))
+                if edge is None:
+                    unresolved += 1
+                    continue
+                resolved += 1
+                edges.append(edge)
+            watch.candidates_out = resolved
+            watch.detail = f"{unresolved} still unresolved"
+        stages.append(_timing(watch))
 
-        cross = self._link_dependencies(index, edges)
-        self._knowledge.add_edges(edges)
+        with Stopwatch("dependencies") as watch:
+            cross = self._link_dependencies(index, edges)
+            watch.candidates_out = cross
+            watch.detail = "cross-repository edges"
+        stages.append(_timing(watch))
+
+        with Stopwatch("write", candidates_in=len(edges)) as watch:
+            self._knowledge.add_edges(edges)
+            watch.candidates_out = len(edges)
+        stages.append(_timing(watch))
 
         return GlobalLinkResult(
             edges=len(edges),
             resolved=resolved,
             unresolved=unresolved,
             cross_repository=cross,
+            trace=LinkTrace(
+                duration_ms=round(sum(stage.duration_ms for stage in stages), 3),
+                claims_considered=len(claims),
+                files_indexed=len(file_rows),
+                symbols_indexed=len(symbols),
+                stages=tuple(stages),
+            ),
         )
 
     def _resolve(
@@ -546,6 +582,11 @@ def _imported_names(parsed: ParsedFile) -> dict[str, str]:
         if tail:
             imported.setdefault(tail, specifier)
     return imported
+
+
+def _timing(watch: Stopwatch) -> StageTiming:
+    assert watch.recorded is not None
+    return watch.recorded
 
 
 def _flavor(origin: FileRow, meta: dict[str, str]) -> str | None:
