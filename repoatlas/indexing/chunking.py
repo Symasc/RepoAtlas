@@ -61,9 +61,30 @@ def chunk_content(
     chunks: list[Chunk] = []
     for start, end in spans:
         text = "\n".join(lines[start - 1 : end])
-        if text.strip():
-            chunks.append(Chunk(line_start=start, line_end=end, text=text))
+        if not text.strip():
+            continue
+        chunks.extend(
+            Chunk(line_start=start, line_end=end, text=piece)
+            for piece in _bounded(text, config.max_chunk_chars)
+        )
     return chunks
+
+
+def _bounded(text: str, limit: int) -> list[str]:
+    """Split text that exceeds the character cap, keeping every character.
+
+    Reached only by content a line-based span cannot bound — a minified bundle, a
+    base64 blob, a generated one-liner. Truncating instead would silently lose
+    whatever sits past the cap, and an exact search for it would then return
+    nothing while the file plainly contains it (V1_SPEC §14).
+
+    Each piece keeps the line range of the span it came from, which stays true:
+    every piece really is on those lines. The citation is coarser than the text,
+    never wrong about it.
+    """
+    if limit <= 0 or len(text) <= limit:
+        return [text]
+    return [text[offset : offset + limit] for offset in range(0, len(text), limit)]
 
 
 def _symbol_spans(

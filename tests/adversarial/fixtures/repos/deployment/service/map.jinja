@@ -1,0 +1,5 @@
+{% set service_map = {
+    'Debian': {'pkg': 'service'},
+    'RedHat': {'pkg': 'service-rh'},
+} %}
+{% set cfg = salt['grains.filter_by'](service_map, grain='os_family') %}

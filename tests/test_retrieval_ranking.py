@@ -116,6 +116,62 @@ def test_the_primary_repository_wins_among_equals() -> None:
     assert ordered[0].repository == "primary"
 
 
+# --- fusion counts agreement, not volume ----------------------------------------
+
+
+def test_repeating_one_span_inside_a_list_does_not_buy_rank() -> None:
+    """RRF ranks a *span*, and a span has one rank per retriever, not many.
+
+    A file whose lines cannot be split — a minified bundle, a generated JSON blob,
+    a one-line lockfile — becomes many chunks that all carry the same line range.
+    If each of them added its own reciprocal rank, the fused score would measure
+    how large the file is rather than how strongly the retrievers agree about it,
+    and content-free generated data would outrank the real answer.
+    """
+    noise = [
+        candidate(
+            "generated.json",
+            start=1,
+            end=1,
+            text=f"chunk {i}",
+            tier=EvidenceTier.ASSOCIATIVE,
+            source=EvidenceSource.SEMANTIC,
+        )
+        for i in range(12)
+    ]
+    answer = candidate(
+        "config.py",
+        start=10,
+        end=20,
+        tier=EvidenceTier.ASSOCIATIVE,
+        source=EvidenceSource.SEMANTIC,
+    )
+
+    ordered = fuse([[answer, *noise]])
+
+    assert [c.path for c in ordered] == ["config.py", "generated.json"]
+
+
+def test_a_span_ranked_once_per_list_still_gains_from_agreement() -> None:
+    """Collapsing within a list must not collapse *across* lists."""
+    agreed = candidate("both.py", tier=EvidenceTier.ASSOCIATIVE)
+    alone = candidate("one.py", tier=EvidenceTier.ASSOCIATIVE)
+
+    ordered = fuse([[alone, agreed], [agreed]])
+
+    assert [c.path for c in ordered] == ["both.py", "one.py"]
+
+
+def test_distinct_spans_of_one_file_each_keep_their_own_rank() -> None:
+    """Different line ranges are different evidence and are not collapsed."""
+    first = candidate("a.py", start=1, end=10, tier=EvidenceTier.ASSOCIATIVE)
+    second = candidate("a.py", start=40, end=50, tier=EvidenceTier.ASSOCIATIVE)
+
+    ordered = fuse([[first, second]])
+
+    assert [(c.line_start, c.line_end) for c in ordered] == [(1, 10), (40, 50)]
+
+
 # --- deduplication -------------------------------------------------------------
 
 
@@ -493,8 +549,10 @@ def test_saturated_similarity_displaces_nothing(initialized: Workspace, question
 
 
 #: A question whose evidence set is genuinely mixed, so inverting the tiers is
-#: something the boundary has to undo rather than a no-op.
-MIXED = "how does the service load its configuration"
+#: something the boundary has to undo rather than a no-op. The quoted term exists,
+#: which keeps the associative stages open, while the exact match on it supplies
+#: the deterministic half.
+MIXED = "'SERVICE_TIMEOUT'"
 
 
 def test_a_reranker_that_inverts_the_tiers_is_corrected(initialized: Workspace) -> None:
@@ -517,11 +575,18 @@ def test_a_hostile_reranker_cannot_spend_the_budget_on_associative_evidence(
     limits = RetrievalLimits.from_settings(
         initialized.settings.retrieval.model_copy(update={"final": 3})
     )
+    honest = initialized.retriever().retrieve(MIXED, context)
     hostile = _retriever(initialized, reranker=_TierInverter(), limits=limits).retrieve(
         MIXED, context
     )
     assert len(hostile.candidates) == 3
-    assert all(c.tier is EvidenceTier.DETERMINISTIC for c in hostile.candidates)
+
+    # Every deterministic candidate that fits still fits. A hostile order would
+    # have spent all three slots on leads and dropped the facts entirely.
+    kept = [c for c in hostile.candidates if c.tier is EvidenceTier.DETERMINISTIC]
+    assert len(kept) == min(3, len(honest.deterministic))
+    assert {c.location for c in kept} == {c.location for c in honest.deterministic[:3]}
+    assert_deterministic_first(hostile)
 
 
 def test_the_trace_records_that_the_order_was_restored(initialized: Workspace) -> None:

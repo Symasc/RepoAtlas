@@ -32,12 +32,26 @@ def hash_bytes(data: bytes) -> str:
     return hashlib.blake2b(data, digest_size=32).hexdigest()
 
 
-def hash_file(path: Path) -> str:
-    """Content hash — the sole authority on whether a file changed (V1_SPEC §12)."""
+def hash_file(path: Path) -> str | None:
+    """Content hash — the sole authority on whether a file changed (V1_SPEC §12).
+
+    ``None`` when the file cannot be read. A file can stop being readable between
+    one sync and the next for entirely ordinary reasons — permissions change, a
+    tracked file is deleted from the working tree while remaining in the git index,
+    a network mount goes away — and one of them must not abort the repository.
+
+    The caller treats an unknown hash as "changed", which is the same rule the
+    indexer already follows: *we may skip work only when we can prove nothing
+    changed* (ARCHITECTURE §9). The indexer then records the failure as a
+    diagnostic, so the file is reported rather than silently dropped.
+    """
     digest = hashlib.blake2b(digest_size=32)
-    with path.open("rb") as handle:
-        while block := handle.read(_HASH_CHUNK_BYTES):
-            digest.update(block)
+    try:
+        with path.open("rb") as handle:
+            while block := handle.read(_HASH_CHUNK_BYTES):
+                digest.update(block)
+    except OSError:
+        return None
     return digest.hexdigest()
 
 

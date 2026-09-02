@@ -1,0 +1,11 @@
+{
+  "name": "@company/ts-service",
+  "version": "1.0.0",
+  "dependencies": {
+    "@company/common": "^2.1.0",
+    "left-pad": "^1.3.0"
+  },
+  "devDependencies": {
+    "typescript": "~5.4.0"
+  }
+}

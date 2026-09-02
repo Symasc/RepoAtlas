@@ -89,6 +89,13 @@ class IndexingSettings(BaseModel):
     chunk_lines: int = 40
     chunk_overlap_lines: int = 8
     max_chunk_lines: int = 200
+    #: Hard character cap on a single chunk. `max_chunk_lines` bounds how many
+    #: lines a chunk spans, which says nothing about its size: minified
+    #: JavaScript, embedded base64 and generated one-liners are all a single line.
+    #: Without this, one chunk can carry a whole file into the token budget
+    #: (V1_SPEC §14). ~8000 characters is roughly 2000 tokens — a third of the
+    #: default evidence budget, so even the worst single candidate leaves room.
+    max_chunk_chars: int = 8000
 
 
 class StorageSettings(BaseModel):
