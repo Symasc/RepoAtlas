@@ -66,6 +66,13 @@ class ChunkRecord(BaseModel):
     text: str
     token_estimate: int = 0
     content_hash: str = ""
+    #: Position of the line span this chunk came from, within its file.
+    span_index: int = 0
+    #: Position of this piece within that span, and how many pieces it became.
+    #: Anything other than ``(0, 1)`` means the span exceeded the character cap
+    #: and was cut, which is what seam recovery needs to know (ARCHITECTURE.md §6).
+    split_index: int = 0
+    split_total: int = 1
 
 
 class FileFacts(BaseModel):
@@ -88,6 +95,29 @@ class ChunkHit(BaseModel):
     line_start: int
     line_end: int
     text: str
+    score: float
+
+
+class FileHit(BaseModel):
+    """An indexed file matched by its own name or path — not by its content.
+
+    File identity is a deterministic fact about the repository, so a hit carries
+    no line range and never acquires one. ``term`` records which spelling matched
+    and ``specificity`` how exactly, which is what lets a full relative path
+    outrank a bare basename without either becoming a fuzzy match.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    file_id: int
+    repo_id: int
+    repository: str
+    path: str
+    entity_id: int | None
+    term: str
+    #: 0 = the term is the whole relative path, 1 = a trailing sub-path,
+    #: 2 = the basename. Lower is more specific; all three are exact.
+    specificity: int
     score: float
 
 
@@ -286,6 +316,9 @@ class SearchIndex(Protocol):
     def search_literal(
         self, term: str, repo_ids: Sequence[int] | None, limit: int
     ) -> list[ChunkHit]: ...
+    def find_files_by_path(
+        self, terms: Sequence[str], repo_ids: Sequence[int] | None, limit: int
+    ) -> list[FileHit]: ...
     def find_entities_by_name(
         self, names: Sequence[str], repo_ids: Sequence[int] | None, limit: int
     ) -> list[EntityHit]: ...

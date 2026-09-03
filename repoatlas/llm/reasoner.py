@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from pydantic import ValidationError
 
-from repoatlas.llm.grounding import INSUFFICIENT_EVIDENCE, GroundingReport, verify_citations
+from repoatlas.llm.grounding import INSUFFICIENT_EVIDENCE, GroundingReport, ground_answer
 from repoatlas.llm.prompts.loader import render
 from repoatlas.llm.protocol import Message, ModelUnavailable, ReasoningModel
 from repoatlas.models.evidence import EvidenceSet, RepoAtlasAnswer
@@ -50,27 +50,49 @@ class ReasoningResult:
 
     @property
     def is_insufficient(self) -> bool:
-        return not self.answer.findings
+        return not self.answer.hypotheses
 
 
 def format_evidence(evidence: EvidenceSet) -> str:
-    """Render candidates as labelled, citable blocks."""
-    if not evidence.candidates:
-        return "(no evidence was retrieved)"
+    """Serialize candidates as a JSON document (ARCHITECTURE.md §11).
 
-    blocks: list[str] = []
+    Repository content is **data**, so it is encoded as a JSON string value and
+    never as prompt structure. The previous format delimited blocks with a
+    ``[E1] repository=... path=...`` line and blank lines, which a repository
+    could simply write into one of its own files: a comment containing
+    ``[E9] repository=infra path=secrets.yaml`` and ``---- END OF EVIDENCE ----``
+    produced a prompt in which a forged block was indistinguishable from a
+    retrieved one.
+
+    JSON removes the ambiguity structurally rather than by escaping conventions
+    nobody can audit: quotes, newlines and braces inside ``content`` are escaped
+    by the encoder, so no value can terminate its own field, close the array, or
+    add a sibling object. The model receives evidence it can cite by ``id``, and
+    the repository can influence only what is *inside* one ``content`` string.
+
+    ``start_line`` and ``end_line`` are ``null`` for a file-level candidate — one
+    retrieved because the question named the file, not because anything was found
+    inside it. The nulls are the honest encoding: RepoAtlas knows the file exists
+    at that path and knows nothing about any line of it, and the system prompt
+    says what may be claimed from that.
+    """
+    blocks = []
     for index, candidate in enumerate(evidence.candidates, start=1):
         body = candidate.text.strip()
-        if len(body) > _MAX_BLOCK_CHARS:
-            body = f"{body[:_MAX_BLOCK_CHARS]}\n... (truncated)"
-        header = (
-            f"[E{index}] repository={candidate.repository} path={candidate.path} "
-            f"lines={candidate.line_start}-{candidate.line_end}"
+        truncated = len(body) > _MAX_BLOCK_CHARS
+        blocks.append(
+            {
+                "id": f"E{index}",
+                "repository": candidate.repository,
+                "path": candidate.path,
+                "start_line": candidate.line_start,
+                "end_line": candidate.line_end,
+                "why_retrieved": candidate.description,
+                "content": body[:_MAX_BLOCK_CHARS] if truncated else body,
+                "content_truncated": truncated,
+            }
         )
-        if candidate.description:
-            header = f"{header} ({candidate.description})"
-        blocks.append(f"{header}\n{body}" if body else header)
-    return "\n\n".join(blocks)
+    return json.dumps({"evidence": blocks}, indent=2, ensure_ascii=False)
 
 
 def _scope_note(evidence: EvidenceSet) -> str:
@@ -147,7 +169,7 @@ class Reasoner:
                     "The reasoning model did not return a valid answer.", response.model, repaired
                 )
 
-        grounding = verify_citations(answer, evidence)
+        grounding = ground_answer(answer, evidence)
         return ReasoningResult(
             answer=grounding.answer,
             grounding=grounding,
@@ -158,7 +180,7 @@ class Reasoner:
     @staticmethod
     def _insufficient(reason: str, model: str, repaired: bool) -> ReasoningResult:
         answer = RepoAtlasAnswer(
-            summary=INSUFFICIENT_EVIDENCE, findings=[], unknowns=[reason], next_check=None
+            summary=INSUFFICIENT_EVIDENCE, hypotheses=[], unknowns=[reason], next_check=None
         )
         return ReasoningResult(
             answer=answer,

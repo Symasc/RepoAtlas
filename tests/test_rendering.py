@@ -6,7 +6,7 @@ from repoatlas.models.evidence import (
     Evidence,
     EvidenceCandidate,
     EvidenceSet,
-    Finding,
+    Hypothesis,
     RepoAtlasAnswer,
 )
 from repoatlas.rendering import (
@@ -20,8 +20,8 @@ from repoatlas.rendering import (
 def _answer(**overrides: object) -> RepoAtlasAnswer:
     base: dict[str, object] = {
         "summary": "SERVICE_HOST is populated by the Salt deployment layer.",
-        "findings": [
-            Finding(
+        "hypotheses": [
+            Hypothesis(
                 statement="The Salt state configures SERVICE_HOST.",
                 confidence=0.9,
                 evidence=[
@@ -65,7 +65,7 @@ def test_confidence_labels() -> None:
 
 
 def test_answer_has_the_documented_sections() -> None:
-    out = render_answer(_answer())
+    out = render_answer(_answer(), _evidence())
     for section in ("ANSWER", "EVIDENCE", "CONFIDENCE", "NEXT"):
         assert section in out
     assert "HIGH" in out
@@ -73,13 +73,13 @@ def test_answer_has_the_documented_sections() -> None:
 
 def test_answer_renders_citations_as_repo_path_line() -> None:
     """Answers must cite locations the user can open (V1_SPEC §11)."""
-    assert "deployment/service/init.sls:42" in render_answer(_answer())
+    assert "deployment/service/init.sls:42" in render_answer(_answer(), _evidence())
 
 
 def test_answer_renders_a_line_range() -> None:
     answer = _answer(
-        findings=[
-            Finding(
+        hypotheses=[
+            Hypothesis(
                 statement="s",
                 confidence=0.8,
                 evidence=[
@@ -94,13 +94,13 @@ def test_answer_renders_a_line_range() -> None:
             )
         ]
     )
-    assert "deployment/service/init.sls:42-48" in render_answer(answer)
+    assert "deployment/service/init.sls:42-48" in render_answer(answer, _evidence())
 
 
 def test_answer_omits_lines_when_the_citation_has_none() -> None:
     answer = _answer(
-        findings=[
-            Finding(
+        hypotheses=[
+            Hypothesis(
                 statement="s",
                 confidence=0.8,
                 evidence=[
@@ -109,39 +109,40 @@ def test_answer_omits_lines_when_the_citation_has_none() -> None:
             )
         ]
     )
-    out = render_answer(answer)
+    out = render_answer(answer, _evidence())
     assert "deployment/service/init.sls" in out
     assert "init.sls:" not in out
 
 
 def test_answer_shows_unknowns() -> None:
-    out = render_answer(_answer(findings=[], unknowns=["the runtime pillar value"]))
+    out = render_answer(_answer(hypotheses=[], unknowns=["the runtime pillar value"]), _evidence())
     assert "UNKNOWN" in out
     assert "the runtime pillar value" in out
 
 
 def test_insufficient_answer_has_no_confidence_claim() -> None:
     """With nothing supported, there is no confidence to report."""
-    out = render_answer(_answer(summary="INSUFFICIENT EVIDENCE", findings=[]))
+    out = render_answer(_answer(summary="INSUFFICIENT EVIDENCE", hypotheses=[]), _evidence())
     assert "INSUFFICIENT EVIDENCE" in out
     assert "CONFIDENCE" not in out
 
 
 def test_answer_is_concise() -> None:
-    assert len(render_answer(_answer()).splitlines()) < 25
+    assert len(render_answer(_answer(), _evidence()).splitlines()) < 25
 
 
 def test_diagnosis_separates_facts_from_hypotheses() -> None:
     """Facts are retrieved evidence; hypotheses are the model's (V1_SPEC §15)."""
     out = render_diagnosis(_answer(), _evidence())
-    assert "FACTS" in out
-    assert "HYPOTHESES" in out
-    assert out.index("FACTS") < out.index("HYPOTHESES")
+    assert "VERIFIED EVIDENCE" in out
+    assert "HYPOTHESIS" in out
+    assert out.index("VERIFIED EVIDENCE") < out.index("HYPOTHESIS")
 
-    facts = out[out.index("FACTS") : out.index("HYPOTHESES")]
-    assert "python-service/src/config.py:18" in facts
+    verified = out[out.index("VERIFIED EVIDENCE") : out.index("HYPOTHESIS")]
+    assert "python-service/src/config.py:18" in verified
+    assert "The Salt state configures SERVICE_HOST." not in verified
 
-    hypotheses = out[out.index("HYPOTHESES") :]
+    hypotheses = out[out.index("HYPOTHESIS") :]
     assert "The Salt state configures SERVICE_HOST." in hypotheses
 
 
@@ -152,15 +153,15 @@ def test_diagnosis_labels_hypothesis_confidence() -> None:
 
 def test_diagnosis_orders_hypotheses_by_confidence() -> None:
     answer = _answer(
-        findings=[
-            Finding(
+        hypotheses=[
+            Hypothesis(
                 statement="weak cause",
                 confidence=0.2,
                 evidence=[
                     Evidence(repository="deployment", path="service/init.sls", description="d")
                 ],
             ),
-            Finding(
+            Hypothesis(
                 statement="strong cause",
                 confidence=0.9,
                 evidence=[
@@ -175,7 +176,7 @@ def test_diagnosis_orders_hypotheses_by_confidence() -> None:
 
 def test_diagnosis_always_has_unknowns_and_next_sections() -> None:
     out = render_diagnosis(_answer(unknowns=["runtime value"]), _evidence())
-    assert "UNKNOWNS" in out
+    assert "UNKNOWN" in out
     assert "NEXT" in out
 
 

@@ -1,5 +1,5 @@
 from repoatlas.llm.factory import build_model
-from repoatlas.llm.grounding import INSUFFICIENT_EVIDENCE, GroundingReport, verify_citations
+from repoatlas.llm.grounding import INSUFFICIENT_EVIDENCE, GroundingReport, ground_answer
 from repoatlas.llm.null import NullBackend
 from repoatlas.llm.ollama import OllamaBackend
 from repoatlas.llm.protocol import (
@@ -28,5 +28,5 @@ __all__ = [
     "ToolSpec",
     "build_messages",
     "build_model",
-    "verify_citations",
+    "ground_answer",
 ]

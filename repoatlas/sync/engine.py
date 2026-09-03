@@ -296,6 +296,9 @@ class SyncEngine:
                 text=chunk.text,
                 token_estimate=chunk.token_estimate,
                 content_hash=chunk.content_hash,
+                span_index=chunk.span_index,
+                split_index=chunk.split_index,
+                split_total=chunk.split_total,
             )
             for chunk in chunks
         )

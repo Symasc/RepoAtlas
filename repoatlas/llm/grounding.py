@@ -1,32 +1,123 @@
-"""Citation verification — the enforcement point (ARCHITECTURE.md §11, V1_SPEC §15).
+"""Answer grounding — the enforcement point (ARCHITECTURE.md §11, V1_SPEC §15).
 
 The trust rule is a guarantee, and a guarantee cannot rest on model compliance.
-So after a model answer validates, every citation in it is checked against the
-evidence set that was *actually supplied*:
+So after a model answer validates against the schema, it is checked against the
+evidence set that was *actually supplied*.
 
-* an ``Evidence`` naming a repository or path not in the supplied set is dropped;
-* a line range outside the supplied span is clamped to it, or dropped if disjoint;
-* a ``Finding`` left with no surviving evidence is demoted to an ``unknown``;
-* if every finding is demoted, the answer becomes ``INSUFFICIENT EVIDENCE``.
+The rule this module exists to enforce, stated exactly:
 
-Nothing here trusts the model's wording. A fabricated citation cannot survive.
+    A citation validates the evidence reference. It does **not** validate
+    arbitrary prose attached to that citation.
+
+Verifying only the typed ``Evidence`` objects was never enough. Every other field
+of an answer is free text that reaches the user, and one valid citation used to
+carry a whole fabricated statement with it. Three rules now apply:
+
+1. **Every citation of a hypothesis must resolve.** Not one of them — all. A
+   claim that references a file it was never shown is not made trustworthy by
+   also referencing one it was.
+2. **No free-text field may name a repository object that was not supplied.**
+   Applied to the summary, to every statement, to every unknown and to the next
+   check, because a fabricated path in prose is a fabrication wherever it sits.
+3. **Confidence may not outlive its support.** A hypothesis whose citations were
+   narrowed cannot keep the number the model chose before that happened.
+
+What this deliberately does *not* attempt is to decide whether a sentence with no
+repository object in it is true — "the credential is hardcoded in the deployment
+configuration" names nothing checkable. That claim is not rejected here; it is
+carried as a hypothesis and rendered as one. Labelling is the guarantee for prose
+that cannot be verified, and it is why :class:`Hypothesis` is named as it is.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
-from repoatlas.models.evidence import Evidence, EvidenceSet, Finding, RepoAtlasAnswer
+from repoatlas.models.evidence import Evidence, EvidenceSet, Hypothesis, RepoAtlasAnswer
 
 INSUFFICIENT_EVIDENCE = "INSUFFICIENT EVIDENCE"
+
+#: Replaces a summary that made an unsupported claim. Saying nothing is correct;
+#: rewriting the model's sentence into a supported one would be inventing.
+_UNSUPPORTED_SUMMARY = "The retrieved evidence does not support a conclusion."
+
+#: Ceiling applied to a hypothesis whose citations grounding had to narrow. The
+#: model chose its number before the support changed, so the number is stale.
+_CLAMPED_CONFIDENCE_CEILING = 0.5
+
+#: File extensions that make a token a repository-object reference rather than an
+#: ordinary word. Kept explicit so that "e.g.", "i.e." and version numbers such
+#: as "4.7.2" are not mistaken for paths.
+_PATH_EXTENSIONS = frozenset(
+    {
+        "bash",
+        "c",
+        "cfg",
+        "conf",
+        "cpp",
+        "cs",
+        "css",
+        "env",
+        "go",
+        "h",
+        "hcl",
+        "html",
+        "ini",
+        "j2",
+        "java",
+        "jinja",
+        "js",
+        "json",
+        "jsx",
+        "key",
+        "kt",
+        "lock",
+        "md",
+        "mjs",
+        "pem",
+        "php",
+        "pl",
+        "properties",
+        "proto",
+        "ps1",
+        "py",
+        "rb",
+        "rs",
+        "rst",
+        "scala",
+        "sh",
+        "sls",
+        "sql",
+        "swift",
+        "tf",
+        "tfvars",
+        "toml",
+        "ts",
+        "tsx",
+        "txt",
+        "xml",
+        "yaml",
+        "yml",
+        "zsh",
+    }
+)
+
+#: A token that looks like a path: either rooted/nested (contains "/") or ending
+#: in a known source extension, optionally followed by ``:line`` or ``:start-end``.
+_REFERENCE = re.compile(
+    r"(?<![\w/.])(/?[\w.\-]+(?:/[\w.\-]+)*\.[A-Za-z][\w]{0,9}|/[\w.\-]+(?:/[\w.\-]+)+)"
+    r"(?::\d+(?:-\d+)?)?"
+)
 
 
 @dataclass(frozen=True, slots=True)
 class GroundingReport:
     """What verification changed. Surfaced under ``--verbose``.
 
-    A rising ``dropped_citations`` count across a corpus is a regression signal
-    for prompts and models, which is why it is counted rather than discarded.
+    Rising counts across a corpus are a regression signal for prompts and models,
+    which is why each is counted rather than discarded.
     """
 
     answer: RepoAtlasAnswer
@@ -41,12 +132,64 @@ class GroundingReport:
 
 
 def _supplied_spans(evidence: EvidenceSet) -> dict[tuple[str, str], list[tuple[int, int]]]:
-    """Line spans actually shown to the model, keyed by (repository, path)."""
+    """Line spans actually shown to the model, keyed by (repository, path).
+
+    A file supplied only as *identity* — a filename match, which carries no line
+    range — appears as a key with an empty span list. The distinction is the point:
+    the model may say the file exists, because it was shown that; it may not
+    attribute anything to a line of it, because it was shown no lines. An empty
+    list makes both outcomes fall out of :func:`_verify_evidence` without a special
+    case.
+    """
     spans: dict[tuple[str, str], list[tuple[int, int]]] = {}
     for candidate in evidence.candidates:
         key = (candidate.repository, candidate.path)
-        spans.setdefault(key, []).append((candidate.line_start, candidate.line_end))
+        supplied = spans.setdefault(key, [])
+        if candidate.line_start is None or candidate.line_end is None:
+            continue
+        supplied.append((candidate.line_start, candidate.line_end))
     return spans
+
+
+def _supplied_references(evidence: EvidenceSet) -> set[str]:
+    """Every spelling of a supplied file that prose may legitimately use.
+
+    A model referring to ``app.py``, ``svc/app.py`` or ``src/app.py`` is naming
+    the same supplied file three ways, and all three are honest. Anything outside
+    this set names a repository object nobody showed it.
+    """
+    names: set[str] = set()
+    for candidate in evidence.candidates:
+        path = candidate.path
+        names.add(path)
+        names.add(f"{candidate.repository}/{path}")
+        names.add(PurePosixPath(path).name)
+        names.add(candidate.repository)
+        # Every trailing sub-path, so "b/c.py" matches a supplied "a/b/c.py".
+        parts = PurePosixPath(path).parts
+        for index in range(1, len(parts)):
+            names.add("/".join(parts[index:]))
+    return names
+
+
+def _unsupported_references(text: str, allowed: set[str]) -> list[str]:
+    """Repository objects named in ``text`` that were never supplied.
+
+    Deliberately a *secondary* defence. It catches the fabrication that names a
+    file, which is the shape that reads as provenance to a human — the primary
+    defence for everything else is that model prose is labelled as inference and
+    can never occupy the verified-evidence section (ARCHITECTURE.md §11).
+    """
+    found: list[str] = []
+    for match in _REFERENCE.finditer(text):
+        token = match.group(1)
+        suffix = PurePosixPath(token).suffix.lstrip(".").lower()
+        if "/" not in token and suffix not in _PATH_EXTENSIONS:
+            continue
+        if token in allowed or token.lstrip("/") in allowed:
+            continue
+        found.append(match.group(0))
+    return found
 
 
 def _verify_evidence(
@@ -88,50 +231,146 @@ def _verify_evidence(
     return None, False
 
 
-def verify_citations(answer: RepoAtlasAnswer, evidence: EvidenceSet) -> GroundingReport:
+def ground_answer(answer: RepoAtlasAnswer, evidence: EvidenceSet) -> GroundingReport:
     """Strip every claim the supplied evidence does not support."""
     spans = _supplied_spans(evidence)
+    allowed = _supplied_references(evidence)
+    # The user introduced the words in their own question; echoing one back is
+    # not the model inventing a repository object.
+    allowed.update(_REFERENCE.findall(evidence.question))
 
     dropped = 0
     clamped = 0
-    demoted: list[str] = []
-    surviving: list[Finding] = []
+    unsupported: list[str] = []
+    surviving: list[Hypothesis] = []
 
-    for finding in answer.findings:
+    for hypothesis in answer.hypotheses:
         kept: list[Evidence] = []
-        for item in finding.evidence:
+        fabricated = 0
+        narrowed = False
+        for item in hypothesis.evidence:
             grounded, was_clamped = _verify_evidence(item, spans)
             if grounded is None:
-                dropped += 1
+                fabricated += 1
                 continue
+            narrowed = narrowed or was_clamped
             clamped += int(was_clamped)
             kept.append(grounded)
+        dropped += fabricated
 
-        if kept:
-            surviving.append(finding.model_copy(update={"evidence": kept}))
-        else:
-            # A finding with no surviving citation is not a finding. It becomes an
-            # unknown, which is the honest thing to report.
-            demoted.append(finding.statement)
+        named = _unsupported_references(hypothesis.statement, allowed)
+        # Rule 1 (every citation resolves) and rule 2 (no invented object) are
+        # both fatal: a statement that fails either one is not a reading of the
+        # evidence, whatever else it also cites.
+        if not kept or fabricated or named:
+            unsupported.append(hypothesis.statement)
+            continue
 
-    unknowns = list(answer.unknowns)
-    unknowns.extend(f"Unsupported by retrieved evidence: {statement}" for statement in demoted)
-
-    if surviving:
-        verified = answer.model_copy(update={"findings": surviving, "unknowns": unknowns})
-    else:
-        verified = answer.model_copy(
-            update={
-                "summary": INSUFFICIENT_EVIDENCE,
-                "findings": [],
-                "unknowns": unknowns,
-            }
+        surviving.append(
+            hypothesis.model_copy(
+                update={
+                    "evidence": kept,
+                    "confidence": _grounded_confidence(hypothesis.confidence, narrowed),
+                }
+            )
         )
+
+    summary, summary_dropped = _grounded_summary(answer.summary, allowed, surviving)
+    unsupported.extend(summary_dropped)
+
+    unknowns, unknown_dropped = _grounded_unknowns(answer.unknowns, allowed)
+    unsupported.extend(unknown_dropped)
+
+    next_check, next_dropped = _grounded_next_check(answer.next_check, allowed)
+    unsupported.extend(next_dropped)
+
+    if unsupported:
+        # Say that something was removed, never *what*. Quoting the removed claim
+        # back to the user would put the fabricated path on screen again — under a
+        # heading that reads as RepoAtlas's own words rather than the model's,
+        # which is worse than where it started. The count is the honest signal;
+        # the text stays in the report for `--verbose` diagnostics.
+        unknowns.append(
+            f"{len(unsupported)} model claim(s) were removed: they referenced repositories, "
+            "files or lines that the retrieved evidence does not contain."
+        )
+
+    verified = answer.model_copy(
+        update={
+            "summary": summary,
+            "hypotheses": surviving,
+            "unknowns": unknowns,
+            "next_check": next_check,
+        }
+    )
 
     return GroundingReport(
         answer=verified,
         dropped_citations=dropped,
         clamped_citations=clamped,
-        demoted_findings=len(demoted),
-        unsupported=tuple(demoted),
+        demoted_findings=len(answer.hypotheses) - len(surviving),
+        unsupported=tuple(unsupported),
     )
+
+
+def _grounded_confidence(claimed: float, narrowed: bool) -> float:
+    """The model's number, capped by what verification left standing.
+
+    Only lowered, never raised: grounding can remove support, and removing
+    support cannot make a claim stronger (V1_SPEC §15).
+    """
+    return min(claimed, _CLAMPED_CONFIDENCE_CEILING) if narrowed else claimed
+
+
+def _grounded_summary(
+    summary: str, allowed: set[str], surviving: list[Hypothesis]
+) -> tuple[str, list[str]]:
+    """The summary, replaced outright when it names something unsupplied.
+
+    Replaced rather than edited. Removing a clause would leave a sentence the
+    model never wrote and whose meaning nobody checked; saying that no conclusion
+    is supported is the honest alternative.
+
+    When nothing survived at all, the answer says ``INSUFFICIENT EVIDENCE`` —
+    the sentinel the rest of the system already recognizes — even if the summary
+    was independently unsupported. The stronger statement subsumes the weaker one,
+    and the removal is still counted.
+    """
+    removed = [summary] if _unsupported_references(summary, allowed) else []
+    if not surviving:
+        return INSUFFICIENT_EVIDENCE, removed
+    if removed:
+        return _UNSUPPORTED_SUMMARY, removed
+    return summary, []
+
+
+def _grounded_unknowns(unknowns: list[str], allowed: set[str]) -> tuple[list[str], list[str]]:
+    """Unknowns describe missing knowledge; they may not invent an object.
+
+    "The runtime value of SERVICE_HOST is not established" is an unknown.
+    "prod/db.env may override it" asserts a file exists, in the one field whose
+    whole purpose is to admit that something is *not* established (V1_SPEC §15).
+    """
+    kept: list[str] = []
+    removed: list[str] = []
+    for unknown in unknowns:
+        if _unsupported_references(unknown, allowed):
+            removed.append(unknown)
+        else:
+            kept.append(unknown)
+    return kept, removed
+
+
+def _grounded_next_check(next_check: str | None, allowed: set[str]) -> tuple[str | None, list[str]]:
+    """A proposal may not presuppose a repository object nobody has seen.
+
+    "Inspect the runtime value of SERVICE_HOST" proposes an investigation.
+    "Open infra/secrets.yaml and rotate the credential" asserts that the file
+    exists and that it holds a credential — a repository claim wearing the
+    grammar of a suggestion.
+    """
+    if next_check is None:
+        return None, []
+    if _unsupported_references(next_check, allowed):
+        return None, [next_check]
+    return next_check, []

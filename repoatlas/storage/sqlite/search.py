@@ -3,15 +3,28 @@
 FTS provides recall; a literal substring check provides precision. No tokenizer is
 exact for every query shape, so a hit is only reported as *exact* once the literal
 term has been found in the chunk text.
+
+Two things exact search must never depend on, and both were once true here:
+
+* **the tokenizer** — hence :meth:`search_literal`, which verifies by substring;
+* **the chunk boundary** — hence its seam pass. Chunk size is an evidence-sizing
+  decision, and for a while it silently decided discoverability too: a literal
+  straddling the character cap existed in no single chunk, so a file the index was
+  holding was reported not to contain text it plainly did.
+
+File identity is searchable for the same reason. ``files.rel_path`` is a fact
+about the repository, so :meth:`find_files_by_path` retrieves it exactly, rather
+than leaving ``src/config.py`` findable only if some chunk happened to mention it.
 """
 
 from __future__ import annotations
 
 import re
+import sqlite3
 from collections.abc import Sequence
 
 from repoatlas.models.parsing import EntityType
-from repoatlas.storage.protocols import ChunkHit, EntityHit
+from repoatlas.storage.protocols import ChunkHit, EntityHit, FileHit
 from repoatlas.storage.sqlite.database import Database
 
 #: Characters FTS5 treats as syntax. Terms are quoted rather than escaped, so any
@@ -38,6 +51,105 @@ def tokenize_query(text: str) -> list[str]:
         if len(token) > 1:
             seen.setdefault(token, None)
     return sorted(seen, key=len, reverse=True)
+
+
+#: Escapes for a LIKE pattern. `_` matches any character in LIKE, and it is the
+#: most common character in the identifiers this search exists to find exactly, so
+#: leaving it unescaped turned a precise lookup into a wildcard one.
+_LIKE_ESCAPE = str.maketrans({"\\": "\\\\", "%": "\\%", "_": "\\_"})
+
+
+def _like_escape(term: str) -> str:
+    return term.translate(_LIKE_ESCAPE)
+
+
+def _normalize_path_term(term: str) -> str:
+    """The spelling of a path a user may reasonably type, reduced to one form.
+
+    ``./src/config.py``, ``/src/config.py`` and ``src/config.py`` name the same
+    thing; a trailing slash names a directory and never a file. Normalization
+    stops here on purpose — nothing here makes matching fuzzier, it only removes
+    punctuation that carries no information about *which* file is meant.
+    """
+    cleaned = term.strip().strip("\"'`")
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    cleaned = cleaned.lstrip("/").rstrip("/")
+    return "" if cleaned in {"", ".", ".."} else cleaned
+
+
+def _straddling_reach(
+    tail: str, following: Sequence[sqlite3.Row], term: str, width: int
+) -> list[int] | None:
+    """Chunk ids after the seam that a straddling occurrence of ``term`` reaches.
+
+    Returns ``None`` when no occurrence *crosses* the seam. An occurrence lying
+    wholly inside one piece is not this pass's business — the direct pass already
+    found it, and reporting it twice would turn one occurrence into two candidates.
+    """
+    window = tail
+    reachable: list[sqlite3.Row] = []
+    for piece in following:
+        head = piece["head"]
+        reachable.append(piece)
+        window += head
+        if len(window) - len(tail) >= width:
+            break
+
+    boundary = len(tail)
+    start = window.find(term)
+    while start != -1:
+        end = start + len(term)
+        if start < boundary < end:
+            overflow = end - boundary
+            covered: list[int] = []
+            reached = 0
+            for piece in reachable:
+                covered.append(piece["chunk_id"])
+                reached += piece["size"]
+                if reached >= overflow:
+                    break
+            return covered
+        start = window.find(term, start + 1)
+    return None
+
+
+#: Every column a file hit needs, joined to its repository and its file entity.
+#: The entity is a LEFT JOIN because the file row is the authority on identity;
+#: an entity that has not been written yet must not make the file unfindable.
+_FILE_SELECT = """
+    SELECT f.id AS file_id, f.repo_id AS repo_id, f.rel_path AS path,
+           f.basename AS basename, r.name AS repository, e.id AS entity_id
+    FROM files f
+    JOIN repositories r ON r.id = f.repo_id
+    LEFT JOIN entities e ON e.file_id = f.id AND e.type = 'file'
+"""
+
+
+def _repo_scope(
+    alias: str, repo_ids: Sequence[int] | None, params: list[object]
+) -> tuple[str, bool]:
+    """Append a repository scope to ``params``. ``False`` means "search nothing"."""
+    if repo_ids is None:
+        return "", True
+    if not repo_ids:
+        return "", False
+    placeholders = ",".join("?" * len(repo_ids))
+    params.extend(repo_ids)
+    return f" AND {alias}.repo_id IN ({placeholders})", True
+
+
+def _file_hit(row: sqlite3.Row, term: str, specificity: int) -> FileHit:
+    return FileHit(
+        file_id=row["file_id"],
+        repo_id=row["repo_id"],
+        repository=row["repository"],
+        path=row["path"],
+        entity_id=row["entity_id"],
+        term=term,
+        specificity=specificity,
+        score=100.0 - specificity,
+    )
 
 
 class SqliteSearchIndex:
@@ -117,10 +229,30 @@ class SqliteSearchIndex:
 
         Guarantees exactness where the tokenizer cannot: used for quoted strings and
         environment-variable names, which must never be approximated.
+
+        Two passes, because one chunk is not the same thing as one region of a
+        file. The first finds ``term`` inside a stored chunk. The second finds it
+        across a **seam** — the point where a span too large for the character cap
+        was cut into pieces. Without the second pass the cap decided what was
+        findable: a marker straddling offset 8000 lived in no single chunk, and
+        exact search reported it absent from a file that contained it.
         """
         if not term:
             return []
-        params: list[object] = [f"%{term}%"]
+
+        direct = self._literal_chunks(term, repo_ids, limit)
+        if len(direct) >= limit:
+            return direct[:limit]
+
+        seen = {hit.chunk_id for hit in direct}
+        seam = self._seam_chunks(term, repo_ids, limit - len(direct), seen)
+        return [*direct, *seam]
+
+    def _literal_chunks(
+        self, term: str, repo_ids: Sequence[int] | None, limit: int
+    ) -> list[ChunkHit]:
+        """Chunks whose own stored text contains ``term``."""
+        params: list[object] = [f"%{_like_escape(term)}%"]
         scope = ""
         if repo_ids is not None:
             if not repo_ids:
@@ -158,6 +290,243 @@ class SqliteSearchIndex:
             for row in rows
             if term in row["text"]
         ]
+
+    def _seam_chunks(
+        self,
+        term: str,
+        repo_ids: Sequence[int] | None,
+        limit: int,
+        exclude: set[int],
+    ) -> list[ChunkHit]:
+        """Matches that begin in one piece of a split span and end in the next.
+
+        The search window is derived from the query, not from a constant: an
+        occurrence of a term of length *L* that starts inside piece *i* reaches at
+        most ``L - 1`` characters into what follows it, so ``L - 1`` characters
+        from each side of a seam is exactly enough and never more. That is what
+        makes the guarantee independent of the chunk size — there is no overlap
+        constant to be wrong about, and no length of literal for which the answer
+        quietly becomes "not found".
+
+        Only spans that were actually cut are read (``split_total > 1``), and only
+        the two windows of each piece, so an index with no oversized content pays
+        one index probe.
+        """
+        width = len(term) - 1
+        if width <= 0 or limit <= 0:
+            return []
+
+        params: list[object] = [width, width]
+        scope = ""
+        if repo_ids is not None:
+            if not repo_ids:
+                return []
+            placeholders = ",".join("?" * len(repo_ids))
+            scope = f" AND c.repo_id IN ({placeholders})"
+            params.extend(repo_ids)
+
+        rows = self._db.execute(
+            f"""
+            SELECT c.id AS chunk_id, c.file_id, c.span_index, c.split_index,
+                   length(c.text) AS size,
+                   substr(c.text, 1, ?)  AS head,
+                   substr(c.text, -(?)) AS tail
+            FROM chunks c
+            WHERE c.split_total > 1{scope}
+            ORDER BY c.file_id, c.span_index, c.split_index
+            """,  # noqa: S608 - placeholders are generated counts, values are bound
+            tuple(params),
+        ).fetchall()
+        if not rows:
+            return []
+
+        spans: dict[tuple[int, int], list[sqlite3.Row]] = {}
+        for row in rows:
+            spans.setdefault((row["file_id"], row["span_index"]), []).append(row)
+
+        wanted: list[list[int]] = []
+        for pieces in spans.values():
+            for index, piece in enumerate(pieces[:-1]):
+                if piece["chunk_id"] in exclude:
+                    continue
+                covered = _straddling_reach(piece["tail"], pieces[index + 1 :], term, width)
+                if covered is None:
+                    continue
+                wanted.append([piece["chunk_id"], *covered])
+                if len(wanted) >= limit:
+                    break
+            if len(wanted) >= limit:
+                break
+
+        return self._stitched_hits(wanted, term)
+
+    def _stitched_hits(self, groups: list[list[int]], term: str) -> list[ChunkHit]:
+        """Rebuild each seam match from the pieces it actually spans.
+
+        The text handed back is the concatenation of those pieces, which is a real
+        contiguous region of the file: every piece of a span carries that span's
+        line range, so joining them is honest about provenance in a way that
+        inventing a line number for the seam would not be (V1_SPEC §11).
+        """
+        if not groups:
+            return []
+
+        ids = sorted({chunk_id for group in groups for chunk_id in group})
+        placeholders = ",".join("?" * len(ids))
+        rows = self._db.execute(
+            f"""
+            SELECT c.id AS chunk_id, c.file_id, c.repo_id, c.line_start, c.line_end, c.text,
+                   f.rel_path AS path, r.name AS repository
+            FROM chunks c
+            JOIN files        f ON f.id = c.file_id
+            JOIN repositories r ON r.id = c.repo_id
+            WHERE c.id IN ({placeholders})
+            """,  # noqa: S608 - placeholders are generated counts, values are bound
+            tuple(ids),
+        ).fetchall()
+        by_id = {row["chunk_id"]: row for row in rows}
+
+        hits: list[ChunkHit] = []
+        for group in groups:
+            parts = [by_id[chunk_id] for chunk_id in group if chunk_id in by_id]
+            if not parts:
+                continue
+            head = parts[0]
+            text = "".join(part["text"] for part in parts)
+            if term not in text:
+                continue
+            hits.append(
+                ChunkHit(
+                    chunk_id=head["chunk_id"],
+                    file_id=head["file_id"],
+                    repo_id=head["repo_id"],
+                    repository=head["repository"],
+                    path=head["path"],
+                    line_start=head["line_start"],
+                    line_end=head["line_end"],
+                    text=text,
+                    score=20.0,
+                )
+            )
+        return hits
+
+    def find_files_by_path(
+        self,
+        terms: Sequence[str],
+        repo_ids: Sequence[int] | None = None,
+        limit: int = 50,
+    ) -> list[FileHit]:
+        """Indexed files whose own name or path is exactly one of ``terms``.
+
+        The name a file has on disk is a fact about the repository, and this is
+        where it becomes retrievable. Without it, ``locate src/config.py`` searched
+        only *content*, found no chunk that mentioned the string, and answered that
+        nothing matched — about a file the index was holding.
+
+        Matching is exact in all three shapes it accepts, and deliberately nothing
+        more: the whole relative path, a trailing sub-path on a segment boundary,
+        or the basename. ``onfig.py`` matches nothing; this is not a substring
+        search, and turning it into one would replace a false negative with a
+        confident guess.
+
+        Ambiguity is returned rather than resolved. Three files named
+        ``config.py`` produce three hits, because choosing one of them would be
+        RepoAtlas inventing the answer to a question the repository leaves open
+        (V1_SPEC §14).
+        """
+        basenames: list[str] = []
+        paths: list[str] = []
+        for raw in dict.fromkeys(terms):
+            term = _normalize_path_term(raw)
+            if not term:
+                continue
+            bucket = paths if "/" in term else basenames
+            if term not in bucket:
+                bucket.append(term)
+        if not basenames and not paths:
+            return []
+
+        found: dict[tuple[str, str], FileHit] = {}
+        for hit in (
+            *self._files_by_basename(basenames, repo_ids, limit),
+            *self._files_by_path(paths, repo_ids, limit),
+        ):
+            key = (hit.repository, hit.path)
+            current = found.get(key)
+            if current is None or hit.specificity < current.specificity:
+                found[key] = hit
+
+        ordered = sorted(
+            found.values(), key=lambda hit: (hit.specificity, hit.repository, hit.path)
+        )
+        return ordered[:limit]
+
+    def _files_by_basename(
+        self, terms: Sequence[str], repo_ids: Sequence[int] | None, limit: int
+    ) -> list[FileHit]:
+        if not terms:
+            return []
+        placeholders = ",".join("?" * len(terms))
+        params: list[object] = list(terms)
+        scope, scoped = _repo_scope("f", repo_ids, params)
+        if not scoped:
+            return []
+        params.append(limit)
+
+        rows = self._db.execute(
+            f"{_FILE_SELECT} WHERE f.basename IN ({placeholders}){scope} LIMIT ?",
+            tuple(params),
+        ).fetchall()
+        # The basename is the least specific exact match there is: it says the file
+        # is called that, not where it lives.
+        return [_file_hit(row, row["basename"], 2) for row in rows]
+
+    def _files_by_path(
+        self, terms: Sequence[str], repo_ids: Sequence[int] | None, limit: int
+    ) -> list[FileHit]:
+        if not terms:
+            return []
+        # Two predicates per term, and the order matters for cost as well as for
+        # correctness. `basename = ?` is an index seek that narrows to the handful
+        # of files whose last segment could match; the rest is checked on those
+        # rows. Without it the path form is a scan of every indexed file — 3.7 ms
+        # at 2,000 files, and linear from there.
+        #
+        # `substr` rather than LIKE: a path term is matched character for
+        # character, and the segment check is what keeps `a/config.py` from
+        # matching `data/config.py`.
+        clause = " OR ".join(
+            """(f.basename = ?
+                AND (f.rel_path = ?
+                     OR (length(f.rel_path) > length(?)
+                         AND substr(f.rel_path, -length(?)) = ?
+                         AND substr(f.rel_path, length(f.rel_path) - length(?), 1) = '/')))"""
+            for _ in terms
+        )
+        params: list[object] = []
+        for term in terms:
+            params.extend([term.rsplit("/", 1)[-1], term, term, term, term, term])
+        scope, scoped = _repo_scope("f", repo_ids, params)
+        if not scoped:
+            return []
+        params.append(limit)
+
+        rows = self._db.execute(
+            f"{_FILE_SELECT} WHERE ({clause}){scope} LIMIT ?",
+            tuple(params),
+        ).fetchall()
+
+        hits: list[FileHit] = []
+        for row in rows:
+            path = row["path"]
+            term = next(
+                (t for t in terms if path == t or path.endswith(f"/{t}")),
+                None,
+            )
+            if term is None:  # pragma: no cover - the SQL predicate guarantees one
+                continue
+            hits.append(_file_hit(row, term, 0 if path == term else 1))
+        return hits
 
     def find_entities_by_name(
         self,

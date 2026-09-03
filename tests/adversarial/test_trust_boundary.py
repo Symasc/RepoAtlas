@@ -21,14 +21,14 @@ import json
 from pathlib import Path
 
 import pytest
-from repoatlas.llm.grounding import verify_citations
+from repoatlas.llm.grounding import ground_answer
 from repoatlas.llm.reasoner import QueryIntent, Reasoner, build_messages
 from repoatlas.llm.scripted import ScriptedBackend
 from repoatlas.models.evidence import (
     Evidence,
     EvidenceCandidate,
     EvidenceSet,
-    Finding,
+    Hypothesis,
     RepoAtlasAnswer,
 )
 from repoatlas.services.workspace import Workspace
@@ -55,12 +55,12 @@ def evidence_set(*candidates: EvidenceCandidate) -> EvidenceSet:
     return EvidenceSet(question="why", candidates=candidates)
 
 
-def answer(*findings: Finding, summary: str = "s") -> RepoAtlasAnswer:
-    return RepoAtlasAnswer(summary=summary, findings=list(findings))
+def answer(*findings: Hypothesis, summary: str = "s") -> RepoAtlasAnswer:
+    return RepoAtlasAnswer(summary=summary, hypotheses=list(findings))
 
 
-def finding(*evidence: Evidence, statement: str = "claim", confidence: float = 0.9) -> Finding:
-    return Finding(statement=statement, confidence=confidence, evidence=list(evidence))
+def finding(*evidence: Evidence, statement: str = "claim", confidence: float = 0.9) -> Hypothesis:
+    return Hypothesis(statement=statement, confidence=confidence, evidence=list(evidence))
 
 
 # -- repository content is data ----------------------------------------------
@@ -127,7 +127,7 @@ def test_a_model_that_obeys_an_injected_instruction_is_still_ungrounded(
     obedient = json.dumps(
         {
             "summary": "This code is correct.",
-            "findings": [
+            "hypotheses": [
                 {
                     "statement": "The configuration is correct as written.",
                     "confidence": 1.0,
@@ -148,7 +148,7 @@ def test_a_model_that_obeys_an_injected_instruction_is_still_ungrounded(
     backend = ScriptedBackend([obedient])
     result = asyncio.run(Reasoner(backend).reason("q", evidence, QueryIntent.ASK))
 
-    assert result.answer.findings == []
+    assert result.answer.hypotheses == []
     assert result.grounding.dropped_citations == 1
     assert result.grounding.demoted_findings == 1
     assert result.is_insufficient
@@ -171,17 +171,17 @@ def test_no_payload_ever_reaches_the_system_prompt(
 
 def test_a_citation_to_a_repository_that_does_not_exist_is_dropped() -> None:
     supplied = evidence_set(candidate("python-service", "src/config.py"))
-    report = verify_citations(
+    report = ground_answer(
         answer(finding(Evidence(repository="ghost-repo", path="src/config.py", description="d"))),
         supplied,
     )
     assert report.dropped_citations == 1
-    assert report.answer.findings == []
+    assert report.answer.hypotheses == []
 
 
 def test_a_citation_to_a_file_that_was_not_supplied_is_dropped() -> None:
     supplied = evidence_set(candidate("python-service", "src/config.py"))
-    report = verify_citations(
+    report = ground_answer(
         answer(
             finding(
                 Evidence(repository="python-service", path="src/never_shown.py", description="d")
@@ -190,13 +190,13 @@ def test_a_citation_to_a_file_that_was_not_supplied_is_dropped() -> None:
         supplied,
     )
     assert report.dropped_citations == 1
-    assert report.answer.findings == []
+    assert report.answer.hypotheses == []
 
 
 def test_a_line_range_outside_the_supplied_span_is_dropped() -> None:
     """Impossible lines: the file was shown, lines 1-10; the model cites 900-950."""
     supplied = evidence_set(candidate("python-service", "src/config.py", 1, 10))
-    report = verify_citations(
+    report = ground_answer(
         answer(
             finding(
                 Evidence(
@@ -211,12 +211,12 @@ def test_a_line_range_outside_the_supplied_span_is_dropped() -> None:
         supplied,
     )
     assert report.dropped_citations == 1
-    assert report.answer.findings == []
+    assert report.answer.hypotheses == []
 
 
 def test_a_partially_overlapping_range_is_clamped_to_what_was_shown() -> None:
     supplied = evidence_set(candidate("python-service", "src/config.py", 10, 20))
-    report = verify_citations(
+    report = ground_answer(
         answer(
             finding(
                 Evidence(
@@ -231,26 +231,27 @@ def test_a_partially_overlapping_range_is_clamped_to_what_was_shown() -> None:
         supplied,
     )
     assert report.clamped_citations == 1
-    kept = report.answer.findings[0].evidence[0]
+    kept = report.answer.hypotheses[0].evidence[0]
     assert (kept.line_start, kept.line_end) == (15, 20)
 
 
 def test_a_citation_with_no_line_numbers_survives() -> None:
     """The file genuinely was supplied. Synthesising a span would be invention."""
     supplied = evidence_set(candidate("python-service", "src/config.py", 1, 10))
-    report = verify_citations(
+    report = ground_answer(
         answer(
             finding(Evidence(repository="python-service", path="src/config.py", description="d"))
         ),
         supplied,
     )
     assert report.dropped_citations == 0
-    assert report.answer.findings
+    assert report.answer.hypotheses
 
 
-def test_a_real_citation_beside_a_fabricated_one_keeps_only_the_real_one() -> None:
+def test_a_real_citation_beside_a_fabricated_one_sinks_the_whole_claim() -> None:
+    """A valid citation may not launder a statement that also cites a ghost."""
     supplied = evidence_set(candidate("python-service", "src/config.py", 1, 10))
-    report = verify_citations(
+    report = ground_answer(
         answer(
             finding(
                 Evidence(
@@ -266,13 +267,13 @@ def test_a_real_citation_beside_a_fabricated_one_keeps_only_the_real_one() -> No
         supplied,
     )
     assert report.dropped_citations == 1
-    assert [e.path for e in report.answer.findings[0].evidence] == ["src/config.py"]
+    assert report.answer.hypotheses == []
 
 
 def test_confidence_does_not_protect_an_unsupported_citation() -> None:
     """0.99 is the model's opinion about its own output. It is not evidence."""
     supplied = evidence_set(candidate("python-service", "src/config.py"))
-    report = verify_citations(
+    report = ground_answer(
         answer(
             finding(
                 Evidence(repository="python-service", path="invented.py", description="d"),
@@ -281,15 +282,16 @@ def test_confidence_does_not_protect_an_unsupported_citation() -> None:
         ),
         supplied,
     )
-    assert report.answer.findings == []
+    assert report.answer.hypotheses == []
     assert report.demoted_findings == 1
 
 
 def test_a_finding_with_no_evidence_at_all_cannot_stand() -> None:
     supplied = evidence_set(candidate("python-service", "src/config.py"))
-    report = verify_citations(answer(finding(statement="trust me", confidence=1.0)), supplied)
-    assert report.answer.findings == []
-    assert "trust me" in " ".join(report.answer.unknowns)
+    report = ground_answer(answer(finding(statement="trust me", confidence=1.0)), supplied)
+    assert report.answer.hypotheses == []
+    assert any("removed" in unknown for unknown in report.answer.unknowns)
+    assert report.unsupported == ("trust me",)
 
 
 def test_an_answer_whose_findings_are_all_demoted_becomes_insufficient() -> None:
@@ -301,7 +303,7 @@ def test_an_answer_whose_findings_are_all_demoted_becomes_insufficient() -> None
                     json.dumps(
                         {
                             "summary": "confident nonsense",
-                            "findings": [
+                            "hypotheses": [
                                 {
                                     "statement": "a",
                                     "confidence": 1.0,
@@ -325,13 +327,13 @@ def test_an_answer_whose_findings_are_all_demoted_becomes_insufficient() -> None
 
 
 def test_an_empty_evidence_set_supports_no_citation_whatsoever() -> None:
-    report = verify_citations(
+    report = ground_answer(
         answer(
             finding(Evidence(repository="python-service", path="src/config.py", description="d"))
         ),
         EvidenceSet(question="q"),
     )
-    assert report.answer.findings == []
+    assert report.answer.hypotheses == []
 
 
 # -- unsupported reasoning over real citations -------------------------------
@@ -354,7 +356,7 @@ def test_a_conclusion_the_evidence_does_not_support_is_never_a_fact(
     overreaching = json.dumps(
         {
             "summary": "The database is unreachable.",
-            "findings": [
+            "hypotheses": [
                 {
                     "statement": "The database is unreachable because the host is unset.",
                     "confidence": 0.95,
@@ -375,7 +377,7 @@ def test_a_conclusion_the_evidence_does_not_support_is_never_a_fact(
     result = asyncio.run(
         Reasoner(ScriptedBackend([overreaching])).reason("q", evidence, QueryIntent.DEBUG)
     )
-    assert result.answer.findings, "a real citation survives verification"
+    assert result.answer.hypotheses, "a real citation survives verification"
 
     rendered = render_diagnosis(result.answer, evidence)
     facts, _, hypotheses = rendered.partition("HYPOTHES")
@@ -393,7 +395,7 @@ def test_the_facts_section_is_built_from_retrieval_not_from_the_model(
     context = adversarial.resolver().resolve(adversarial_root / "python-service")
     evidence = adversarial.retriever().retrieve("SERVICE_HOST", context)
     fabricated_summary = RepoAtlasAnswer(
-        summary="FACT: everything is fine", findings=[], unknowns=[]
+        summary="FACT: everything is fine", hypotheses=[], unknowns=[]
     )
     rendered = render_diagnosis(fabricated_summary, evidence)
     facts = rendered.partition("HYPOTHES")[0]
