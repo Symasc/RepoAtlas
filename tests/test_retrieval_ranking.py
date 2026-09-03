@@ -379,6 +379,7 @@ def test_every_stage_is_instrumented(initialized: Workspace) -> None:
     assert trace is not None
     assert [stage.name for stage in trace.stages] == [
         "exact",
+        "file",
         "lexical",
         "symbol",
         "semantic",

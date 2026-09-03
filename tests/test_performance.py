@@ -85,6 +85,7 @@ def test_the_trace_accounts_for_the_time_actually_spent(measured: Workspace) -> 
     assert evidence.trace is not None
     assert {stage.name for stage in evidence.trace.stages} == {
         "exact",
+        "file",
         "lexical",
         "symbol",
         "semantic",

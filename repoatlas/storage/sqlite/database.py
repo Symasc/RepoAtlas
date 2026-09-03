@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from importlib import resources
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class Database:

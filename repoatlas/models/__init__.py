@@ -9,7 +9,7 @@ from repoatlas.models.evidence import (
     Evidence,
     EvidenceCandidate,
     EvidenceSet,
-    Finding,
+    Hypothesis,
     RepoAtlasAnswer,
 )
 from repoatlas.models.parsing import (
@@ -32,7 +32,7 @@ __all__ = [
     "EvidenceCandidate",
     "EvidenceSet",
     "FileState",
-    "Finding",
+    "Hypothesis",
     "IndexedFile",
     "ParseDiagnostic",
     "ParsedFile",

@@ -160,7 +160,7 @@ def test_no_secret_reaches_the_model_prompt(
         (repo / name).write_text(text)
 
     backend = ScriptedBackend(
-        [json.dumps({"summary": "No credentials are indexed.", "findings": [], "unknowns": []})]
+        [json.dumps({"summary": "No credentials are indexed.", "hypotheses": [], "unknowns": []})]
     )
     monkeypatch.setattr("repoatlas.services.query_service.build_model", lambda settings: backend)
 

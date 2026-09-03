@@ -260,7 +260,7 @@ def _reasoning_command(
     elif intent is QueryIntent.DEBUG:
         typer.echo(render_diagnosis(result.answer, evidence))
     else:
-        typer.echo(render_answer(result.answer))
+        typer.echo(render_answer(result.answer, evidence))
     workspace.close()
 
 
@@ -315,7 +315,7 @@ def _report_grounding(result: ReasoningResult) -> None:
         typer.echo(
             f"grounding: {grounding.dropped_citations} citation(s) dropped, "
             f"{grounding.clamped_citations} clamped, "
-            f"{grounding.demoted_findings} finding(s) demoted to unknown",
+            f"{grounding.demoted_findings} hypothesis(es) demoted to unknown",
             err=True,
         )
     else:
