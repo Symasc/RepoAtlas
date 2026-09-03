@@ -64,10 +64,15 @@ def scan_repository(
 ) -> list[ScannedFile]:
     """Enumerate the indexable files of one repository.
 
-    Applies, in order: git's own ignore handling, the built-in exclusion set,
-    ``.repoatlasignore``, and finally secret patterns. Secrets are filtered here,
-    before any content is read, so they cannot reach chunks, embeddings, prompts
-    or logs (V1_SPEC §17).
+    The built-in obvious-secret policy is applied **first and unconditionally**,
+    ahead of git's ignore handling, the built-in exclusion set and
+    ``.repoatlasignore``. Order matters: it is what makes the policy mandatory
+    rather than merely usually-applied, so a ``!.ENV`` negation in a user's ignore
+    file cannot re-admit a file the security policy claims (V1_SPEC §17).
+
+    Every decision here is made from the path alone, before any content is read —
+    so an excluded file is never opened, and cannot reach chunks, embeddings,
+    retrieval, prompts or logs (ARCHITECTURE.md §12).
     """
     config = settings or DiscoverySettings()
     client = git or GitClient()
@@ -83,11 +88,13 @@ def scan_repository(
 
     results: list[ScannedFile] = []
     for rel_path in candidates:
+        # Security policy first: not configurable, not negotiable, and decided
+        # from the name alone so nothing below it ever sees the file.
+        if is_secret_path(rel_path):
+            continue
         if _is_excluded(rel_path, config):
             continue
         if ignore.matches(rel_path):
-            continue
-        if is_secret_path(rel_path):
             continue
 
         absolute = repo_path / rel_path

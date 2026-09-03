@@ -1,12 +1,28 @@
 """Ignore rules (V1_SPEC §5, §17).
 
-Precedence, most specific last::
+Two systems live here, and keeping them apart is the point:
 
-    built-in defaults -> .gitignore (via git ls-files) -> .repoatlasignore -> secrets
+**User preference** — ``.repoatlasignore``, in :class:`IgnoreRules`. gitignore-like
+semantics, including negation, and **case-sensitive**, because that is what
+gitignore does on a case-sensitive filesystem and what the user wrote the file
+expecting.
 
-Secret patterns are applied last and unconditionally, at enumeration time — before
-any content is read — so excluded content cannot reach chunks, embeddings, prompts
-or logs (V1_SPEC §17).
+**Security policy** — the built-in obvious-secret filenames, in
+:mod:`repoatlas.security`. Not a preference: it cannot be negated, cannot be
+configured off, and is matched **case-insensitively**, because ``.ENV`` is a
+dotenv file and a rule that says otherwise is not a security boundary. It lives
+one layer down because enumeration is not its only caller — the git working-tree
+comparison must refuse to read these files too.
+
+Precedence at enumeration is therefore: the secret policy first and
+unconditionally, then built-in directory exclusions, ``.gitignore`` (via
+``git ls-files``) and ``.repoatlasignore``. Applying the security check first is
+not an optimization — it is what makes "a user cannot re-admit a secret"
+structural rather than a happy accident of ordering (ARCHITECTURE.md §12).
+
+Every check runs on the path **before any content is read**, so an excluded file
+is never opened, parsed, chunked, embedded, retrieved, serialized into a prompt,
+or logged.
 """
 
 from __future__ import annotations
@@ -15,9 +31,13 @@ import fnmatch
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from repoatlas.config.settings import SECRET_PATTERNS
+from repoatlas.security import is_secret_path
 
 IGNORE_FILENAME = ".repoatlasignore"
+
+#: Re-exported so ``discovery`` stays the natural place to ask about ignoring,
+#: while the policy itself lives below every layer that must obey it.
+__all__ = ["IGNORE_FILENAME", "IgnoreRules", "is_secret_path"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,9 +119,3 @@ class IgnoreRules:
 
         # Unanchored patterns match any path component, as gitignore does.
         return any(fnmatch.fnmatch(part, pattern) for part in parts)
-
-
-def is_secret_path(rel_path: str) -> bool:
-    """Whether a path matches a known secret pattern (V1_SPEC §17)."""
-    name = PurePosixPath(rel_path).name
-    return any(fnmatch.fnmatch(name, pattern) for pattern in SECRET_PATTERNS)
