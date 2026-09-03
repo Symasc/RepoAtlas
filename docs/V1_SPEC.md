@@ -558,6 +558,28 @@ Salt invocation references
 
 **Never execute scripts. Static analysis only.**
 
+**Execution targets must be statically proven.** A `EXECUTES` relationship may name only a target the source
+itself contains:
+
+> A Bash `EXECUTES` edge names only a target explicitly recoverable from static source syntax. Variable
+> expansion or runtime command construction never becomes a deterministic target.
+
+> Absence of a deterministic target means *unresolved*, not low-confidence invention.
+
+| Proven — must resolve | Not proven — must resolve to nothing |
+|---|---|
+| `./deploy.sh`, `"./deploy.sh"`, `'./deploy.sh'` | `$CMD`, `"$CMD"`, `${SCRIPT}` |
+| `python3 app.py`, `ruby tool.rb` | `"$BASE/$NAME"`, `${BASE}/script.sh`, `prefix-$VAR` |
+| `source ./env.sh`, `. ./env.sh` | `source "$CONFIG"`, `python "$SCRIPT"` |
+| `salt-call state.apply app` | `$(find_tool)`, `eval "$COMMAND"`, `"${!INDIRECT}"` |
+| `timeout 30 ./migrate.sh` (wrapper grammar known) | `CMD=./x.sh` then `$CMD` — V1 does no constant propagation |
+
+`cmd:$CMD` at confidence 0.5 is not an acceptable substitute for absence: the entity still exists and can still be
+cited. Quoting is shell syntax and is stripped from the target — `'./deploy.sh'` names the file `./deploy.sh`.
+A dynamic invocation still records what the file *does* prove: the environment read its expansion implies, and any
+leading `NAME=value` assignments. Wrapper policy, the `sh -c` / `eval` rule and the full table live in
+`ARCHITECTURE.md` §5.
+
 ### 7.4 Ruby
 
 Parsed with tree-sitter. Extract basic:
@@ -1850,3 +1872,22 @@ transaction. `Database.transaction()` became reentrant so a caller can group sto
 a real upsert; opening the database stopped being a write; migrations apply under `BEGIN IMMEDIATE`. See
 `ARCHITECTURE.md` §9. Regression suite: `tests/adversarial/test_sync_atomicity.py` (32 cases, including four
 injected failure points and real concurrent processes killed with `SIGTERM` and `SIGKILL`).
+
+### Remediation pass 7 — Bash execution-fact integrity — **COMPLETE**
+
+Completed 2026-09-03. One finding: the Bash parser recorded deterministic `EXECUTES` facts for command targets it
+could not statically prove.
+
+Reproduced on a fresh fixture: `$CMD` became `EXECUTES cmd:$CMD` at **confidence 1.0**, `"$DEPLOY_CMD"` became
+`cmd:"$DEPLOY_CMD"` with the quotes in the entity key, `'./quoted-script.sh'` became a quoted `COMMAND` instead of
+a script path, `bash -c "./x.sh"` created a cross-file edge while `sh -c './x.sh'` created none, and
+`/usr/bin/python3 app.py` silently dropped `app.py`. The shipped adversarial ecosystem itself carried `cmd:$CMD`
+and `cmd:"$SCRIPT"` entities, contradicting its own `GROUND_TRUTH.md`.
+
+Fixed by deciding static proof from the tree-sitter syntax tree rather than from the text: a target resolves only
+when every node under it is literal, which rejects every expansion form and strips quoting from the ones that
+remain. Wrapper unwrapping became a per-wrapper option grammar that fails closed on unknown flags, extended to
+`timeout`, `nice`, `time` and `setsid`, with `sudo`, `xargs` and `chroot` deliberately recorded as themselves.
+`sh -c`, `bash -c`, `python -c` and `eval` payloads are never followed. See `ARCHITECTURE.md` §5. Regression
+suite: `tests/adversarial/test_bash_execution_integrity.py` (195 cases, of which 87 failed before the fix),
+covering the parser, the database and incremental literal↔dynamic transitions.
