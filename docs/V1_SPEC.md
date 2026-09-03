@@ -1284,6 +1284,35 @@ Exclusion is applied **before** content is read for chunking, so secret content 
 embeddings, prompts or logs. Design so stronger secret scanning (entropy/pattern detection on file content) can be
 added later at the same seam.
 
+**Matching is case-insensitive, and mandatory.** Three invariants:
+
+> Built-in obvious-secret filename checks are security policy, not user preference, and cannot be negated by
+> `.repoatlasignore`.
+
+> An excluded secret file is rejected before its contents are parsed, chunked, embedded, retrieved, serialized into
+> prompts, or logged — and before it is opened at all.
+
+> Filename-case variation cannot bypass a built-in secret exclusion.
+
+| Pattern | Excluded, in any case | Still indexed |
+|---|---|---|
+| `.env` | `.env`, `.ENV`, `.Env`, `.eNv` | `env`, `env.py`, `.envrc`, `dotenv.md` |
+| `.env.*` | `.env.local`, `.ENV.PRODUCTION`, `.Env.Production` | `my.env.backup` |
+| `*.pem` | `server.pem`, `server.PEM`, `tls.private.PEM` | `server.pem.txt`, `pem_notes.md` |
+| `*.key` | `private.KEY`, `service.production.KEY` | `monkey.py`, `keyboard.txt`, `key_rotation.md` |
+| `id_rsa` | `id_rsa`, `ID_RSA`, `Id_Rsa` | `id_rsa.pub`, `id_rsa_notes.txt` |
+| `id_ed25519` | `id_ed25519`, `ID_ED25519`, `Id_Ed25519` | `id_ed25519.pub` |
+
+Matching is on the **basename**, case-folded, with glob semantics — a real suffix, not a substring search.
+Over-exclusion silently loses real evidence, so `monkey.py` is not a `*.key` and `id_rsa_notes.txt` is not a private
+key. `.repoatlasignore` keeps its own gitignore-like, **case-sensitive** semantics: the two systems answer different
+questions and are not merged.
+
+**The guarantee, stated exactly.** RepoAtlas excludes files matching its built-in obvious-secret *filename* policy
+before their contents enter the indexing pipeline. It is **not** true that "RepoAtlas never indexes secrets": a
+credential pasted into `app.py` is indexed like every other line of that file. V1 performs no entropy analysis, no
+provider-specific key patterns and no content-based secret detection of any kind.
+
 ---
 
 ## 18. Docker
@@ -1891,3 +1920,25 @@ remain. Wrapper unwrapping became a per-wrapper option grammar that fails closed
 `sh -c`, `bash -c`, `python -c` and `eval` payloads are never followed. See `ARCHITECTURE.md` §5. Regression
 suite: `tests/adversarial/test_bash_execution_integrity.py` (195 cases, of which 87 failed before the fix),
 covering the parser, the database and incremental literal↔dynamic transitions.
+
+### Remediation pass 8 — secret exclusion integrity — **COMPLETE**
+
+Completed 2026-09-03. One P2 security finding: the built-in obvious-secret filename policy matched
+case-sensitively, so `.ENV`, `.Env`, `ID_RSA`, `Id_Rsa`, `server.PEM` and `private.KEY` were indexed.
+
+Reproduced end to end: **20 of 26** secret-named files in a fresh fixture reached the `files` table, with 20 chunk
+rows, 20 FTS hits, 20 stored vectors and secret paths returned as retrieval evidence. A question naming a canary put
+the file's content into the LLM prompt three times over, along with the path and the variable name. The shipped
+`GROUND_TRUTH` for the policy was never wrong; the matcher was.
+
+Root cause: `fnmatch.fnmatch` normalizes its input with `os.path.normcase`, which lowercases on Windows and macOS
+and does nothing on Linux — so identical code enforced the policy on one platform and not on another.
+
+Fixed by moving the policy to `repoatlas/security.py` as the single authority and matching with
+`fnmatch.fnmatchcase` over a case-folded basename. The check now runs *first* in enumeration, ahead of every user
+ignore rule, so it cannot be negated; the git dirty-state comparison obeys it too, so an excluded file is never
+opened at all. Already-indexed secrets are removed by an ordinary `repoatlas sync` through the existing
+no-stale-facts path — no policy version, no flag, no manual database deletion. See `ARCHITECTURE.md` §12.
+Regression suite: `tests/adversarial/test_secret_exclusion_integrity.py` (97 cases, of which 49 failed before the
+fix), covering the predicate, the reader, every database stage, the embedding backend's own inputs, the assembled
+prompt, operator output, renames, branches, and an upgrade from a contaminated database.
