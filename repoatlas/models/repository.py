@@ -22,13 +22,66 @@ class SyncStatus(enum.StrEnum):
     FAILED = "failed"
 
 
+def repository_slug(path: Path, root: Path | None) -> str:
+    """The canonical identity of a repository: its path relative to the root.
+
+    Three different things are wanted from a repository, and one field cannot be
+    all of them (ARCHITECTURE.md §3):
+
+    * **identity** — this value, unambiguous and machine-facing;
+    * **path** — where the repository currently sits on this host;
+    * **display name** — the basename, which is for people and may repeat.
+
+    A root-relative path is chosen over the alternatives for reasons that matter:
+
+    * a **database row id** is allocation order, so a clean reindex of the same
+      tree would produce different identities and break the equivalence invariant
+      of §9 by construction;
+    * a **UUID** has the same problem and is meaningless in a citation — the model
+      and the user both have to be told which repository evidence came from, and
+      neither can read a UUID;
+    * a **remote URL** may be absent, shared between clones, mutable, or
+      unreachable, and RepoAtlas must work on a local repository with no remote;
+    * the **basename** is exactly what this function exists to stop being used.
+
+    A root-relative path is unique by construction — a filesystem cannot hold two
+    directories at one path — deterministic, reproducible by a fresh index of the
+    same tree, independent of discovery order, and readable. It also scales past
+    two duplicates: ``apps/api`` and ``backend/api`` differ for the same reason
+    ``teamA/common`` and ``teamB/common`` do.
+
+    Case is preserved, because ``Common`` and ``common`` are different directories
+    on a case-sensitive filesystem. Package-name normalization rules deliberately
+    do not apply here: they are about matching declared names, not about identity.
+
+    A repository that *is* the root gets ``"."``; one outside the root falls back
+    to its absolute path, which is the only unique and deterministic identity
+    available in that case.
+    """
+    resolved = path.expanduser().resolve()
+    if root is not None:
+        try:
+            relative = resolved.relative_to(root.expanduser().resolve())
+        except ValueError:
+            relative = None
+        if relative is not None:
+            return relative.as_posix()
+    return resolved.as_posix()
+
+
 class Repository(BaseModel):
     """A managed Git repository and everything known about its indexed state."""
 
     model_config = ConfigDict(frozen=True)
 
     id: int | None = None
+    #: Human-readable name. Usually the directory basename, and **not unique**:
+    #: two managed repositories may legitimately both be called ``common``.
+    #: Never used as identity (ARCHITECTURE.md §3).
     name: str
+    #: Canonical identity. See :func:`repository_slug`. Empty only for a row
+    #: written before the identity column existed; it is backfilled on first sync.
+    slug: str = ""
     path: Path
     branch: str | None = None
     head_sha: str | None = None
@@ -85,6 +138,7 @@ class RepositoryCandidate(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     name: str
+    slug: str = ""
     path: Path
     languages: tuple[str, ...] = Field(default=())
     manifests: tuple[str, ...] = Field(default=())

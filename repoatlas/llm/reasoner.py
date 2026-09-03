@@ -70,6 +70,14 @@ def format_evidence(evidence: EvidenceSet) -> str:
     add a sibling object. The model receives evidence it can cite by ``id``, and
     the repository can influence only what is *inside* one ``content`` string.
 
+    ``repository`` is a display name and may repeat: two managed repositories can
+    both be called ``common``. ``repository_path`` is the identity — the
+    repository's path within the managed root — so two blocks that would otherwise
+    read identically (``repository=common``, ``path=index.ts``) are distinguishable,
+    and a citation can say which one it means. It is root-relative rather than
+    absolute: the model needs to tell two sources apart, not to learn where this
+    host keeps its files.
+
     ``start_line`` and ``end_line`` are ``null`` for a file-level candidate — one
     retrieved because the question named the file, not because anything was found
     inside it. The nulls are the honest encoding: RepoAtlas knows the file exists
@@ -84,6 +92,7 @@ def format_evidence(evidence: EvidenceSet) -> str:
             {
                 "id": f"E{index}",
                 "repository": candidate.repository,
+                "repository_path": candidate.repository_slug or candidate.repository,
                 "path": candidate.path,
                 "start_line": candidate.line_start,
                 "end_line": candidate.line_end,

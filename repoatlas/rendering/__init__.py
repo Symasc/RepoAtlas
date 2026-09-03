@@ -1,6 +1,7 @@
 from repoatlas.rendering.text import (
     confidence_label,
     render_answer,
+    render_dependencies,
     render_diagnosis,
     render_evidence,
     render_repos,
@@ -11,6 +12,7 @@ from repoatlas.rendering.text import (
 __all__ = [
     "confidence_label",
     "render_answer",
+    "render_dependencies",
     "render_diagnosis",
     "render_evidence",
     "render_repos",

@@ -8,7 +8,7 @@ from pathlib import Path
 from repoatlas.config.settings import DiscoverySettings
 from repoatlas.discovery.ignore import IgnoreRules
 from repoatlas.gitstate.client import is_git_repository
-from repoatlas.models.repository import RepositoryCandidate
+from repoatlas.models.repository import RepositoryCandidate, repository_slug
 
 
 def discover_repositories(
@@ -30,7 +30,9 @@ def discover_repositories(
     for path in _walk(resolved_root, resolved_root, config, ignore, depth=0):
         if path in found:  # dedup: never index the same repository twice
             continue
-        found[path] = RepositoryCandidate(name=path.name, path=path)
+        found[path] = RepositoryCandidate(
+            name=path.name, slug=repository_slug(path, resolved_root), path=path
+        )
 
     return sorted(found.values(), key=lambda c: str(c.path))
 

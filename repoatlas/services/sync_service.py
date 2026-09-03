@@ -17,6 +17,10 @@ def sync(workspace: Workspace, context: RepositoryContext, *, full: bool = False
     engine = workspace.sync_engine()
     reports = []
     for repo in context.repositories:
+        # Scope decides which repositories a sync may forget, exactly as it decides
+        # which it may index: a repository-scoped run never touches another row.
+        if engine.forget_if_missing(repo):
+            continue
         engine.ensure_repository_entity(repo)
         reports.append(engine.sync_repository(repo, full=full))
 

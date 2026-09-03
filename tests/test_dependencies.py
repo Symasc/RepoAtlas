@@ -21,7 +21,7 @@ from repoatlas.dependencies.python import (
 )
 from repoatlas.dependencies.registry import DependencyRegistry, default_dependency_parsers
 from repoatlas.dependencies.ruby import GemfileLockParser, GemfileParser, GemspecParser
-from repoatlas.models.dependencies import DependencyView
+from repoatlas.models.dependencies import DependencyPackage
 from repoatlas.services.workspace import Workspace
 
 # --- normalization -----------------------------------------------------------
@@ -279,22 +279,22 @@ def test_gemfile_lock_reads_only_top_level_specs() -> None:
 
 def test_declared_and_resolved_versions_are_both_stored(initialized: Workspace) -> None:
     """V1_SPEC §13: store both. The resolved half is what V2 needs."""
-    view = {v.normalized_name: v for v in initialized.dependencies.join_view(None)}
+    view = {p.normalized_name: p for p in initialized.dependencies.list_packages(None)}
     common = view["common-lib"]
     assert common.repository == "python-service"
-    assert common.constraint == ">=1.0"
-    assert common.version == "1.4.0"
-    assert common.manifest_path == "pyproject.toml"
-    assert common.lockfile_path == "uv.lock"
+    assert [(o.source_path, o.value) for o in common.declarations] == [("pyproject.toml", ">=1.0")]
+    assert [(o.source_path, o.value) for o in common.resolutions] == [("uv.lock", "1.4.0")]
 
 
 def test_a_locked_transitive_package_survives_without_a_declaration(
     initialized: Workspace,
 ) -> None:
-    view = {(v.repository, v.normalized_name): v for v in initialized.dependencies.join_view(None)}
+    view = {
+        (p.repository, p.normalized_name): p for p in initialized.dependencies.list_packages(None)
+    }
     transitive = view[("ts-service", "left-pad")]
-    assert transitive.constraint is None
-    assert transitive.version == "1.3.0"
+    assert transitive.declarations == ()
+    assert [o.value for o in transitive.resolutions] == ["1.3.0"]
 
 
 def test_providers_are_matched_on_the_exact_normalized_name(initialized: Workspace) -> None:
@@ -311,19 +311,19 @@ def test_dependency_facts_are_removed_with_their_manifest(
     """Provenance on the row means a dependency cannot outlive its manifest."""
     from repoatlas.services.sync_service import sync
 
-    def python_service_common() -> DependencyView | None:
+    def python_service_common() -> DependencyPackage | None:
         return next(
             (
-                v
-                for v in initialized.dependencies.join_view(None)
-                if v.repository == "python-service" and v.normalized_name == "common-lib"
+                p
+                for p in initialized.dependencies.list_packages(None)
+                if p.repository == "python-service" and p.normalized_name == "common-lib"
             ),
             None,
         )
 
     before = python_service_common()
     assert before is not None
-    assert before.constraint == ">=1.0"
+    assert [o.value for o in before.declarations] == [">=1.0"]
 
     (workspace_root / "python-service" / "pyproject.toml").unlink()
     context = initialized.resolver().resolve(workspace_root / "python-service")
@@ -331,8 +331,8 @@ def test_dependency_facts_are_removed_with_their_manifest(
 
     after = python_service_common()
     assert after is not None, "the lockfile still resolves it"
-    assert after.constraint is None, "the declaration is gone with its manifest"
-    assert after.version == "1.4.0"
+    assert after.declarations == (), "the declaration is gone with its manifest"
+    assert [o.value for o in after.resolutions] == ["1.4.0"]
 
 
 def test_deleting_a_manifest_drops_the_cross_repository_edge(

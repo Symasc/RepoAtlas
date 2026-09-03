@@ -67,7 +67,7 @@ class RepositoryContextResolver:
                     scope=ContextScope.REPOSITORY,
                     repositories=(repo,),
                     primary=repo,
-                    reason=f"inside managed repository {repo.name} ({repo.path})",
+                    reason=f"inside managed repository {repo.slug or repo.name} ({repo.path})",
                     cwd=canonical,
                 )
 
@@ -101,24 +101,41 @@ class RepositoryContextResolver:
         )
 
     def _resolve_explicit(self, name: str, cwd: Path) -> RepositoryContext:
-        """Explicit selection overrides cwd entirely and works from anywhere."""
-        matches = [repo for repo in self._repositories if repo.name == name]
+        """Explicit selection overrides cwd entirely and works from anywhere.
 
-        if len(matches) == 1:
-            repo = matches[0]
+        A selector is matched against two namespaces at once: repository **names**,
+        which may repeat, and repository **identities** (the path within the managed
+        root), which cannot. The union decides:
+
+        * exactly one repository matched either way — resolve to it;
+        * more than one — refuse and list them.
+
+        Checking identities first and stopping there would silently answer the
+        ambiguous case whenever the name collided with some *other* repository's
+        identity: with ``scripts`` and ``nested/scripts`` both managed, ``--repo
+        scripts`` matches one identity and two names, and picking the identity is
+        exactly the arbitrary choice V1_SPEC §6 forbids.
+        """
+        matched: list[Repository] = []
+        for repo in self._repositories:
+            if repo.name == name or (repo.slug and repo.slug == name):
+                matched.append(repo)
+
+        if len(matched) == 1:
+            repo = matched[0]
+            selector = "identity" if repo.slug == name else "argument"
             return RepositoryContext(
                 scope=ContextScope.REPOSITORY,
                 repositories=(repo,),
                 primary=repo,
-                reason=f"explicit repository argument ({repo.name})",
+                reason=f"explicit repository {selector} ({repo.slug or repo.name})",
                 cwd=_canonical(cwd),
             )
 
-        if len(matches) > 1:
-            listing = "\n".join(f"  {repo.path}" for repo in matches)
+        if len(matched) > 1:
             raise ContextResolutionError(
                 f"Repository name is ambiguous: {name}",
-                detail=f"Candidates:\n\n{listing}\n\nSpecify a path instead of a name.",
+                detail=self._ambiguity_detail(matched),
             )
 
         # Fall back to an exact canonical path match, so a path can be passed too.
@@ -136,6 +153,27 @@ class RepositoryContextResolver:
             f"Unknown repository: {name}",
             detail=self._known_repositories_detail(),
         )
+
+    @staticmethod
+    def _ambiguity_detail(matches: list[Repository]) -> str:
+        """List the candidates by identity. Never resolved by choosing one.
+
+        Both spellings are offered because the identity is not always enough on its
+        own: a repository sitting directly under the root has an identity equal to
+        its name, so in the rare case where that name is *also* shared, only the
+        path separates them.
+        """
+        ordered = sorted(matches, key=lambda r: (r.slug, str(r.path)))
+        listing = "\n".join(f"  {repo.slug or repo.path}\n    {repo.path}" for repo in ordered)
+        example = next(
+            (repo.slug for repo in ordered if repo.slug and repo.slug != repo.name), None
+        )
+        hint = (
+            f"Select one by its path within the root, for example:\n\n  --repo {example}"
+            if example
+            else "Select one by its absolute path."
+        )
+        return f"Candidates:\n\n{listing}\n\n{hint}"
 
     def _known_repositories_detail(self) -> str:
         if not self._repositories:
