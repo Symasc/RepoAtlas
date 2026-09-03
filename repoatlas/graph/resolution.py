@@ -86,6 +86,9 @@ class ResolutionIndex:
     files_by_repo: dict[int, dict[str, FileRow]] = field(default_factory=dict)
     repo_roots: list[tuple[Path, int]] = field(default_factory=list)
     repo_names: dict[int, str] = field(default_factory=dict)
+    #: Canonical repository identity by repo id. Keys are built from this, never
+    #: from ``repo_names`` — two repositories may share a display name.
+    repo_slugs: dict[int, str] = field(default_factory=dict)
     symbols_by_file: dict[int, dict[str, list[SymbolRow]]] = field(default_factory=dict)
     salt_states_by_repo: dict[int, dict[str, list[SymbolRow]]] = field(default_factory=dict)
     files_by_name: dict[str, list[FileRow]] = field(default_factory=dict)
@@ -99,6 +102,7 @@ class ResolutionIndex:
             index.files_by_repo.setdefault(row.repo_id, {})[row.rel_path] = row
             roots[row.repo_id] = row.repo_path
             index.repo_names[row.repo_id] = row.repo_name
+            index.repo_slugs[row.repo_id] = row.repo_slug
             index.files_by_name.setdefault(PurePosixPath(row.rel_path).name, []).append(row)
 
         # Longest path first, so a nested repository wins over its parent.

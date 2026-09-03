@@ -12,7 +12,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
-from repoatlas.models.dependencies import DependencyRecord, DependencyView
+from repoatlas.models.dependencies import DependencyPackage, DependencyRecord
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.models.repository import FileState, IndexedFile, Repository
 
@@ -91,6 +91,7 @@ class ChunkHit(BaseModel):
     file_id: int
     repo_id: int
     repository: str
+    repository_slug: str = ""
     path: str
     line_start: int
     line_end: int
@@ -112,6 +113,7 @@ class FileHit(BaseModel):
     file_id: int
     repo_id: int
     repository: str
+    repository_slug: str = ""
     path: str
     entity_id: int | None
     term: str
@@ -130,6 +132,7 @@ class VectorHit(BaseModel):
     file_id: int
     repo_id: int
     repository: str
+    repository_slug: str = ""
     path: str
     line_start: int
     line_end: int
@@ -145,6 +148,7 @@ class EntityHit(BaseModel):
     name: str
     qualified_name: str | None
     repository: str
+    repository_slug: str = ""
     path: str | None
     line_start: int | None
     line_end: int | None
@@ -183,6 +187,8 @@ class FileRow(BaseModel):
     file_entity_id: int
     repo_id: int
     repo_name: str
+    #: Canonical repository identity. ``repo_name`` is for people and may repeat.
+    repo_slug: str
     repo_path: Path
     rel_path: str
 
@@ -232,6 +238,7 @@ class EntityDescription(BaseModel):
 
     entity_id: int
     repository: str
+    repository_slug: str = ""
     path: str
     line_start: int
     line_end: int
@@ -281,7 +288,7 @@ class DependencyStore(Protocol):
     def replace_for_file(self, file_id: int, records: Sequence[DependencyRecord]) -> None: ...
     def providers(self, ecosystem: str, normalized_name: str) -> list[tuple[int, str]]: ...
     def list_for_repos(self, repo_ids: Sequence[int] | None) -> list[DependencyRecord]: ...
-    def join_view(self, repo_ids: Sequence[int] | None) -> list[DependencyView]: ...
+    def list_packages(self, repo_ids: Sequence[int] | None) -> list[DependencyPackage]: ...
 
 
 class VectorIndex(Protocol):

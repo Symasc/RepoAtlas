@@ -159,7 +159,7 @@ Migrations are numbered SQL files in `storage/sqlite/migrations/`, applied in or
 
 ```sql
 repositories(
-  id, name, path UNIQUE, branch, head_sha, is_dirty,
+  id, name, slug UNIQUE, path UNIQUE, branch, head_sha, is_dirty,
   languages_json, manifests_json,
   last_indexed_at, last_indexed_head, last_sync_status
 )
@@ -214,6 +214,83 @@ embeddings(
 
 meta(key, value)   -- schema_version, parser_version, embedding_model, last_global_sync
 ```
+
+### Repository identity, path and display name are three things
+
+**Invariant: repository display names are never used as provenance identity.**
+
+**Invariant: two repository sources with identical display name, relative path,
+line range and content remain distinct evidence sources.**
+
+`teamA/common` and `teamB/common` are two legitimate managed repositories that happen to be called the same
+thing. One field cannot serve every purpose they are asked for, so three are separated:
+
+| Concept | Column | Used for |
+|---|---|---|
+| **identity** | `slug` | entity keys, evidence, fusion, deduplication, grounding, cross-repository links |
+| **path** | `path` | where the repository is on this host; the natural key for upsert |
+| **display name** | `name` | the terminal, and nothing else |
+
+`slug` is the repository's **canonical path relative to the managed root** — `svc`, `teamA/common`,
+`teamB/common`. The alternatives were rejected for specific reasons, not by convenience:
+
+- a **database row id** is allocation order, so a clean reindex of the same tree would assign different
+  identities and break §9's equivalence invariant by construction;
+- a **UUID** has the same problem, and is meaningless in a citation: both the model and the user have to be
+  told which repository a piece of evidence came from, and neither can read a UUID;
+- a **remote URL** may be absent, shared between clones, mutable or unreachable, and RepoAtlas must work on a
+  local repository that has no remote (V1_SPEC §17 forbids reaching for one anyway);
+- a **basename plus an ordinal** (`common#1`, `common#2`) renumbers when another repository is discovered, so
+  it is not an identity at all;
+- the **basename** is exactly what this replaces.
+
+A root-relative path is unique by construction — a filesystem cannot hold two directories at one path —
+deterministic, reproducible by a fresh index of the same tree, independent of discovery order, and readable.
+It scales past two duplicates at any nesting depth: `apps/api` and `backend/api` differ for the same reason
+`teamA/common` and `teamB/common` do. Case is preserved, because `Common` and `common` are different
+directories here; package-name normalization deliberately does not apply, since that is about matching declared
+names, not about identity. A repository that *is* the root gets `.`; one outside the root falls back to its
+absolute path, the only unique deterministic identity available in that case.
+
+**Assigned once, never rewritten.** The identity is derived from the configured root, so recomputing it on
+every upsert would mean that changing the root silently invalidated every entity key built from it — with no
+reparse triggered, because the root is not part of `facts_version` (§9). It is therefore written on insert and
+preserved on conflict.
+
+#### Move and rename semantics
+
+`path` being the upsert key already answered this, and the answer is kept: **a moved or renamed repository is a
+removal plus a discovery, not the same repository at a new location.** `root/teamA/common` → `root/teamA/shared`
+produces a new identity, new keys and a new set of facts.
+
+The removal half now actually happens. A repository whose directory no longer exists is forgotten — its row is
+deleted and everything cascades, including the repository graph node, which is otherwise exempt from orphan
+collection and would otherwise survive as a citable identity for a repository that is gone. Nothing extra is
+lost by this: a sync over a missing directory already scans nothing, classifies every file deleted and cascades
+every fact away, so the row was only ever a shell that still answered to a name. `init` forgets missing
+repositories across the whole managed set, because discovery is the authority on what exists; `sync` forgets
+only within its resolved scope, because a repository-scoped run must not touch another repository's row.
+
+Git metadata is deliberately not consulted for any of this. Identity is decided from the filesystem alone,
+which keeps it inside the §8 execution boundary.
+
+#### Entity keys are built from identity
+
+```
+repo:<slug>                                  repo:teamA/common
+file:<slug>:<rel_path>                       file:teamA/common:index.ts
+sym:<slug>:<rel_path>:<qualname>:<line>      sym:teamA/common:index.ts:SHARED_NAME:1
+```
+
+Interned entities are unique by key, so `repo:common` was not merely ambiguous — it made two repositories a
+single graph node, and a dependency edge to "the repository called common" resolved to whichever had been
+indexed first. File and symbol keys collided as strings; the rows stayed distinct only because those lookups
+also carry a `file_id`, which is a property of the query rather than of the key.
+
+Interned **global** entities are untouched by this. `env:SERVICE_HOST` is one node that many repositories
+reach, and that is the point of it (V1_SPEC §10): the entity is a concept, while the *edges* carry the
+repository and file that asserted them. Strengthening repository identity must not make a shared hub
+repository-local, and a test asserts it did not.
 
 ### The two-tier entity design
 
@@ -454,6 +531,10 @@ ParseDiagnostic     severity, message, line
 
 DeclaredDependency  ecosystem, name, normalized_name, constraint, group, manifest_path, line
 ResolvedDependency  ecosystem, name, normalized_name, version, lockfile_path, line
+DependencyObservation  repository, ecosystem, name, normalized_name, role, value, group,
+                       scope, source_path, line
+DependencyScope     scope, declarations, resolutions, provisions
+DependencyPackage   repository, ecosystem, name, normalized_name, observations, scopes
 
 RepositoryContext   scope (REPOSITORY | GLOBAL), primary, repositories, reason, cwd
 EvidenceCandidate   repository, path, line_start, line_end, text, score, source, entity_id
@@ -463,6 +544,80 @@ Evidence            repository, path, line_start, line_end, description
 Finding             statement, confidence, evidence
 RepoAtlasAnswer     summary, findings, unknowns, next_check
 ```
+
+### Dependencies: observations, grouped but never reduced
+
+**Invariant: dependency aggregation may summarize observations, but may never destroy provenance or silently
+choose one of several real declarations or resolutions.**
+
+**Invariant: a repository may legitimately contain more than one resolved version of the same package.**
+
+One repository routinely holds several dependency domains — a root `package.json` beside `backend/package.json`,
+a `pyproject.toml` beside `requirements.txt` and `requirements-dev.txt` — and each of them states something true.
+The layer is therefore built bottom-up from facts, with grouping as a *view*:
+
+| Level | What it is |
+|---|---|
+| `DependencyObservation` | one fact stated by one file: role, value, group, scope, source path, line |
+| `DependencyScope` | the observations of one package inside one dependency domain |
+| `DependencyPackage` | every observation of one package in one repository, grouped by scope |
+
+`role` separates the three claims that were always meant to stay distinct (V1_SPEC §13): `DECLARED` is a request
+(`left-pad ^1.0.0`), `RESOLVED` is what a lockfile pinned (`left-pad 1.3.0`), `PROVIDED` is the package a
+manifest publishes. Only `RESOLVED` says what actually runs, which is why V2's version-specific documentation
+retrieval depends on it surviving.
+
+The previous view grouped on `(repo_id, ecosystem, normalized_name)` and then **assigned** `constraint`,
+`version`, `manifest_path` and `lockfile_path` while looping over rows. So a repository with a root and a backend
+manifest reported one constraint and one version — whichever row SQLite returned last — and every other
+declaration vanished with no trace that it had existed. The stored rows were right the whole time; the view over
+them was the destructive step. Aggregation is now a pure function of the whole observation set, and no observation
+is ever dropped to produce a summary.
+
+#### Scope, and manifest-to-lockfile pairing
+
+A **scope** is the directory holding the file that stated the fact: `.` for a root `package.json`, `backend` for
+`backend/package.json`. It is deterministic, derived from the layout alone, and it is the unit of pairing: a
+manifest pairs with the lockfile **beside it**, because co-location is what every one of these tools means by
+"this lockfile belongs to that manifest".
+
+| Ecosystem | Paired within one scope |
+|---|---|
+| Node | `package.json` with `package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` |
+| Python | `pyproject.toml` / `setup.py` / `setup.cfg` / `requirements*.txt` with `uv.lock` / `poetry.lock` |
+| Ruby | `Gemfile` / `*.gemspec` with `Gemfile.lock` |
+
+Where the layout does **not** prove a pairing, the observations simply stay in separate scopes. A workspace root
+lockfile and a nested member's `package.json` are the case that matters: npm can resolve a member's dependency in
+the root lockfile, but nothing in the files says which entry belongs to which member, so the nested manifest keeps
+its declaration and reports no resolved version. An unpaired declaration is an honest state; attributing the
+root's `1.3.0` to `backend/` would be a guess of exactly the kind V1_SPEC §2 forbids.
+
+Nothing here infers a runtime package environment. RepoAtlas cannot observe one without running the ecosystem's
+own resolver, which §12 forbids outright.
+
+#### Multiplicity is reported; incompatibility is not
+
+`Agreement` has four values — `NONE`, `SINGLE`, `AGREEING`, `DIVERGENT` — and they count **distinct values**,
+nothing more. It is deliberately not called "conflict": V1 has no ecosystem-aware constraint intersection, so it
+cannot know whether `^1.0` and `>=1.0,<2` are incompatible, only that they are two different strings. Saying
+"version conflict" would be reporting an analysis RepoAtlas does not perform.
+
+`AGREEING` matters as much as `DIVERGENT`. Two `requirements*.txt` files asking for `==2.28.0` agree, and saying
+so is different from saying they conflict — but **both source paths are still kept**, because deduplicating
+identical text is not the same as deduplicating provenance.
+
+#### The graph does not consume the aggregation
+
+The linker reads dependency **records**, never the grouped view, so presentation semantics cannot reach graph
+correctness. Two manifests declaring the same package produce two `DEPENDS_ON` edges, each provenanced by the file
+that asserted it — the same rule as every other edge in §3 — while the *cross-repository count* reports distinct
+repository pairs, because two statements of one relationship are one relationship.
+
+Rendering follows the model: one block per package, one line per observation with its own source path, and an
+explicit count when more than one distinct value exists. A single unambiguous package renders compactly, because
+most of them are. V1 exposes no `deps` command (V1_SPEC §4 lists the whole CLI surface), so this renderer is what a
+caller of the storage API gets; adding a command is a V2 decision, not a correctness one.
 
 ### The load-bearing decision: parsers emit unresolved references
 
@@ -1086,7 +1241,7 @@ Reciprocal-rank fusion is chosen over score normalization because BM25 ranks, co
 scores and graph distances are not commensurable, and RRF needs no per-source calibration to combine them stably.
 
 **Each ranked list contributes one reciprocal rank per span, its best.** RRF is defined over *items*, and the item
-here is a span — `(repository, path, line_start, line_end)` — while a retriever returns *chunks*. The two are
+here is a span — `(repository identity, path, line_start, line_end)` — while a retriever returns *chunks*. The two are
 usually one-to-one, but not always: a file with no line breaks becomes many chunks that all carry the same line
 range, so a single retriever can return the same span a dozen times. Summing those reciprocal ranks would make the
 fused score a measure of how large a file is rather than of how strongly the retrievers agree about it, and a
@@ -1097,6 +1252,18 @@ measure — and two distinct line ranges of one file remain two spans.
 Deduplication drops a span contained in a higher-ranked one, or overlapping it by more than half of the shorter
 span — chunk windows overlap by design, so the same lines arrive repeatedly. Spans are never merged into a
 synthetic range: a citation must point at text that was actually retrieved (V1_SPEC §11).
+
+**Both fusion and deduplication compare repository identity, never the display name.** Keying on the name fused
+`common/index.ts:1` from `teamA/common` and `teamB/common` into a single candidate — two repositories, one
+evidence line, and no way to tell which. A shared library copied between teams makes this worse rather than
+rarer: the two files are often byte-identical, so every appearance-based test for "the same evidence" says yes.
+Content is not identity either; identical content in two repositories is two pieces of repository evidence, and
+content hashing stays where it belongs, in vector reuse (§3), which is about avoiding recomputation rather than
+about provenance.
+
+The **primary-repository boost** keys on identity for the same reason. Matching on a display name meant that
+standing inside `teamB/common` promoted evidence from `teamA/common`, because both directories are called
+`common` — a bias that quietly pointed at the wrong repository from inside the right one.
 
 ### Known ranking limitations
 
@@ -1163,6 +1330,11 @@ Evidence is serialized as a **JSON document**, not as labelled text blocks:
               {"id": "E2", "repository": "svc", "path": "src/config.py",
                "start_line": null, "end_line": null, "content": "", "content_truncated": false}]}
 ```
+
+`repository` is a display name and may repeat; `repository_path` is the identity, so two blocks that would
+otherwise read identically (`repository=common`, `path=index.ts`) are distinguishable and a citation can say
+which one it means. It is root-relative rather than absolute: the model needs to tell two sources apart, not to
+learn where this host keeps its files.
 
 `start_line` and `end_line` are `null` for a **file-level** candidate — one retrieved because the question named
 the file, not because anything was found inside it (§10). The nulls are the honest encoding: RepoAtlas knows the
@@ -1242,6 +1414,15 @@ Both `ask` and `debug` use the same section vocabulary, so the same word means t
 | `UNKNOWN` | what the evidence does not settle, plus a count of anything grounding removed |
 | `NEXT CHECK` | a proposed investigation |
 
+Citations are resolved to a **source**, not to a name. A citation carrying `repository_slug` names one supplied
+source exactly. A citation carrying only a display name is resolved when that name reaches a single supplied
+source, and **refused when it reaches two** — with both `common` repositories on screen, `common/index.ts:1-3`
+names neither, and picking one would be the system inventing the provenance of a claim. That is the case the
+span map used to get wrong in the most dangerous direction: keyed by display name, evidence supplied from
+`teamA/common/index.ts` validated a citation to `teamB/common/index.ts` — same name, same path, same lines,
+quite possibly the same bytes, different repository. Once resolved, the identity is written onto the citation,
+so the rendered support line says which `common` a hypothesis rests on.
+
 `VERIFIED EVIDENCE` is constructed from `EvidenceCandidate` objects without consulting a single model string. That
 is what makes "unverified prose cannot appear as evidence" a property of the code rather than a promise about
 wording — and it is the third layer: even if serialization fails to deter a model and grounding cannot check a
@@ -1249,7 +1430,15 @@ sentence, the sentence still cannot occupy the place a reader trusts.
 
 A candidate is rendered at the granularity it actually has: `svc/src/config.py:12-18` for a span,
 `svc/src/config.py` for a file matched by name, each with the reason it was retrieved ("file name is
-`config.py`"). The reason is phrased as identity rather than as content, because "this file is called
+`config.py`").
+
+The repository prefix is **conditionally disambiguated**: the display name when it identifies one repository in
+the rendered set, the identity when it does not — `teamA/common/index.ts:1` beside `teamB/common/index.ts:1`,
+while `svc/app.ts:1` stays as it was. `repoatlas repos` and `repoatlas status` follow the same rule, and
+`--repo` accepts an identity (`--repo teamA/common`) alongside a name. An ambiguous `--repo common` still
+refuses rather than choosing, and now lists identities that can be passed straight back in. Printing a full path
+on every line to guard against a collision that is not occurring would make the ordinary output worse
+(V1_SPEC §16); printing `common/index.ts:1` for two repositories is a citation that cites nothing. The reason is phrased as identity rather than as content, because "this file is called
 `config.py`" and "this file contains the text `config.py`" are different facts and only one of them was checked.
 
 ### Backends
@@ -1481,3 +1670,17 @@ full reindex.
 | Suppression consults the file stage as well as the exact stage | Weaken suppression when a question looks like a filename | The suppression was right; its notion of "exists" was incomplete. Broadening the existence proof keeps absent names refused, where relaxing the rule would have traded one false negative for a class of confident guesses (§10) |
 | Chunk seams stitched with a window of `len(term) − 1` | A fixed overlap (64, 256 chars) between chunk pieces, or no character cap | A constant makes the guarantee "exact for strings shorter than a number we chose", and removing the cap puts a 200 KB line back in one evidence chunk. Deriving the window from the query is exactly sufficient for any literal and has nothing to tune (§6, §10) |
 | `files.basename` is a generated column | A column written by the indexer | Generated means `rel_path` and its basename cannot drift, and a rename or delete keeps the search index honest through the ordinary file lifecycle with no second code path to forget (§3) |
+| Repository identity is the canonical root-relative path | A row id, a UUID, a remote URL, or `name#ordinal` | A row id and a UUID both differ between a clean reindex and an incremental one, which breaks §9's equivalence invariant by construction, and neither can be read in a citation. A remote URL may be absent, shared between clones or mutable. An ordinal renumbers when another repository is discovered. A root-relative path is unique by construction, deterministic, order-independent and human-readable (§3) |
+| Repository identity assigned once and never rewritten | Derive it from the current root on every upsert | The identity is a function of the configured root, and the root is not part of `facts_version`. Recomputing it would let a root change strand every entity key built from it with no reparse to rebuild them (§3, §9) |
+| A moved repository is a removal plus a discovery | Follow the move and keep the identity | `path` was already the upsert key, so this is the promise the schema was making; following a move needs a signal that a *different* repository has not simply appeared at the old location, and Git metadata is the only such signal available — which §8 keeps outside the execution boundary (§3) |
+| A repository whose directory is gone is forgotten | Keep the row and let its facts cascade away | The row was a shell: a sync over a missing directory already deletes every file and every fact. Keeping it preserved nothing except a stale identity that evidence could still be attributed to, and — because repository nodes are exempt from orphan collection — a graph node that outlived its repository (§3) |
+| Fusion, deduplication and grounding compare repository identity | Compare the display name, or the content hash | The display name merged `common/index.ts:1` from two repositories into one candidate and let evidence from one validate a citation to the other. A content hash is worse: a shared library copied between teams is byte-identical, and identical content in two repositories is still two pieces of repository evidence (§10, §11) |
+| A name-only citation is refused when two supplied sources share the name | Resolve it to the first match | Choosing between two sources the model did not distinguish is the system inventing provenance, which is the one thing grounding exists to prevent. Concise citations keep working for unambiguous repositories and stop exactly where they stop meaning something (§11) |
+| Repository disambiguation in output is conditional | Always print the identity, or always print the name | Most workspaces have no duplicated names, and printing a path on every line to guard against a collision that is not happening makes the ordinary output worse. Always printing the name makes two rows that both read `common` (§11, V1_SPEC §16) |
+| Dependency aggregation is a view over immutable observations | Group rows and assign the fields as they arrive | Assigning made the last row SQLite returned the repository's answer and deleted every other declaration. The rows always carried provenance; only the view destroyed it, so the fix is a pure function over the whole set rather than a different overwrite order (§5) |
+| Dependency scope is the manifest's directory | A repository-wide dependency namespace, or a parsed workspace configuration | The directory is deterministic and provable from the layout. A workspace configuration would let RepoAtlas claim which lockfile entry belongs to which member, which the files do not actually say — so unpaired observations stay unpaired instead (§5) |
+| Manifests pair with lockfiles by co-location only | Pair on package name anywhere in the repository | `backend/package.json` and a root `package-lock.json` share a package name and nothing else. Name-matching across directories is the assumed-relationship error V1_SPEC §9 forbids, applied to versions (§5) |
+| Multiplicity is reported as `AGREEING` / `DIVERGENT`, never as conflict | Report a version conflict | V1 has no constraint intersection, so it can see that two constraint *strings* differ and cannot see whether they are incompatible. `DIVERGENT` states exactly what was observed (§5, V1_SPEC §13) |
+| Identical constraints in two files stay two observations | Deduplicate them | Deduplicating identical text is not deduplicating provenance: which files ask for a package is a fact about the repository, and a summary that says "2 agreeing declarations" still has to be able to name both (§5) |
+| The linker reads dependency records, not the grouped view | Reuse the aggregation the renderer uses | Graph correctness must not inherit presentation semantics. Each declaration keeps its own provenanced edge; only the reported cross-repository *count* collapses to distinct repository pairs (§5, §10) |
+| `DependencyView` removed rather than kept alongside | Keep the singular-field model for compatibility | Its fields (`constraint`, `version`, `manifest_path`) are singular where several values genuinely exist, so keeping it would have preserved a shape whose whole problem is that it cannot be right. It had no caller outside tests (§5) |

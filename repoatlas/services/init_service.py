@@ -33,9 +33,19 @@ def initialize(
     save_settings(settings, config_path)
 
     engine = workspace.sync_engine()
+
+    # Discovery is the only way a repository becomes managed, so it is also the
+    # only authority on which ones still exist. A repository that has been moved
+    # or deleted is forgotten here rather than left behind as a stale identity
+    # that evidence could still be attributed to (V1_SPEC §5).
+    for stored in workspace.repositories.list_all():
+        engine.forget_if_missing(stored)
+
     reports = []
     for candidate in candidates:
-        workspace.repositories.upsert(Repository(name=candidate.name, path=candidate.path))
+        workspace.repositories.upsert(
+            Repository(name=candidate.name, slug=candidate.slug, path=candidate.path)
+        )
         stored = workspace.repositories.get_by_path(candidate.path)
         assert stored is not None
         engine.ensure_repository_entity(stored)

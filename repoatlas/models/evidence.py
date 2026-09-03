@@ -62,7 +62,13 @@ class EvidenceCandidate(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    #: Display name of the repository. For people, and **not unique**: two
+    #: managed repositories may both be called ``common``.
     repository: str
+    #: Canonical repository identity (ARCHITECTURE.md §3). This is what fusion,
+    #: deduplication and grounding compare; ``repository`` is what is printed.
+    #: Empty only for a candidate constructed outside the retrieval path.
+    repository_slug: str = ""
     path: str
     line_start: int | None = None
     line_end: int | None = None
@@ -79,13 +85,28 @@ class EvidenceCandidate(BaseModel):
         return self.line_start is None and self.line_end is None
 
     @property
+    def identity(self) -> tuple[str, str]:
+        """What makes two candidates the same source: identity, then path."""
+        return (self.repository_slug or self.repository, self.path)
+
+    @property
     def location(self) -> str:
         """``repo/path``, ``repo/path:line`` or ``repo/path:start-end`` (V1_SPEC §11)."""
+        return self.located(self.repository)
+
+    def located(self, prefix: str) -> str:
+        """``location`` with an explicit repository prefix.
+
+        Rendering picks the prefix from the surrounding set: the display name when
+        it identifies one repository, the canonical identity when it does not.
+        Printing ``common/index.ts:1`` for two different repositories is a citation
+        that does not cite anything (V1_SPEC §11).
+        """
         if self.line_start is None:
-            return f"{self.repository}/{self.path}"
+            return f"{prefix}/{self.path}"
         if self.line_end is None or self.line_start == self.line_end:
-            return f"{self.repository}/{self.path}:{self.line_start}"
-        return f"{self.repository}/{self.path}:{self.line_start}-{self.line_end}"
+            return f"{prefix}/{self.path}:{self.line_start}"
+        return f"{prefix}/{self.path}:{self.line_start}-{self.line_end}"
 
 
 class EvidenceSet(BaseModel):
@@ -105,11 +126,41 @@ class EvidenceSet(BaseModel):
     def deterministic(self) -> tuple[EvidenceCandidate, ...]:
         return tuple(c for c in self.candidates if c.tier is EvidenceTier.DETERMINISTIC)
 
+    @property
+    def ambiguous_repositories(self) -> frozenset[str]:
+        """Display names that name more than one repository in *this* set.
+
+        Disambiguation is conditional on purpose. Most workspaces have no
+        duplicated names, and printing a full path on every line to guard against
+        a case that is not occurring would make the ordinary output worse
+        (V1_SPEC §16).
+        """
+        seen: dict[str, set[str]] = {}
+        for candidate in self.candidates:
+            seen.setdefault(candidate.repository, set()).add(
+                candidate.repository_slug or candidate.repository
+            )
+        return frozenset(name for name, slugs in seen.items() if len(slugs) > 1)
+
+    def prefix_for(self, candidate: EvidenceCandidate) -> str:
+        """The repository prefix to print for one candidate of this set."""
+        if candidate.repository in self.ambiguous_repositories:
+            return candidate.repository_slug or candidate.repository
+        return candidate.repository
+
 
 class Evidence(BaseModel):
-    """A citation in a model answer. Verified against the supplied EvidenceSet."""
+    """A citation in a model answer. Verified against the supplied EvidenceSet.
+
+    ``repository_path`` is the canonical identity the evidence block carried. It
+    is optional because a concise citation naming an unambiguous repository is
+    perfectly good — but when two supplied sources share a display name, a
+    citation without it names neither, and grounding refuses it rather than
+    picking one (ARCHITECTURE.md §11).
+    """
 
     repository: str
+    repository_slug: str | None = None
     path: str
     line_start: int | None = None
     line_end: int | None = None

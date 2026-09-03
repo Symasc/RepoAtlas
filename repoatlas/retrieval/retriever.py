@@ -157,6 +157,10 @@ class Retriever:
         # every question (V1_SPEC §20).
         primary_ids = list(context.repository_ids)
         primary_name = context.primary.name if context.primary else None
+        # The boost keys on identity, not on the display name: standing inside
+        # `teamB/common` must not promote evidence from `teamA/common` merely
+        # because both directories are called `common` (ARCHITECTURE.md §10).
+        primary_slug = context.primary.slug if context.primary else None
         scopes = self._scopes(context, primary_ids)
 
         ranked_lists: list[list[EvidenceCandidate]] = []
@@ -231,7 +235,7 @@ class Retriever:
         with Stopwatch("fuse", candidates_in=incoming) as watch:
             fused = fuse(
                 ranked_lists,
-                primary_repository=primary_name,
+                primary_repository=primary_slug or primary_name,
                 primary_boost=self._limits.primary_boost,
             )
             watch.candidates_out = len(fused)
@@ -398,6 +402,7 @@ class Retriever:
                     candidates.append(
                         EvidenceCandidate(
                             repository=hit.repository,
+                            repository_slug=hit.repository_slug,
                             path=hit.path,
                             line_start=hit.line_start,
                             line_end=hit.line_end or hit.line_start,
@@ -426,6 +431,7 @@ class Retriever:
                     candidates.append(
                         EvidenceCandidate(
                             repository=hit.repository,
+                            repository_slug=hit.repository_slug,
                             path=hit.path,
                             line_start=hit.line_start,
                             line_end=hit.line_end or hit.line_start,
@@ -485,6 +491,7 @@ class Retriever:
             candidates = [
                 EvidenceCandidate(
                     repository=hit.repository,
+                    repository_slug=hit.repository_slug,
                     path=hit.path,
                     line_start=None,
                     line_end=None,
@@ -667,6 +674,7 @@ class Retriever:
         return [
             EvidenceCandidate(
                 repository=row.repository,
+                repository_slug=row.repository_slug,
                 path=row.path,
                 line_start=row.line_start,
                 line_end=row.line_end,
@@ -704,6 +712,7 @@ class Retriever:
     ) -> EvidenceCandidate:
         return EvidenceCandidate(
             repository=hit.repository,
+            repository_slug=hit.repository_slug,
             path=hit.path,
             line_start=hit.line_start,
             line_end=hit.line_end,
@@ -718,6 +727,7 @@ class Retriever:
     def _vector_candidate(hit: VectorHit) -> EvidenceCandidate:
         return EvidenceCandidate(
             repository=hit.repository,
+            repository_slug=hit.repository_slug,
             path=hit.path,
             line_start=hit.line_start,
             line_end=hit.line_end,
