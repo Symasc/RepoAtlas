@@ -11,32 +11,16 @@ def sync(workspace: Workspace, context: RepositoryContext, *, full: bool = False
     """Sync exactly the repositories the resolved context names.
 
     Scope is decided by the shared resolver, never re-derived here. The link pass
-    that follows is global even for a single-repository sync, because a change
-    here can create or invalidate an edge over there (ARCHITECTURE.md §6).
+    that closes the run is global even for a single-repository sync, because a
+    change here can create or invalidate an edge over there (ARCHITECTURE.md §6) —
+    which is also why a repository-scoped sync takes the *whole* writer lock: two
+    runs over different repositories still rebuild one shared graph, so they are
+    not independent writers (ARCHITECTURE.md §9).
     """
-    engine = workspace.sync_engine()
-    reports = []
-    for repo in context.repositories:
-        # Scope decides which repositories a sync may forget, exactly as it decides
-        # which it may index: a repository-scoped run never touches another row.
-        if engine.forget_if_missing(repo):
-            continue
-        engine.ensure_repository_entity(repo)
-        reports.append(engine.sync_repository(repo, full=full))
-
-    link = engine.link_global()
-    # Embedding runs last and only over what changed. It is the one stage allowed
-    # to be unavailable without failing the sync (V1_SPEC §14).
-    embedding = engine.embed_pending([r.id for r in context.repositories if r.id is not None])
-
-    return SyncReport(
-        repositories=tuple(reports),
-        scope=str(context.scope),
-        linked_references=link.resolved,
-        unresolved_references=link.unresolved,
-        cross_repository_edges=link.cross_repository,
-        embedded_chunks=embedding.embedded,
-        pending_embeddings=embedding.pending,
-        embedding_detail=embedding.detail,
-        link_trace=link.trace,
-    )
+    with workspace.writer_lock():
+        return workspace.sync_engine().run(
+            context.repositories,
+            full=full,
+            scope=str(context.scope),
+            embed_repo_ids=[r.id for r in context.repositories if r.id is not None],
+        )

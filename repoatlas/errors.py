@@ -9,6 +9,9 @@ class ExitCode:
     CONTEXT = 2
     NOT_INITIALIZED = 3
     LLM_UNAVAILABLE = 4
+    #: Another process holds the writer lock. Distinct from RUNTIME so a wrapper
+    #: script can retry contention without retrying a genuine failure.
+    SYNC_LOCKED = 5
 
 
 class RepoAtlasError(Exception):
@@ -54,6 +57,11 @@ class ReasoningModelUnavailableError(RepoAtlasError):
 
 
 class SyncInProgressError(RepoAtlasError):
-    """Another sync holds the advisory lock (ARCHITECTURE §9)."""
+    """Another process holds the knowledge-base writer lock (ARCHITECTURE.md §9).
 
-    exit_code = ExitCode.RUNTIME
+    An operational condition, not a bug: two syncs overlapped. It is raised
+    rather than waited out forever so a wedged writer is reported instead of
+    hanging the second one silently.
+    """
+
+    exit_code = ExitCode.SYNC_LOCKED

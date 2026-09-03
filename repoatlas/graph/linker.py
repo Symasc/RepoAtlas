@@ -19,11 +19,19 @@ then rebuilds from the standing claims. Running it twice therefore gives the sam
 graph as running it once, which is what lets an incremental sync equal a full
 reindex (V1_SPEC §12). It is also **global by necessity** — a change in one
 repository can create or invalidate a cross-repository edge in another.
+
+Because it is a *replacement*, it is split in two: :meth:`prepare_global` computes
+the whole new graph while writing nothing, and :meth:`commit_global` swaps it in
+inside a single transaction. Deleting the old graph and inserting the new one used
+to be two commits with all the resolution work between them, so any failure in
+that gap published a knowledge base with no cross-repository graph at all while
+``status`` still reported it current (ARCHITECTURE.md §9).
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from repoatlas.dependencies.normalize import GEM, NPM, PYPI
@@ -86,6 +94,42 @@ class GlobalLinkResult:
     unresolved: int
     cross_repository: int
     trace: LinkTrace | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PendingEdge:
+    """A dependency edge whose endpoints are named but not yet interned.
+
+    Endpoints are carried as natural keys rather than row ids so the whole
+    replacement graph can be computed without writing anything. They become ids
+    inside the swap transaction, where an edge and the entity it points at commit
+    together or not at all.
+    """
+
+    source: EntityRecord
+    target: EntityRecord
+    record: DependencyRecord
+
+
+@dataclass(frozen=True, slots=True)
+class GlobalPlan:
+    """The complete replacement graph, computed but not yet applied.
+
+    Produced by :meth:`ReferenceLinker.prepare_global` without touching the
+    database, and consumed by :meth:`ReferenceLinker.commit_global` in one
+    transaction. Nothing here is a partial answer: a plan describes the whole
+    global graph, so applying it is a replacement rather than a merge.
+    """
+
+    edges: tuple[EdgeRecord, ...] = ()
+    dependencies: tuple[PendingEdge, ...] = ()
+    resolved: int = 0
+    unresolved: int = 0
+    cross_repository: int = 0
+    claims_considered: int = 0
+    files_indexed: int = 0
+    symbols_indexed: int = 0
+    stages: tuple[StageTiming, ...] = ()
 
 
 class ReferenceLinker:
@@ -261,17 +305,27 @@ class ReferenceLinker:
     # -- global pass ---------------------------------------------------------
 
     def link_global(self) -> GlobalLinkResult:
-        """Resolve every standing claim against everything currently indexed.
+        """Rebuild the global graph: compute the replacement, then swap it in.
+
+        Two phases, and the split is the correctness of the pass rather than an
+        optimization. See :meth:`prepare_global` and :meth:`commit_global`.
+        """
+        return self.commit_global(self.prepare_global())
+
+    def prepare_global(self) -> GlobalPlan:
+        """Compute the complete replacement graph. **Writes nothing.**
+
+        Everything expensive happens here: reading every file row and symbol,
+        building the resolution index, resolving every standing claim, and walking
+        the dependency table. None of it touches the previous graph, so a failure
+        anywhere in this phase leaves the committed state exactly as it was — which
+        is the first half of why a failed link pass can no longer publish an empty
+        graph (ARCHITECTURE.md §9).
 
         Instrumented per stage so the traversal's cost is measurable without
         anyone restructuring it to find out (V1_SPEC §20).
         """
         stages: list[StageTiming] = []
-
-        with Stopwatch("reset") as watch:
-            watch.candidates_in = self._knowledge.delete_edges_by_parser(GLOBAL_PARSER)
-            watch.detail = "previous global edges dropped"
-        stages.append(_timing(watch))
 
         with Stopwatch("index") as watch:
             file_rows = self._knowledge.list_file_rows()
@@ -310,29 +364,95 @@ class ReferenceLinker:
         stages.append(_timing(watch))
 
         with Stopwatch("dependencies") as watch:
-            cross = self._link_dependencies(index, edges)
+            dependencies, cross = self._plan_dependencies(index)
+            watch.candidates_in = len(dependencies)
             watch.candidates_out = cross
             watch.detail = "cross-repository edges"
         stages.append(_timing(watch))
 
-        with Stopwatch("write", candidates_in=len(edges)) as watch:
-            self._knowledge.add_edges(edges)
+        return GlobalPlan(
+            edges=tuple(edges),
+            dependencies=tuple(dependencies),
+            resolved=resolved,
+            unresolved=unresolved,
+            cross_repository=cross,
+            claims_considered=len(claims),
+            files_indexed=len(file_rows),
+            symbols_indexed=len(symbols),
+            stages=tuple(stages),
+        )
+
+    def commit_global(self, plan: GlobalPlan) -> GlobalLinkResult:
+        """Replace the global graph with ``plan``, atomically.
+
+        Delete, intern, insert and collect, in **one transaction**. Another
+        connection sees the previous complete graph or the new complete graph and
+        nothing between them, because there is no committed state between them
+        (ARCHITECTURE.md §9). Previously the delete committed on its own and the
+        insert followed later, so any failure in the gap published a knowledge
+        base with no cross-repository graph at all.
+
+        The transaction stays short by construction: everything it does is bounded
+        by the size of the graph, and all the resolution work happened in
+        :meth:`prepare_global` before it opened. Interning is inside it because an
+        edge to an entity written by a transaction that then rolls back would be an
+        edge to nothing.
+        """
+        stages = list(plan.stages)
+        edges = list(plan.edges)
+
+        with Stopwatch("swap", candidates_in=len(edges) + len(plan.dependencies)) as watch:
+            with self._knowledge.transaction():
+                removed = self._knowledge.delete_edges_by_parser(GLOBAL_PARSER)
+                edges.extend(self._materialize(plan.dependencies))
+                self._knowledge.add_edges(edges)
+                self._knowledge.gc_orphan_entities()
             watch.candidates_out = len(edges)
+            watch.detail = f"{removed} replaced"
         stages.append(_timing(watch))
 
         return GlobalLinkResult(
             edges=len(edges),
-            resolved=resolved,
-            unresolved=unresolved,
-            cross_repository=cross,
+            resolved=plan.resolved,
+            unresolved=plan.unresolved,
+            cross_repository=plan.cross_repository,
             trace=LinkTrace(
                 duration_ms=round(sum(stage.duration_ms for stage in stages), 3),
-                claims_considered=len(claims),
-                files_indexed=len(file_rows),
-                symbols_indexed=len(symbols),
+                claims_considered=plan.claims_considered,
+                files_indexed=plan.files_indexed,
+                symbols_indexed=plan.symbols_indexed,
                 stages=tuple(stages),
             ),
         )
+
+    def _materialize(self, pending: Sequence[PendingEdge]) -> list[EdgeRecord]:
+        """Intern the planned endpoints and turn the plan into real edges.
+
+        Runs inside the swap transaction. Interning is get-or-create by natural
+        key, so the same entity named by twenty declarations is one row.
+        """
+        interned: dict[str, int] = {}
+
+        def entity_id(record: EntityRecord) -> int:
+            found = interned.get(record.key)
+            if found is None:
+                found = self._knowledge.intern_entity(record)
+                interned[record.key] = found
+            return found
+
+        return [
+            EdgeRecord(
+                src_id=entity_id(edge.source),
+                dst_id=entity_id(edge.target),
+                type=EdgeType.DEPENDS_ON,
+                repo_id=edge.record.repo_id,
+                file_id=edge.record.file_id,
+                line_start=edge.record.line_start,
+                line_end=edge.record.line_end,
+                parser=GLOBAL_PARSER,
+            )
+            for edge in pending
+        ]
 
     def _resolve(
         self,
@@ -474,15 +594,19 @@ class ReferenceLinker:
 
     # -- dependencies and cross-repository edges -----------------------------
 
-    def _link_dependencies(self, index: ResolutionIndex, edges: list[EdgeRecord]) -> int:
-        """Turn declared dependencies into package and repository edges.
+    def _plan_dependencies(self, index: ResolutionIndex) -> tuple[list[PendingEdge], int]:
+        """Plan package and repository edges from declared dependencies.
 
-        A repository-to-repository edge is created only on **exact normalized-name
+        Writes nothing: entity *keys* are decided here and interned during the
+        swap, so a failure while planning cannot leave entities behind for a graph
+        that was never committed.
+
+        A repository-to-repository edge is planned only on **exact normalized-name
         equality within one ecosystem**, and only when exactly one managed
         repository provides that name (V1_SPEC §9).
         """
         if self._dependencies is None:
-            return 0
+            return [], 0
 
         # Counted as *relationships*, not as assertions. A monorepo whose root and
         # backend manifests both declare one shared package states the same
@@ -490,43 +614,40 @@ class ReferenceLinker:
         # provenanced edge — but reporting "2 cross-repository links" would describe
         # the manifests rather than the graph (V1_SPEC §9).
         cross_pairs: set[tuple[int, int]] = set()
-        repo_entities: dict[int, int] = {}
+        planned: list[PendingEdge] = []
 
-        def repository_entity(repo_id: int) -> int | None:
-            if repo_id in repo_entities:
-                return repo_entities[repo_id]
+        def repository_entity(repo_id: int) -> EntityRecord | None:
             name = index.repo_names.get(repo_id)
             slug = index.repo_slugs.get(repo_id)
             if name is None or not slug:
                 return None
-            entity_id = self._knowledge.intern_entity(
-                EntityRecord(
-                    type=EntityType.REPOSITORY,
-                    key=repository_key(slug),
-                    name=name,
-                    qualified_name=slug,
-                    repo_id=repo_id,
-                )
+            return EntityRecord(
+                type=EntityType.REPOSITORY,
+                key=repository_key(slug),
+                name=name,
+                qualified_name=slug,
+                repo_id=repo_id,
             )
-            repo_entities[repo_id] = entity_id
-            return entity_id
 
         for record in self._dependencies.list_for_repos(None):
             if record.role != "declared":
                 continue
-            source_id = repository_entity(record.repo_id)
-            if source_id is None:
+            source = repository_entity(record.repo_id)
+            if source is None:
                 continue
 
-            package_id = self._knowledge.intern_entity(
-                EntityRecord(
-                    type=EntityType.PACKAGE,
-                    key=package_key(record.ecosystem, record.normalized_name),
-                    name=record.name,
-                    qualified_name=f"{record.ecosystem}:{record.normalized_name}",
+            planned.append(
+                PendingEdge(
+                    source=source,
+                    target=EntityRecord(
+                        type=EntityType.PACKAGE,
+                        key=package_key(record.ecosystem, record.normalized_name),
+                        name=record.name,
+                        qualified_name=f"{record.ecosystem}:{record.normalized_name}",
+                    ),
+                    record=record,
                 )
             )
-            edges.append(self._dependency_edge(record, source_id, package_id))
 
             if record.ecosystem not in _REPOSITORY_ECOSYSTEMS:
                 continue
@@ -541,26 +662,13 @@ class ReferenceLinker:
                 # Nothing provides it, or more than one does. Both are honest
                 # "unknown", and picking a winner would be a guess (V1_SPEC §9).
                 continue
-            target_id = repository_entity(providers[0][0])
-            if target_id is None:
+            target = repository_entity(providers[0][0])
+            if target is None:
                 continue
-            edges.append(self._dependency_edge(record, source_id, target_id))
+            planned.append(PendingEdge(source=source, target=target, record=record))
             cross_pairs.add((record.repo_id, providers[0][0]))
 
-        return len(cross_pairs)
-
-    @staticmethod
-    def _dependency_edge(record: DependencyRecord, src_id: int, dst_id: int) -> EdgeRecord:
-        return EdgeRecord(
-            src_id=src_id,
-            dst_id=dst_id,
-            type=EdgeType.DEPENDS_ON,
-            repo_id=record.repo_id,
-            file_id=record.file_id,
-            line_start=record.line_start,
-            line_end=record.line_end,
-            parser=GLOBAL_PARSER,
-        )
+        return planned, len(cross_pairs)
 
 
 def _imported_names(parsed: ParsedFile) -> dict[str, str]:
