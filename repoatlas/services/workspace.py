@@ -6,6 +6,8 @@ receive an assembled workspace; none of them constructs storage itself.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +30,7 @@ from repoatlas.storage.sqlite.stores import (
 )
 from repoatlas.storage.sqlite.vectors import SqliteVectorIndex
 from repoatlas.sync.engine import SyncEngine
+from repoatlas.sync.lock import writer_lock
 
 
 @dataclass(slots=True)
@@ -70,6 +73,19 @@ class Workspace:
             except EmbeddingUnavailable:
                 self._embeddings = None
         return self._embeddings
+
+    @contextmanager
+    def writer_lock(self) -> Iterator[Path]:
+        """Hold the exclusive writer lock for this workspace's state database.
+
+        Every mutating command takes it; no read command does. The scope is the
+        database rather than a repository, because a single-repository sync still
+        rebuilds the one global graph they all share (ARCHITECTURE.md §9).
+        """
+        with writer_lock(
+            self.database.path, timeout=self.settings.storage.lock_timeout_seconds
+        ) as path:
+            yield path
 
     def sync_engine(self) -> SyncEngine:
         return SyncEngine(

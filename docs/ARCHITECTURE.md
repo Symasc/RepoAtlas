@@ -1021,10 +1021,143 @@ above covers the mtime hazard.
 Invariant 2 is the one that catches the entire class of stale-data bugs, and it is cheap to run over fixtures on
 every commit.
 
-### Concurrency
+### The synchronization transaction
 
-A sync takes an advisory lock row in `meta`. A second concurrent sync exits with a clear message rather than
-interleaving writes. Reads (`locate`, `ask`) are unaffected — WAL permits concurrent readers.
+An earlier version of this section claimed *"a sync takes an advisory lock row in `meta`"*. **No such lock
+existed**, and the global link pass was not atomic either. Both are now implemented, and this section describes
+what the code does.
+
+The property both of them serve:
+
+> A successful sync moves RepoAtlas from one complete logical knowledge state to another complete logical
+> knowledge state.
+
+#### Who owns which boundary
+
+| Stage | Commits | Owned by |
+|---|---|---|
+| repository row created / identity assigned | immediately | `RepositoryStore` |
+| `mark_sync_started` (status → `interrupted`) | immediately | `SyncEngine.sync_repository` |
+| stale file facts deleted, new facts written, per-file edges and claims | per file | `SyncEngine._index_file` |
+| detected metadata (languages, manifests, lockfiles) | per repository | `SyncEngine.sync_repository` |
+| **global graph replaced + every repository marked synchronized** | **one transaction** | **`SyncEngine.run`** |
+| embeddings | per batch, after the run | `SyncEngine.embed_pending` |
+
+Per-file work commits as it is produced. Holding one write transaction across a fifty-repository parse would block
+every other writer for the duration and buy nothing: a half-parsed repository is *recoverable* state, because its
+status still says `interrupted` and the next run redoes it.
+
+What must not commit early is the **claim that those facts are current**, and that is why the last two rows are one
+transaction. `SyncEngine.run` is the boundary that guarantees old complete state → new complete state.
+
+#### Global link: prepare, then swap
+
+`ReferenceLinker` splits the pass in two:
+
+1. **`prepare_global()`** reads every file row, symbol, standing claim and dependency record, resolves them, and
+   returns a `GlobalPlan` — the complete replacement graph, in memory. It **writes nothing**, including no interned
+   entities: planned endpoints are carried as natural keys, not row ids.
+2. **`commit_global(plan)`** opens one transaction and, inside it, deletes every `linker:global` edge, interns the
+   planned endpoints, inserts the complete new set, and collects orphans.
+
+The delete and the insert are therefore one commit. Another connection observes the previous complete graph or the
+new complete graph, because no committed state exists between them.
+
+The old shape was `DELETE … COMMIT`, then all the resolution work, then `INSERT … COMMIT`. Anything failing in that
+gap — an exception, a `SIGKILL`, a full disk — published a knowledge base whose cross-repository graph was **empty**
+while `status` still said `current`. Measured on a 320-file tree: preparing takes ~15 ms and holds no write lock;
+the swap holds it for ~0.8 ms.
+
+Nesting is what makes this expressible. `Database.transaction()` is **reentrant**: the outermost block owns the
+commit and inner ones join it, so each store method keeps its own transaction for when it is called alone, and a
+caller that needs a group of them to land together simply opens one around them.
+
+#### What "current" means
+
+`current` means file facts **and** the global graph correspond to the same successful run. Mechanically:
+`mark_sync_started` sets a repository to `interrupted` before any of its facts are written, and only
+`mark_many_synced` — called inside the swap transaction — sets it back to `ok`. So a run that fails anywhere,
+including in the link pass, leaves every repository it touched recorded as unfinished, which both stops `status`
+claiming currency and forces a full rehash next time.
+
+A generation counter was considered and rejected. Ordering already gives the guarantee: a repository is `ok` only
+if a full global rebuild committed after its facts did, and the rebuild is global, so it covers everything
+committed at that moment. A counter would add a column and a migration to express the same fact the sequence
+already expresses.
+
+One nuance worth stating rather than hiding: after a failed run, a repository that was **not** in that run's scope
+keeps its `ok` status, and the graph does not reflect the failed run's committed file facts. The workspace-level
+`index_state` is not `current` in that situation — the failed run's repositories report `interrupted` — so
+RepoAtlas does not claim the knowledge base is current. The per-repository line remains accurate about that
+repository's own files, which is what it has always meant.
+
+#### The writer lock
+
+`init` and `sync` hold an exclusive **`flock`** on `<database>.lock` for the whole command. Scope is one state
+database, so a single-repository sync takes the same lock as a full-root one — two runs over different
+repositories still rebuild the one graph they share, which makes them the same writer, not two.
+
+The lock is an OS advisory lock rather than a row, and that is the load-bearing choice:
+
+| | Lock row in `meta` | `flock` on a lock file |
+|---|---|---|
+| released on normal exit | needs a `finally` | kernel |
+| released on uncaught exception | needs a `finally` | kernel |
+| released on `SIGTERM` | needs a handler | kernel |
+| released on `SIGKILL` | **never** | kernel |
+| stale-lock recovery | pid check, heartbeat or timeout — each wrong somewhere | none needed |
+
+A row records an *intention*, and nothing revokes an intention when the holder dies. Every row-based scheme
+therefore needs a liveness heuristic, and pids are reused, container hostnames collide, and a staleness timeout
+either strands the lock or breaks it under a writer that was merely slow. The kernel already knows which processes
+are alive. The lock file's contents (pid, host, start time) are written for the error message only and are never
+consulted to decide whether the lock is held.
+
+`fcntl` is imported lazily, so a platform without POSIX advisory locking can still *read* an index; a writer there
+fails with a clear message rather than running unserialized.
+
+#### The second writer
+
+Waits up to `storage.lock_timeout_seconds` (default 30, overridable per container with
+`REPOATLAS_SYNC_LOCK_TIMEOUT`), then exits **5** with:
+
+```
+Another RepoAtlas synchronization is already in progress.
+
+Wait for it to finish and try again.
+
+Lock holder: pid=4127 host=atlas-1 since=2026-09-02T14:03:11+00:00
+```
+
+Bounded rather than indefinite, because a writer that never finishes must be reported rather than waited on in
+silence. A wait rather than an immediate refusal, because overlapping syncs are ordinary and the second one
+usually only needs a moment. Uncontended acquisition costs ~0.16 ms.
+
+#### Readers
+
+Read commands take **no** lock. WAL gives them a committed snapshot, so `locate`, `status`, `repos` and `ask` run
+unimpeded during a sync — measured at 0.2 ms median while swaps commit in a loop, and a reader sampling the graph
+throughout never observed a partial one.
+
+Two things had to change for that to be true. Opening the database used to stamp `schema_version` unconditionally,
+which made *opening* a write: a reader could then fail with `database is locked` against a running sync. It is now
+written only when it differs. And migrations, which run at open and so cannot be covered by the writer lock, apply
+under `BEGIN IMMEDIATE` with `user_version` re-read inside that transaction, so two processes opening a fresh
+database concurrently cannot both apply the same migration.
+
+`PRAGMA busy_timeout = 10000` is set on every connection. It is contention *behaviour*, not the synchronization
+protocol — it covers WAL checkpoints and the migration race above, and nothing relies on it for correctness.
+
+### Concurrency invariants (all tested)
+
+1. **At most one RepoAtlas knowledge-base writer is active for a state database.**
+2. **Global-link replacement is atomic**: readers observe either the previous complete graph or the new complete
+   graph.
+3. **A failed global-link rebuild cannot leave `status` claiming a graph state that was never successfully
+   committed.**
+
+`tests/adversarial/test_sync_atomicity.py` proves all three, using injected failures at four points of the swap and
+**real concurrent processes** — including `SIGTERM` and `SIGKILL` of a running writer — for the lock.
 
 ---
 
@@ -1684,3 +1817,12 @@ full reindex.
 | Identical constraints in two files stay two observations | Deduplicate them | Deduplicating identical text is not deduplicating provenance: which files ask for a package is a fact about the repository, and a summary that says "2 agreeing declarations" still has to be able to name both (§5) |
 | The linker reads dependency records, not the grouped view | Reuse the aggregation the renderer uses | Graph correctness must not inherit presentation semantics. Each declaration keeps its own provenanced edge; only the reported cross-repository *count* collapses to distinct repository pairs (§5, §10) |
 | `DependencyView` removed rather than kept alongside | Keep the singular-field model for compatibility | Its fields (`constraint`, `version`, `manifest_path`) are singular where several values genuinely exist, so keeping it would have preserved a shape whose whole problem is that it cannot be right. It had no caller outside tests (§5) |
+| The writer lock is an OS `flock` on a lock file | A `meta` row, a pid file, or a lease with a timeout | A row records an intention, and nothing revokes an intention when the holder is `SIGKILL`ed. Every row-based scheme then needs a liveness heuristic, and pids are reused, container hostnames collide, and a staleness timeout either strands the lock or breaks it under a slow writer. The kernel already tracks liveness (§9) |
+| The lock file's owner line is diagnostic only | Read it to decide whether the lock is held | The moment ownership is decided from file *contents*, the stale-lock problem is back. `flock` answers "is it held" without RepoAtlas parsing anything; the line exists so the error message can name the other process (§9) |
+| Lock scope is the state database, not the repository | Lock per repository, so two repository-scoped syncs can run at once | They are not independent writers: a single-repository sync rebuilds the one global graph they share, which is exactly why the link pass is global (§6). Correctness over write concurrency (§9) |
+| A contending writer waits, bounded, then exits 5 | Refuse immediately, or block indefinitely | Refusing immediately makes an ordinary overlap — a cron run beside a manual one — a failure the user has to retry by hand. Blocking forever turns a wedged writer into a silent hang. A bounded wait handles the common case and still reports the pathological one (§9) |
+| Global linking is prepare-then-swap | One long transaction around the whole pass | The expensive half is resolution, and holding SQLite's single write lock across it would block every other writer for the duration. Preparing outside and swapping inside gives the same atomicity for ~0.8 ms of held lock instead of ~15 ms (§9) |
+| `Database.transaction()` is reentrant | Add a separate "outer transaction" API, or drop the per-store transactions | Each store method is right to commit when called alone. Making nesting join the outermost block lets a caller group them without every store growing a second code path — and without the trap where an inner `with` silently commits its parent (§9) |
+| Repositories are marked synchronized after the swap, in the same transaction | Mark each one as its parse finishes | Parsing finishing is not the sync succeeding. Marking early is precisely what let a failed link pass leave every repository claiming `current` over a graph that had been deleted and never rebuilt (§9) |
+| Sequence, not a generation counter, ties graph state to repository state | Add `sync_generation` to `meta` and `repositories` | The rebuild is global, so it covers everything committed at that moment; a repository is `ok` only if a rebuild committed after its facts did. A counter would need a column and a migration to state what the ordering already states (§9) |
+| `schema_version` is written only when it changes | Stamp it on every open | Stamping made *opening* the database a write, so `locate` and `status` competed for SQLite's write lock with a running sync and could fail with `database is locked`. Readers must not need a writer's privileges (§9) |

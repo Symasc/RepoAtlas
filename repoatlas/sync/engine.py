@@ -1,7 +1,20 @@
 """Sync execution (ARCHITECTURE.md §6, §9).
 
-Runs the pipeline for one repository: enumerate, diff, delete stale facts, parse,
-persist, link, chunk, index, GC.
+Runs the pipeline for one repository — enumerate, diff, delete stale facts, parse,
+persist, link, chunk, index, GC — and owns the **lifecycle of a whole run** in
+:meth:`SyncEngine.run`.
+
+The run boundary is where the synchronization invariant lives:
+
+> A successful sync moves RepoAtlas from one complete logical knowledge state to
+> another complete logical knowledge state.
+
+Per-repository file facts commit as they are produced, because holding a write
+transaction open across a fifty-repository parse would block every other writer
+for the duration and gain nothing. What must *not* commit early is the claim that
+those facts are current: the cross-repository graph is rebuilt once, at the end,
+over all of them, so a repository is marked synchronized only after that rebuild
+has committed — in the same transaction (ARCHITECTURE.md §9).
 """
 
 from __future__ import annotations
@@ -21,10 +34,10 @@ from repoatlas.graph.linker import GlobalLinkResult, ReferenceLinker
 from repoatlas.indexing.chunking import chunk_content
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.parsing import EntityType, ParsedFile, ParseDiagnostic, Severity
-from repoatlas.models.reports import RepositorySyncReport
+from repoatlas.models.reports import RepositorySyncReport, SyncReport
 from repoatlas.models.repository import IndexedFile, Repository, repository_slug
 from repoatlas.parsers.registry import ParserRegistry
-from repoatlas.storage.protocols import ChunkRecord, EntityRecord, FileFacts
+from repoatlas.storage.protocols import ChunkRecord, EntityRecord, FileFacts, SyncCompletion
 from repoatlas.storage.sqlite.database import SCHEMA_VERSION
 from repoatlas.storage.sqlite.stores import (
     SqliteDependencyStore,
@@ -141,8 +154,17 @@ class SyncEngine:
         self._repositories.assign_slug(repo.id, slug)
         return repo.model_copy(update={"slug": slug})
 
-    def sync_repository(self, repo: Repository, *, full: bool = False) -> RepositorySyncReport:
-        """Bring one repository's index in line with its current working tree."""
+    def sync_repository(
+        self, repo: Repository, *, full: bool = False
+    ) -> tuple[RepositorySyncReport, SyncCompletion]:
+        """Bring one repository's index in line with its current working tree.
+
+        Returns the report *and* the completion the run will apply once the global
+        graph has been rebuilt. The repository is left recorded as unfinished until
+        then, deliberately: parsing having succeeded is not the sync having
+        succeeded, and a run that dies here must be redone rather than trusted
+        (ARCHITECTURE.md §9).
+        """
         if repo.id is None:
             raise ValueError("repository must be persisted before sync")
 
@@ -213,14 +235,15 @@ class SyncEngine:
             manifests=sorted(manifests),
             lockfiles=sorted(lockfiles),
         )
-        self._repositories.mark_sync_finished(
-            repo_id,
+
+        completion = SyncCompletion(
+            repo_id=repo_id,
             head_sha=git_state.head_sha,
             is_dirty=git_state.is_dirty,
             branch=git_state.branch,
         )
 
-        return RepositorySyncReport(
+        report = RepositorySyncReport(
             repository=repo.name,
             branch=git_state.branch,
             is_dirty=git_state.is_dirty,
@@ -236,6 +259,7 @@ class SyncEngine:
             rehash_reason=plan.rehash.reason,
             diagnostics=tuple(diagnostics),
         )
+        return report, completion
 
     @staticmethod
     def _note_manifest(rel_path: str, manifests: set[str], lockfiles: set[str]) -> None:
@@ -436,16 +460,82 @@ class SyncEngine:
         self._dependencies.replace_for_file(file_id, records)
         return len(records), diagnostics
 
+    def run(
+        self,
+        repositories: Sequence[Repository],
+        *,
+        full: bool = False,
+        scope: str = "global",
+        embed_repo_ids: Sequence[int] | None = None,
+    ) -> SyncReport:
+        """One synchronization run, from working tree to complete knowledge state.
+
+        This method owns the run's transaction boundary, and the ordering is the
+        whole point:
+
+        1. every in-scope repository is parsed and its file facts committed, with
+           its status left ``interrupted`` and its completion held back;
+        2. the replacement global graph is computed, touching nothing;
+        3. **one transaction** swaps the graph in and marks every repository of
+           this run synchronized — so the graph and the currency claim it justifies
+           become visible together;
+        4. embedding runs last, over what changed.
+
+        A failure before step 3 leaves the previous complete graph and every
+        in-scope repository recorded as unfinished, which is what makes the next
+        run redo the work instead of trusting it (ARCHITECTURE.md §9).
+
+        The caller must already hold the writer lock; see
+        :func:`repoatlas.sync.lock.writer_lock`.
+        """
+        reports: list[RepositorySyncReport] = []
+        completions: list[SyncCompletion] = []
+
+        for repo in repositories:
+            # Scope decides which repositories a run may forget, exactly as it
+            # decides which it may index: a repository-scoped run never touches
+            # another row.
+            if self.forget_if_missing(repo):
+                continue
+            self.ensure_repository_entity(repo)
+            report, completion = self.sync_repository(repo, full=full)
+            reports.append(report)
+            completions.append(completion)
+
+        # Computed outside the transaction: this is the expensive half, and none
+        # of it touches the graph it is going to replace.
+        plan = self._linker.prepare_global()
+
+        with self._knowledge.transaction():
+            link = self._linker.commit_global(plan)
+            self._repositories.mark_many_synced(completions)
+
+        # Embedding runs last and only over what changed. It is the one stage
+        # allowed to be unavailable without failing the sync (V1_SPEC §14), so it
+        # sits outside the transaction that decides whether the run succeeded.
+        embedding = self.embed_pending(embed_repo_ids)
+
+        return SyncReport(
+            repositories=tuple(reports),
+            scope=scope,
+            linked_references=link.resolved,
+            unresolved_references=link.unresolved,
+            cross_repository_edges=link.cross_repository,
+            embedded_chunks=embedding.embedded,
+            pending_embeddings=embedding.pending,
+            embedding_detail=embedding.detail,
+            link_trace=link.trace,
+        )
+
     def link_global(self) -> GlobalLinkResult:
         """Resolve every standing reference against everything now indexed.
 
         Runs once at the end of a sync run, including a single-repository sync,
         because a change in one repository can create or invalidate a
-        cross-repository edge in another (ARCHITECTURE.md §6).
+        cross-repository edge in another (ARCHITECTURE.md §6). Prepare and swap
+        are separate phases; see :class:`~repoatlas.graph.linker.ReferenceLinker`.
         """
-        result = self._linker.link_global()
-        self._knowledge.gc_orphan_entities()
-        return result
+        return self._linker.link_global()
 
     def embed_pending(self, repo_ids: Sequence[int] | None = None) -> EmbeddingResult:
         """Embed chunk text that has no vector for the configured model.

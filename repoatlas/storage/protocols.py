@@ -7,6 +7,7 @@ so the backend can be replaced without touching a caller.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Protocol
 
@@ -48,6 +49,24 @@ class EdgeRecord(BaseModel):
     line_start: int | None = None
     line_end: int | None = None
     parser: str | None = None
+
+
+class SyncCompletion(BaseModel):
+    """One repository's finished sync, held back until the run as a whole succeeds.
+
+    A sync writes a repository's file facts long before the run is over, and the
+    cross-repository graph is rebuilt once at the end over all of them. Recording
+    "synchronized" at the first of those two moments is what let a failed link
+    pass leave every repository claiming to be current (ARCHITECTURE.md §9), so
+    the git state observed during the run is carried here and applied afterwards.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    repo_id: int
+    head_sha: str | None = None
+    is_dirty: bool = False
+    branch: str | None = None
 
 
 class ChunkRecord(BaseModel):
@@ -252,6 +271,8 @@ class RepositoryStore(Protocol):
     def get_by_path(self, path: Path) -> Repository | None: ...
     def list_all(self) -> list[Repository]: ...
     def delete(self, repo_id: int) -> None: ...
+    def mark_sync_started(self, repo_id: int) -> None: ...
+    def mark_many_synced(self, completions: Sequence[SyncCompletion]) -> None: ...
 
 
 class FileStore(Protocol):
@@ -261,6 +282,7 @@ class FileStore(Protocol):
 
 
 class KnowledgeStore(Protocol):
+    def transaction(self) -> AbstractContextManager[None]: ...
     def replace_file_facts(self, file_id: int, facts: FileFacts) -> None: ...
     def intern_entity(self, entity: EntityRecord) -> int: ...
     def add_edges(self, edges: Sequence[EdgeRecord]) -> None: ...
