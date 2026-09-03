@@ -40,7 +40,7 @@ from repoatlas.retrieval.ranking import (
     enforce_tier_order,
     fuse,
 )
-from repoatlas.storage.protocols import ChunkHit, VectorHit
+from repoatlas.storage.protocols import ChunkHit, FileHit, VectorHit
 from repoatlas.storage.sqlite.search import SqliteSearchIndex
 from repoatlas.storage.sqlite.stores import SqliteKnowledgeStore
 from repoatlas.storage.sqlite.vectors import SqliteVectorIndex
@@ -177,10 +177,18 @@ class Retriever:
         if exact:
             ranked_lists.append(exact)
 
+        # File identity is searched *before* suppression is decided, because it is
+        # one of the two ways a named term can be proven to exist. Deciding
+        # suppression on content alone is what made RepoAtlas answer "no indexed
+        # evidence matches" for `src/config.py` while holding that exact file.
+        files, proven = self._stage_files([*literal_terms, *analysis.terms], scopes, stages)
+        if files:
+            ranked_lists.append(files)
+
         # A question that names something specific and does not find it is not
         # answered by anything associative. Decided once, here, and honoured by
         # every stage that follows. See _suppress_associative.
-        suppressed = self._suppress_associative(definite_terms, exact)
+        suppressed = self._suppress_associative(definite_terms, exact, proven)
 
         lexical = self._stage_lexical(question, scopes, stages, suppressed=suppressed)
         ranked_lists.extend(lexical)
@@ -302,7 +310,7 @@ class Retriever:
                         for hit in self._search.search_literal(term, scope, self._limits.per_source)
                     )
             watch.candidates_out = len(hits)
-            watch.detail = f"{len(literal_terms)} literal term(s)"
+            watch.detail = f"{len(literal_terms)} literal term(s) in content"
         stages.append(_recorded(watch))
         return hits
 
@@ -373,6 +381,9 @@ class Retriever:
             # an exact-name hit on one of them would enter as DETERMINISTIC — the
             # strongest tier — for a question whose subject does not exist.
             named = list(literal_terms) if suppressed is not None else [*literal_terms, *terms]
+            #: Split for the trace: an exact entity-name match and a full-text one
+            #: are different claims, and the trace must not blur them.
+            by_name = 0
             for scope in scopes:
                 for hit in self._search.find_entities_by_name(
                     named, scope, self._limits.per_source
@@ -381,6 +392,7 @@ class Retriever:
                         continue
                     seen_entities.add(hit.entity_id)
                     entity_ids.append(hit.entity_id)
+                    by_name += 1
                     if hit.path is None or hit.line_start is None:
                         continue
                     candidates.append(
@@ -428,14 +440,74 @@ class Retriever:
                         )
                     )
             watch.candidates_out = len(candidates)
-            if suppressed is not None:
-                watch.detail = suppressed
+            watch.detail = (
+                suppressed
+                if suppressed is not None
+                else f"{by_name} exact entity name, {len(seen_entities) - by_name} full-text"
+            )
         stages.append(_recorded(watch))
         return candidates, entity_ids
 
+    def _stage_files(
+        self,
+        names: list[str],
+        scopes: list[list[int] | None],
+        stages: list[StageTiming],
+    ) -> tuple[list[EvidenceCandidate], set[str]]:
+        """Files whose own name or path the question spells out.
+
+        A file's path is a deterministic fact about the repository, so a match is
+        `DETERMINISTIC` and carries **no line range**: it is a claim about the
+        file, not about any line in it. Citing line 1 to satisfy a renderer would
+        be manufacturing provenance for a fact that has none (V1_SPEC §11).
+
+        Every match is returned. Three files named `config.py` are three answers to
+        a question the repository genuinely leaves open, and silently picking one
+        would be RepoAtlas guessing. Ranking still says which is most specific: a
+        full path precedes a trailing sub-path, which precedes a bare basename.
+
+        The second return value is the set of terms this stage *proved to exist*.
+        Suppression consumes it, which is the whole reason the stage runs this
+        early — see :meth:`_suppress_associative`.
+        """
+        with Stopwatch("file") as watch:
+            hits: dict[tuple[str, str], FileHit] = {}
+            for scope in scopes:
+                for hit in self._search.find_files_by_path(names, scope, self._limits.per_source):
+                    key = (hit.repository, hit.path)
+                    current = hits.get(key)
+                    if current is None or hit.specificity < current.specificity:
+                        hits[key] = hit
+
+            ordered = sorted(
+                hits.values(), key=lambda hit: (hit.specificity, hit.repository, hit.path)
+            )
+            candidates = [
+                EvidenceCandidate(
+                    repository=hit.repository,
+                    path=hit.path,
+                    line_start=None,
+                    line_end=None,
+                    text="",
+                    score=hit.score,
+                    source=EvidenceSource.FILE,
+                    tier=EvidenceTier.DETERMINISTIC,
+                    description=_file_reason(hit),
+                    entity_id=hit.entity_id,
+                )
+                for hit in ordered
+            ]
+            paths = sum(1 for hit in ordered if hit.specificity < 2)
+            watch.candidates_out = len(candidates)
+            watch.detail = f"{paths} exact path, {len(ordered) - paths} exact basename"
+        stages.append(_recorded(watch))
+        return candidates, {hit.term for hit in ordered}
+
     @staticmethod
     def _suppress_associative(
-        literal_terms: list[str], exact: list[EvidenceCandidate]
+        literal_terms: list[str],
+        exact: list[EvidenceCandidate],
+        proven_files: set[str] | None = None,
     ) -> str | None:
         """Whether every associative source would be answering a different question.
 
@@ -458,10 +530,14 @@ class Retriever:
         to keep the funnel open: the question is answerable, and the rest of the
         stages are how the surrounding context is found.
         """
-        if literal_terms and not exact:
-            named = ", ".join(literal_terms[:3])
-            return f"suppressed: none of the named terms exist ({named})"
-        return None
+        if not literal_terms or exact:
+            return None
+        # A term the file index resolved exists just as definitely as one found in
+        # chunk text. `src/config.py` is not absent because no file *mentions* it.
+        if proven_files and any(term in proven_files for term in literal_terms):
+            return None
+        named = ", ".join(literal_terms[:3])
+        return f"suppressed: none of the named terms exist ({named})"
 
     def _stage_semantic(
         self,
@@ -651,6 +727,20 @@ class Retriever:
             tier=EvidenceTier.ASSOCIATIVE,
             description="semantically similar",
         )
+
+
+def _file_reason(hit: FileHit) -> str:
+    """Why this file matched, in the user's own vocabulary.
+
+    Stated as identity, never as content: "file name matches config.py" cannot be
+    misread as "this file contains the string config.py", and the two are
+    different facts.
+    """
+    if hit.specificity == 0:
+        return f"file path is {hit.term}"
+    if hit.specificity == 1:
+        return f"file path ends with {hit.term}"
+    return f"file name is {hit.term}"
 
 
 def _recorded(watch: Stopwatch) -> StageTiming:

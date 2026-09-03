@@ -131,7 +131,10 @@ def fact_snapshot(workspace: Workspace) -> dict[str, object]:
     fact — and everything else is ordered so the comparison is stable.
     """
     files = workspace.database.execute(
-        "SELECT r.name, f.rel_path, f.content_hash FROM files f "
+        # `basename` is generated from `rel_path`, and it is what exact filename
+        # lookup seeks on. Including it keeps the equivalence invariant covering
+        # the column retrieval actually reads (ARCHITECTURE.md §3, §10).
+        "SELECT r.name, f.rel_path, f.basename, f.content_hash FROM files f "
         "JOIN repositories r ON r.id = f.repo_id ORDER BY r.name, f.rel_path"
     ).fetchall()
     entities = workspace.database.execute(
@@ -156,10 +159,16 @@ def fact_snapshot(workspace: Workspace) -> dict[str, object]:
         "ORDER BY r.name, f.rel_path, u.line_start, target_key"
     ).fetchall()
     chunks = workspace.database.execute(
-        "SELECT r.name, f.rel_path, c.line_start, c.line_end, c.content_hash "
+        # The split columns are part of the state: they decide whether a literal
+        # straddling a chunk boundary is recoverable, so an incremental sync that
+        # reproduced the text but not the seam metadata would not be equivalent.
+        # They also make the ordering total — several pieces of one span share a
+        # line range, so line_start alone left the comparison order undefined.
+        "SELECT r.name, f.rel_path, c.line_start, c.line_end, c.content_hash, "
+        "c.span_index, c.split_index, c.split_total "
         "FROM chunks c JOIN files f ON f.id = c.file_id "
         "JOIN repositories r ON r.id = c.repo_id "
-        "ORDER BY r.name, f.rel_path, c.line_start"
+        "ORDER BY r.name, f.rel_path, c.span_index, c.split_index, c.line_start"
     ).fetchall()
     return {
         "files": [tuple(r) for r in files],

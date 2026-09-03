@@ -27,7 +27,9 @@ _RRF_K = 60.0
 #: candidate is treated as redundant rather than as additional context.
 _OVERLAP_THRESHOLD = 0.5
 
-_Key = tuple[str, str, int, int]
+#: What makes two candidates "the same evidence". A file-level candidate carries
+#: no line range, so ``None`` is part of the key rather than a value to fill in.
+_Key = tuple[str, str, int | None, int | None]
 
 
 class Reranker(Protocol):
@@ -52,6 +54,23 @@ class NoopReranker:
 
 def _key(candidate: EvidenceCandidate) -> _Key:
     return (candidate.repository, candidate.path, candidate.line_start, candidate.line_end)
+
+
+def _ordering(key: _Key) -> tuple[str, str, bool, int, int]:
+    """Tie-break within a tier and score: specific evidence before coarse.
+
+    A span names the lines it is about; a file-level match names only the file. So
+    when the two agree exactly on how strongly they were retrieved, the one that
+    says more goes first — which is why "where is SERVICE_HOST set in
+    src/config.py?" leads with the assignment rather than with the filename that
+    also matched. It is a tie-break, not a tier: a file match still outranks
+    everything associative.
+
+    It also keeps the ordering total in the presence of ``None``, which comparing
+    the raw keys would not.
+    """
+    repository, path, start, end = key
+    return (repository, path, start is None, start or 0, end or 0)
 
 
 def fuse(
@@ -104,7 +123,7 @@ def fuse(
             if key[0] == primary_repository:
                 scores[key] += primary_boost
 
-    ordered = sorted(scores, key=lambda key: (tiers[key], -scores[key], key))
+    ordered = sorted(scores, key=lambda key: (tiers[key], -scores[key], _ordering(key)))
     return [
         best[key].model_copy(update={"score": scores[key], "tier": tiers[key]}) for key in ordered
     ]
@@ -130,14 +149,38 @@ def enforce_tier_order(candidates: Sequence[EvidenceCandidate]) -> list[Evidence
 
 
 def _overlap(a: EvidenceCandidate, b: EvidenceCandidate) -> float:
-    """Fraction of the shorter span that the two candidates share."""
+    """Fraction of the shorter span that the two candidates share.
+
+    A file-level candidate overlaps nothing: it makes no claim about any line, so
+    there is no span for a line-level candidate to repeat. Treating it as covering
+    the whole file would delete the very evidence that answers the question, and
+    treating a span as covering the file would delete the filename match that
+    proves the file exists — the two are different facts and both are kept.
+    """
     if a.repository != b.repository or a.path != b.path:
         return 0.0
-    shared = min(a.line_end, b.line_end) - max(a.line_start, b.line_start) + 1
+    if a.line_start is None or b.line_start is None:
+        return 0.0
+    a_end = a.line_end if a.line_end is not None else a.line_start
+    b_end = b.line_end if b.line_end is not None else b.line_start
+    shared = min(a_end, b_end) - max(a.line_start, b.line_start) + 1
     if shared <= 0:
         return 0.0
-    shortest = min(a.line_end - a.line_start + 1, b.line_end - b.line_start + 1)
+    shortest = min(a_end - a.line_start + 1, b_end - b.line_start + 1)
     return shared / shortest if shortest else 0.0
+
+
+def _contains(kept: EvidenceCandidate, candidate: EvidenceCandidate) -> bool:
+    """Whether ``kept`` already covers every line ``candidate`` cites."""
+    if kept.repository != candidate.repository or kept.path != candidate.path:
+        return False
+    if kept.line_start is None or candidate.line_start is None:
+        # Two file-level candidates for one file are the same candidate; fusion
+        # has already collapsed them by key, so anything reaching here differs.
+        return kept.is_file_level and candidate.is_file_level
+    kept_end = kept.line_end if kept.line_end is not None else kept.line_start
+    end = candidate.line_end if candidate.line_end is not None else candidate.line_start
+    return kept.line_start <= candidate.line_start and kept_end >= end
 
 
 def deduplicate(
@@ -155,16 +198,7 @@ def deduplicate(
     """
     kept: list[EvidenceCandidate] = []
     for candidate in candidates:
-        redundant = any(
-            (
-                k.repository == candidate.repository
-                and k.path == candidate.path
-                and k.line_start <= candidate.line_start
-                and k.line_end >= candidate.line_end
-            )
-            or _overlap(k, candidate) > threshold
-            for k in kept
-        )
+        redundant = any(_contains(k, candidate) or _overlap(k, candidate) > threshold for k in kept)
         if not redundant:
             kept.append(candidate)
     return kept

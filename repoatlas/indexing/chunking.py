@@ -22,6 +22,17 @@ class Chunk:
     line_start: int
     line_end: int
     text: str
+    #: Which line span of the file this chunk came from.
+    span_index: int = 0
+    #: Which piece of that span this is, and how many pieces the span became.
+    #:
+    #: A span whose text exceeds the character cap is cut, and the cut is what
+    #: used to decide whether a literal was findable at all. Recording where each
+    #: piece sits makes the cut reversible: exact search stitches adjacent pieces
+    #: back together across the seam, so the cap bounds *evidence size* only and
+    #: no longer bounds *discoverability* (V1_SPEC §14).
+    split_index: int = 0
+    split_total: int = 1
 
     @property
     def token_estimate(self) -> int:
@@ -59,13 +70,21 @@ def chunk_content(
         spans = _window_spans(len(lines), config)
 
     chunks: list[Chunk] = []
-    for start, end in spans:
+    for span_index, (start, end) in enumerate(spans):
         text = "\n".join(lines[start - 1 : end])
         if not text.strip():
             continue
+        pieces = _bounded(text, config.max_chunk_chars)
         chunks.extend(
-            Chunk(line_start=start, line_end=end, text=piece)
-            for piece in _bounded(text, config.max_chunk_chars)
+            Chunk(
+                line_start=start,
+                line_end=end,
+                text=piece,
+                span_index=span_index,
+                split_index=split_index,
+                split_total=len(pieces),
+            )
+            for split_index, piece in enumerate(pieces)
         )
     return chunks
 

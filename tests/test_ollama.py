@@ -81,7 +81,7 @@ def test_complete_posts_the_expected_request() -> None:
     assert body["options"]["temperature"] == 0.0
     assert body["messages"] == [{"role": "user", "content": "hello"}]
     # Constrained decoding: the answer schema is sent, not just requested in prose.
-    assert body["format"]["properties"].keys() >= {"summary", "findings", "unknowns"}
+    assert body["format"]["properties"].keys() >= {"summary", "hypotheses", "unknowns"}
     assert response.content == '{"summary":"s"}'
 
 

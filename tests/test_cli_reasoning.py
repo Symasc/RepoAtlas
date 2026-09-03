@@ -45,7 +45,7 @@ def scripted(monkeypatch: pytest.MonkeyPatch, *responses: str, available: bool =
 ANSWER = json.dumps(
     {
         "summary": "SERVICE_HOST comes from the Salt deployment layer.",
-        "findings": [
+        "hypotheses": [
             {
                 "statement": "The service reads SERVICE_HOST from the environment.",
                 "confidence": 0.9,
@@ -99,9 +99,9 @@ def test_debug_separates_facts_from_hypotheses(
     scripted(monkeypatch, ANSWER)
     result = run_in(indexed, "debug", "SERVICE_HOST is empty at startup")
     assert result.exit_code == ExitCode.OK, result.output
-    assert "FACTS" in result.output
-    assert "HYPOTHESES" in result.output
-    assert "UNKNOWNS" in result.output
+    assert "VERIFIED EVIDENCE" in result.output
+    assert "HYPOTHESIS" in result.output
+    assert "UNKNOWN" in result.output
     assert "NEXT" in result.output
 
 
@@ -118,7 +118,7 @@ def test_fabricated_citation_is_stripped_before_display(
     fabricated = json.dumps(
         {
             "summary": "It is set in config/secrets.yaml.",
-            "findings": [
+            "hypotheses": [
                 {
                     "statement": "The value comes from config/secrets.yaml.",
                     "confidence": 0.99,
@@ -199,7 +199,7 @@ def test_json_output_is_the_validated_answer(
     assert result.exit_code == ExitCode.OK
     payload = json.loads(result.output)
     assert payload["summary"]
-    assert payload["findings"][0]["evidence"][0]["repository"] == "python-service"
+    assert payload["hypotheses"][0]["evidence"][0]["repository"] == "python-service"
 
 
 def test_verbose_reports_grounding(indexed: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -213,7 +213,7 @@ def test_verbose_reports_dropped_citations(indexed: Path, monkeypatch: pytest.Mo
     fabricated = json.dumps(
         {
             "summary": "s",
-            "findings": [
+            "hypotheses": [
                 {
                     "statement": "invented",
                     "confidence": 0.9,
@@ -235,7 +235,7 @@ def test_verbose_reports_dropped_citations(indexed: Path, monkeypatch: pytest.Mo
     scripted(monkeypatch, fabricated)
     result = run_in(indexed, "ask", "Where is SERVICE_HOST?", "--verbose")
     assert "1 citation(s) dropped" in result.output
-    assert "1 finding(s) demoted" in result.output
+    assert "1 hypothesis(es) demoted" in result.output
 
 
 def test_reasoning_respects_explicit_repository(

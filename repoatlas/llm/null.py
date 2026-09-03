@@ -19,7 +19,7 @@ INSUFFICIENT_EVIDENCE = "INSUFFICIENT EVIDENCE"
 
 
 class NullBackend:
-    """Always answers ``INSUFFICIENT EVIDENCE`` with no findings."""
+    """Always answers ``INSUFFICIENT EVIDENCE`` with no hypotheses."""
 
     id = "null"
 
@@ -32,7 +32,7 @@ class NullBackend:
         del messages, tools, response_schema
         answer = RepoAtlasAnswer(
             summary=INSUFFICIENT_EVIDENCE,
-            findings=[],
+            hypotheses=[],
             unknowns=["No reasoning model is configured, so no analysis was performed."],
             next_check=None,
         )

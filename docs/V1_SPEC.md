@@ -901,6 +901,23 @@ Salt state IDs
 **Vector search must not replace exact search.** Where the lexical index cannot guarantee exactness (tokenizer
 limits), results are verified against file content before being presented as exact matches.
 
+#### Exact search must not depend on how content was stored
+
+`filenames` above is a requirement about the file, not about its contents. An indexed file must be findable by the
+name it has on disk — its basename, its whole relative path, or a trailing sub-path on a segment boundary — whether
+or not any text inside the repository happens to mention that name. Matching is exact in all three shapes:
+`onfig.py` finds nothing, and RepoAtlas never falls back to fuzzy pathname search. When several files share a
+name, **all** of them are returned, ordered from most to least specific; choosing one would be RepoAtlas answering
+a question the repository leaves open.
+
+A file matched this way is evidence about the file, so it cites the file and **no line number**. Provenance is
+never synthesized to satisfy a renderer (§11).
+
+Storage layout must likewise not decide discoverability. Chunk boundaries — including the character cap that
+bounds a file with no line structure — exist to bound *evidence size*. A literal that straddles one of them is
+still present in the repository, and exact search must still find it. Both properties are asserted in the
+adversarial suite in each direction: what exists is found, and what does not exist is still refused (§2).
+
 ### Semantic search
 
 Local semantic retrieval with a local embedding model, backend replaceable, no paid APIs. Helps with:
@@ -1681,6 +1698,9 @@ is not a running container. Anyone taking V1 to a real deployment should rebuild
 - [x] No git command RepoAtlas runs can execute repository-controlled code — content filters, hooks, fsmonitor,
       pagers, credential helpers, diff drivers or aliases (§17, `ARCHITECTURE.md` §8) —
       `tests/adversarial/test_git_execution_boundary.py`
+- [x] A valid citation cannot launder unsupported prose, no free-text field may name a repository object that was
+      not supplied, and repository text cannot forge prompt structure (§15, `ARCHITECTURE.md` §11) —
+      `tests/adversarial/test_answer_trust_model.py`
 
 ### Adversarial validation pass — **COMPLETE**
 
