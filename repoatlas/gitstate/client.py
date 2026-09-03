@@ -32,6 +32,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from repoatlas.security import is_secret_path
+
 #: Subcommands that read refs, the object database or the index, and never
 #: compare a working-tree file against it. Adding to this list is a security
 #: decision: the test is not "is it read-only" but "can it spawn a process".
@@ -300,9 +302,20 @@ def _worktree_differs_from_index(repo_path: Path, entries: list[tuple[str, str, 
 
     Stops at the first difference: the answer is a boolean, and a dirty tree is
     usually dirty early.
+
+    Files the built-in secret policy claims are **skipped without being read**.
+    Answering "is this tree dirty?" is not a reason to open a private key: the
+    guarantee is that such a file is never read, and it would be a strange
+    guarantee that held everywhere except the one place that hashes every tracked
+    file (V1_SPEC §17). The narrowed meaning is the useful one anyway — an edit to
+    an excluded file cannot change a single fact RepoAtlas stores, so counting it
+    as dirtiness would force a rehash that can only reproduce what is already
+    there.
     """
     for mode, sha, rel_path in entries:
         if mode == _MODE_GITLINK:  # a submodule has no blob in this repository
+            continue
+        if is_secret_path(rel_path):
             continue
         absolute = repo_path / rel_path
         if _blob_hash(absolute, mode) != sha:

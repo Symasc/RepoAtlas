@@ -1682,19 +1682,93 @@ Repositories are **untrusted input**. Static analysis only.
 
 ### Secrets
 
-Patterns `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa`, `id_ed25519` are excluded **at enumeration**, before content
-is read. Nothing excluded there can reach chunks, embeddings, prompts or logs, because those stages only ever see
-enumerated files.
+Three invariants, all tested:
 
-That single choke point is also the seam for stronger scanning later: a content-based detector (entropy, provider
-key patterns) plugs into the same filter and gains the same guarantee, with no changes downstream.
+> **Invariant.** Built-in obvious-secret filename checks are *security policy, not user preference*, and cannot be
+> negated by `.repoatlasignore`.
 
-Logging never includes file content — only paths, line numbers and counts.
+> **Invariant.** An excluded secret file is rejected **before its contents are parsed, chunked, embedded, retrieved,
+> serialized into prompts, or logged** — and before it is opened at all.
 
-Each of these is asserted separately, at every stage the content could otherwise reach — enumeration, chunks, the
-FTS index, embeddings, entities, evidence sets, the model prompt and `--verbose` output. A single choke point is
-only a guarantee if the stages behind it genuinely depend on it, and a test per stage is what keeps that true as
-stages are added.
+> **Invariant.** Filename-case variation cannot bypass a built-in secret exclusion.
+
+**The policy.** `repoatlas/security.py` holds the single authority, `is_secret_path`. It matches the **basename**,
+**case-folded**, against the glob patterns in `SECRET_PATTERNS`:
+
+| Pattern | Semantics | Excluded | Still indexed |
+|---|---|---|---|
+| `.env` | exact basename | `.env`, `.ENV`, `.Env`, `.eNv` | `env`, `env.py`, `.envrc`, `dotenv.md` |
+| `.env.*` | basename prefix `.env.` | `.env.local`, `.ENV.PRODUCTION` | `my.env.backup`, `.envrc` |
+| `*.pem` | basename suffix | `server.pem`, `server.PeM`, `tls.private.PEM` | `server.pem.txt`, `pem_notes.md` |
+| `*.key` | basename suffix | `private.KEY`, `service.production.KEY` | `monkey.py`, `keyboard.txt`, `key_rotation.md` |
+| `id_rsa` | exact basename | `id_rsa`, `ID_RSA`, `Id_Rsa` | `id_rsa.pub`, `id_rsa_notes.txt` |
+| `id_ed25519` | exact basename | `id_ed25519`, `ID_ED25519` | `id_ed25519.pub`, `id_ed25519_notes.txt` |
+
+Public keys (`.pub`) stay indexable: a public key is not secret, and hiding it loses real deployment evidence.
+`.envrc` is direnv configuration and is deliberately outside the V1 policy.
+
+Matching uses `fnmatch.fnmatchcase` on a `casefold`ed name rather than `fnmatch`, which is not a stylistic
+preference. `fnmatch` runs its input through `os.path.normcase` — a lowercase on Windows and macOS, a no-op on
+Linux — so *the security behaviour of identical code differed by platform*. That is how `.ENV`, `ID_RSA` and
+`server.PEM` were being indexed on Linux while the same build excluded them on a Mac. Folding explicitly gives one
+answer everywhere. `casefold` rather than `lower` because where the two differ, `casefold` folds harder, and for a
+security comparison the aggressive direction is the safe one.
+
+Folding is a *comparison*, never a normalization: the stored and displayed path keeps its real spelling
+(`server.PEM`, not `server.pem`). Identity and security matching are different concerns.
+
+**Where the boundary is.** The check is the *first* thing enumeration does, ahead of the built-in directory
+exclusions, `.gitignore` and `.repoatlasignore`:
+
+```
+git ls-files / walk  →  is_secret_path  →  SKIP        (never opened, never read)
+                             ↓ no
+                        exclusions → .repoatlasignore → stat → ScannedFile → hash → parse → chunk → FTS → embed
+```
+
+Order is what makes the policy mandatory rather than usually-applied. A user who writes `!.ENV` in
+`.repoatlasignore` is asking for something RepoAtlas does not offer; the alternative is a config file that can
+silently switch off a security control. User ignore rules keep their documented gitignore semantics — including
+**case sensitivity**, because that is what gitignore does on a case-sensitive filesystem and what the user wrote
+the file expecting. The two systems are deliberately not merged.
+
+The git working-tree comparison (§8) obeys the same policy: `_worktree_differs_from_index` hashes every tracked
+file to decide whether a repository is dirty, and skips the ones the policy claims. "Is this tree dirty?" is not a
+reason to open a private key. The narrowed meaning is the useful one anyway — an edit to an excluded file cannot
+change a fact RepoAtlas stores, so counting it as dirtiness would force a rehash that can only reproduce what is
+already there. This is why the policy lives in a top-level module and not inside `discovery/`: enumeration is not
+its only caller, and a second copy of the rule would be a second policy.
+
+**Stale secrets in an existing index.** A database written by a build with the weaker policy still contains those
+rows, and no upgrade flag exists to discover. None is needed: the file list is recomputed from the current policy on
+every sync, and a stored file absent from the new scan is classified *deleted* by the ordinary no-stale-facts
+mechanism (§9). One `repoatlas sync` therefore removes the file row and — by cascade — its entities, edges,
+unresolved refs, chunks and FTS rows; the next embedding pass collects the now-orphaned vectors. Nothing here
+depends on mtime, on `--full`, or on the file having changed.
+
+No separate *policy version* is introduced, and that is a decision rather than an omission: `facts_version` forces
+files to be **reparsed**, which an excluded file is not, whereas removal needs it to be **absent from the scan** —
+which it already is. A version bump would add a migration to state something the enumeration already states. The
+one thing to know: sync scope is the repository, so `repoatlas sync <one-repo>` cleans that repository. A root-scope
+`repoatlas sync` cleans everything, and `status` reports any repository still unsynced.
+
+**What this does not cover.** This is filename policy, not content scanning. A credential pasted into `app.py` is
+indexed like every other line of that file. RepoAtlas runs no entropy heuristics, no provider-specific key regexes
+and no secret-detection model over file contents, and V1 does not claim to. The correct statement of the guarantee
+is: *RepoAtlas excludes files matching its built-in obvious-secret filename policy before their contents enter the
+indexing pipeline* — not "RepoAtlas never indexes secrets".
+
+That single choke point is also the seam for stronger scanning later: a content-based detector plugs into the same
+filter and gains the same downstream guarantee.
+
+Logging never includes file content — only paths, line numbers and counts. Skipping is *silent*: no line names the
+excluded files, because a list of a repository's secret paths in terminal scrollback and CI output buys nothing
+operationally.
+
+Each of these is asserted separately, at every stage the content could otherwise reach — the predicate, the reader,
+enumeration, chunks, the FTS index, embeddings (including the strings handed to the embedding backend), entities,
+evidence sets, the model prompt and `--verbose` output. A single choke point is only a guarantee if the stages
+behind it genuinely depend on it, and a test per stage is what keeps that true as stages are added.
 
 ### Container posture
 
@@ -1902,3 +1976,10 @@ full reindex.
 | Each wrapper has its own option grammar, and unknown flags fail closed | One shared list of "harmless" flags | A flag that stands alone for `env` may consume a word for `timeout`; a shared list unwraps by resemblance. Failing closed reports the wrapper, which is true, instead of counting positions past a flag whose arity is unknown (§5) |
 | `sudo`, `xargs` and `chroot` are recorded as themselves | Unwrap them for recall | Each is genuinely the executed command, so naming it omits a fact rather than adding one — and `chroot` would be actively wrong, since the wrapped path resolves inside a different root (§5) |
 | `sh -c` / `bash -c` / `eval` payloads are never followed | Parse the literal payload when it looks like a path | The payload is shell source re-parsed at run time with expansion; reading a path out of it would be a second, unwritten shell parser. It also removes the split where `bash -c "x"` linked and `sh -c 'x'` did not, purely on tree-sitter node type (§5) |
+| Built-in secret exclusion is case-insensitive; `.repoatlasignore` is not | One matching rule for both, either way | They answer different questions. Security policy must hold whatever the file is called; a user ignore rule must do what gitignore does, or it silently drops files nobody asked to drop (§12) |
+| `fnmatchcase` over a `casefold`ed basename | `fnmatch`, as before | `fnmatch` applies `os.path.normcase`, so the same code excluded `.ENV` on macOS and indexed it on Linux. A security control whose behaviour depends on the platform is not a control (§12) |
+| The secret check runs first in enumeration | Keep it last, after the ignore rules | Order is what makes it mandatory. Last-and-unconditional worked, but only by inspection; first is structural, and it also means an excluded file is never stat-ed (§12) |
+| `is_secret_path` moved to a top-level `security` module | Leave it in `discovery/` and duplicate the rule in `gitstate/` | `gitstate` must obey the same policy and `discovery` already imports `gitstate`. A second copy would be a second policy, and a security control with two implementations has whichever behaviour the caller reached (§12) |
+| The dirty-state hash skips secret files | Hash everything, since it only produces a digest | The guarantee is that these files are never read; one that held everywhere except the code that opens every tracked file is not the guarantee. An edit to an excluded file also cannot change any stored fact (§8, §12) |
+| No secret-policy version column | Add one, and invalidate on change | Removal needs the file to be *absent from the scan*, which recomputing enumeration already achieves on every sync. `facts_version` forces a reparse, which an excluded file never gets. A version would need a migration to state what enumeration states (§9, §12) |
+| Skipped secret files are not logged | Log each skip at `--verbose` | The log line would be a list of the repository's secret paths, in scrollback and CI output, for no operational gain. Absence from `files` is already observable (§12) |
