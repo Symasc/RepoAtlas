@@ -646,6 +646,76 @@ Consequences, all of them wanted:
   link pass, so adding `common-lib` later retroactively creates the `service-a DEPENDS_ON common-lib` edge without
   reparsing `service-a`.
 
+### Bash execution targets: what counts as static proof
+
+Shell scripts are where a deployment decides what runs, which makes command position the place a parser is most
+tempted to guess. RepoAtlas does not:
+
+> **Invariant.** A Bash `EXECUTES` edge names only a target explicitly recoverable from static source syntax.
+> Variable expansion or runtime command construction never becomes a deterministic target.
+
+> **Invariant.** Absence of a deterministic target means *unresolved*, not low-confidence invention.
+
+`$CMD` is not a program called `$CMD`. It is a program whose name the file does not contain, and the honest record
+of that is nothing at all — not `cmd:$CMD` at confidence 0.5. A downgraded confidence is the same fabricated node
+with a smaller number on it: the entity still exists, retrieval still surfaces it, and an answer can still cite it.
+
+**Proof comes from the syntax tree, not from the text.** `_literal_text` in `parsers/bash.py` returns a node's value
+only when every part of it is spelled out in the source, and `None` the moment an expansion, command substitution,
+arithmetic evaluation or `ERROR` node appears. Deciding it there rather than by scanning for `$` is what makes it
+right in both directions: `"$BASE/script.sh"` is rejected despite ending in a plausible filename, and
+`'./run\ x.sh'` is accepted with its quoting and escaping removed.
+
+| Written in the source | Recorded |
+|---|---|
+| `./deploy.sh`, `"./deploy.sh"`, `'./deploy.sh'` | `EXECUTES` → `scripts/deploy.sh` |
+| `"./scripts/run migration.sh"`, `./run\ x.sh` | the path, *without* the quoting |
+| `python3 app.py` | `EXECUTES cmd:python3` **and** `EXECUTES` → `app.py` |
+| `make build` | `EXECUTES cmd:make` |
+| `$CMD`, `"${TOOL}"`, `$BASE/$NAME`, `$(pick)` | **nothing** — plus the `READS` its expansion proves |
+| `CMD=./x.sh` then `$CMD` | **nothing**: V1 does no constant propagation |
+| `FOO=bar ./app` | `EXECUTES` → `./app`, and `EXPORTS FOO` |
+
+Quoting is shell syntax and never part of a filename. `cmd:'./deploy.sh'` and `cmd:./deploy.sh` would be two graph
+nodes for one file, and the quoted one joins to nothing — so quote stripping is a correctness fix, not cosmetics.
+
+**Wrappers.** A command that runs another command is unwrapped only when the wrapped word can be identified from a
+grammar written down for *that* wrapper. Every entry in `_WRAPPERS` lists the flags that stand alone, the flags that
+consume a value (`-s TERM` and `--signal=TERM` alike), and how many positional operands precede the command. The
+rule is **fail closed**: a token starting with `-` that is not in that entry stops the unwrap, because an unknown
+flag may consume the next word and counting positions past it is guessing. A computed *operand* is fine —
+`timeout "$T" ./x.sh` still resolves `./x.sh`, because position identifies the command and position is static.
+
+| Wrapper | Decision | Why |
+|---|---|---|
+| `env`, `exec`, `nohup`, `command` | unwrap | Small grammars; `env` also gives `NAME=value` operands their POSIX meaning |
+| `timeout` | unwrap | `[OPTION]... DURATION COMMAND`; one positional operand before the command |
+| `nice` | unwrap | Only `-n` / `--adjustment` take a value |
+| `setsid` | unwrap | `-c`, `-f`, `-w` all stand alone |
+| `time` | unwrap | Usually the shell's *reserved word*, so `cmd:time` may name nothing real; the wrapped command is both truer and more useful |
+| `sudo` | wrapper only | Flags consume arguments (`-u`, `-g`), `--` is accepted, grammar is large |
+| `xargs` | wrapper only | Final argv is built from **stdin**; `-I`/`-n`/`-a` reshape it |
+| `chroot` | wrapper only | The path resolves inside a **different root**, so unwrapping yields a confidently wrong edge |
+| `stdbuf`, `ionice` | out of V1 scope | Attached-value forms (`-oL`, `-c3`) need rules no other wrapper needs, for rare commands |
+
+Recording `EXECUTES cmd:sudo` and not claiming the script behind it is a **limitation, not a fabrication** — `sudo`
+genuinely is the executed command. The difference is that a limitation omits a fact; a fabrication adds one. When a
+wrapper *is* unwrapped, only the wrapped command is recorded: `EXECUTES env` answers a question nobody asked and
+hides the one they did.
+
+**`sh -c` and `eval` reach through to nothing.** The argument of `bash -c "./x.sh"` is shell *source*, re-parsed at
+run time with expansion — the same syntax with a different variable in scope runs something else. Extracting a path
+from it would be a second, unwritten shell parser, so only the shell itself is recorded. The same holds for
+`python -c` and `ruby -e`. `eval` is recorded as the executed command and its argument is never followed. Before
+this rule, `bash -c "./x.sh"` produced a cross-file edge and `sh -c './x.sh'` produced none — the difference being
+only that tree-sitter gives single- and double-quoted strings different node types.
+
+**A dynamic invocation is not silently dropped.** What the file *does* prove is still recorded: `"$DEPLOY_CMD"` in
+command position yields a `READS DEPLOY_CMD`, and `LOG_LEVEL=debug $CMD` still yields `EXPORTS LOG_LEVEL`. Only the
+invented target disappears. No pseudo-entity stands in for the unknown target either: `unresolved_refs` rows are
+claims the global pass tries to *resolve*, and a claim naming `$CMD` would put the same fabrication one indirection
+away.
+
 ### The two link passes
 
 Linking runs twice, and the split is what keeps the trust rule enforceable.
@@ -1826,3 +1896,9 @@ full reindex.
 | Repositories are marked synchronized after the swap, in the same transaction | Mark each one as its parse finishes | Parsing finishing is not the sync succeeding. Marking early is precisely what let a failed link pass leave every repository claiming `current` over a graph that had been deleted and never rebuilt (§9) |
 | Sequence, not a generation counter, ties graph state to repository state | Add `sync_generation` to `meta` and `repositories` | The rebuild is global, so it covers everything committed at that moment; a repository is `ok` only if a rebuild committed after its facts did. A counter would need a column and a migration to state what the ordering already states (§9) |
 | `schema_version` is written only when it changes | Stamp it on every open | Stamping made *opening* the database a write, so `locate` and `status` competed for SQLite's write lock with a running sync and could fail with `database is locked`. Readers must not need a writer's privileges (§9) |
+| A computed Bash target resolves to nothing | Record `cmd:$CMD` at reduced confidence | Confidence is not permission to invent an entity: the node still exists, retrieval still surfaces it, and an answer can still cite it. `$CMD` names a *place a name comes from*, so the honest record is absence (§5) |
+| Static proof is decided from the syntax tree | Reject a target whose text contains `$` | The tree already distinguishes `word`/`raw_string`/`string_content` from every expansion node, so it is right in both directions: `"$BASE/script.sh"` is rejected despite its plausible suffix, and `'./run\ x.sh'` is accepted with its quoting removed (§5) |
+| Quoting is stripped from the target key | Keep the target as written | `cmd:'./deploy.sh'` and `cmd:./deploy.sh` are two graph nodes for one file, and the quoted one joins to nothing. Quotes are shell syntax, never part of a filename (§5) |
+| Each wrapper has its own option grammar, and unknown flags fail closed | One shared list of "harmless" flags | A flag that stands alone for `env` may consume a word for `timeout`; a shared list unwraps by resemblance. Failing closed reports the wrapper, which is true, instead of counting positions past a flag whose arity is unknown (§5) |
+| `sudo`, `xargs` and `chroot` are recorded as themselves | Unwrap them for recall | Each is genuinely the executed command, so naming it omits a fact rather than adding one — and `chroot` would be actively wrong, since the wrapped path resolves inside a different root (§5) |
+| `sh -c` / `bash -c` / `eval` payloads are never followed | Parse the literal payload when it looks like a path | The payload is shell source re-parsed at run time with expansion; reading a path out of it would be a second, unwritten shell parser. It also removes the split where `bash -c "x"` linked and `sh -c 'x'` did not, purely on tree-sitter node type (§5) |
