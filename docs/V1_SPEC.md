@@ -234,8 +234,12 @@ repoatlas watch
 | 2 | Repository context could not be resolved (§6) |
 | 3 | Not initialized, or index missing/unusable |
 | 4 | Reasoning model unavailable or unusable |
+| 5 | Another RepoAtlas synchronization is already in progress (§12) |
 
 Human-readable messages go to stderr; primary output to stdout.
+
+Code 5 is separate from code 1 on purpose: contention is an operational condition a wrapper script may
+sensibly retry, where a runtime error is not.
 
 ### Constraints
 
@@ -833,10 +837,27 @@ Correctly handle `git checkout`, `git switch`, `git pull`, `git rebase`, `git re
 After `repoatlas sync`, the knowledge base must reflect the **current working tree**. Facts from the previous
 branch must not remain.
 
+### One writer, one complete state
+
+A sync moves RepoAtlas from one **complete logical knowledge state** to another. File facts and the
+cross-repository graph they justify are both part of that state, so:
+
+- the global graph is **replaced atomically** — another process reads the previous complete graph or the new
+  complete graph, never a moment with neither;
+- a repository is recorded as synchronized **only after** that replacement commits, in the same transaction, so a
+  run whose link pass failed reports `interrupted` rather than `current`;
+- `init` and `sync` hold one **writer lock** per state database, so two mutating runs cannot interleave. The
+  second waits up to `storage.lock_timeout_seconds` (default 30) and then exits 5 with a message naming the
+  holder. Read commands never take it.
+
+The mechanism and its crash behaviour are in `ARCHITECTURE.md` §9.
+
 ### Invariants (tested)
 
 1. After any sync, **no fact exists whose file reference points to content not currently on disk**.
 2. An incremental sync across any HEAD change yields **state equivalent to a full reindex** of the same tree.
+3. A failed sync leaves the **previous complete graph** intact and does not report the affected repositories as
+   current.
 
 Stale-data bugs are serious: a deleted symbol must not continue appearing in answers.
 
@@ -1492,7 +1513,7 @@ Delivered 2026-09-02. 139 tests green; ruff, ruff format and pyright clean.
 
 - [x] **1. Project foundation** — uv + CPython 3.13.15, `pyproject.toml`, package skeleton, ruff, pyright, pytest
 - [x] **2. Configuration + CLI** — Pydantic settings, YAML config load/save, XDG paths, Typer app,
-      exit codes 0/1/2/3/4, `--json`, `--verbose`
+      exit codes 0/1/2/3/4/5, `--json`, `--verbose`
 - [x] **3. Repository discovery** — recursive walk, nested repos, exclusions, `.repoatlasignore`, language
       detection, manifest/lockfile detection, `init`
 - [x] **4. Shared directory-context resolver** — §6 in full; 23 cases covering depth, nesting, symlinks,
@@ -1807,3 +1828,25 @@ changing its content, so the file was never re-read. Neither produced a change t
 
 Forbidden-evidence hits: 0. Unanswerable questions correctly refused: 5/5. Deterministic-precedence violations: 0.
 Cross-repository expectations met: 2/2.
+
+### Remediation pass 6 — synchronization atomicity and writer serialization — **COMPLETE**
+
+Completed 2026-09-02. Two findings from the independent review, fixed together because they are one
+transaction/lifecycle problem.
+
+1. **The global link rebuild was not atomic.** It committed `DELETE FROM edges WHERE parser = 'linker:global'`,
+   did all its resolution work, and committed the replacement later. Anything failing in that gap published a
+   knowledge base with **no cross-repository graph at all**, while `status` reported `current`. Reproduced: 2
+   global edges and `svc → lib` before, 0 edges and `repo:svc` with no neighbours after, `status` still
+   `'current'`.
+2. **Concurrent syncs were not serialized.** This document and `ARCHITECTURE.md` both described an advisory sync
+   lock; none existed. Two real `repoatlas sync` processes over an 8-repository tree produced
+   `UNIQUE constraint failed: entities.key`, `FOREIGN KEY constraint failed`, raw Python tracebacks — and, in
+   about a third of runs, **exit code 0 over a silently doubled graph** (32 global edges where 16 is correct).
+
+Fixed by: prepare-then-swap global linking (one transaction for delete + intern + insert + GC), an `flock` writer
+lock per state database shared by `init` and `sync`, and marking repositories synchronized only inside that swap
+transaction. `Database.transaction()` became reentrant so a caller can group store writes; `intern_entity` became
+a real upsert; opening the database stopped being a write; migrations apply under `BEGIN IMMEDIATE`. See
+`ARCHITECTURE.md` §9. Regression suite: `tests/adversarial/test_sync_atomicity.py` (32 cases, including four
+injected failure points and real concurrent processes killed with `SIGTERM` and `SIGKILL`).

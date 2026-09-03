@@ -5,6 +5,7 @@ Normal usage requires no configuration file beyond the root recorded by ``init``
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 from typing import Any
@@ -102,6 +103,10 @@ class StorageSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     database: Path | None = None
+    #: How long a second ``init``/``sync`` waits for the writer lock before
+    #: reporting that a synchronization is already running (ARCHITECTURE.md §9).
+    #: Zero refuses immediately; the wait is always bounded.
+    lock_timeout_seconds: float = 30.0
 
 
 class EmbeddingSettings(BaseModel):
@@ -199,11 +204,23 @@ def _env_overrides(settings: Settings) -> Settings:
     rather than ``localhost``. ``REPOATLAS_CONFIG`` and ``REPOATLAS_DB`` are
     handled at path resolution for the same reason.
     """
+    updates: dict[str, Any] = {}
+
     base_url = os.environ.get("REPOATLAS_LLM_BASE_URL")
-    if not base_url:
-        return settings
-    llm = settings.llm.model_copy(update={"base_url": base_url})
-    return settings.model_copy(update={"llm": llm})
+    if base_url:
+        updates["llm"] = settings.llm.model_copy(update={"base_url": base_url})
+
+    # A container orchestrator decides how long an overlapping sync may wait, and
+    # it has no config file to edit. Ignored if unparseable rather than fatal: a
+    # bad value must not stop indexing, only lose the override.
+    timeout = os.environ.get("REPOATLAS_SYNC_LOCK_TIMEOUT")
+    if timeout:
+        with contextlib.suppress(ValueError):
+            updates["storage"] = settings.storage.model_copy(
+                update={"lock_timeout_seconds": max(float(timeout), 0.0)}
+            )
+
+    return settings.model_copy(update=updates) if updates else settings
 
 
 def load_settings(path: Path | None = None) -> Settings:

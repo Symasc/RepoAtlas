@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
@@ -28,6 +29,7 @@ from repoatlas.storage.protocols import (
     FileRow,
     NeighborEdge,
     SymbolRow,
+    SyncCompletion,
     UnresolvedRefRecord,
 )
 from repoatlas.storage.sqlite.database import Database
@@ -182,11 +184,20 @@ class SqliteRepositoryStore:
                 (str(SyncStatus.INTERRUPTED), repo_id),
             )
 
-    def mark_sync_finished(
-        self, repo_id: int, *, head_sha: str | None, is_dirty: bool, branch: str | None
-    ) -> None:
+    def mark_many_synced(self, completions: Sequence[SyncCompletion]) -> None:
+        """Mark every repository of one run finished, in one commit.
+
+        Called *after* the global-link swap, never before: the cross-repository
+        graph is part of the knowledge base, so a run whose link pass failed did
+        not produce a current index and must not record one (ARCHITECTURE.md §9).
+        Grouping the updates means the graph and the currency claim it justifies
+        commit together.
+        """
+        if not completions:
+            return
+        finished = datetime.now(UTC).isoformat()
         with self._db.transaction() as conn:
-            conn.execute(
+            conn.executemany(
                 """
                 UPDATE repositories SET
                     last_sync_status = ?,
@@ -198,16 +209,19 @@ class SqliteRepositoryStore:
                     branch = ?
                 WHERE id = ?
                 """,
-                (
-                    str(SyncStatus.OK),
-                    datetime.now(UTC).isoformat(),
-                    head_sha,
-                    int(is_dirty),
-                    head_sha,
-                    int(is_dirty),
-                    branch,
-                    repo_id,
-                ),
+                [
+                    (
+                        str(SyncStatus.OK),
+                        finished,
+                        done.head_sha,
+                        int(done.is_dirty),
+                        done.head_sha,
+                        int(done.is_dirty),
+                        done.branch,
+                        done.repo_id,
+                    )
+                    for done in completions
+                ],
             )
 
     def update_detected_metadata(
@@ -319,6 +333,18 @@ class SqliteKnowledgeStore:
     def __init__(self, database: Database) -> None:
         self._db = database
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Make several store calls one atomic unit.
+
+        The seam exists for exactly one caller: the global-link swap, which must
+        delete the previous graph and insert its replacement in a single commit so
+        no other connection can observe the gap (ARCHITECTURE.md §9). Store
+        methods keep their own transactions and join this one when it is open.
+        """
+        with self._db.transaction():
+            yield
+
     def replace_file_facts(self, file_id: int, facts: FileFacts) -> None:
         """Delete everything this file asserted, then insert the new facts.
 
@@ -376,7 +402,16 @@ class SqliteKnowledgeStore:
                 )
 
     def intern_entity(self, entity: EntityRecord) -> int:
-        """Get-or-create a global entity by its natural key."""
+        """Get-or-create a global entity by its natural key.
+
+        The insert carries its own conflict clause rather than trusting the
+        preceding read. A bare SELECT-then-INSERT is a check-then-act: two writers
+        that both find nothing both insert, and the partial unique index turns the
+        loser into ``UNIQUE constraint failed: entities.key`` — which is precisely
+        what two concurrent syncs used to produce (ARCHITECTURE.md §9). The writer
+        lock now makes that pair impossible; this makes the statement correct on
+        its own rather than correct because of something elsewhere.
+        """
         with self._db.transaction() as conn:
             row = conn.execute(
                 "SELECT id FROM entities WHERE key = ? AND file_id IS NULL", (entity.key,)
@@ -387,6 +422,7 @@ class SqliteKnowledgeStore:
                 """
                 INSERT INTO entities (type, key, repo_id, file_id, name, qualified_name)
                 VALUES (?, ?, ?, NULL, ?, ?)
+                ON CONFLICT (key) WHERE file_id IS NULL DO NOTHING
                 """,
                 (
                     str(entity.type),
@@ -396,7 +432,13 @@ class SqliteKnowledgeStore:
                     entity.qualified_name,
                 ),
             )
-        return int(cursor.lastrowid or 0)
+            if cursor.rowcount:
+                return int(cursor.lastrowid or 0)
+            # The conflict clause fired: somebody else interned it first.
+            existing = conn.execute(
+                "SELECT id FROM entities WHERE key = ? AND file_id IS NULL", (entity.key,)
+            ).fetchone()
+        return int(existing["id"])
 
     def find_file_entity(self, file_id: int, key: str) -> int | None:
         row = self._db.execute(
