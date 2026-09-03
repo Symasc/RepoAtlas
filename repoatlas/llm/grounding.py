@@ -131,24 +131,48 @@ class GroundingReport:
         return bool(self.dropped_citations or self.clamped_citations or self.demoted_findings)
 
 
-def _supplied_spans(evidence: EvidenceSet) -> dict[tuple[str, str], list[tuple[int, int]]]:
-    """Line spans actually shown to the model, keyed by (repository, path).
+@dataclass(frozen=True, slots=True)
+class SuppliedEvidence:
+    """What was actually shown to the model, indexed for citation resolution.
+
+    ``spans`` is keyed by repository **identity** and path — not by display name.
+    Two managed repositories may both be called ``common``, and a span map keyed on
+    the name made evidence supplied from ``teamA/common/index.ts`` validate a
+    citation to ``teamB/common/index.ts``: same name, same path, same lines, quite
+    possibly the same bytes, and an entirely different repository.
+
+    ``by_display`` records which identities a display name reaches, which is what
+    lets a concise citation resolve when it is unambiguous and be refused when it
+    is not (ARCHITECTURE.md §11).
+    """
+
+    spans: dict[tuple[str, str], list[tuple[int, int]]]
+    by_display: dict[tuple[str, str], tuple[tuple[str, str], ...]]
+
+
+def _supplied_evidence(evidence: EvidenceSet) -> SuppliedEvidence:
+    """Index the supplied candidates by identity and by display name.
 
     A file supplied only as *identity* — a filename match, which carries no line
-    range — appears as a key with an empty span list. The distinction is the point:
-    the model may say the file exists, because it was shown that; it may not
-    attribute anything to a line of it, because it was shown no lines. An empty
-    list makes both outcomes fall out of :func:`_verify_evidence` without a special
-    case.
+    range — appears with an empty span list. The distinction is the point: the
+    model may say the file exists, because it was shown that; it may not attribute
+    anything to a line of it, because it was shown no lines.
     """
     spans: dict[tuple[str, str], list[tuple[int, int]]] = {}
+    display: dict[tuple[str, str], list[tuple[str, str]]] = {}
     for candidate in evidence.candidates:
-        key = (candidate.repository, candidate.path)
+        key = candidate.identity
         supplied = spans.setdefault(key, [])
+        reachable = display.setdefault((candidate.repository, candidate.path), [])
+        if key not in reachable:
+            reachable.append(key)
         if candidate.line_start is None or candidate.line_end is None:
             continue
         supplied.append((candidate.line_start, candidate.line_end))
-    return spans
+    return SuppliedEvidence(
+        spans=spans,
+        by_display={name: tuple(keys) for name, keys in display.items()},
+    )
 
 
 def _supplied_references(evidence: EvidenceSet) -> set[str]:
@@ -161,10 +185,18 @@ def _supplied_references(evidence: EvidenceSet) -> set[str]:
     names: set[str] = set()
     for candidate in evidence.candidates:
         path = candidate.path
+        slug = candidate.repository_slug
         names.add(path)
         names.add(f"{candidate.repository}/{path}")
         names.add(PurePosixPath(path).name)
         names.add(candidate.repository)
+        if slug:
+            # The identity is a spelling of the same supplied file, and it is the
+            # spelling the evidence block asked the model to cite by.
+            names.add(slug)
+            names.add(f"{slug}/{path}")
+            for index in range(1, len(PurePosixPath(slug).parts)):
+                names.add("/".join(PurePosixPath(slug).parts[index:]))
         # Every trailing sub-path, so "b/c.py" matches a supplied "a/b/c.py".
         parts = PurePosixPath(path).parts
         for index in range(1, len(parts)):
@@ -192,17 +224,46 @@ def _unsupported_references(text: str, allowed: set[str]) -> list[str]:
     return found
 
 
-def _verify_evidence(
-    item: Evidence, spans: dict[tuple[str, str], list[tuple[int, int]]]
-) -> tuple[Evidence | None, bool]:
+def _resolve_source(item: Evidence, supplied: SuppliedEvidence) -> tuple[str, str] | None:
+    """Which supplied source a citation names, or ``None`` if that is not decidable.
+
+    A citation carrying ``repository_slug`` names one source exactly. A citation
+    carrying only a display name is resolved **only when that name identifies a
+    single supplied source**; when two supplied repositories share it, the citation
+    names neither and is refused. Choosing between them would be the system
+    inventing the provenance of a claim, which is the one thing grounding exists to
+    prevent (V1_SPEC §15).
+
+    Concise citations therefore keep working for ordinary repositories, and stop
+    working exactly where they stop meaning something.
+    """
+    if item.repository_slug:
+        key = (item.repository_slug, item.path)
+        return key if key in supplied.spans else None
+
+    candidates = supplied.by_display.get((item.repository, item.path), ())
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _verify_evidence(item: Evidence, supplied: SuppliedEvidence) -> tuple[Evidence | None, bool]:
     """Return the grounded citation and whether it needed clamping.
 
-    ``None`` means the citation was not supported by the supplied set at all.
+    ``None`` means the citation was not supported by the supplied set at all —
+    including the case where it is *ambiguous*, which is a failure to identify a
+    source rather than a failure to find one.
     """
-    key = (item.repository, item.path)
-    supplied = spans.get(key)
-    if supplied is None:
+    key = _resolve_source(item, supplied)
+    if key is None:
         return None, False
+    spans = supplied.spans[key]
+    # Record the identity that was resolved. Not an invention: it is the identity
+    # of the source the model was actually shown, and carrying it means the
+    # rendered citation says which `common` a hypothesis rests on.
+    item = (
+        item
+        if item.repository_slug == key[0]
+        else item.model_copy(update={"repository_slug": key[0]})
+    )
 
     # A file-level citation with no line numbers is grounded as far as it goes:
     # the file really was supplied. Inventing a span for it would be worse.
@@ -215,7 +276,7 @@ def _verify_evidence(
     if start > end:
         start, end = end, start
 
-    for span_start, span_end in supplied:
+    for span_start, span_end in spans:
         if start <= span_end and end >= span_start:
             clamped_start = max(start, span_start)
             clamped_end = min(end, span_end)
@@ -233,7 +294,7 @@ def _verify_evidence(
 
 def ground_answer(answer: RepoAtlasAnswer, evidence: EvidenceSet) -> GroundingReport:
     """Strip every claim the supplied evidence does not support."""
-    spans = _supplied_spans(evidence)
+    supplied = _supplied_evidence(evidence)
     allowed = _supplied_references(evidence)
     # The user introduced the words in their own question; echoing one back is
     # not the model inventing a repository object.
@@ -249,7 +310,7 @@ def ground_answer(answer: RepoAtlasAnswer, evidence: EvidenceSet) -> GroundingRe
         fabricated = 0
         narrowed = False
         for item in hypothesis.evidence:
-            grounded, was_clamped = _verify_evidence(item, spans)
+            grounded, was_clamped = _verify_evidence(item, supplied)
             if grounded is None:
                 fabricated += 1
                 continue

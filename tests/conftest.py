@@ -130,6 +130,12 @@ def fact_snapshot(workspace: Workspace) -> dict[str, object]:
     tree*. Row ids are excluded deliberately — they are allocation order, not
     fact — and everything else is ordered so the comparison is stable.
     """
+    repositories = workspace.database.execute(
+        # `slug` is the repository's identity, and every entity key is built from
+        # it. An incremental sync that reproduced the facts but not the identities
+        # would not be equivalent to a full reindex (ARCHITECTURE.md §3).
+        "SELECT name, slug FROM repositories ORDER BY slug"
+    ).fetchall()
     files = workspace.database.execute(
         # `basename` is generated from `rel_path`, and it is what exact filename
         # lookup seeks on. Including it keeps the equivalence invariant covering
@@ -148,9 +154,18 @@ def fact_snapshot(workspace: Workspace) -> dict[str, object]:
         "ORDER BY src.key, dst.key, e.type, e.line_start"
     ).fetchall()
     dependencies = workspace.database.execute(
-        "SELECT r.name, ecosystem, normalized_name, role, constraint_text, version "
+        # The source path is part of a dependency fact, not decoration: one
+        # repository may declare the same package in several manifests, and a
+        # snapshot that omitted the path could not tell a moved manifest from an
+        # unchanged one. Ordering by every column also makes the comparison total —
+        # rows sharing (name, ecosystem, package, role) previously came back in
+        # insertion order, so two equivalent states could differ by row order alone.
+        "SELECT r.name, d.ecosystem, d.normalized_name, d.role, d.constraint_text, "
+        "d.version, d.group_name, f.rel_path, d.line_start "
         "FROM dependencies d JOIN repositories r ON r.id = d.repo_id "
-        "ORDER BY r.name, ecosystem, normalized_name, role"
+        "JOIN files f ON f.id = d.file_id "
+        "ORDER BY r.name, d.ecosystem, d.normalized_name, d.role, f.rel_path, "
+        "d.line_start, d.constraint_text, d.version"
     ).fetchall()
     claims = workspace.database.execute(
         "SELECT r.name, f.rel_path, edge_type, target_kind, target_key, u.line_start "
@@ -171,6 +186,7 @@ def fact_snapshot(workspace: Workspace) -> dict[str, object]:
         "ORDER BY r.name, f.rel_path, c.span_index, c.split_index, c.line_start"
     ).fetchall()
     return {
+        "repositories": [tuple(r) for r in repositories],
         "files": [tuple(r) for r in files],
         "entities": [tuple(r) for r in entities],
         "edges": [tuple(r) for r in edges],

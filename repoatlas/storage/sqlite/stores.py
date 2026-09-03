@@ -9,9 +9,15 @@ import json
 import sqlite3
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from repoatlas.models.dependencies import DependencyRecord, DependencyView
+from repoatlas.models.dependencies import (
+    DependencyObservation,
+    DependencyPackage,
+    DependencyRecord,
+    DependencyRole,
+    DependencyScope,
+)
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.models.repository import FileState, IndexedFile, Repository, SyncStatus
 from repoatlas.storage.protocols import (
@@ -50,6 +56,7 @@ class SqliteRepositoryStore:
         return Repository(
             id=row["id"],
             name=row["name"],
+            slug=row["slug"],
             path=Path(row["path"]),
             branch=row["branch"],
             head_sha=row["head_sha"],
@@ -64,17 +71,29 @@ class SqliteRepositoryStore:
         )
 
     def upsert(self, repo: Repository) -> int:
-        """Insert or update by canonical path, which is the natural key."""
+        """Insert or update by canonical path, which is the natural key.
+
+        The path being the natural key is also the answer to what a *move* means:
+        a repository that changes path is a removal plus a discovery, not the same
+        repository somewhere else (ARCHITECTURE.md §3). ``slug`` follows from that
+        — it is assigned once and never rewritten, so a later change to the
+        configured root cannot silently invalidate every entity key that was built
+        from it.
+        """
         with self._db.transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO repositories (
-                    name, path, branch, head_sha, is_dirty,
+                    name, slug, path, branch, head_sha, is_dirty,
                     languages_json, manifests_json, lockfiles_json,
                     last_indexed_at, last_indexed_head, last_indexed_dirty, last_sync_status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     name = excluded.name,
+                    slug = CASE
+                        WHEN repositories.slug = '' THEN excluded.slug
+                        ELSE repositories.slug
+                    END,
                     branch = excluded.branch,
                     head_sha = excluded.head_sha,
                     is_dirty = excluded.is_dirty,
@@ -88,6 +107,7 @@ class SqliteRepositoryStore:
                 """,
                 (
                     repo.name,
+                    repo.slug,
                     str(repo.path),
                     repo.branch,
                     repo.head_sha,
@@ -118,6 +138,25 @@ class SqliteRepositoryStore:
             "SELECT * FROM repositories WHERE name = ? ORDER BY path", (name,)
         ).fetchall()
         return [self._row_to_repository(row) for row in rows]
+
+    def get_by_slug(self, slug: str) -> Repository | None:
+        """Lookup by identity. Unlike a name, this can only ever match one row."""
+        row = self._db.execute(
+            "SELECT * FROM repositories WHERE slug = ? AND slug != ''", (slug,)
+        ).fetchone()
+        return None if row is None else self._row_to_repository(row)
+
+    def assign_slug(self, repo_id: int, slug: str) -> None:
+        """Give an identity to a row written before identities existed.
+
+        Only ever fills an empty value. An assigned identity is immutable: the
+        entity keys built from it are already persisted, and rewriting it would
+        strand them without any reparse being triggered (ARCHITECTURE.md §3, §9).
+        """
+        with self._db.transaction() as conn:
+            conn.execute(
+                "UPDATE repositories SET slug = ? WHERE id = ? AND slug = ''", (slug, repo_id)
+            )
 
     def get_by_path(self, path: Path) -> Repository | None:
         row = self._db.execute("SELECT * FROM repositories WHERE path = ?", (str(path),)).fetchone()
@@ -464,7 +503,8 @@ class SqliteKnowledgeStore:
         rows = self._db.execute(
             """
             SELECT f.id AS file_id, e.id AS file_entity_id, f.repo_id AS repo_id,
-                   r.name AS repo_name, r.path AS repo_path, f.rel_path AS rel_path
+                   r.name AS repo_name, r.slug AS repo_slug, r.path AS repo_path,
+                   f.rel_path AS rel_path
             FROM files f
             JOIN repositories r ON r.id = f.repo_id
             JOIN entities e ON e.file_id = f.id AND e.type = 'file'
@@ -476,6 +516,7 @@ class SqliteKnowledgeStore:
                 file_entity_id=row["file_entity_id"],
                 repo_id=row["repo_id"],
                 repo_name=row["repo_name"],
+                repo_slug=row["repo_slug"],
                 repo_path=Path(row["repo_path"]),
                 rel_path=row["rel_path"],
             )
@@ -614,7 +655,8 @@ class SqliteKnowledgeStore:
         rows = self._db.execute(
             f"""
             SELECT e.id, e.type, e.name, e.qualified_name, e.line_start, e.line_end,
-                   e.signature, f.rel_path AS path, r.name AS repository
+                   e.signature, f.rel_path AS path, r.name AS repository,
+                   r.slug AS repository_slug
             FROM entities e
             JOIN files        f ON f.id = e.file_id
             JOIN repositories r ON r.id = e.repo_id
@@ -626,6 +668,7 @@ class SqliteKnowledgeStore:
             EntityDescription(
                 entity_id=row["id"],
                 repository=row["repository"],
+                repository_slug=row["repository_slug"] or "",
                 path=row["path"],
                 line_start=row["line_start"] or 1,
                 line_end=row["line_end"] or row["line_start"] or 1,
@@ -670,6 +713,39 @@ class SqliteKnowledgeStore:
                 tuple(repo_ids),
             ).fetchone()
         return int(row["n"])
+
+
+def _dependency_scope(source_path: str) -> str:
+    """The dependency domain a file belongs to: the directory it sits in.
+
+    ``package.json`` → ``.``; ``backend/package.json`` → ``backend``. Deterministic,
+    derived from the layout alone, and the unit of manifest-to-lockfile pairing.
+    Nothing here infers a runtime package environment, because RepoAtlas cannot
+    observe one without executing the ecosystem's own resolver (V1_SPEC §17).
+    """
+    if not source_path:
+        return "."
+    parent = PurePosixPath(source_path).parent.as_posix()
+    return parent or "."
+
+
+def _dependency_scopes(
+    observations: Sequence[DependencyObservation],
+) -> tuple[DependencyScope, ...]:
+    """Partition one package's observations by scope, preserving order within each."""
+    by_scope: dict[str, dict[DependencyRole, list[DependencyObservation]]] = {}
+    for observation in observations:
+        roles = by_scope.setdefault(observation.scope, {})
+        roles.setdefault(observation.role, []).append(observation)
+    return tuple(
+        DependencyScope(
+            scope=scope,
+            declarations=tuple(roles.get(DependencyRole.DECLARED, ())),
+            resolutions=tuple(roles.get(DependencyRole.RESOLVED, ())),
+            provisions=tuple(roles.get(DependencyRole.PROVIDED, ())),
+        )
+        for scope, roles in sorted(by_scope.items())
+    )
 
 
 class SqliteDependencyStore:
@@ -755,50 +831,85 @@ class SqliteDependencyStore:
             for row in rows
         ]
 
-    def join_view(self, repo_ids: Sequence[int] | None = None) -> list[DependencyView]:
-        """Declared constraints joined to resolved versions, per repository.
+    def list_packages(self, repo_ids: Sequence[int] | None = None) -> list[DependencyPackage]:
+        """Every dependency observation, grouped by package. Nothing is discarded.
 
-        The join is a LEFT JOIN in both directions by design: a declared package
-        with no lockfile entry and a locked transitive package with no declaration
-        are both real states, and neither may be silently dropped (V1_SPEC §13).
+        Grouping, not merging. The previous implementation keyed on
+        ``(repo_id, ecosystem, normalized_name)`` and then *assigned*
+        ``constraint``, ``version``, ``manifest_path`` and ``lockfile_path`` while
+        looping over the rows, so a repository holding a root ``package.json`` and
+        a ``backend/package.json`` reported exactly one constraint and one version
+        — whichever row SQLite returned last — and every other declaration
+        disappeared with no trace that it had existed. The raw rows were right the
+        whole time; the view over them was the destructive step (V1_SPEC §13).
+
+        Manifest-to-lockfile pairing is by **scope**: the directory the file sits
+        in. ``backend/package.json`` pairs with ``backend/package-lock.json`` and
+        never with the root lockfile, because co-location is what every one of
+        these tools actually means by "this lockfile belongs to that manifest".
+        Where the layout does not prove a pairing — a workspace root lockfile and a
+        nested member manifest — the observations simply stay in separate scopes:
+        an unpaired declaration is an honest state, and attributing a root
+        lockfile's version to a nested package would be a guess (V1_SPEC §13, §2).
         """
         records = self.list_for_repos(repo_ids)
-        names = {
-            row["id"]: row["name"]
-            for row in self._db.execute("SELECT id, name FROM repositories").fetchall()
+        repositories = {
+            row["id"]: (row["name"], row["slug"] or "")
+            for row in self._db.execute("SELECT id, name, slug FROM repositories").fetchall()
         }
         paths = {
             row["id"]: row["rel_path"]
             for row in self._db.execute("SELECT id, rel_path FROM files").fetchall()
         }
 
-        merged: dict[tuple[int, str, str], dict[str, object]] = {}
+        grouped: dict[tuple[str, str, str], list[DependencyObservation]] = {}
+        display: dict[tuple[str, str, str], str] = {}
         for record in records:
-            if record.role == "provided":
-                continue
-            key = (record.repo_id, record.ecosystem, record.normalized_name)
-            entry = merged.setdefault(
-                key,
-                {
-                    "repository": names.get(record.repo_id, ""),
-                    "ecosystem": record.ecosystem,
-                    "name": record.name,
-                    "normalized_name": record.normalized_name,
-                },
+            repository, slug = repositories.get(record.repo_id, ("", ""))
+            source_path = paths.get(record.file_id, "")
+            observation = DependencyObservation(
+                repository=repository,
+                repository_slug=slug,
+                ecosystem=record.ecosystem,
+                name=record.name,
+                normalized_name=record.normalized_name,
+                role=DependencyRole(record.role),
+                value=record.constraint if record.role == "declared" else record.version,
+                group=record.group,
+                scope=_dependency_scope(source_path),
+                source_path=source_path,
+                line=record.line_start,
             )
-            if record.role == "declared":
-                entry["constraint"] = record.constraint
-                entry["group"] = record.group
-                entry["manifest_path"] = paths.get(record.file_id)
-                entry["manifest_line"] = record.line_start
-            else:
-                entry["version"] = record.version
-                entry["lockfile_path"] = paths.get(record.file_id)
-                entry["lockfile_line"] = record.line_start
+            key = (slug or repository, record.ecosystem, record.normalized_name)
+            grouped.setdefault(key, []).append(observation)
+            # The display name is the one a human wrote; normalization is for
+            # matching. Chosen by sort so it never depends on row order either.
+            current = display.get(key)
+            if current is None or record.name < current:
+                display[key] = record.name
 
+        packages: list[DependencyPackage] = []
+        for key, observations in grouped.items():
+            ordered = tuple(sorted(observations, key=lambda o: o.order))
+            first = ordered[0]
+            packages.append(
+                DependencyPackage(
+                    repository=first.repository,
+                    repository_slug=first.repository_slug,
+                    ecosystem=first.ecosystem,
+                    name=display[key],
+                    normalized_name=first.normalized_name,
+                    observations=ordered,
+                    scopes=_dependency_scopes(ordered),
+                )
+            )
         return sorted(
-            (DependencyView.model_validate(entry) for entry in merged.values()),
-            key=lambda v: (v.repository, v.ecosystem, v.normalized_name),
+            packages,
+            key=lambda p: (
+                p.repository_slug or p.repository,
+                p.ecosystem,
+                p.normalized_name,
+            ),
         )
 
     def count(self, repo_ids: Sequence[int] | None = None) -> int:

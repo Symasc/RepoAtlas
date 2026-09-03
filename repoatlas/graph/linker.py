@@ -105,17 +105,17 @@ class ReferenceLinker:
         self,
         *,
         repo_id: int,
-        repo_name: str,
+        repo_slug: str,
         file_id: int,
         rel_path: str,
         parsed: ParsedFile,
     ) -> LinkResult:
         """Create every edge this file can prove alone; record the rest as claims."""
-        file_entity_id = self._knowledge.find_file_entity(file_id, file_key(repo_name, rel_path))
+        file_entity_id = self._knowledge.find_file_entity(file_id, file_key(repo_slug, rel_path))
         if file_entity_id is None:
             return LinkResult(edges=0, unresolved=0)
 
-        symbol_ids = self._symbol_ids(file_id, repo_name, rel_path, parsed.symbols)
+        symbol_ids = self._symbol_ids(file_id, repo_slug, rel_path, parsed.symbols)
         imported = _imported_names(parsed)
 
         edges: list[EdgeRecord] = [
@@ -244,14 +244,14 @@ class ReferenceLinker:
     def _symbol_ids(
         self,
         file_id: int,
-        repo_name: str,
+        repo_slug: str,
         rel_path: str,
         symbols: tuple[ParsedSymbol, ...],
     ) -> dict[str, int]:
         """Map qualified symbol name to its persisted entity id."""
         mapping: dict[str, int] = {}
         for symbol in symbols:
-            key = symbol_key(repo_name, rel_path, symbol.qualified_name, symbol.line_start)
+            key = symbol_key(repo_slug, rel_path, symbol.qualified_name, symbol.line_start)
             entity_id = self._knowledge.find_file_entity(file_id, key)
             if entity_id is not None:
                 mapping[symbol.qualified_name] = entity_id
@@ -484,20 +484,27 @@ class ReferenceLinker:
         if self._dependencies is None:
             return 0
 
-        cross = 0
+        # Counted as *relationships*, not as assertions. A monorepo whose root and
+        # backend manifests both declare one shared package states the same
+        # repository-to-repository fact twice, and each statement keeps its own
+        # provenanced edge — but reporting "2 cross-repository links" would describe
+        # the manifests rather than the graph (V1_SPEC §9).
+        cross_pairs: set[tuple[int, int]] = set()
         repo_entities: dict[int, int] = {}
 
         def repository_entity(repo_id: int) -> int | None:
             if repo_id in repo_entities:
                 return repo_entities[repo_id]
             name = index.repo_names.get(repo_id)
-            if name is None:
+            slug = index.repo_slugs.get(repo_id)
+            if name is None or not slug:
                 return None
             entity_id = self._knowledge.intern_entity(
                 EntityRecord(
                     type=EntityType.REPOSITORY,
-                    key=repository_key(name),
+                    key=repository_key(slug),
                     name=name,
+                    qualified_name=slug,
                     repo_id=repo_id,
                 )
             )
@@ -538,9 +545,9 @@ class ReferenceLinker:
             if target_id is None:
                 continue
             edges.append(self._dependency_edge(record, source_id, target_id))
-            cross += 1
+            cross_pairs.add((record.repo_id, providers[0][0]))
 
-        return cross
+        return len(cross_pairs)
 
     @staticmethod
     def _dependency_edge(record: DependencyRecord, src_id: int, dst_id: int) -> EdgeRecord:

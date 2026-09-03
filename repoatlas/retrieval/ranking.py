@@ -27,8 +27,12 @@ _RRF_K = 60.0
 #: candidate is treated as redundant rather than as additional context.
 _OVERLAP_THRESHOLD = 0.5
 
-#: What makes two candidates "the same evidence". A file-level candidate carries
-#: no line range, so ``None`` is part of the key rather than a value to fill in.
+#: What makes two candidates "the same evidence": repository **identity**, path
+#: and line span. The identity is deliberately not the display name — two managed
+#: repositories may both be called ``common``, and keying on the name fused
+#: ``common/index.ts:1`` from two different repositories into one candidate.
+#: A file-level candidate carries no line range, so ``None`` is part of the key
+#: rather than a value to fill in.
 _Key = tuple[str, str, int | None, int | None]
 
 
@@ -53,7 +57,8 @@ class NoopReranker:
 
 
 def _key(candidate: EvidenceCandidate) -> _Key:
-    return (candidate.repository, candidate.path, candidate.line_start, candidate.line_end)
+    repository, path = candidate.identity
+    return (repository, path, candidate.line_start, candidate.line_end)
 
 
 def _ordering(key: _Key) -> tuple[str, str, bool, int, int]:
@@ -84,7 +89,9 @@ def fuse(
     The primary-repository boost biases toward the repository the question was
     asked in without walling off other repositories — "primary scope, not a wall"
     (V1_SPEC §6). It is added to the score, so it competes inside a tier and never
-    promotes a candidate across one.
+    promotes a candidate across one. ``primary_repository`` is a repository
+    **identity**: matching on a display name meant that standing in ``teamB/common``
+    boosted evidence from ``teamA/common``, because both are called ``common``.
 
     Each list contributes **one** reciprocal rank per span, its best. A span can
     reach a single retriever's list several times — a file whose lines cannot be
@@ -148,6 +155,16 @@ def enforce_tier_order(candidates: Sequence[EvidenceCandidate]) -> list[Evidence
     return sorted(candidates, key=lambda candidate: candidate.tier)
 
 
+def _same_source(a: EvidenceCandidate, b: EvidenceCandidate) -> bool:
+    """Whether two candidates come from the same file of the same repository.
+
+    Compared by identity. Two repositories called ``common`` each holding an
+    ``index.ts`` are two sources, however identical they look — and identical is
+    exactly what a shared library copied between teams tends to be.
+    """
+    return a.identity == b.identity
+
+
 def _overlap(a: EvidenceCandidate, b: EvidenceCandidate) -> float:
     """Fraction of the shorter span that the two candidates share.
 
@@ -157,7 +174,7 @@ def _overlap(a: EvidenceCandidate, b: EvidenceCandidate) -> float:
     treating a span as covering the file would delete the filename match that
     proves the file exists — the two are different facts and both are kept.
     """
-    if a.repository != b.repository or a.path != b.path:
+    if not _same_source(a, b):
         return 0.0
     if a.line_start is None or b.line_start is None:
         return 0.0
@@ -172,7 +189,7 @@ def _overlap(a: EvidenceCandidate, b: EvidenceCandidate) -> float:
 
 def _contains(kept: EvidenceCandidate, candidate: EvidenceCandidate) -> bool:
     """Whether ``kept`` already covers every line ``candidate`` cites."""
-    if kept.repository != candidate.repository or kept.path != candidate.path:
+    if not _same_source(kept, candidate):
         return False
     if kept.line_start is None or candidate.line_start is None:
         # Two file-level candidates for one file are the same candidate; fusion

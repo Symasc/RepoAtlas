@@ -80,6 +80,9 @@ class RepositoryStatus(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     name: str
+    #: Canonical identity, shown when the display name does not identify one
+    #: repository (ARCHITECTURE.md §3).
+    slug: str = ""
     path: Path
     branch: str | None = None
     head_sha: str | None = None

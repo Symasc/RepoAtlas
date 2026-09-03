@@ -119,7 +119,8 @@ def _straddling_reach(
 #: an entity that has not been written yet must not make the file unfindable.
 _FILE_SELECT = """
     SELECT f.id AS file_id, f.repo_id AS repo_id, f.rel_path AS path,
-           f.basename AS basename, r.name AS repository, e.id AS entity_id
+           f.basename AS basename, r.name AS repository, r.slug AS repository_slug,
+           e.id AS entity_id
     FROM files f
     JOIN repositories r ON r.id = f.repo_id
     LEFT JOIN entities e ON e.file_id = f.id AND e.type = 'file'
@@ -144,6 +145,7 @@ def _file_hit(row: sqlite3.Row, term: str, specificity: int) -> FileHit:
         file_id=row["file_id"],
         repo_id=row["repo_id"],
         repository=row["repository"],
+        repository_slug=row["repository_slug"],
         path=row["path"],
         entity_id=row["entity_id"],
         term=term,
@@ -184,7 +186,8 @@ class SqliteSearchIndex:
         rows = self._db.execute(
             f"""
             SELECT c.id AS chunk_id, c.file_id, c.repo_id, c.line_start, c.line_end, c.text,
-                   f.rel_path AS path, r.name AS repository, bm25(chunks_fts) AS rank
+                   f.rel_path AS path, r.name AS repository, r.slug AS repository_slug,
+                   bm25(chunks_fts) AS rank
             FROM chunks_fts
             JOIN chunks       c ON c.id = chunks_fts.rowid
             JOIN files        f ON f.id = c.file_id
@@ -209,6 +212,7 @@ class SqliteSearchIndex:
                     file_id=row["file_id"],
                     repo_id=row["repo_id"],
                     repository=row["repository"],
+                    repository_slug=row["repository_slug"],
                     path=row["path"],
                     line_start=row["line_start"],
                     line_end=row["line_end"],
@@ -265,7 +269,7 @@ class SqliteSearchIndex:
         rows = self._db.execute(
             f"""
             SELECT c.id AS chunk_id, c.file_id, c.repo_id, c.line_start, c.line_end, c.text,
-                   f.rel_path AS path, r.name AS repository
+                   f.rel_path AS path, r.name AS repository, r.slug AS repository_slug
             FROM chunks c
             JOIN files        f ON f.id = c.file_id
             JOIN repositories r ON r.id = c.repo_id
@@ -281,6 +285,7 @@ class SqliteSearchIndex:
                 file_id=row["file_id"],
                 repo_id=row["repo_id"],
                 repository=row["repository"],
+                repository_slug=row["repository_slug"],
                 path=row["path"],
                 line_start=row["line_start"],
                 line_end=row["line_end"],
@@ -376,7 +381,7 @@ class SqliteSearchIndex:
         rows = self._db.execute(
             f"""
             SELECT c.id AS chunk_id, c.file_id, c.repo_id, c.line_start, c.line_end, c.text,
-                   f.rel_path AS path, r.name AS repository
+                   f.rel_path AS path, r.name AS repository, r.slug AS repository_slug
             FROM chunks c
             JOIN files        f ON f.id = c.file_id
             JOIN repositories r ON r.id = c.repo_id
@@ -401,6 +406,7 @@ class SqliteSearchIndex:
                     file_id=head["file_id"],
                     repo_id=head["repo_id"],
                     repository=head["repository"],
+                    repository_slug=head["repository_slug"],
                     path=head["path"],
                     line_start=head["line_start"],
                     line_end=head["line_end"],
@@ -563,7 +569,7 @@ class SqliteSearchIndex:
             f"""
             SELECT e.id AS entity_id, e.type, e.name, e.qualified_name,
                    e.line_start, e.line_end,
-                   f.rel_path AS path, r.name AS repository
+                   f.rel_path AS path, r.name AS repository, r.slug AS repository_slug
             FROM entities e
             LEFT JOIN files        f ON f.id = e.file_id
             LEFT JOIN repositories r ON r.id = e.repo_id
@@ -582,6 +588,7 @@ class SqliteSearchIndex:
                 name=row["name"],
                 qualified_name=row["qualified_name"],
                 repository=row["repository"] or "",
+                repository_slug=row["repository_slug"] or "",
                 path=row["path"],
                 line_start=row["line_start"],
                 line_end=row["line_end"],
@@ -625,7 +632,7 @@ class SqliteSearchIndex:
             f"""
             SELECT e.id AS entity_id, e.type, e.name, e.qualified_name,
                    e.line_start, e.line_end,
-                   f.rel_path AS path, r.name AS repository,
+                   f.rel_path AS path, r.name AS repository, r.slug AS repository_slug,
                    bm25(entities_fts) AS rank
             FROM entities_fts
             JOIN entities          e ON e.id = entities_fts.rowid
@@ -653,6 +660,7 @@ class SqliteSearchIndex:
                     # entities (V1_SPEC §10) and are the hubs graph expansion
                     # travels through, so they must not be joined away.
                     repository=row["repository"] or "",
+                    repository_slug=row["repository_slug"] or "",
                     path=row["path"],
                     line_start=row["line_start"],
                     line_end=row["line_end"],

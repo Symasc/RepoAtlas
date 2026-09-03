@@ -22,7 +22,7 @@ from repoatlas.indexing.chunking import chunk_content
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.parsing import EntityType, ParsedFile, ParseDiagnostic, Severity
 from repoatlas.models.reports import RepositorySyncReport
-from repoatlas.models.repository import IndexedFile, Repository
+from repoatlas.models.repository import IndexedFile, Repository, repository_slug
 from repoatlas.parsers.registry import ParserRegistry
 from repoatlas.storage.protocols import ChunkRecord, EntityRecord, FileFacts
 from repoatlas.storage.sqlite.database import SCHEMA_VERSION
@@ -104,11 +104,51 @@ class SyncEngine:
             f"||deps:{self._dependency_registry.version}"
         )
 
+    def forget_if_missing(self, repo: Repository) -> bool:
+        """Drop a repository whose directory no longer exists, and say whether it did.
+
+        A repository's path is its natural key, so a repository that is no longer
+        at its path is no longer that repository: a move is a removal plus a
+        discovery, never a rename in place (ARCHITECTURE.md §3). Removing the row
+        cascades away its files, entities, chunks and edges — including the
+        repository graph node, which is otherwise exempt from orphan collection and
+        would survive as a citable identity for a repository that is gone.
+
+        Nothing extra is lost by doing this. A sync over a missing directory
+        already scans nothing, so every file is classified deleted and every fact
+        cascades away regardless; keeping the row only preserved a shell that still
+        answered to a name.
+        """
+        if repo.id is None or repo.path.is_dir():
+            return False
+        self._repositories.delete(repo.id)
+        return True
+
+    def ensure_repository_identity(self, repo: Repository) -> Repository:
+        """Give the repository its canonical identity, assigning one if it lacks it.
+
+        A database written before schema v5 has rows with no identity, and the
+        identity is a function of the *configured root* — a value SQL cannot see,
+        which is why the migration leaves the column empty rather than filling it
+        with host-absolute paths. It is assigned here, before anything builds a key
+        from it, and never rewritten afterwards (ARCHITECTURE.md §3).
+        """
+        if repo.slug:
+            return repo
+        if repo.id is None:
+            raise ValueError("repository must be persisted before sync")
+        slug = repository_slug(repo.path, self._settings.repos.root)
+        self._repositories.assign_slug(repo.id, slug)
+        return repo.model_copy(update={"slug": slug})
+
     def sync_repository(self, repo: Repository, *, full: bool = False) -> RepositorySyncReport:
         """Bring one repository's index in line with its current working tree."""
         if repo.id is None:
             raise ValueError("repository must be persisted before sync")
 
+        repo_id = repo.id
+        # Identity is resolved before anything builds a key from it.
+        repo = self.ensure_repository_identity(repo)
         repo_path = repo.path
         git_state = self._git.state(repo_path)
 
@@ -123,9 +163,9 @@ class SyncEngine:
             settings=self._settings.discovery,
             managed_subrepos=managed,
         )
-        known = self._files.list_states(repo.id)
+        known = self._files.list_states(repo_id)
 
-        self._repositories.mark_sync_started(repo.id)
+        self._repositories.mark_sync_started(repo_id)
 
         plan = plan_sync(
             scanned,
@@ -168,13 +208,13 @@ class SyncEngine:
         self._knowledge.gc_orphan_entities()
 
         self._repositories.update_detected_metadata(
-            repo.id,
+            repo_id,
             languages=sorted(languages),
             manifests=sorted(manifests),
             lockfiles=sorted(lockfiles),
         )
         self._repositories.mark_sync_finished(
-            repo.id,
+            repo_id,
             head_sha=git_state.head_sha,
             is_dirty=git_state.is_dirty,
             branch=git_state.branch,
@@ -275,7 +315,7 @@ class SyncEngine:
             entities.append(
                 EntityRecord(
                     type=symbol.kind,
-                    key=symbol_key(repo.name, rel_path, symbol.qualified_name, symbol.line_start),
+                    key=symbol_key(repo.slug, rel_path, symbol.qualified_name, symbol.line_start),
                     name=symbol.name,
                     qualified_name=symbol.qualified_name,
                     repo_id=repo.id,
@@ -309,7 +349,7 @@ class SyncEngine:
 
         link = self._linker.link_file(
             repo_id=repo.id,
-            repo_name=repo.name,
+            repo_slug=repo.slug,
             file_id=file_id,
             rel_path=rel_path,
             parsed=parsed,
@@ -470,7 +510,7 @@ class SyncEngine:
     def _file_entity(repo: Repository, file_id: int, rel_path: str) -> EntityRecord:
         return EntityRecord(
             type=EntityType.FILE,
-            key=file_key(repo.name, rel_path),
+            key=file_key(repo.slug, rel_path),
             name=Path(rel_path).name,
             qualified_name=rel_path,
             repo_id=repo.id,
@@ -478,14 +518,21 @@ class SyncEngine:
         )
 
     def ensure_repository_entity(self, repo: Repository) -> int:
-        """Intern the repository node itself, so the graph has a root per repo."""
+        """Intern the repository node itself, so the graph has a root per repo.
+
+        Keyed by identity rather than by name. Interned entities are unique by
+        key, so ``repo:common`` made two managed repositories called ``common``
+        into a single graph node — and a dependency edge to one of them was an
+        edge to whichever had been indexed first (V1_SPEC §9).
+        """
+        identified = self.ensure_repository_identity(repo)
         return self._knowledge.intern_entity(
             EntityRecord(
                 type=EntityType.REPOSITORY,
-                key=repository_key(repo.name),
-                name=repo.name,
-                qualified_name=str(repo.path),
-                repo_id=repo.id,
+                key=repository_key(identified.slug),
+                name=identified.name,
+                qualified_name=identified.slug,
+                repo_id=identified.id,
             )
         )
 

@@ -22,7 +22,13 @@ from repoatlas.models.parsing import (
     Severity,
 )
 from repoatlas.models.reports import RepositorySyncReport, StatusReport, SyncReport
-from repoatlas.models.repository import FileState, IndexedFile, Repository, SyncStatus
+from repoatlas.models.repository import (
+    FileState,
+    IndexedFile,
+    Repository,
+    SyncStatus,
+    repository_slug,
+)
 
 __all__ = [
     "ContextScope",
@@ -46,4 +52,5 @@ __all__ = [
     "StatusReport",
     "SyncReport",
     "SyncStatus",
+    "repository_slug",
 ]

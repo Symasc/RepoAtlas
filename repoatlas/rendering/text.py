@@ -6,29 +6,52 @@ action. Expanded reasoning belongs behind ``--verbose``, not in the default view
 
 from __future__ import annotations
 
+from repoatlas.models.dependencies import Agreement, DependencyPackage
 from repoatlas.models.evidence import Evidence, EvidenceSet, Hypothesis, RepoAtlasAnswer
 from repoatlas.models.reports import StatusReport, SyncReport
 from repoatlas.models.repository import Repository
 
 
 def render_repos(repositories: list[Repository]) -> str:
-    """Compact table: name, then detected languages."""
+    """Compact table: name, then detected languages.
+
+    A second column appears **only** for names that more than one repository
+    answers to. Two rows both reading ``common`` are technically correct and
+    useless; printing every repository's path to guard against a collision that is
+    not happening would make the ordinary listing worse (V1_SPEC §16). So the
+    identity is shown exactly where the name stops identifying anything.
+    """
     if not repositories:
         return "No repositories are managed yet.\n\nRun:\n\n  repoatlas init <directory>"
 
+    counts: dict[str, int] = {}
+    for repo in repositories:
+        counts[repo.name] = counts.get(repo.name, 0) + 1
+    ambiguous = {name for name, count in counts.items() if count > 1}
+
+    ordered = sorted(repositories, key=lambda r: (r.name, r.slug, str(r.path)))
     width = max(len(repo.name) for repo in repositories)
+    identity_width = max((len(repo.slug) for repo in ordered if repo.name in ambiguous), default=0)
+
     lines = []
-    for repo in sorted(repositories, key=lambda r: r.name):
+    for repo in ordered:
         languages = ", ".join(repo.languages) if repo.languages else "-"
-        lines.append(f"{repo.name.ljust(width)}  {languages}")
+        if ambiguous:
+            identity = repo.slug if repo.name in ambiguous else ""
+            lines.append(f"{repo.name.ljust(width)}  {identity.ljust(identity_width)}  {languages}")
+        else:
+            lines.append(f"{repo.name.ljust(width)}  {languages}")
     return "\n".join(lines)
 
 
 def render_status(report: StatusReport) -> str:
     if report.scope == "repository" and report.repositories:
         repo = report.repositories[0]
+        # The identity is shown whenever it says more than the name does, so a
+        # status report for one of two repositories called `common` states which.
+        identity = f" ({repo.slug})" if repo.slug and repo.slug != repo.name else ""
         lines = [
-            f"Repository: {repo.name}",
+            f"Repository: {repo.name}{identity}",
             f"Path: {repo.path}",
             f"Branch: {repo.branch or 'unknown'}",
             f"Working tree: {'dirty' if repo.is_dirty else 'clean'}",
@@ -104,6 +127,53 @@ def render_sync(report: SyncReport) -> str:
     return "\n".join(lines)
 
 
+def render_dependencies(packages: list[DependencyPackage]) -> str:
+    """One block per package, one line per observation (V1_SPEC §13, §16).
+
+    Grouped so multiplicity is obvious, never flattened so it disappears. An
+    unambiguous package renders compactly — one declaration, one resolution, no
+    commentary — because most of them are. A package with more than one distinct
+    value gets an explicit count, phrased as **declarations** and **resolved
+    versions** rather than as a conflict: RepoAtlas has no constraint solver, so it
+    can say that ``^1.0.0`` and ``^9.9.9`` are two different requests and must not
+    say they are incompatible (V1_SPEC §13).
+
+    Every line keeps its own source path, so grouping never costs provenance.
+    """
+    if not packages:
+        return "No dependencies are indexed."
+
+    lines: list[str] = []
+    for package in packages:
+        header = f"{package.name}  ({package.ecosystem})"
+        notes = _multiplicity_notes(package)
+        lines.append(f"{header}  [{', '.join(notes)}]" if notes else header)
+        width = max((len(o.source_path) for o in package.observations), default=0)
+        for observation in package.observations:
+            value = observation.value or "-"
+            group = f"  ({observation.group})" if observation.group not in (None, "main") else ""
+            lines.append(
+                f"  {observation.source_path.ljust(width)}  "
+                f"{observation.role.value:9s} {value}{group}"
+            )
+        lines.append("")
+    if lines:
+        lines.pop()
+    return "\n".join(lines)
+
+
+def _multiplicity_notes(package: DependencyPackage) -> list[str]:
+    """What the reader must not miss: several answers exist, and how many."""
+    notes: list[str] = []
+    if package.declaration_agreement is Agreement.DIVERGENT:
+        notes.append(f"{len(package.declared_constraints)} differing declarations")
+    elif package.declaration_agreement is Agreement.AGREEING:
+        notes.append(f"{len(package.declarations)} agreeing declarations")
+    if package.resolution_agreement is Agreement.DIVERGENT:
+        notes.append(f"{len(package.resolved_versions)} resolved versions")
+    return notes
+
+
 def render_evidence(evidence: EvidenceSet) -> str:
     """``locate`` output: locations first, prose minimal (V1_SPEC §16)."""
     if not evidence.candidates:
@@ -122,7 +192,7 @@ def render_evidence(evidence: EvidenceSet) -> str:
 
     lines = ["EVIDENCE", ""]
     for candidate in evidence.candidates:
-        lines.append(f"{candidate.location}")
+        lines.append(candidate.located(evidence.prefix_for(candidate)))
         detail = candidate.description or _first_meaningful_line(candidate.text)
         if detail:
             lines.append(f"  {detail}")
@@ -159,8 +229,13 @@ def confidence_label(value: float) -> str:
 
 
 def _citation_location(item: Evidence) -> str:
-    """``repo/path``, with the span when the citation carries one."""
-    location = f"{item.repository}/{item.path}"
+    """``repo/path``, with the span when the citation carries one.
+
+    Grounding has already resolved which source this cites, so the identity is
+    printed when the citation carries one: a hypothesis supported by
+    ``teamA/common/index.ts`` must not be shown as supported by ``common``.
+    """
+    location = f"{item.repository_slug or item.repository}/{item.path}"
     if item.line_start is None:
         return location
     span = (
@@ -190,7 +265,7 @@ def _verified_evidence_lines(evidence: EvidenceSet) -> list[str]:
     """
     lines: list[str] = []
     for candidate in evidence.candidates:
-        lines.append(candidate.location)
+        lines.append(candidate.located(evidence.prefix_for(candidate)))
         detail = candidate.description or _first_meaningful_line(candidate.text)
         if detail:
             lines.append(f"  {detail}")

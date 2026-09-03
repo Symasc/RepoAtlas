@@ -269,6 +269,26 @@ The user must **not** manually register repositories.
 A Git repository inside another Git repository is a **separate managed repository**. Files belonging to an inner
 repository are never indexed as part of the outer one.
 
+### Repository identity
+
+**A repository's name is not its identity.** Two managed repositories may share a directory basename — `teamA/common`
+and `teamB/common` are both legitimate — and they may additionally share a package name, folder names and symbol
+names without becoming the same repository.
+
+Every internal identity used for storage, graph nodes, entity keys, evidence, rank fusion, deduplication, grounding
+and cross-repository linking must distinguish repositories unambiguously. The display name is a **presentation**
+concern and must not appear in any of them.
+
+Two invariants follow, and both are asserted in the adversarial suite:
+
+- repository display names are never used as provenance identity;
+- two repository sources with identical display name, relative path, line range and content remain **distinct**
+  evidence sources.
+
+A repository that is moved or renamed is a removal plus a discovery, not the same repository at a new path; the
+removed identity must not survive anywhere. Where a display name is genuinely ambiguous — in `repos`, in evidence,
+in `--repo` — output disambiguates and selection refuses rather than choosing. Ambiguity is reported, never resolved.
+
 ### Default exclusions
 
 ```
@@ -876,6 +896,29 @@ resolved:  foo 4.7.2
 ```
 
 **Store both.** The resolved version becomes essential in V2 for version-specific documentation retrieval (§22).
+
+### Multiplicity and provenance
+
+One repository may legitimately hold **several** dependency domains — a root `package.json` beside
+`backend/package.json`, a `pyproject.toml` beside `requirements.txt` and `requirements-dev.txt` — and each states
+something true.
+
+**Multiple real dependency declarations must never be silently collapsed into one apparently authoritative
+declaration or version.** RepoAtlas may report one declaration, several agreeing declarations, several differing
+declarations, one resolved version, several independently resolved versions, or an unresolved state. It may not
+choose one of them.
+
+Consequences:
+
+- every observation keeps its own source path, line, group and role;
+- a manifest is paired with a lockfile only when the layout proves the pairing — in practice, when they sit in the
+  same directory. A workspace root lockfile is not evidence about a nested member's version;
+- **a repository may contain more than one resolved version of the same package**, and both survive;
+- identical constraints in two files are *agreement*, not conflict, and both source paths are still recorded;
+- multiplicity is reported as a count of distinct declarations or resolved versions. V1 performs no constraint
+  intersection, so it never claims that two constraints are incompatible — only that they differ (§2);
+- ecosystem is part of package identity: npm `foo-bar` and PyPI `foo_bar` normalize alike and are not the same
+  dependency.
 
 `setup.py` is parsed statically via `ast`; it is never imported or executed (§17).
 

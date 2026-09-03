@@ -40,6 +40,7 @@ def status(workspace: Workspace, context: RepositoryContext) -> StatusReport:
         per_repo.append(
             RepositoryStatus(
                 name=repo.name,
+                slug=repo.slug,
                 path=repo.path,
                 branch=repo.branch,
                 head_sha=repo.head_sha,
