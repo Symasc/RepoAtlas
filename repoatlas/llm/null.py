@@ -12,7 +12,7 @@ from collections.abc import Sequence
 
 from pydantic import BaseModel
 
-from repoatlas.llm.protocol import Message, ModelResponse, ToolSpec
+from repoatlas.llm.protocol import Message, ModelFailure, ModelResponse, ToolSpec
 from repoatlas.models.evidence import RepoAtlasAnswer
 
 INSUFFICIENT_EVIDENCE = "INSUFFICIENT EVIDENCE"
@@ -43,3 +43,7 @@ class NullBackend:
 
     def availability_detail(self) -> str:
         return "the null backend is always available"
+
+    def availability_category(self) -> ModelFailure:
+        """Configuration, not a failure: no backend was requested."""
+        return ModelFailure.CONFIGURATION

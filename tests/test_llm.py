@@ -14,7 +14,12 @@ from repoatlas.llm.factory import build_model
 from repoatlas.llm.grounding import ground_answer
 from repoatlas.llm.null import NullBackend
 from repoatlas.llm.ollama import OllamaBackend
-from repoatlas.llm.protocol import ModelUnavailable, ReasoningModel
+from repoatlas.llm.protocol import (
+    ModelConfigurationError,
+    ModelError,
+    ModelFailure,
+    ReasoningModel,
+)
 from repoatlas.llm.reasoner import QueryIntent, Reasoner, build_messages, format_evidence
 from repoatlas.llm.scripted import ScriptedBackend
 from repoatlas.models.evidence import (
@@ -98,9 +103,14 @@ def test_factory_is_configuration_driven() -> None:
 
 
 def test_factory_rejects_unknown_provider() -> None:
-    with pytest.raises(ModelUnavailable) as excinfo:
+    """A provider nobody implements is RepoAtlas's own configuration, not a
+    backend that could not be reached — nothing was contacted."""
+    with pytest.raises(ModelConfigurationError) as excinfo:
         build_model(LLMSettings(provider="not-a-provider"))
     assert "ollama" in (excinfo.value.detail or "")
+    assert excinfo.value.category is ModelFailure.CONFIGURATION
+    # Still catchable by a caller that only cares that the backend is unusable.
+    assert isinstance(excinfo.value, ModelError)
 
 
 def test_ollama_id_includes_the_model() -> None:
@@ -197,9 +207,17 @@ def test_schema_violation_is_repaired() -> None:
     assert result.answer.hypotheses[0].confidence == 0.9
 
 
-def test_backend_failure_during_repair_is_survived() -> None:
-    _, result = _reason(["not json"])
-    assert result.answer.summary == "INSUFFICIENT EVIDENCE"
+def test_backend_failure_during_repair_is_reported_as_a_backend_failure() -> None:
+    """A backend that dies during the repair is a backend failure, not a model
+    that answered badly.
+
+    This previously returned INSUFFICIENT EVIDENCE and exit 0, so an Ollama
+    outage produced exit 4 or exit 0 depending only on whether the *first*
+    response happened to parse. The first response being invalid does not make
+    the server's death a quality problem (V1_SPEC §15).
+    """
+    with pytest.raises(ModelError):
+        _reason(["not json"])
 
 
 # -- citation verification (the enforcement point) --------------------------

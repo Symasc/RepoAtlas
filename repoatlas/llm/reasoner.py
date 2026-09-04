@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from repoatlas.llm.grounding import INSUFFICIENT_EVIDENCE, GroundingReport, ground_answer
 from repoatlas.llm.prompts.loader import render
-from repoatlas.llm.protocol import Message, ModelUnavailable, ReasoningModel
+from repoatlas.llm.protocol import Message, ModelResponse, ReasoningModel
 from repoatlas.models.evidence import EvidenceSet, RepoAtlasAnswer
 
 #: Characters of a single evidence block passed to the model. The retriever has
@@ -144,6 +144,75 @@ def _parse(content: str) -> RepoAtlasAnswer:
     return RepoAtlasAnswer.model_validate_json(_extract_json(content))
 
 
+#: Characters of the validation error echoed back to the model in the repair
+#: prompt. Bounded because a Pydantic error quotes the offending input.
+_MAX_REPAIR_ERROR_CHARS = 800
+
+
+def _output_problem(response: ModelResponse, error: Exception) -> str:
+    """Say what was actually wrong with the model's text, and what would fix it.
+
+    Four distinguishable states, and they are not interchangeable advice:
+
+    * the server reported the output limit — raising it is the fix;
+    * nothing was generated at all;
+    * the text is not JSON;
+    * the text is JSON of the wrong shape.
+
+    Telling a user to raise ``num_predict`` because a model emitted confident
+    nonsense would be a guess dressed as a diagnosis, so only the first case
+    mentions the limit — and only because the *server* said so, never because
+    the text merely looks unfinished (V1_SPEC §15).
+
+    Nothing here quotes the output. A Pydantic error carries the offending text
+    in its ``input`` field, and that text is written from repository content, so
+    the position is reported and the characters are not (V1_SPEC §17).
+    """
+    if response.truncated:
+        return (
+            "The reasoning model's response was cut off before it was complete: "
+            "the server reported that generation stopped at its output limit "
+            f"(done_reason={response.finish_reason!r}). "
+            "Raise the model's output limit (Ollama: options.num_predict) or ask a "
+            "narrower question."
+        )
+    if not response.content.strip():
+        return (
+            "The reasoning model returned an empty response. The server answered "
+            "normally, so this is the model producing nothing rather than a "
+            "connection problem."
+        )
+    syntax = _json_syntax_error(error)
+    if syntax is not None:
+        return f"The reasoning model returned output that is not valid JSON ({syntax})."
+    count = error.error_count() if isinstance(error, ValidationError) else 1
+    return (
+        "The reasoning model returned well-formed JSON that is not a RepoAtlas "
+        f"answer ({count} schema {'violation' if count == 1 else 'violations'})."
+    )
+
+
+def _json_syntax_error(error: Exception) -> str | None:
+    """Where the JSON broke, or ``None`` if the JSON itself was fine.
+
+    Pydantic's ``model_validate_json`` reports a syntax failure as a
+    ``ValidationError`` of type ``json_invalid`` rather than as a
+    ``JSONDecodeError``, so the two cases cannot be told apart by exception
+    class — which is exactly the kind of collapse this pass exists to undo. The
+    ``ctx.error`` message is a line/column position and carries no content.
+    """
+    if isinstance(error, json.JSONDecodeError):
+        return f"parsing failed at character {error.pos}"
+    if not isinstance(error, ValidationError):
+        return None
+    errors = error.errors()
+    if not errors or any(item.get("type") != "json_invalid" for item in errors):
+        return None
+    context = errors[0].get("ctx") or {}
+    where = str(context.get("error", "")).strip()
+    return f"parsing failed: {where}" if where else "parsing failed"
+
+
 class Reasoner:
     """Turns evidence into a validated, citation-verified answer."""
 
@@ -160,22 +229,34 @@ class Reasoner:
 
         try:
             answer = _parse(response.content)
-        except (ValidationError, ValueError, json.JSONDecodeError) as first_error:
+        except (ValidationError, json.JSONDecodeError) as first_error:
             # One repair attempt, then give up rather than render unvalidated
             # output (V1_SPEC §15).
             repaired = True
             repair = [
                 *messages,
                 Message(role="assistant", content=response.content),
-                Message(role="user", content=render("repair", error=str(first_error)[:800])),
+                Message(
+                    role="user",
+                    content=render("repair", error=str(first_error)[:_MAX_REPAIR_ERROR_CHARS]),
+                ),
             ]
+            # A backend failure during the repair is a backend failure. Folding it
+            # into "the model returned an invalid answer" would describe the wrong
+            # layer — the first response was invalid, but what ended the run was
+            # the server, and only one of those two is actionable.
+            retried = await self._model.complete(repair, response_schema=RepoAtlasAnswer)
             try:
-                retried = await self._model.complete(repair, response_schema=RepoAtlasAnswer)
                 answer = _parse(retried.content)
                 response = retried
-            except (ValidationError, ValueError, json.JSONDecodeError, ModelUnavailable):
+            except (ValidationError, json.JSONDecodeError) as repair_error:
                 return self._insufficient(
-                    "The reasoning model did not return a valid answer.", response.model, repaired
+                    "The reasoning model did not return a valid answer, and the "
+                    "repair attempt did not either.\n\n"
+                    f"First attempt: {_output_problem(response, first_error)}\n"
+                    f"Repair attempt: {_output_problem(retried, repair_error)}",
+                    retried.model or response.model,
+                    repaired,
                 )
 
         grounding = ground_answer(answer, evidence)

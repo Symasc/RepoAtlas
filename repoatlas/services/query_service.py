@@ -10,7 +10,7 @@ import asyncio
 
 from repoatlas.errors import ReasoningModelUnavailableError
 from repoatlas.llm.factory import build_model
-from repoatlas.llm.protocol import ModelUnavailable, ReasoningModel
+from repoatlas.llm.protocol import ModelError, ReasoningModel
 from repoatlas.llm.reasoner import QueryIntent, Reasoner, ReasoningResult
 from repoatlas.models.context import RepositoryContext
 from repoatlas.models.evidence import EvidenceSet
@@ -66,7 +66,10 @@ def reason(
 
     try:
         result = asyncio.run(Reasoner(backend).reason(question, evidence, intent))
-    except ModelUnavailable as exc:
+    except ModelError as exc:
+        # Every backend failure is exit 4, but the message is the backend's own
+        # account of which layer failed — never a generic reachability claim
+        # (ARCHITECTURE.md §11).
         raise ReasoningModelUnavailableError(exc.message, detail=exc.detail) from exc
 
     return evidence, result
@@ -75,5 +78,8 @@ def reason(
 def _build(workspace: Workspace) -> ReasoningModel:
     try:
         return build_model(workspace.settings.llm)
-    except ModelUnavailable as exc:
+    except ModelError as exc:
+        # Every backend failure is exit 4, but the message is the backend's own
+        # account of which layer failed — never a generic reachability claim
+        # (ARCHITECTURE.md §11).
         raise ReasoningModelUnavailableError(exc.message, detail=exc.detail) from exc
