@@ -1,0 +1,72 @@
+# Test coverage gate.
+#
+# The threshold itself lives in `pyproject.toml` under `[tool.coverage.report]`,
+# not here, so `uv run pytest --cov` locally enforces exactly what CI enforces.
+# A gate you can only evaluate by pushing is a gate people learn to ignore.
+name: coverage
+
+on:
+  push:
+    branches: [master, v1-the-base]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: this workflow reads the tree and writes a job summary.
+permissions:
+  contents: read
+
+# A superseded push has nothing to tell us; cancel it rather than queue it.
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        # Pinned to an exact tag: astral-sh publishes no moving `v10` major
+        # ref, so `@v10` does not resolve.
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          # `requires-python = ">=3.13"`; pin the minor so a new release does not
+          # silently change what is being tested.
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install dependencies
+        # `--locked` fails rather than silently resolving something other than
+        # `uv.lock`. CI must test the dependency set the lockfile describes.
+        run: uv sync --locked
+
+      - name: Run tests with coverage
+        # `slow` (network / model download) and `scale` are deselected by the
+        # `addopts` in pyproject.toml. Coverage is measured over the suite that
+        # actually runs on every change, so the number means what it says.
+        run: uv run pytest --cov --cov-report=term-missing --cov-report=xml
+
+      - name: Write coverage summary
+        # Runs even when the gate failed — that is precisely when the table is
+        # worth reading.
+        if: always()
+        run: |
+          {
+            echo '## Coverage'
+            echo
+            echo '```'
+            uv run coverage report --skip-covered || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: warn
+          retention-days: 14
