@@ -10,7 +10,13 @@ from collections.abc import Sequence
 
 from pydantic import BaseModel
 
-from repoatlas.llm.protocol import Message, ModelResponse, ModelUnavailable, ToolSpec
+from repoatlas.llm.protocol import (
+    Message,
+    ModelFailure,
+    ModelResponse,
+    ModelUnavailable,
+    ToolSpec,
+)
 
 
 class ScriptedBackend:
@@ -24,10 +30,12 @@ class ScriptedBackend:
         *,
         is_available: bool = True,
         detail: str = "scripted backend marked unavailable",
+        category: ModelFailure = ModelFailure.TRANSPORT,
     ) -> None:
         self._responses = list(responses)
         self._is_available = is_available
         self._detail = detail
+        self._category = category
         self.calls: list[list[Message]] = []
         self.schemas: list[type[BaseModel] | None] = []
 
@@ -49,6 +57,9 @@ class ScriptedBackend:
 
     def availability_detail(self) -> str:
         return self._detail
+
+    def availability_category(self) -> ModelFailure:
+        return self._category
 
     @property
     def remaining(self) -> int:

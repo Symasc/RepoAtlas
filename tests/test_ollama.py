@@ -13,7 +13,7 @@ import httpx
 import pytest
 from repoatlas.config.settings import LLMSettings
 from repoatlas.llm.ollama import OllamaBackend
-from repoatlas.llm.protocol import Message, ModelUnavailable
+from repoatlas.llm.protocol import Message, ModelServerError, ModelUnavailable
 from repoatlas.models.evidence import RepoAtlasAnswer
 
 
@@ -107,9 +107,23 @@ def test_connection_failure_raises_model_unavailable() -> None:
     assert "Could not reach Ollama" in excinfo.value.message
 
 
-def test_http_error_raises_model_unavailable() -> None:
+def test_http_error_is_a_server_failure_not_an_unreachable_server() -> None:
+    """The server answered. Reporting that as unavailability would send the user
+    to restart something that is running (ARCHITECTURE.md §11)."""
     backend = _backend(lambda request: httpx.Response(500, text="boom"))
-    with pytest.raises(ModelUnavailable) as excinfo:
+    with pytest.raises(ModelServerError) as excinfo:
         asyncio.run(backend.complete([Message(role="user", content="x")]))
     assert "HTTP 500" in excinfo.value.message
-    assert "boom" in (excinfo.value.detail or "")
+    assert excinfo.value.http_status == 500
+    assert excinfo.value.retryable
+    assert not isinstance(excinfo.value, ModelUnavailable)
+    # The raw body is not Ollama's documented `{"error": ...}` envelope, so it is
+    # not shown at all rather than dumped (V1_SPEC §17).
+    assert "boom" not in f"{excinfo.value.message}{excinfo.value.detail}"
+
+
+def test_a_documented_error_envelope_is_surfaced() -> None:
+    backend = _backend(lambda request: httpx.Response(503, json={"error": "server busy"}))
+    with pytest.raises(ModelServerError) as excinfo:
+        asyncio.run(backend.complete([Message(role="user", content="x")]))
+    assert "server busy" in (excinfo.value.detail or "")

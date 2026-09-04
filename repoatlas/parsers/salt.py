@@ -12,6 +12,14 @@ neutralized. The strategy the specification requires, in order:
    and requisites at reduced confidence, and record a diagnostic.
 
 Templates are neutralized, never rendered (V1_SPEC §17).
+
+**Provenance.** A state's span ends on the last source line structurally belonging
+to that state. Sibling states, top-level Jinja controls, trailing comments and
+separator whitespace are not evidence for the state above them; Jinja written
+inside a state's value is. Because step 1 preserves every character position,
+marks taken from the neutralized text index the raw file exactly — which is what
+lets :func:`~repoatlas.parsers.marks.node_span` read raw lines against neutralized
+marks (ARCHITECTURE.md §5).
 """
 
 from __future__ import annotations
@@ -31,7 +39,7 @@ from repoatlas.models.parsing import (
     Severity,
 )
 from repoatlas.parsers.jinja import extract_references, neutralize
-from repoatlas.parsers.marks import diagnostic_line
+from repoatlas.parsers.marks import diagnostic_line, node_span
 from repoatlas.parsers.structured import collect_config_keys
 
 _SUFFIXES = frozenset({".sls"})
@@ -70,19 +78,6 @@ _FALLBACK_REQUISITE = re.compile(
 _FALLBACK_CONFIDENCE = 0.6
 
 
-def _line(node: yaml.Node) -> tuple[int, int]:
-    """1-based inclusive line range of a composed YAML node.
-
-    A block node's end mark sits at the start of whatever follows it, so a range
-    ending in column 0 would claim the next construct's first line.
-    """
-    start = node.start_mark.line + 1
-    end = node.end_mark.line + 1
-    if node.end_mark.column == 0 and end > start:
-        end -= 1
-    return start, end
-
-
 def _scalar(node: yaml.Node) -> str | None:
     return node.value if isinstance(node, yaml.ScalarNode) else None
 
@@ -90,10 +85,17 @@ def _scalar(node: yaml.Node) -> str | None:
 class _Collector:
     """Turns one composed YAML document into Salt symbols and references."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, lines: list[str]) -> None:
         self._path = path
+        #: The **raw** file, not the neutralized copy. Neutralization preserves
+        #: positions, so marks index these lines exactly — and a line that only
+        #: looks blank after neutralization still counts as content.
+        self._lines = lines
         self.symbols: list[ParsedSymbol] = []
         self.references: list[ParsedReference] = []
+
+    def _span(self, node: yaml.Node) -> tuple[int, int]:
+        return node_span(node, self._lines)
 
     def document(self, root: yaml.Node) -> None:
         if not isinstance(root, yaml.MappingNode):
@@ -118,7 +120,7 @@ class _Collector:
             target = _scalar(item)
             if target is None:
                 continue
-            start, end = _line(item)
+            start, end = self._span(item)
             self.references.append(
                 ParsedReference(
                     edge_type=EdgeType.INCLUDES,
@@ -137,7 +139,7 @@ class _Collector:
             target = _scalar(key_node)
             if target is None:
                 continue
-            start, end = _line(key_node)
+            start, end = self._span(key_node)
             self.references.append(
                 ParsedReference(
                     edge_type=EdgeType.REFERENCES,
@@ -159,12 +161,12 @@ class _Collector:
         is what lets a ``pillar['service']['host']`` reference resolve to the line
         that defines it.
         """
-        start, _ = _line(key_node)
-        _, end = _line(value_node)
+        start, _ = self._span(key_node)
+        _, end = self._span(value_node)
         functions = self._state_functions(value_node)
 
         if not functions and not self._is_state(value_node):
-            keys, _truncated = collect_config_keys(value_node, state_id)
+            keys, _truncated = collect_config_keys(value_node, state_id, lines=self._lines)
             self.symbols.append(
                 ParsedSymbol(
                     kind=EntityType.CONFIG,
@@ -219,7 +221,7 @@ class _Collector:
         ]
 
     def _state_function(self, state_id: str, function: str, node: yaml.Node) -> None:
-        start, end = _line(node)
+        start, end = self._span(node)
         self.references.append(
             ParsedReference(
                 edge_type=EdgeType.REFERENCES,
@@ -257,7 +259,7 @@ class _Collector:
         edge_type = _REQUISITES[key]
         for item in node.value:
             for module, target, target_node in self._requisite_targets(item):
-                start, end = _line(target_node)
+                start, end = self._span(target_node)
                 self.references.append(
                     ParsedReference(
                         edge_type=edge_type,
@@ -297,7 +299,7 @@ class _Collector:
             target = _scalar(candidate)
             if target is None or "_" * 4 in target:
                 continue
-            start, end = _line(candidate)
+            start, end = self._span(candidate)
             self.references.append(
                 ParsedReference(
                     edge_type=EdgeType.REFERENCES,
@@ -323,7 +325,7 @@ class _Collector:
             name = _scalar(key_node)
             if name is None or not _ENV_NAME.match(name):
                 continue
-            start, end = _line(key_node)
+            start, end = self._span(key_node)
             self.references.append(
                 ParsedReference(
                     edge_type=EdgeType.CONFIGURES,
@@ -337,18 +339,40 @@ class _Collector:
             )
 
 
+def _block_end(lines: list[str], start: int) -> int:
+    """The last line of the indented block opened at 1-based ``start``.
+
+    The recovery path's answer to the same question the YAML path answers from
+    node content: a top-level construct owns the lines beneath it that are blank
+    or indented, and ends at the last one that is neither blank nor a comment.
+    Indentation cannot prove the *nesting* a YAML parse would have — which is why
+    these facts keep their reduced confidence — but it does prove where the block
+    stops, and a one-line span for a six-line state understates the evidence just
+    as a six-line span for a one-line state overstates it.
+    """
+    end = start
+    for number in range(start + 1, len(lines) + 1):
+        text = lines[number - 1]
+        if text.strip() and not text[0].isspace():
+            break
+        if text.strip() and not text.lstrip().startswith("#"):
+            end = number
+    return end
+
+
 def _fallback_scan(content: str) -> tuple[list[ParsedSymbol], list[ParsedReference]]:
     """Line-oriented recovery when the neutralized text is still not YAML.
 
     Recovers state IDs and requisites only, at reduced confidence, because
     indentation alone cannot prove the nesting the YAML parser would have.
     """
+    lines = content.splitlines()
     symbols: list[ParsedSymbol] = []
     references: list[ParsedReference] = []
     current: str | None = None
     pending: str | None = None
 
-    for number, line in enumerate(content.splitlines(), start=1):
+    for number, line in enumerate(lines, start=1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
 
@@ -371,7 +395,7 @@ def _fallback_scan(content: str) -> tuple[list[ParsedSymbol], list[ParsedReferen
                     name=state_id,
                     qualified_name=state_id,
                     line_start=number,
-                    line_end=number,
+                    line_end=_block_end(lines, number),
                     meta={"recovery": "line-scan"},
                 )
             )
@@ -424,7 +448,7 @@ class SaltParser:
     def parse(self, path: Path, content: str) -> ParsedFile:
         neutralized = neutralize(content)
         diagnostics: list[ParseDiagnostic] = []
-        collector = _Collector(path)
+        collector = _Collector(path, content.splitlines())
 
         try:
             documents = list(yaml.compose_all(neutralized, Loader=yaml.SafeLoader))

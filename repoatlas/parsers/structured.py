@@ -14,6 +14,7 @@ generated keys ever could.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
@@ -25,7 +26,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
     Severity,
 )
-from repoatlas.parsers.marks import diagnostic_line
+from repoatlas.parsers.marks import diagnostic_line, node_span
 
 _YAML_SUFFIXES = frozenset({".yaml", ".yml"})
 _JSON_SUFFIXES = frozenset({".json"})
@@ -43,32 +44,38 @@ _MAX_KEYS = 400
 _LEADING_TABS = re.compile(r"^\t+", re.MULTILINE)
 
 
-def _line(node: yaml.Node) -> tuple[int, int]:
-    """1-based inclusive line range; a block node's end mark sits on the next line."""
-    start = node.start_mark.line + 1
-    end = node.end_mark.line + 1
-    if node.end_mark.column == 0 and end > start:
-        end -= 1
-    return start, end
-
-
 def collect_config_keys(
-    node: yaml.Node, prefix: str = "", *, max_depth: int = _MAX_DEPTH, max_keys: int = _MAX_KEYS
+    node: yaml.Node,
+    prefix: str = "",
+    *,
+    lines: Sequence[str],
+    max_depth: int = _MAX_DEPTH,
+    max_keys: int = _MAX_KEYS,
 ) -> tuple[list[ParsedSymbol], bool]:
     """Mapping keys of a composed YAML node as CONFIG symbols with line ranges.
+
+    ``lines`` is the source file split into lines; ranges are derived from node
+    content rather than from end marks (see :mod:`repoatlas.parsers.marks`).
 
     Shared with the Salt parser, which uses it for the pillar-data half of an
     ``.sls`` tree (V1_SPEC §7.5, §7.7).
     """
-    collector = _KeyCollector(max_depth=max_depth, max_keys=max_keys)
+    collector = _KeyCollector(lines=lines, max_depth=max_depth, max_keys=max_keys)
     collector.walk(node, prefix)
     return collector.symbols, collector.truncated
 
 
 class _KeyCollector:
-    def __init__(self, *, max_depth: int = _MAX_DEPTH, max_keys: int = _MAX_KEYS) -> None:
+    def __init__(
+        self,
+        *,
+        lines: Sequence[str],
+        max_depth: int = _MAX_DEPTH,
+        max_keys: int = _MAX_KEYS,
+    ) -> None:
         self.symbols: list[ParsedSymbol] = []
         self.truncated = False
+        self._lines = lines
         self._max_depth = max_depth
         self._max_keys = max_keys
 
@@ -85,8 +92,8 @@ class _KeyCollector:
                     continue
                 name = key_node.value
                 path = f"{prefix}.{name}" if prefix else name
-                start, _ = _line(key_node)
-                _, end = _line(value_node)
+                start, _ = node_span(key_node, self._lines)
+                _, end = node_span(value_node, self._lines)
                 self.symbols.append(
                     ParsedSymbol(
                         kind=EntityType.CONFIG,
@@ -148,7 +155,7 @@ class StructuredParser:
                 ),
             )
 
-        collector = _KeyCollector()
+        collector = _KeyCollector(lines=content.splitlines())
         for document in documents:
             if document is not None:
                 collector.walk(document)

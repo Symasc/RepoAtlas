@@ -9,7 +9,7 @@ from __future__ import annotations
 from repoatlas.config.settings import LLMSettings
 from repoatlas.llm.null import NullBackend
 from repoatlas.llm.ollama import OllamaBackend
-from repoatlas.llm.protocol import ModelUnavailable, ReasoningModel
+from repoatlas.llm.protocol import ModelConfigurationError, ReasoningModel
 
 _PROVIDERS = ("ollama", "none")
 
@@ -21,7 +21,9 @@ def build_model(settings: LLMSettings) -> ReasoningModel:
         return OllamaBackend(settings)
     if provider in {"none", "null"}:
         return NullBackend()
-    raise ModelUnavailable(
+    # RepoAtlas's own configuration, not a backend that failed: nothing was
+    # contacted, so nothing is unavailable.
+    raise ModelConfigurationError(
         f"Unknown LLM provider: {settings.provider!r}",
         detail="Supported providers:\n\n" + "\n".join(f"  {p}" for p in _PROVIDERS),
     )

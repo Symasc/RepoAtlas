@@ -804,6 +804,25 @@ deployment/service/init.sls:42-48
 A fact without provenance is a bug. Provenance is stored on the fact row itself (not derived at query time), which
 is also what makes stale-fact removal exact (§12).
 
+**A range must be the smallest span that establishes the fact.**
+
+> A deterministic entity or fact may cite only the smallest source span that actually establishes it.
+
+This is a correctness requirement, not a tidiness one: a parser's line range is the authoritative supplied span,
+so retrieval renders it and citation verification (§15) checks the model's claims against it. A range wider than
+the fact's real source lets unrelated lines be presented — and validated — as support. Narrower is not safer
+either: a span that omits part of the state offers evidence that does not establish the fact.
+
+For Salt specifically:
+
+> A Salt state's provenance ends on the last source line structurally belonging to that state. Top-level Jinja
+> controls, sibling states, trailing comments and separator whitespace are not evidence for the preceding state.
+
+> Jinja embedded inside a state's value remains part of that state's provenance.
+
+Ranges are derived from parsed node **content**, never from a YAML end mark — a composite node's end mark points at
+the next construct, which is a different question. See `ARCHITECTURE.md` §5.
+
 ---
 
 ## 12. Incremental synchronization and branch awareness
@@ -1139,6 +1158,36 @@ class RepoAtlasAnswer(BaseModel):
 
 Validate model output before rendering. On validation failure: one repair attempt, then return
 `INSUFFICIENT EVIDENCE` rather than rendering unvalidated output.
+
+### Failure diagnostics must name the layer that failed
+
+> Receiving an invalid model response is not equivalent to failing to reach the model server.
+
+> An error message describes the deepest layer successfully reached before the failure.
+
+A diagnostic is output, and output has to be true. Backend failures are classified by how far the request got —
+configuration, transport, server, protocol, model output — and a failure at one layer may never be described in the
+vocabulary of the layer below it. Only a connection that was never established may say "could not reach".
+
+| Situation | Reported as |
+|---|---|
+| Nothing listening, or the connect timed out | could not reach the server |
+| Connected, then HTTP 4xx/5xx, or the response never finished | the server was reached and failed |
+| The server listed its models; the configured one is absent | the server is running, the model is not installed |
+| A body arrived that is not the API format | the server answered, but not in the expected format |
+| A valid envelope carrying unusable model text | the model returned invalid output |
+| The **server reported** generation stopped at its output limit | the response was truncated; raise the output limit |
+| Model output invalid and the repair also invalid | both attempts named, with what was wrong with each |
+| A valid answer citing unsupplied evidence | `INSUFFICIENT EVIDENCE` — a grounding outcome, not a backend failure |
+
+Truncation is reported only when the server states it, never inferred from text that looks unfinished: a model that
+emitted confident nonsense will emit more of it with a larger budget, so "raise the output limit" would be a guess
+presented as a diagnosis. A backend failure during the repair attempt is reported as a backend failure, not as the
+model having answered badly. Every backend failure keeps exit code 4; the *message* carries the cause.
+
+Error messages never contain a response body. Model output is written from repository content, so failures are
+described by shape — a byte count, the names of the fields present, a parse position — and Ollama's documented
+`{"error": "..."}` string is the only server text ever quoted, bounded (§17).
 
 ### Citation verification (enforcement of §2)
 
@@ -1942,3 +1991,52 @@ no-stale-facts path — no policy version, no flag, no manual database deletion.
 Regression suite: `tests/adversarial/test_secret_exclusion_integrity.py` (97 cases, of which 49 failed before the
 fix), covering the predicate, the reader, every database stage, the embedding backend's own inputs, the assembled
 prompt, operator output, renames, branches, and an upgrade from a contaminated database.
+
+### Remediation pass 9 — Salt provenance range integrity — **COMPLETE**
+
+Completed 2026-09-03. One P3 correctness finding: Salt state symbols received line ranges extending past the state
+they represent.
+
+Reproduced on fresh fixtures: `install_nginx` in the review's own example cited lines **3-5 as 3-7**, absorbing a
+blank line and the `{% endif %}` of its enclosing conditional. Every boundary leaked — a state before a sibling took
+the separator blank lines, a state before a comment took the comment, a state at EOF took the trailing blank lines,
+and worst, a state followed by a comment and a guarded neighbour cited *the neighbour's own `{% if %}`* as its
+evidence. Verified persisted: `entities.line_start`/`line_end` and `locate` both showed the over-wide span.
+
+Root cause: PyYAML's `end_mark` for a composite node is the position of the **next token**, reached after the
+scanner consumes intervening blank lines and comments. The existing correction — subtract one when the mark sits in
+column 0 — removed only the last line of that overshoot.
+
+Fixed by deriving the end from node **content** instead: recursively, the last line any leaf of the subtree
+occupies. The calculation moved into `repoatlas/parsers/marks.py` as the single authority shared by the Salt and
+YAML/JSON parsers, since Salt uses the latter's key collector for the pillar half of an `.sls` tree. Block scalars
+are trimmed over blank lines only, so a `#` inside a literal block stays content. The line-scan recovery path gained
+the same model from indentation. See `ARCHITECTURE.md` §5. Regression suite:
+`tests/adversarial/test_salt_provenance_integrity.py` (59 cases, of which 30 failed before the fix), asserting exact
+ranges and exact covered text through the parser, the database, retrieval and the grounding span.
+
+### Remediation pass 10 — Ollama failure classification and diagnostics — **COMPLETE**
+
+Completed 2026-09-03. The final finding from the independent review: Ollama failures were classified too broadly, so
+a reachable server returning malformed or truncated output could be reported as though RepoAtlas could not reach
+Ollama at all.
+
+Reproduced against a **real socket** HTTP server, not a mocked transport — the distinction the finding is about is
+invisible to a mock, because a mock never separates "no connection" from "a connection that returned something
+useless". HTTP 200 with a non-JSON body produced `Could not reach Ollama at http://…`; a read timeout after a
+successful connect produced the same; `/api/tags` answering HTTP 500 produced `No Ollama server responded`. Two
+envelope shapes (`{"message": 123}`, a JSON array) escaped as an unhandled `AttributeError` and a Python traceback
+at exit 1. A wrong envelope silently produced empty content and blamed the evidence. A response the server flagged
+as `done_reason: "length"` was rendered as `INSUFFICIENT EVIDENCE` at exit 0 with no hint that the output limit had
+been hit. HTTP error details dumped the raw response body.
+
+Root cause: `except (httpx.HTTPError, json.JSONDecodeError)` in one clause, mapping a connection failure and a JSON
+parse failure onto one message; the envelope was then read with `body.get(...)` on an unvalidated body; and the
+reasoner's repair path caught `ModelUnavailable` alongside parse errors, so the same server outage produced exit 4
+or exit 0 depending only on whether the first response happened to parse.
+
+Fixed with a generic `ModelError` taxonomy in `protocol.py` — configuration / transport / server / model-absent /
+protocol / output / truncated / repair, each with `category`, `retryable` and structured fields — translated by the
+Ollama backend, which is the only module that knows its own protocol's spelling. See `ARCHITECTURE.md` §11.
+Regression suite: `tests/adversarial/test_ollama_failure_diagnostics.py` (64 cases, of which the transport, server
+and protocol layers run against a real HTTP server bound to an ephemeral port).
