@@ -1815,8 +1815,123 @@ Repositories are **untrusted input**. Static analysis only.
 | Dockerfiles | Parsed as text; never built or run |
 | Discovered commands | Recorded as entities; never executed |
 | Git hooks / config | `core.hooksPath=/dev/null`, read-only plumbing allowlist (§8) |
-| Path traversal via symlinks | Paths canonicalized and asserted to remain within the repository root before reading |
+| Path traversal via symlinks | Every read goes through the containment boundary below: the *object opened*, not the path, is proven to be inside the root |
 | Zip-bomb / huge files | Size and line caps before content is read into memory |
+
+### Filesystem containment
+
+> **Invariant.** RepoAtlas may read file content only when the filesystem object that will actually be opened
+> resolves within the canonical managed repository root.
+
+> **Invariant.** Containment is decided from the filesystem, never from the spelling of a path, and never by a
+> string prefix comparison.
+
+> **Invariant.** When containment cannot be proven, the file is skipped. Fail closed.
+
+**Why a path check is not enough.** Enumeration prefers `git ls-files` (§8), and `ls-files --cached` reports the
+paths git holds in its *index*. An index path is not a promise about the working-tree object it currently names. A
+directory that was committed as a directory and later replaced by a symlink keeps every one of its paths in the
+index while the objects those paths name have moved outside the repository entirely:
+
+```
+victim/sub/passwd     still listed by `git ls-files`
+victim/sub         →  /etc                 (a symlink, committed as a directory)
+```
+
+`sub/passwd` is a perfectly ordinary relative path. It contains no `..`, it starts inside the root, and every
+string test one might write on it passes. Only the filesystem knows it resolves to `/etc/passwd`. Checking the
+final component for `is_symlink()` does not help either: the final component *is* a regular file — it is an
+**ancestor** that redirects.
+
+**The policy, stated as a rule about routes rather than about files.** No component of the route to a file may be
+a symlink. This is stronger than "the resolved path is under the root", and deliberately so: a symlink that
+leaves the tree and returns inward (`link → /tmp/x/../../repo/src`) resolves inside the root while still handing
+control of the route to something outside it.
+
+**Enforcement — the descriptor walk.** `repoatlas/containment.py` holds the single authority,
+`RepositoryBoundary`. It opens the root, then descends one component at a time with
+`O_RDONLY | O_DIRECTORY | O_NOFOLLOW` relative to the previous directory's descriptor, and finally opens the leaf
+with `O_NOFOLLOW | O_NONBLOCK`. `O_NOFOLLOW` makes a symlinked component fail the `openat` rather than redirect
+it, so containment is enforced by the kernel at each step instead of being re-derived from a string. The leaf is
+then `fstat`ed and required to be `S_ISREG`, which is also what makes `O_NONBLOCK` necessary: opening a FIFO
+without it blocks until a writer appears, and a repository may contain one.
+
+This is the reason the walk is descriptor-based rather than a `resolve()`-and-compare: a descriptor pins an
+**inode**. Once the walk holds a directory descriptor, replacing that directory on disk cannot redirect the read
+that follows, because the read is addressed relative to the descriptor and not re-looked-up by name.
+
+**Symlinks are refused, not followed, and never re-attributed.** A refused file is simply not indexed. It is not
+recorded under a foreign provenance, not stored with a rewritten path, and not reported as belonging to the
+repository — RepoAtlas's provenance model says a fact belongs to a repository, so content from outside one has
+nowhere legitimate to go. In-repository symlinks are refused by the same rule; V1 does not index them, so the
+only file that is skipped is the alias, never its target reached by its real path.
+
+**Broken and unusual paths are refused for the same reason as escapes.** A dangling symlink, a symlink loop
+(`ELOOP`), a component that is not a directory, a path denied by permissions, a path containing `..`, an absolute
+path, a path with an embedded NUL, a device node, a FIFO, and a directory-where-a-file-was-expected are all
+"containment not proven" and all skipped. The boundary distinguishes none of them, and that is intentional: the
+alternative is a mechanism whose failure modes leak the shape of the filesystem.
+
+**The repository root may itself be a symlink.** It is resolved exactly once, at boundary construction, and the
+result is the canonical root. This is what makes a managed root under `/home/me/repos → /mnt/data/repos` work at
+all, and it is safe for the same reason the walk is safe: everything below that point must reach its target
+without a further symlink. Resolving the root does not change repository identity — the stored path, the slug and
+every entity key are unchanged, so containment can be added to an existing index without a migration and without
+re-slugging a single repository.
+
+**TOCTOU.** The window between "check" and "read" is closed for ancestors, because the walk never re-resolves a
+name it has already opened. It cannot be closed for the leaf's *content*: a regular file inside the repository may
+be rewritten between the `fstat` and the last `read`, and no filesystem primitive prevents that. The residual
+exposure is therefore bounded to in-repository content changing while it is read — the same window every file
+reader has, and not a route out of the tree. The stress test in
+`tests/adversarial/test_filesystem_containment.py` runs repeated syncs against a thread flapping an ancestor
+between a real directory and a symlink to `/etc`, and asserts that no foreign path is ever opened.
+
+**Capability detection is a probe, not a lookup.** Whether `openat` is usable is answered by *performing* a
+`dir_fd` open, not by testing `os.open in os.supports_dir_fd`. That set holds the original `os.open` object, so
+membership is an identity test: anything that wraps `os.open` — a profiler, a sandbox, a test's own observer —
+would silently downgrade this control to its portable fallback. The fallback (`lstat` per component) is correct
+but *not* race-free, and it is documented as such where it is defined. A security control must not decide it is
+switched off because something wrapped a builtin.
+
+**Dirty state obeys the boundary too.** `_worktree_differs_from_index` (§8) hashes tracked files to decide whether
+a repository is dirty, and it hashes them through the same boundary. An escaped path is skipped rather than
+counted as a difference — for the same reason excluded secrets are (above): content RepoAtlas will never index
+cannot change a fact it stores, so calling the repository dirty on its account would force a rehash that can only
+reproduce what is already there. Both callers share one implementation; there is no second containment policy.
+
+**Containment and the secret policy are independent, and both are mandatory.** They answer different questions.
+The secret policy excludes *some in-repository files by name*; containment excludes *all out-of-repository
+content*, whatever it is called. `sub/credentials` reached through a symlinked `sub` is refused by containment
+alone — `credentials` matches no secret pattern and never needed to. Neither control may be relied upon to cover
+the other's cases.
+
+**Stale escaped content in an existing index** needs no special handling, by the same argument as stale secrets: a
+refused file is absent from the scan, so the ordinary no-stale-facts mechanism (§9) classifies it *deleted*. One
+`repoatlas sync` — no `--full`, no manual database surgery — removes the file row and cascades to its entities,
+edges, unresolved refs, chunks and FTS rows, and the next embedding pass collects the orphaned vectors.
+
+**In the container**, the boundary is the second line rather than the first: repositories are mounted read-only
+and the process has no capabilities, but `/etc` and the state volume are still *reachable paths* inside the
+namespace, and a symlinked ancestor in a mounted repository names them exactly as it would on a host. The
+read-only mount prevents writes; it does nothing about reads. Containment is what stops the container's own
+`/etc/passwd` and RepoAtlas's own state volume from being indexed as repository content.
+
+**What containment does not cover.** It is a rule about *routes*, so it says nothing about a file whose directory
+entry genuinely lives inside the repository. A **hardlink** to a file elsewhere on the same filesystem creates
+exactly that: the walk never leaves the root because the inode really is linked into the tree, and RepoAtlas
+indexes it as repository content. This is bounded rather than open — `fs.protected_hardlinks` (on by default)
+forbids hardlinking a file the user neither owns nor can write, and a hardlink cannot cross a filesystem — so the
+reachable set is content the repository owner could equally have copied in. It is a provenance nuance, not a
+privilege crossing, and it is deliberately not treated as an escape: `st_nlink > 1` is normal for ordinary
+repository files (`cp -l` checkouts, some build systems), so refusing on it would reject real content to prevent
+nothing. The same reasoning applies to a bind mount placed inside a repository, which requires privileges the
+threat model already excludes.
+
+Refusals are **silent and counted**. The count is available on the boundary; no log line names a refused path.
+Naming them would turn the filesystem boundary into a filesystem-disclosure feature — an attacker who plants
+symlinks and reads the diagnostics would learn which paths exist outside the tree, which is precisely the
+information the boundary exists to withhold.
 
 ### Secrets
 
