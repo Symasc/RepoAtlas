@@ -646,6 +646,74 @@ Consequences, all of them wanted:
   link pass, so adding `common-lib` later retroactively creates the `service-a DEPENDS_ON common-lib` edge without
   reparsing `service-a`.
 
+### Source ranges: the smallest span that establishes the fact
+
+Provenance is not decoration. A deterministic parser's line range is the *authoritative supplied span*: retrieval
+renders it, and citation validation checks a model's claims against it. A range wider than the fact's real source
+lets unrelated lines be presented, and validated, as support.
+
+> **Invariant.** A deterministic entity or fact may cite only the smallest source span that actually establishes it.
+
+> **Invariant.** A Salt state's provenance ends on the last source line structurally belonging to that state.
+> Top-level Jinja controls, sibling states, trailing comments and separator whitespace are not evidence for the
+> preceding state.
+
+> **Invariant.** Jinja embedded inside a state's value remains part of that state's provenance.
+
+**PyYAML marks do not mean what they look like.** `repoatlas/parsers/marks.py` owns the calculation for every
+YAML-shaped parser, because a composite node's `end_mark` is the position of the *next token*, reached after the
+scanner has consumed every blank line and comment in between:
+
+```yaml
+first_state:              # value mapping: start 2:2 … end 5:0
+  pkg.installed:
+    - name: nginx
+                          # ← blank line
+second_state:             # …which is *here*
+```
+
+Subtracting one for an end mark in column 0 removes the most visible symptom and nothing else — the blank line, the
+comment, and a neutralized `{% endif %}` all stay inside. Block scalars (`|`, `>`) have the same problem for the
+same reason: `- contents: |` also ends where the next token starts.
+
+So the end is **not read from the node's own mark**. `node_span` derives it from the node's *content*: recursively,
+the last line any leaf of the subtree occupies. Leaf marks are exact, and a construct that is not part of the state
+— a sibling, a trailing comment, a wrapper's `{% endif %}` — is by definition not a leaf of it. The one place a
+trailing scan is still needed is a multi-line scalar, where the tail is trimmed over **blank** lines only: a `#`
+inside a literal block is content, and the trailing-comment case never reaches that code because a comment is not a
+leaf.
+
+| Written | Cited |
+|---|---|
+| the state ID line, its function, its arguments and requisites | **yes** — the whole block |
+| a nested mapping or list inside an argument | yes, to its last line |
+| a `\|` or `>` block scalar's body | yes, all of it |
+| a comment *between* the state's own entries | yes — it is inside the block |
+| `{{ pillar['app'] }}` inside a value | yes — structural placement, not "Jinja bad" |
+| the enclosing `{% if %}` / `{% endif %}` | **no** — context, not definition |
+| a comment after the block | no |
+| blank separator lines | no |
+| the next sibling state | no |
+
+A symbol representing `install_nginx` is not a symbol representing the condition that guards it, so the span starts
+at the state ID rather than at the `{% if %}`.
+
+**Coordinate preservation is what makes this legal.** The Salt parser neutralizes Jinja into same-length filler
+before parsing YAML, so every character and newline position in the transformed text matches the original. Marks
+therefore index the **raw** file exactly — which is why `node_span` is handed the raw lines rather than the
+neutralized copy: a line that only looks blank after neutralization is still content.
+
+The line-scan recovery path answers the same question from indentation: a top-level construct owns the lines beneath
+it that are blank or indented, ending at the last one that is neither blank nor a comment. Indentation cannot prove
+the *nesting* a YAML parse would have, which is why those facts keep their reduced confidence — but it does prove
+where the block stops, and a one-line span for a six-line state understates the evidence exactly as a six-line span
+for a one-line state overstates it.
+
+**Fact-level provenance stays as it was.** V1 cites the *state* span for the state symbol and the *value's own line*
+for each reference it produces — a requisite target, a `source:`, a state function. Widening every child fact to the
+whole state, or narrowing the state to its ID line, would both be changes to the documented model rather than
+corrections to it.
+
 ### Bash execution targets: what counts as static proof
 
 Shell scripts are where a deployment decides what runs, which makes command position the place a parser is most
@@ -1661,6 +1729,76 @@ development machine.
 
 Prompts live in `llm/prompts/` as versioned templates, not inline strings, so prompt changes are reviewable diffs.
 
+### Failure classification: describe the layer that actually failed
+
+> **Invariant.** Receiving an invalid model response is not equivalent to failing to reach the model server.
+
+> **Invariant.** An error message describes the **deepest layer successfully reached** before the failure.
+
+A diagnostic is output, and output has to be true. "Could not reach Ollama" sends a user to restart a server that
+answered on the first try; "the model returned invalid output" sends them to swap models when the socket is closed.
+Both send them to the wrong place, and a wrong diagnosis costs more than no diagnosis.
+
+Five layers, each owning its errors. A failure at layer *n* may never be described in the vocabulary of layer *n-1*:
+
+```
+configuration   the URL or provider is unusable        nothing was attempted
+      v
+transport       no connection established              the ONLY layer that may say "could not reach"
+      v
+server          connected; HTTP error, or never done   never a connection failure
+      v
+protocol        a body arrived; not the API contract   never a server failure
+      v
+output          envelope valid; model text unusable    never a protocol failure
+      v
+grounding       answer valid; citations unsupported    not a backend failure at all
+```
+
+| Category | Raised as | What it means | Retryable |
+|---|---|---|---|
+| `CONFIGURATION` | `ModelConfigurationError` | Unknown provider, or a `base_url` that is not an absolute http(s) URL | no |
+| `TRANSPORT` | `ModelUnavailable` | Connection refused or connect timeout | yes |
+| `SERVER` | `ModelServerError` | HTTP status error, read timeout after connect, or a broken response stream | 408/425/429/5xx only |
+| `MODEL_ABSENT` | availability probe | The server listed its models; the configured one is not among them | no |
+| `PROTOCOL` | `ModelProtocolError` | Body is not JSON, not an object, or has no usable `message.content` | no |
+| `OUTPUT` | `ModelOutputError` | Envelope fine; the model's text is empty, not JSON, or not the answer schema | no |
+| `TRUNCATED` | `ModelOutputTruncated` | The **server reported** generation stopped at its output limit | yes |
+| `REPAIR` | `ModelRepairFailed` | The output was invalid and the one repair attempt was invalid too | no |
+
+Every class derives from `ModelError`, so a caller that only needs "the backend failed" catches one type and gets
+one exit code (4); a caller that must tell a dead server from a bad answer reads `.category` or catches the
+subclass. The categories are generic and live in `protocol.py`; only `ollama.py` knows that `done_reason` is
+spelled that way. A second backend translates its own protocol into the same vocabulary.
+
+**Truncation is reported, never inferred.** Ollama sets `done_reason: "length"` exactly when llama-server reports
+`finish_reason == "length"` — the `num_predict` budget was exhausted. That is a fact the server stated, so
+`ModelResponse.truncated` carries it and the diagnostic can name the output limit as the fix. An answer that merely
+*looks* unfinished gets no such advice: a model that emitted confident nonsense will emit more of it with a bigger
+budget, and "raise num_predict" would be a guess dressed as a diagnosis.
+
+**Distinguishing JSON syntax from schema shape needs the error payload, not the exception class.** Pydantic's
+`model_validate_json` reports a syntax failure as a `ValidationError` of type `json_invalid` rather than as a
+`JSONDecodeError`, so `except` clauses alone cannot separate "the model did not emit JSON" from "the model ignored
+the schema" — exactly the collapse this section exists to undo. The error *type* is inspected instead.
+
+**A backend failure during the repair is a backend failure.** The repair call's exceptions are no longer folded
+into "the model returned an invalid answer": the first response being unparseable does not make the server's
+subsequent death a quality problem. Before this, an Ollama outage produced exit 4 or exit 0 depending only on
+whether the first response happened to parse.
+
+**Grounding stays downstream.** An answer that parses and validates but cites evidence that was not supplied is the
+grounding layer working correctly (§11). It produces `INSUFFICIENT EVIDENCE` / demoted findings and is never
+converted into a backend diagnostic — the model did its job; the claim was not supported.
+
+**No response body reaches an error message.** Ollama's documented error envelope is `{"error": "..."}`, so that
+string is extracted and bounded; everything else is described by *shape* — a byte count, a content-type, the names
+of the fields present, a parse position. Model output is written from repository content, and an error message is
+not a place to put it (V1_SPEC §17).
+
+Cancellation is never caught: nothing in this path handles `KeyboardInterrupt`, `SystemExit` or
+`asyncio.CancelledError`, and unexpected programming errors are not translated into operational diagnoses.
+
 ---
 
 ## 12. Security model
@@ -1983,3 +2121,14 @@ full reindex.
 | The dirty-state hash skips secret files | Hash everything, since it only produces a digest | The guarantee is that these files are never read; one that held everywhere except the code that opens every tracked file is not the guarantee. An edit to an excluded file also cannot change any stored fact (§8, §12) |
 | No secret-policy version column | Add one, and invalidate on change | Removal needs the file to be *absent from the scan*, which recomputing enumeration already achieves on every sync. `facts_version` forces a reparse, which an excluded file never gets. A version would need a migration to state what enumeration states (§9, §12) |
 | Skipped secret files are not logged | Log each skip at `--verbose` | The log line would be a list of the repository's secret paths, in scrollback and CI output, for no operational gain. Absence from `files` is already observable (§12) |
+| Source ranges are derived from node content, not from `end_mark` | Use the mark and subtract one for column 0 | A composite node's end mark is the *next token*, so the mark answers "where does the following construct begin?" — a different question. Subtracting one fixes the last line of the symptom and leaves the blank lines, comments and `{% endif %}` inside (§5) |
+| One `node_span` shared by every YAML-shaped parser | Fix Salt, leave the YAML/JSON key collector alone | Salt calls that collector for the pillar half of an `.sls` tree, so leaving it would have fixed half of one file type. Provenance is a fact about evidence, and a fact computed two slightly different ways is two facts (§5) |
+| Block scalars trim over blank lines only | Trim over comments too, or compute the length from the parsed value | A `#` inside a literal block is content, so trimming comments would truncate real state text. The parsed value cannot be measured either: a folded scalar joins its lines with spaces, so its newline count says nothing about source lines (§5) |
+| The recovery path spans the indented block | Keep the ID line only, as before | Under-claiming is also untruthful provenance: a one-line span for a six-line state offers evidence that does not establish the fact. Indentation cannot prove nesting — hence the reduced confidence — but it does prove where the block stops (§5) |
+| The enclosing `{% if %}` is not part of the state | Include it, since it decides whether the state applies | A symbol for `install_nginx` is not a symbol for its condition. Modelling the conditional is a separate fact with its own span, not a widening of this one (§5) |
+| Model failures form a taxonomy under one `ModelError` base | Keep one `ModelUnavailable` with a message field | "Could not reach Ollama" was being printed for a server that answered on the first try. Transport absence and invalid output need different fixes from the user, so they must be different types — but one base keeps the exit code and every existing caller intact (§11) |
+| One exit code (4) for every backend failure | A distinct code per category | A second taxonomy to keep in sync with the first, for a distinction the message already carries. The requirement is that the *cause* be distinguishable, not that the shell see eight numbers (§11) |
+| Truncation comes from `done_reason`, never from the text | Detect an unbalanced brace and infer a limit | The server states it; inferring it would produce "raise num_predict" advice for a model that simply answered badly, which is a guess presented as a diagnosis (§11) |
+| A repair-call backend failure propagates | Keep folding it into INSUFFICIENT EVIDENCE | The same Ollama outage produced exit 4 or exit 0 depending only on whether the first response parsed. The first response being invalid does not reclassify what killed the run (§11) |
+| Read timeout is a server failure, not a transport one | Group all `httpx` timeouts together | The connection succeeded. Saying the server was unreachable hides the two things that would help — a longer timeout or a smaller model — and points at the one that would not (§11) |
+| Error messages carry no response body | Include a bounded excerpt for debugging | The body is model output, written from repository content. Shape — byte count, field names, parse position — debugs just as well and discloses nothing (§11, §12) |
