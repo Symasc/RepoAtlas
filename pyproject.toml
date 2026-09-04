@@ -80,3 +80,23 @@ markers = [
     "adversarial: adversarial validation; runs by default, selectable with -m adversarial",
     "scale: builds a large synthetic tree; deselected by default",
 ]
+
+[tool.coverage.run]
+source = ["repoatlas"]
+# Branch coverage, not just statements: a `if not contained: skip` whose false
+# arm is never taken is exactly the kind of gap a security control cannot
+# afford, and statement coverage reports it as covered.
+branch = true
+
+[tool.coverage.report]
+# The gate. It lives here rather than in the workflow so that
+# `uv run pytest --cov` locally enforces precisely what CI enforces.
+fail_under = 80
+show_missing = true
+exclude_also = [
+    # Type-checking-only imports never execute at runtime.
+    "if TYPE_CHECKING:",
+    # Protocol and abstract declarations are signatures, not behaviour.
+    "^\\s*\\.\\.\\.$",
+    "raise NotImplementedError",
+]

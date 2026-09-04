@@ -13,6 +13,8 @@ venv/
 .ruff_cache/
 .mypy_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 
 # RepoAtlas local state (the index is derived data, never source)
