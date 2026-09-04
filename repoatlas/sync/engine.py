@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from repoatlas.config.settings import Settings
+from repoatlas.containment import RepositoryBoundary
 from repoatlas.dependencies.registry import DependencyRegistry
 from repoatlas.discovery.languages import detect_language, is_lockfile, is_manifest
 from repoatlas.embeddings.protocol import EmbeddingModel, EmbeddingUnavailable
@@ -47,7 +48,7 @@ from repoatlas.storage.sqlite.stores import (
 )
 from repoatlas.storage.sqlite.vectors import SqliteVectorIndex
 from repoatlas.sync.planner import decide_rehash, plan_sync
-from repoatlas.sync.scanner import ScannedFile, hash_bytes, hash_file, scan_repository
+from repoatlas.sync.scanner import ScannedFile, hash_bytes, hash_within, scan_repository
 
 #: Bytes above which a file is recorded but never read (V1_SPEC §17 zip-bomb guard).
 _BINARY_SNIFF_BYTES = 8192
@@ -179,11 +180,16 @@ class SyncEngine:
         managed = frozenset(
             r.path for r in self._repositories.list_all() if r.path.is_relative_to(repo_path)
         )
+        # One boundary for the whole repository pass, so enumeration, hashing and
+        # content reading all measure containment against the same canonical root
+        # and the refusal count is aggregated once (ARCHITECTURE.md §12).
+        boundary = RepositoryBoundary(repo_path)
         scanned = scan_repository(
             repo_path,
             git=self._git,
             settings=self._settings.discovery,
             managed_subrepos=managed,
+            boundary=boundary,
         )
         known = self._files.list_states(repo_id)
 
@@ -194,7 +200,7 @@ class SyncEngine:
             known,
             rehash=rehash,
             parser_version=self.facts_version,
-            hash_of=lambda rel: hash_file(repo_path / rel),
+            hash_of=lambda rel: hash_within(boundary, rel),
         )
 
         # Deletion first: a file's facts must never outlive the file.
@@ -218,7 +224,7 @@ class SyncEngine:
             self._note_manifest(scanned_file.rel_path, manifests, lockfiles)
 
         for scanned_file in [*plan.new, *plan.changed]:
-            outcome = self._index_file(repo, scanned_file.rel_path, scanned_file)
+            outcome = self._index_file(repo, scanned_file.rel_path, scanned_file, boundary)
             diagnostics.extend(outcome.diagnostics)
             symbols_total += outcome.symbols
             edges_total += outcome.edges
@@ -269,19 +275,34 @@ class SyncEngine:
             lockfiles.add(rel_path)
 
     def _index_file(
-        self, repo: Repository, rel_path: str, scanned_file: ScannedFile
+        self,
+        repo: Repository,
+        rel_path: str,
+        scanned_file: ScannedFile,
+        boundary: RepositoryBoundary,
     ) -> _FileOutcome:
-        """Parse and persist one file. Never raises: failures become diagnostics."""
+        """Parse and persist one file. Never raises: failures become diagnostics.
+
+        The read goes through the boundary rather than through ``repo.path /
+        rel_path``. Enumeration already proved this candidate contained, and
+        re-deriving the path here would re-ask a question that has an answer —
+        badly, because a raw path can be redirected by an ancestor that changed
+        since (ARCHITECTURE.md §12).
+        """
         assert repo.id is not None
-        absolute = repo.path / rel_path
         language = detect_language(rel_path)
 
-        try:
-            raw = absolute.read_bytes()
-        except OSError as exc:
+        raw = boundary.read_bytes(rel_path)
+        if raw is None:
+            # Unreadable, vanished, or no longer inside the repository. All three
+            # mean the same thing to the indexer: there is nothing to record, and
+            # the file's previous facts are replaced by none.
             return _FileOutcome(
                 diagnostics=[
-                    ParseDiagnostic(severity=Severity.WARNING, message=f"unreadable: {exc}")
+                    ParseDiagnostic(
+                        severity=Severity.WARNING,
+                        message="unreadable or not contained",
+                    )
                 ]
             )
 

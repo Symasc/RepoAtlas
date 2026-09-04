@@ -245,25 +245,39 @@ def test_an_excluded_file_is_never_opened(tmp_path: Path, vault_root: Path) -> N
     built chunk.
     """
     opened: list[str] = []
-    real_read_bytes = Path.read_bytes
-    real_open = Path.open
+    real_os_open = os.open
 
-    def record_read(self: Path, *args: object, **kwargs: object) -> bytes:
-        opened.append(str(self))
-        return real_read_bytes(self)
+    def record_os_open(path, flags, mode=0o777, *, dir_fd=None):
+        """Observe the syscall, whatever the caller passed.
 
-    def record_open(self: Path, *args: object, **kwargs: object):
-        opened.append(str(self))
-        return real_open(self, *args, **kwargs)  # type: ignore[arg-type]
+        Content is read through the containment boundary, which opens by
+        basename relative to a directory descriptor, so the observable event is
+        ``os.open`` rather than ``Path.read_bytes``. The descriptor is resolved
+        through ``/proc/self/fd`` to recover the full path.
 
-    Path.read_bytes = record_read  # type: ignore[method-assign]
-    Path.open = record_open  # type: ignore[method-assign]
+        Recording never raises. An instrument that can fail the call it watches
+        makes an unopened file indistinguishable from a *refused* one, and this
+        test's whole subject is the difference between them.
+        """
+        try:
+            name = os.fspath(path)
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", errors="surrogateescape")
+            if dir_fd is not None:
+                name = str(Path(os.readlink(f"/proc/self/fd/{dir_fd}")) / name)  # noqa: PTH115
+            opened.append(os.path.realpath(name))
+        except Exception:  # noqa: S110 - see the docstring: this must not raise
+            pass
+        if dir_fd is None:
+            return real_os_open(path, flags, mode)
+        return real_os_open(path, flags, mode, dir_fd=dir_fd)
+
+    os.open = record_os_open  # type: ignore[assignment]
     try:
         space = _indexed(tmp_path, "unopened", vault_root)
         space.close()
     finally:
-        Path.read_bytes = real_read_bytes  # type: ignore[method-assign]
-        Path.open = real_open  # type: ignore[method-assign]
+        os.open = real_os_open  # type: ignore[assignment]
 
     # Exact path comparison, not substring: `vault/.env` is a prefix of
     # `vault/.envrc`, which is a safe file and *is* legitimately read.

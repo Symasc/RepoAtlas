@@ -13,6 +13,7 @@ exactly like an index that is up to date.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,24 @@ def test_a_repository_that_vanishes_mid_run_does_not_abort_the_others(
     assert {"python-service", "deployment", "scripts"} <= synced
 
 
+def _is_target(path: object, dir_fd: int | None, target: Path) -> bool:
+    """Does this ``os.open`` name ``target``, however it was addressed?
+
+    Resolves a directory descriptor through ``/proc/self/fd`` so a
+    ``dir_fd``-relative basename is recognised. Never raises: an instrument that
+    can fail the call it is observing would change the outcome it is measuring.
+    """
+    try:
+        name = os.fspath(path)  # type: ignore[arg-type]
+        if isinstance(name, bytes):
+            name = name.decode("utf-8", errors="surrogateescape")
+        if dir_fd is not None:
+            name = str(Path(os.readlink(f"/proc/self/fd/{dir_fd}")) / name)  # noqa: PTH115
+        return os.path.realpath(name) == os.path.realpath(target)
+    except Exception:
+        return False
+
+
 def test_a_file_deleted_between_scan_and_parse_is_not_fatal(
     adversarial: Workspace, adversarial_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -72,18 +91,25 @@ def test_a_file_deleted_between_scan_and_parse_is_not_fatal(
     the scan rather than inside it.
     """
     target = adversarial_root / "python-service" / "src" / "config.py"
-    original = Path.read_bytes
+    original = os.open
     removed = {"done": False}
 
-    def vanishing(self: Path, *args, **kwargs):
-        if self == target and not removed["done"]:
+    def vanishing(path, flags, mode=0o777, *, dir_fd=None):
+        # Content is read through the containment boundary, which opens by
+        # basename relative to a directory descriptor. Hooking `Path.read_bytes`
+        # would hook nothing and the race would never be simulated — so the hook
+        # goes where the real open happens, and `removed["done"]` below is the
+        # assertion that it did.
+        if not removed["done"] and _is_target(path, dir_fd, target):
             removed["done"] = True
-            self.unlink()
-        return original(self, *args, **kwargs)
+            target.unlink()
+        if dir_fd is None:
+            return original(path, flags, mode)
+        return original(path, flags, mode, dir_fd=dir_fd)
 
     # The file must be classified as changed, or it is never read at all.
     target.write_text(target.read_text() + "\n# edited\n")
-    monkeypatch.setattr(Path, "read_bytes", vanishing)
+    monkeypatch.setattr(os, "open", vanishing)
     report = _sync(adversarial, adversarial_root, "python-service")
     assert removed["done"], "the race must actually have been simulated"
     assert report.repositories

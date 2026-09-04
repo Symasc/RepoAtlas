@@ -27,11 +27,13 @@ index blob hashes, which git will hand over without running anything.
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from repoatlas.containment import RepositoryBoundary
 from repoatlas.security import is_secret_path
 
 #: Subcommands that read refs, the object database or the index, and never
@@ -260,28 +262,39 @@ def _staged_differs_from_head(entries: list[tuple[str, str, str]], head: GitResu
     return {(mode, sha, path) for mode, sha, path in entries} != tree
 
 
-def _blob_hash(path: Path, mode: str) -> str | None:
-    """Git's object name for what is on disk at ``path``.
+def _blob_hash(boundary: RepositoryBoundary, rel_path: str, mode: str) -> str | None:
+    """Git's object name for what is on disk at ``rel_path``, or ``None``.
 
     Git blob hashing is ``sha1("blob <length>\\0" + content)``, which is a content
     address rather than a security primitive — the algorithm is git's choice, not
-    ours. A symlink hashes its target, which is what git stores for mode 120000.
+    ours. A symlink hashes its *target string*, which is what git stores for mode
+    120000; reading a link's value is not reading what it points at, so that stays
+    inside the boundary.
+
+    Length and content come from **one file descriptor**. Taking the size from a
+    separate ``stat`` would let the file change between the two calls and produce
+    a hash of nothing that ever existed — and, more to the point, would reopen a
+    path the boundary has already resolved (ARCHITECTURE.md §12).
     """
     digest = hashlib.sha1(usedforsecurity=False)
-    try:
-        if mode == _MODE_SYMLINK:
-            payload = str(path.readlink()).encode("utf-8")
-            digest.update(b"blob %d\0" % len(payload))
-            digest.update(payload)
-            return digest.hexdigest()
+    if mode == _MODE_SYMLINK:
+        target = boundary.readlink(rel_path)
+        if target is None:
+            return None
+        payload = target.encode("utf-8")
+        digest.update(b"blob %d\0" % len(payload))
+        digest.update(payload)
+        return digest.hexdigest()
 
-        size = path.stat().st_size
-        digest.update(b"blob %d\0" % size)
-        with path.open("rb") as handle:
-            while block := handle.read(_READ_CHUNK_BYTES):
+    with boundary.open(rel_path) as handle:
+        if handle is None:
+            return None
+        try:
+            digest.update(b"blob %d\0" % os.fstat(handle).st_size)
+            while block := os.read(handle, _READ_CHUNK_BYTES):
                 digest.update(block)
-    except OSError:
-        return None
+        except OSError:
+            return None
     return digest.hexdigest()
 
 
@@ -312,13 +325,22 @@ def _worktree_differs_from_index(repo_path: Path, entries: list[tuple[str, str, 
     as dirtiness would force a rehash that can only reproduce what is already
     there.
     """
+    boundary = RepositoryBoundary(repo_path)
     for mode, sha, rel_path in entries:
         if mode == _MODE_GITLINK:  # a submodule has no blob in this repository
             continue
         if is_secret_path(rel_path):
             continue
-        absolute = repo_path / rel_path
-        if _blob_hash(absolute, mode) != sha:
+        refused_before = boundary.refused
+        digest = _blob_hash(boundary, rel_path, mode)
+        if digest is None and boundary.refused > refused_before:
+            # The path names something outside this repository. It cannot change
+            # a single fact RepoAtlas stores, so it cannot make the tree dirty:
+            # reporting it as a difference would force a rehash that can only
+            # reproduce what is already there. Same reasoning as the secret skip
+            # above, and the same conclusion.
+            continue
+        if digest != sha:
             return True
     return False
 
