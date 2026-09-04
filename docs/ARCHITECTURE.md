@@ -1880,12 +1880,14 @@ every entity key are unchanged, so containment can be added to an existing index
 re-slugging a single repository.
 
 **TOCTOU.** The window between "check" and "read" is closed for ancestors, because the walk never re-resolves a
-name it has already opened. It cannot be closed for the leaf's *content*: a regular file inside the repository may
-be rewritten between the `fstat` and the last `read`, and no filesystem primitive prevents that. The residual
-exposure is therefore bounded to in-repository content changing while it is read — the same window every file
-reader has, and not a route out of the tree. The stress test in
-`tests/adversarial/test_filesystem_containment.py` runs repeated syncs against a thread flapping an ancestor
-between a real directory and a symlink to `/etc`, and asserts that no foreign path is ever opened.
+name it has already opened. The leaf's *content* window cannot be closed — a regular file inside the repository may
+be rewritten between the `fstat` and the last `read`, and no filesystem primitive prevents that — so it is
+**detected** instead, by the before/after descriptor comparison described above. The distinction matters: RepoAtlas
+cannot stop the write, but it can refuse to store a fact derived from bytes that were never a file state. The
+residual exposure is a torn read being refused and retried on the next sync, not a stale row surviving. The stress
+test in `tests/adversarial/test_filesystem_containment.py` runs repeated syncs against a thread flapping an ancestor
+between a real directory and a symlink to `/etc`, and asserts that no foreign path is ever opened; separate tests
+tear a file mid-read through both the buffered and the streaming reader.
 
 **Capability detection is a probe, not a lookup.** Whether `openat` is usable is answered by *performing* a
 `dir_fd` open, not by testing `os.open in os.supports_dir_fd`. That set holds the original `os.open` object, so
@@ -1917,16 +1919,29 @@ namespace, and a symlinked ancestor in a mounted repository names them exactly a
 read-only mount prevents writes; it does nothing about reads. Containment is what stops the container's own
 `/etc/passwd` and RepoAtlas's own state volume from being indexed as repository content.
 
-**What containment does not cover.** It is a rule about *routes*, so it says nothing about a file whose directory
-entry genuinely lives inside the repository. A **hardlink** to a file elsewhere on the same filesystem creates
-exactly that: the walk never leaves the root because the inode really is linked into the tree, and RepoAtlas
-indexes it as repository content. This is bounded rather than open — `fs.protected_hardlinks` (on by default)
-forbids hardlinking a file the user neither owns nor can write, and a hardlink cannot cross a filesystem — so the
-reachable set is content the repository owner could equally have copied in. It is a provenance nuance, not a
-privilege crossing, and it is deliberately not treated as an escape: `st_nlink > 1` is normal for ordinary
-repository files (`cp -l` checkouts, some build systems), so refusing on it would reject real content to prevent
-nothing. The same reasoning applies to a bind mount placed inside a repository, which requires privileges the
-threat model already excludes.
+**The leaf is held to two further conditions.** It must be a regular file, and it must have exactly one link. A
+**hardlink** is not a route out of the tree — the inode really is linked into it, so the walk never leaves — but the
+same bytes are then reachable under a name RepoAtlas cannot see and did not authorize, which is precisely the
+question containment exists to answer. The cost of refusing was measured before the rule was adopted: across three
+real repositories, **0 of 3,288 indexable files** had `st_nlink > 1`, while all 82,293 hardlinks on that machine sat
+inside `.venv` and `node_modules` — directories the exclusion set removes long before the boundary sees them. A
+hardlinked file is therefore refused and counted, like any other unprovable candidate.
+
+**Content is verified to have held still.** The ancestor race is closed by the descriptor walk, but a regular file
+inside the repository may still be rewritten while it is being read, and no filesystem primitive prevents that. Both
+readers therefore `fstat` the open descriptor before and after and compare `(st_dev, st_ino, st_size, st_mtime_ns)`.
+A change means the bytes in hand are a splice of two versions that never existed on disk; they are refused rather
+than hashed. This does not stop the write — nothing can — but it stops the result being stored as though it were a
+file state, which is the part that would otherwise be wrong for as long as the row survived.
+
+**There is no fallback.** Where `openat` with `O_NOFOLLOW` is unavailable, containment cannot be proven and nothing
+is admitted. An earlier revision degraded to an `lstat`-per-component walk — correct at the instant it ran, and
+invalidatable by a rename before the open. A security control that quietly becomes racy on some platforms is worse
+than one that plainly does nothing: an empty index is an obvious failure, a racy one is not. RepoAtlas targets Linux
+and macOS, where the descriptor walk is always available; the check is a runtime probe, not a platform assumption.
+
+What remains genuinely outside the boundary is a **bind mount** placed inside a repository, which requires
+privileges the threat model already excludes.
 
 Refusals are **silent and counted**. The count is available on the boundary; no log line names a refused path.
 Naming them would turn the filesystem boundary into a filesystem-disclosure feature — an attacker who plants
