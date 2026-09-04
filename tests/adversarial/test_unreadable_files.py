@@ -37,10 +37,20 @@ def _indexed(workspace: Workspace, repo: str, rel_path: str) -> int:
     ).fetchone()["n"]
 
 
-def test_hashing_an_unreadable_file_does_not_raise() -> None:
-    from repoatlas.sync.scanner import hash_file
+def test_hashing_an_unreadable_file_does_not_raise(tmp_path: Path) -> None:
+    """A hash that cannot be taken is ``None``, not an exception.
 
-    assert hash_file(Path("/nonexistent/path/that/cannot/be/read")) is None
+    Hashing is expressed against a containment boundary rather than a bare path,
+    so this also covers the two ways a hash can be unavailable — the file is not
+    readable, and the file is not ours — through the one code path that decides
+    both.
+    """
+    from repoatlas.containment import RepositoryBoundary
+    from repoatlas.sync.scanner import hash_within
+
+    boundary = RepositoryBoundary(tmp_path)
+    assert hash_within(boundary, "nonexistent/path/that/cannot/be/read") is None
+    assert hash_within(boundary, "../escape") is None
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
