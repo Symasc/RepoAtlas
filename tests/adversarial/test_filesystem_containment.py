@@ -985,3 +985,192 @@ def test_the_database_holds_no_foreign_row_after_indexing(
         )
     finally:
         workspace.close()
+
+
+# == the leaf's own conditions ===============================================
+
+
+def test_a_hardlink_to_an_outside_file_is_refused(tmp_path: Path) -> None:
+    """A hardlink is not a route out, and is refused anyway.
+
+    The descriptor walk never leaves the root here — the inode genuinely is
+    linked into the tree — so nothing above the leaf can catch this. What makes
+    it a containment question is that the same bytes are reachable under a name
+    RepoAtlas cannot see and did not authorize.
+    """
+    from repoatlas.containment import RepositoryBoundary
+
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "app.py").write_text(f'HOST = "{INSIDE_CANARY}"\n')
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "secret.py"
+    target.write_text(f'LEAK = "{OUTSIDE_CANARY}"\n')
+    os.link(target, root / "linked.py")
+
+    boundary = RepositoryBoundary(root)
+    assert boundary.stat("linked.py") is None
+    assert boundary.read_bytes("linked.py") is None
+    # The ordinary file beside it is untouched: this is a leaf rule, not a
+    # repository-wide refusal.
+    assert boundary.stat("src/app.py") is not None
+    assert INSIDE_CANARY.encode() in (boundary.read_bytes("src/app.py") or b"")
+
+
+def test_a_hardlinked_file_is_never_indexed(tmp_path: Path, containment_settings: Settings) -> None:
+    """End to end: the hardlink's content reaches no table."""
+
+    root = tmp_path / "repos"
+    repo = root / "victim"
+    make_repository(repo)
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text(f'HOST = "{INSIDE_CANARY}"\n')
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    leak = outside / "leak.py"
+    leak.write_text(f'LEAK = "{OUTSIDE_CANARY}"\n')
+    os.link(leak, repo / "linked.py")
+    commit(repo)
+
+    workspace = index(containment_settings, root, tmp_path)
+    try:
+        assert "linked.py" not in indexed_paths(workspace)
+        assert "src/app.py" in indexed_paths(workspace)
+        assert not contains_text(workspace, OUTSIDE_CANARY)
+    finally:
+        workspace.close()
+
+
+def test_a_file_rewritten_during_the_read_is_refused_not_spliced(tmp_path: Path) -> None:
+    """The leaf's content window: detected, and failed closed.
+
+    The ancestor race is closed by the descriptor walk. This one cannot be —
+    nothing stops a write to a file being read — so the requirement is weaker
+    and still worth meeting: never store bytes that were never a file state.
+    """
+    from repoatlas.containment import RepositoryBoundary
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "big.py"
+    original = ("A" * 4096 + "\n") * 64
+    target.write_text(original)
+
+    boundary = RepositoryBoundary(root)
+    real_read = os.read
+    swapped = {"done": False}
+
+    def tearing(fd: int, length: int) -> bytes:
+        # Rewrite the file after the first block has been handed over, so what
+        # the reader ends up holding is a splice of two versions.
+        block = real_read(fd, length)
+        if block and not swapped["done"]:
+            swapped["done"] = True
+            target.write_text(("B" * 4096 + "\n") * 64)
+        return block
+
+    refused_before = boundary.refused
+    os.read = tearing  # type: ignore[assignment]
+    try:
+        result = boundary.read_bytes("big.py")
+    finally:
+        os.read = real_read  # type: ignore[assignment]
+
+    assert swapped["done"], "the race must actually have been simulated"
+    assert result is None, "a torn read must not be returned as file content"
+    assert boundary.refused > refused_before
+
+    # The settled file reads normally on the next attempt.
+    assert boundary.read_bytes("big.py") is not None
+
+
+def test_a_torn_read_is_refused_by_the_hashing_path_too(tmp_path: Path) -> None:
+    """`read_into` streams rather than buffering, so it needs its own check."""
+    from repoatlas.containment import RepositoryBoundary
+    from repoatlas.sync.scanner import hash_within
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "big.py"
+    target.write_text(("A" * 4096 + "\n") * 64)
+
+    boundary = RepositoryBoundary(root)
+    real_read = os.read
+    swapped = {"done": False}
+
+    def tearing(fd: int, length: int) -> bytes:
+        block = real_read(fd, length)
+        if block and not swapped["done"]:
+            swapped["done"] = True
+            target.write_text(("B" * 4096 + "\n") * 64)
+        return block
+
+    os.read = tearing  # type: ignore[assignment]
+    try:
+        digest = hash_within(boundary, "big.py")
+    finally:
+        os.read = real_read  # type: ignore[assignment]
+
+    assert swapped["done"], "the race must actually have been simulated"
+    assert digest is None, "a hash must never describe bytes that were never a file state"
+
+
+def test_an_unchanged_file_read_is_not_mistaken_for_a_torn_one(tmp_path: Path) -> None:
+    """The control. A stability check that refused ordinary reads would be
+    indistinguishable from a broken boundary, and every other test here would
+    still pass."""
+    from repoatlas.containment import RepositoryBoundary
+
+    root = tmp_path / "repo"
+    (root / "a" / "b").mkdir(parents=True)
+    payload = ("stable line\n" * 5000).encode()
+    (root / "a" / "b" / "big.py").write_bytes(payload)
+
+    boundary = RepositoryBoundary(root)
+    for _ in range(5):
+        assert boundary.read_bytes("a/b/big.py") == payload
+    assert boundary.refused == 0
+
+
+# == no fallback: unsupported means closed ===================================
+
+
+def test_an_unusable_boundary_admits_nothing(tmp_path: Path) -> None:
+    """Where the descriptor walk is unavailable there is no weaker path.
+
+    The previous revision degraded to an `lstat`-per-component walk, which is
+    correct at the instant it runs and can be invalidated by a rename before the
+    open. A control that quietly becomes racy is worse than one that plainly
+    refuses, so this asserts the refusal rather than the degradation.
+    """
+    from repoatlas.containment import RepositoryBoundary
+
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "app.py").write_text("X = 1\n")
+
+    boundary = RepositoryBoundary(root)
+    assert boundary.stat("src/app.py") is not None  # precondition
+
+    object.__setattr__(boundary, "_usable", False)
+    refused_before = boundary.refused
+    assert boundary.stat("src/app.py") is None
+    assert boundary.read_bytes("src/app.py") is None
+    assert boundary.readlink("src/app.py") is None
+    with boundary.open("src/app.py") as handle:
+        assert handle is None
+    assert boundary.refused > refused_before
+
+
+def test_the_boundary_exposes_no_path_based_helper(tmp_path: Path) -> None:
+    """The removed `contains()` took a `Path` and answered from a resolved
+    string. It had no callers, and a path-based helper on a descriptor-based
+    boundary is an invitation to reintroduce the bug this module exists to
+    prevent."""
+    from repoatlas.containment import RepositoryBoundary
+
+    boundary = RepositoryBoundary(tmp_path)
+    assert not hasattr(boundary, "contains")
+    public = {name for name in dir(boundary) if not name.startswith("_")}
+    assert public == {"open", "read_bytes", "read_into", "readlink", "refused", "root", "stat"}
