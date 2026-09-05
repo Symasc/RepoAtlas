@@ -46,6 +46,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
     Severity,
 )
+from repoatlas.parsers.marks import whole_file_span
 from repoatlas.parsers.treesitter import (
     GrammarUnavailable,
     has_error,
@@ -629,7 +630,9 @@ class BashParser:
     """Deterministic shell structure extraction."""
 
     name = "tree-sitter-bash"
-    version = "1"
+    # 2: whole-file spans stop at EOF and are absent for an empty file; a
+    #    classic-Mac (CR-only) file is no longer collapsed into one line.
+    version = "2"
     language = "Bash"
 
     def supports(self, path: Path) -> bool:
@@ -650,12 +653,13 @@ class BashParser:
         walker.run(tree.root_node)
         walker.finish()
 
+        whole_file_start, whole_file_last = whole_file_span(content)
         script = ParsedSymbol(
             kind=EntityType.SCRIPT,
             name=path.name,
             qualified_name=path.as_posix(),
-            line_start=1,
-            line_end=max(1, content.count("\n") + 1),
+            line_start=whole_file_start,
+            line_end=whole_file_last,
         )
 
         diagnostics = (

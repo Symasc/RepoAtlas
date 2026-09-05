@@ -131,6 +131,7 @@ def test_broken_salt_never_raises_and_never_misplaces_a_line(name: str) -> None:
     parsed = parse_salt(source)
     limit = max(1, len(source.splitlines()))
     for symbol in parsed.symbols:
+        assert symbol.line_start is not None and symbol.line_end is not None, (name, symbol)
         assert 1 <= symbol.line_start <= symbol.line_end <= limit, (name, symbol)
     for reference in parsed.references:
         assert 1 <= reference.line_start <= limit, (name, reference)

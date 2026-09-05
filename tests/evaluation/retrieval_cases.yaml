@@ -374,3 +374,93 @@ cases:
     notes: >
       The sentinel exists on disk in eight secret files. Exclusion happens at
       enumeration, so it is unreachable — the correct answer is "no evidence".
+
+  # -------------------------------------------------------------- unicode ----
+  # Ground truth: common_lib/unicode_names.py is the only file in the ecosystem
+  # containing any of these names or strings. Written from the fixture source,
+  # not from what RepoAtlas returns.
+  - id: unicode-exact-symbol
+    category: exact
+    command: locate
+    query: créer_utilisateur
+    context_repo: common-lib
+    required_evidence:
+      - common-lib/common_lib/unicode_names.py
+    recall_k: 3
+    expect_unknown: false
+    notes: >
+      A French function name. Before this fix, query analysis extracted no term at
+      all and the FTS builder shredded it into `cr` + `er_utilisateur`, so the
+      answer was INSUFFICIENT EVIDENCE for a symbol the index was holding.
+
+  - id: unicode-exact-class
+    category: exact
+    command: locate
+    query: Ünïcode
+    context_repo: common-lib
+    required_evidence:
+      - common-lib/common_lib/unicode_names.py
+    recall_k: 3
+    expect_unknown: false
+    notes: A class name carrying diacritics; the only definition in the ecosystem.
+
+  - id: unicode-exact-error-japanese
+    category: exact
+    command: debug
+    query: 名前が正しくありません
+    context_repo: common-lib
+    required_evidence:
+      - common-lib/common_lib/unicode_names.py
+    recall_k: 3
+    expect_unknown: false
+    notes: >
+      The canonical debug workflow: a pasted error message. SQLite's unicode61
+      tokenizer treats the whole run as one token, so the exact pasted string is
+      retrievable even though sub-phrases of it are not.
+
+  - id: unicode-exact-error-russian
+    category: exact
+    command: debug
+    query: Указано неверное имя
+    context_repo: common-lib
+    required_evidence:
+      - common-lib/common_lib/unicode_names.py
+    recall_k: 3
+    expect_unknown: false
+    notes: A Cyrillic error string, space-separated unlike the Japanese one.
+
+  - id: unicode-path
+    category: exact
+    command: locate
+    query: unicode_names.py
+    context_repo: common-lib
+    required_evidence:
+      - common-lib/common_lib/unicode_names.py
+    recall_k: 3
+    expect_unknown: false
+    notes: File identity lookup must survive the query-tokenizer change.
+
+  - id: unicode-absent-literal
+    category: unanswerable
+    command: debug
+    query: 存在しないエラー
+    context_repo: common-lib
+    expect_unknown: true
+    recall_k: 3
+    notes: >
+      No file contains this string. Unicode support must not become a licence to
+      return something merely because the query is foreign.
+
+  - id: unicode-diacritic-near-miss
+    category: unanswerable
+    command: locate
+    query: creer_utilisateur
+    context_repo: common-lib
+    expect_unknown: true
+    recall_k: 3
+    notes: >
+      The exact/lexical boundary. `unicode61 remove_diacritics 2` genuinely folds
+      this against `créer_utilisateur`, so FTS *can* match it. The unaccented
+      spelling is not in any source file, so it must not be returned as evidence:
+      a definite term that is not literally present suppresses the associative
+      half of the funnel, exactly as it does for an absent ASCII identifier.

@@ -22,6 +22,7 @@ from repoatlas.models.dependencies import (
     ResolvedDependency,
 )
 from repoatlas.models.parsing import ParseDiagnostic, Severity
+from repoatlas.parsers.marks import line_at, split_lines
 
 _DEPENDENCY_GROUPS = {
     "dependencies": "main",
@@ -43,7 +44,7 @@ _YARN_VERSION = re.compile(r'^\s+version\s+"?(?P<version>[^"\s]+)"?')
 
 def _find_line(content: str, needle: str, start: int = 0) -> int:
     index = content.find(needle, start)
-    return content.count("\n", 0, index) + 1 if index != -1 else 1
+    return line_at(content, index) if index != -1 else 1
 
 
 def _resolved(name: str, version: str, path: Path, line: int) -> ResolvedDependency:
@@ -63,7 +64,7 @@ class PackageJsonParser:
     ecosystem = NPM
     kind: DependencyKind = "manifest"
     name = "package-json"
-    version = "1"
+    version = "2"  # 2: line numbers follow the shared source-line model
 
     def supports(self, path: Path) -> bool:
         return path.name == "package.json"
@@ -135,7 +136,7 @@ class PackageLockParser:
     ecosystem = NPM
     kind: DependencyKind = "lockfile"
     name = "package-lock"
-    version = "1"
+    version = "2"  # 2: line numbers follow the shared source-line model
 
     def supports(self, path: Path) -> bool:
         return path.name == "package-lock.json"
@@ -205,7 +206,7 @@ class PnpmLockParser:
     ecosystem = NPM
     kind: DependencyKind = "lockfile"
     name = "pnpm-lock"
-    version = "1"
+    version = "2"  # 2: line numbers follow the shared source-line model
 
     def supports(self, path: Path) -> bool:
         return path.name == "pnpm-lock.yaml"
@@ -252,7 +253,7 @@ class YarnLockParser:
     ecosystem = NPM
     kind: DependencyKind = "lockfile"
     name = "yarn-lock"
-    version = "1"
+    version = "2"  # 2: line numbers follow the shared source-line model
 
     def supports(self, path: Path) -> bool:
         return path.name == "yarn.lock"
@@ -261,7 +262,7 @@ class YarnLockParser:
         found: dict[str, ResolvedDependency] = {}
         pending: list[tuple[str, int]] = []
 
-        for number, line in enumerate(content.splitlines(), start=1):
+        for number, line in enumerate(split_lines(content), start=1):
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
             if not line[0].isspace():

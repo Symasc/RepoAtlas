@@ -20,6 +20,7 @@ from repoatlas.models.dependencies import (
     ProvidedPackage,
     ResolvedDependency,
 )
+from repoatlas.parsers.marks import split_lines
 
 #: ``gem "rails", "~> 7.0"`` — name, then any number of literal constraints.
 _GEM_CALL = re.compile(
@@ -55,7 +56,7 @@ class GemfileParser:
     ecosystem = GEM
     kind: DependencyKind = "manifest"
     name = "gemfile"
-    version = "1"
+    version = "2"  # 2: line numbers follow the shared source-line model
 
     def supports(self, path: Path) -> bool:
         return path.name == "Gemfile"
@@ -64,7 +65,7 @@ class GemfileParser:
         declared: list[DeclaredDependency] = []
         groups: list[str] = []
 
-        for number, line in enumerate(content.splitlines(), start=1):
+        for number, line in enumerate(split_lines(content), start=1):
             if line.lstrip().startswith("#"):
                 continue
             block = _GROUP_BLOCK.match(line)
@@ -99,7 +100,7 @@ class GemspecParser:
     ecosystem = GEM
     kind: DependencyKind = "manifest"
     name = "gemspec"
-    version = "1"
+    version = "2"  # 2: line numbers follow the shared source-line model
 
     def supports(self, path: Path) -> bool:
         return path.suffix == ".gemspec"
@@ -109,7 +110,7 @@ class GemspecParser:
         provides: list[ProvidedPackage] = []
 
         version_match = _SPEC_VERSION.search(content)
-        for number, line in enumerate(content.splitlines(), start=1):
+        for number, line in enumerate(split_lines(content), start=1):
             if line.lstrip().startswith("#"):
                 continue
             name_match = _SPEC_NAME.search(line)
@@ -155,7 +156,7 @@ class GemfileLockParser:
     ecosystem = GEM
     kind: DependencyKind = "lockfile"
     name = "gemfile-lock"
-    version = "1"
+    version = "2"  # 2: line numbers follow the shared source-line model
 
     def supports(self, path: Path) -> bool:
         return path.name == "Gemfile.lock"
@@ -164,7 +165,7 @@ class GemfileLockParser:
         resolved: dict[str, ResolvedDependency] = {}
         in_specs = False
 
-        for number, line in enumerate(content.splitlines(), start=1):
+        for number, line in enumerate(split_lines(content), start=1):
             stripped = line.strip()
             if stripped == "specs:":
                 in_specs = True

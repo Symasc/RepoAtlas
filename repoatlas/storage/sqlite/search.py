@@ -27,9 +27,20 @@ from repoatlas.models.parsing import EntityType
 from repoatlas.storage.protocols import ChunkHit, EntityHit, FileHit
 from repoatlas.storage.sqlite.database import Database
 
-#: Characters FTS5 treats as syntax. Terms are quoted rather than escaped, so any
-#: user text is safe to place inside an MATCH expression.
-_TOKEN_RE = re.compile(r"[A-Za-z0-9_.@$/-]+")
+#: What counts as one searchable token, and it must agree with the tokenizer that
+#: **built** the index — ``unicode61 remove_diacritics 2 tokenchars '_.-@$'``.
+#:
+#: ``\w`` rather than ``A-Za-z0-9_``: for ``str`` patterns Python 3 makes ``\w``
+#: Unicode-aware, so this is a strict superset of the old class and every ASCII
+#: token splits exactly as before. The old class did not merely *drop* non-ASCII
+#: text, which would have been survivable — it **shredded** it, turning
+#: ``créer_utilisateur`` into ``cr`` and ``er_utilisateur``: two terms that are not
+#: in the source, searched instead of the one that is.
+#:
+#: Enumerating scripts by hand (``À-ÿ``, ``\u0400-\u04ff``, …) was rejected. Unicode
+#: is not a finite checklist of Western alphabets, and a class like that answers
+#: "did someone remember this script?" rather than "is this a word character?".
+_TOKEN_RE = re.compile(r"[\w.@$/-]+")
 
 
 def _fts_query(terms: Sequence[str]) -> str:

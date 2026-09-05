@@ -171,7 +171,18 @@ def test_module_symbol_is_always_present() -> None:
 
 
 def test_parser_records_its_own_provenance() -> None:
+    """Every parsed file carries the identity and version of what produced it.
+
+    The version is compared against the parser's own declaration rather than a
+    literal. It is *meant* to change whenever parser output changes — that is the
+    mechanism that reparses existing indexes (ARCHITECTURE.md §9) — so pinning the
+    number here would turn every correct bump into a test failure and invite
+    someone to fix it by not bumping.
+    """
+    from repoatlas.parsers.python import PythonParser
+
     parsed = parse("x = 1\n")
     assert parsed.parser == "python-ast"
-    assert parsed.parser_version == "1"
+    assert parsed.parser_version == PythonParser.version
+    assert parsed.parser_version, "a parser must declare a version"
     assert parsed.language == "Python"

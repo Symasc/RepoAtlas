@@ -38,13 +38,37 @@ def load_parser(language: str) -> Parser:
         raise GrammarUnavailable(f"grammar {language!r} unavailable: {exc}") from exc
 
 
+#: ASCII carriage return and line feed. Single bytes, which is what makes the
+#: substitution in :func:`parse_tree` offset-preserving.
+_CR, _LF = 0x0D, 0x0A
+
+
 def parse_tree(language: str, content: str) -> tuple[Tree, bytes]:
     """Parse ``content`` and return the tree with the exact bytes it indexes.
 
     tree-sitter offsets are byte offsets, so the encoded source is returned with
     the tree; slicing anything else would misalign on non-ASCII input.
+
+    **Classic-Mac line endings are normalized first.** The grammars for
+    TypeScript, Ruby and Bash do not accept a lone ``\r`` as a line terminator, so
+    a file that uses only ``\r`` collapses into a single line as far as tree-sitter
+    is concerned. That is not a cosmetic loss: in a seven-line CR-only TypeScript
+    file, ``beta`` on lines 5-7 was reported at ``1-1``, and grounding would have
+    believed a citation to line 1 for content that is not there — a fabricated
+    citation for *real* content, which is worse than the phantom end-of-file line
+    this module's line model was written to prevent. Bash fared worse still and
+    lost both function definitions outright.
+
+    The rewrite is deliberately confined to the unambiguous case: a file holding at
+    least one ``\r`` and **no** ``\n`` at all is a classic-Mac file in which every
+    ``\r`` is a terminator. A file that mixes the two is left exactly as it is,
+    because there no rule can tell a terminator from a carriage return inside a
+    string. Both bytes are one byte wide, so every offset, and therefore every
+    slice :func:`node_text` takes, is unchanged.
     """
     source = content.encode("utf-8")
+    if _CR in source and _LF not in source:
+        source = source.replace(b"\r", b"\n")
     return load_parser(language).parse(source), source
 
 

@@ -22,6 +22,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
     Severity,
 )
+from repoatlas.parsers.marks import whole_file_span
 from repoatlas.parsers.treesitter import (
     GrammarUnavailable,
     has_error,
@@ -425,7 +426,9 @@ class TypeScriptParser:
     """Deterministic TypeScript/JavaScript structure extraction."""
 
     name = "tree-sitter-typescript"
-    version = "1"
+    # 2: whole-file spans stop at EOF and are absent for an empty file; a
+    #    classic-Mac (CR-only) file is no longer collapsed into one line.
+    version = "2"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
@@ -454,12 +457,13 @@ class TypeScriptParser:
         walker = _Walker(source, grammar)
         walker.run(tree.root_node)
 
+        whole_file_start, whole_file_last = whole_file_span(content)
         module = ParsedSymbol(
             kind=EntityType.MODULE,
             name=path.stem,
             qualified_name=path.stem,
-            line_start=1,
-            line_end=max(1, content.count("\n") + 1),
+            line_start=whole_file_start,
+            line_end=whole_file_last,
         )
 
         diagnostics = (

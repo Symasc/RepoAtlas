@@ -153,7 +153,76 @@ relationship graph at this scale is a well-indexed edge table with recursive CTE
 database would add a dependency and an operational surface for a query pattern we can already express. Revisit only
 if traversal profiling shows it dominates.
 
-Migrations are numbered SQL files in `storage/sqlite/migrations/`, applied in order, version recorded in `meta`.
+Migrations are numbered SQL files in `storage/sqlite/migrations/`, applied in order by
+`storage/sqlite/migrator.py`.
+
+> **Invariant.** A migration's statements and its `user_version` transition commit atomically.
+
+> **Invariant.** A process that waits for another migrator re-reads the schema version after acquiring migration
+> serialization, and never re-applies a migration that has already completed.
+
+> **Invariant.** A failed migration leaves the last successfully versioned schema usable.
+
+> **Invariant.** RepoAtlas never treats an arbitrary partially matching schema as successfully migrated.
+
+**Transaction ownership.** The migrator owns one transaction per version transition, from `BEGIN IMMEDIATE` to
+`COMMIT`, and every statement in the migration plus the `user_version` stamp runs inside it. Nothing in the body may
+commit implicitly. This is asserted mechanically: `conn.in_transaction` stays true throughout, and SQLite's DDL —
+`CREATE TABLE`, `CREATE INDEX`, `CREATE TRIGGER`, `ALTER TABLE ADD COLUMN`, `DROP TABLE` — is transactional, as is
+`PRAGMA user_version`, both verified against the production PRAGMAs rather than assumed.
+
+Migrations run before the `Database` object exists, so they never join the reentrant application transaction helper
+(§9). That separation is deliberate: a migration must own its commit, not inherit someone else's.
+
+**Statement execution.** Statements are executed one at a time with `Connection.execute`. They are separated with
+`sqlite3.complete_statement`, the binding for SQLite's own `sqlite3_complete()`, which ignores semicolons inside
+string literals, inside comments, and inside a trigger's `BEGIN ... END` body. `001` defines six such triggers, and
+a `sql.split(";")` turns it into 39 fragments where there are 29 statements — every trigger shredded into an invalid
+`CREATE TRIGGER ... BEGIN INSERT ...` plus a stray `END`.
+
+`Connection.executescript` is **not** used and must not be: it commits any open transaction before executing
+anything, so wrapping it in `BEGIN IMMEDIATE` produces a transaction that is already closed by the time the first
+statement runs. That is the defect this design replaces — a killed process left half a schema committed with the old
+version stamped, and the next open re-ran the migration onto it (`duplicate column name: slug`, permanently
+unopenable); and two processes could both pass the version check and both begin applying, because neither held a
+write transaction.
+
+**Serialization** is SQLite's own writer lock, not an advisory file lock. Migrations run at *open*, and readers open
+the database too, so taking the sync writer lock here would make `locate` queue behind a running `sync`.
+`BEGIN IMMEDIATE` acquires the write lock, `busy_timeout` bounds the wait, and the version is re-read **inside** the
+transaction — the read taken before waiting is stale by definition. A waiter that times out gets a `MigrationError`
+naming the condition, not a `sqlite3.OperationalError` traceback.
+
+**Per-version, not per-upgrade.** Each version transition is its own transaction rather than the whole chain being
+one. A database several versions behind that fails at *N+1* stays usable at *N* instead of losing the transitions
+that already succeeded, and every `user_version` boundary is a valid, openable schema.
+
+**Crash behaviour.** SQLite's own recovery does this work; there is no custom stale-state cleanup, because a lock
+file of our own would be one more thing to leave behind. A process killed with `SIGTERM` or `SIGKILL` mid-migration
+leaves the previous version intact, `integrity_check` clean, and no stray lock; the next open migrates normally.
+
+**Recovery of historically damaged databases.** Databases wrecked by the previous implementation still exist, and
+making future migrations atomic does not un-strand them. When a migration's first statement already appears applied,
+the migrator finds the resume point by **simulation**: it builds a scratch in-memory database at version *N-1*,
+applies the migration's statements one at a time, and compares the schema shape against the live database after each
+one. The prefix whose shape matches exactly is the prefix that ran.
+
+Simulation rather than per-statement inspection, because inspection cannot answer the question in general: `003`
+drops `embeddings` and creates a *different* table of the same name, so "has `CREATE TABLE embeddings` been applied?"
+has no order-independent answer. Replaying is exact for every migration rather than for the ones whose statements
+happen to be independent. The shape comparison reads `PRAGMA table_xinfo`, not `table_info`, because the latter omits
+`GENERATED` columns entirely — `004`'s `files.basename` would otherwise read as absent and be added twice.
+
+A statement with no detectable schema effect (today, one `DELETE`) cannot be distinguished as before-or-after by any
+shape comparison, so recovery replays it. Every such statement must therefore be idempotent; a test enumerates them
+across all migrations and fails if a future migration adds one that is not.
+
+**Unknown schemas fail closed.** If no prefix matches, RepoAtlas raises `MigrationError` and changes nothing. A
+column of the wrong type, an index with a different definition, or an unrelated object holding a needed name is not
+a partially applied migration, and blanket `IF NOT EXISTS` would silently bless it. Idempotent DDL is deliberately
+*not* the mechanism here: it makes re-running less explosive without establishing atomicity, and it cannot tell a
+recognized partial migration from arbitrary schema damage.
+
 
 ### Tables
 
@@ -328,6 +397,92 @@ An edge is provenanced by the file that *asserted* it, not by its endpoints. `se
 `common` produces an edge owned by `app.py`; deleting `app.py` removes the claim, while `common` itself is
 untouched.
 
+#### What a line range may say
+
+> **Invariant.** No provenance range may cite a source line that does not exist.
+
+> **Invariant.** A terminal newline terminates the final source line; it does not create an additional citable line.
+
+> **Invariant.** Whole-file provenance includes the real comments and blank lines belonging to the file, but never an
+> artificial EOF+1 position.
+
+`marks.split_lines` is the single splitter behind every line number RepoAtlas computes for itself:
+`marks.line_count`, `marks.whole_file_span`, and the chunker's line array. There is one because there were once
+seven. Five parsers each reimplemented `content.count("\n") + 1`, which counts the line *slots* newlines delimit
+rather than the lines that hold anything, so every file ending in a newline — nearly all of them — gained a phantom
+line; Python, TypeScript/JavaScript, Bash, Ruby and Dockerfile all had it, Salt, Jinja, YAML and JSON did not. The
+chunker had a sixth model, `str.splitlines()`, and Salt's fallback scan a seventh. Chunk ranges and entity ranges
+are compared, fused and cited side by side, so two line models is two sets of line numbers for the same file.
+
+The model, decided case by case rather than inherited from an expression:
+
+| content | source lines | why |
+|---|---|---|
+| `""` | 0 | an empty file has no lines |
+| `"a"` | 1 | a final line needs no terminator |
+| `"a\n"` | 1 | the newline **ends** line 1; it does not open line 2 |
+| `"a\nb\n"` | 2 | |
+| `"a\n\n"` | 2 | the blank line is real source and is inside the whole-file span |
+| `"a\r\nb\r\n"` | 2 | CRLF is one terminator, not two |
+| `"a\fb"` | 1 | a form feed is a page break, not a line break |
+
+The form-feed row is why the helper does not use `str.splitlines()`, which is otherwise exactly right.
+`splitlines()` also breaks on U+000B, U+000C, U+001C–U+001E, U+0085 and U+2028/9, while `ast` and the tree-sitter
+grammars do not; adopting it would have replaced one phantom-line defect with a rarer one. The helper splits on
+`\n`, `\r\n` and `\r` only, which is what every parser, editor and `wc -l` agrees on. The chunker made exactly
+that mistake: splitting with `splitlines()`, it put a chunk holding `b = 2` on line 3 of a two-line file containing
+a form feed, and tore a string literal containing a vertical tab into two chunks on two lines that were really one.
+A chunk range that is merely *in bounds* is not enough — a test slices each chunk's lines back out of the source and
+compares them to the chunk's own text.
+
+**"One line model everywhere" is the wrong lesson.** The right rule is that *the line model must match whatever
+produced the line numbers*, and there are two producers. A line array indexed by a **PyYAML mark** must use PyYAML's
+line-break set, which is `splitlines()`'s: PyYAML rejects form feed and vertical tab outright, and treats U+0085,
+U+2028 and U+2029 as breaks exactly as `splitlines()` does. So `SaltParser`'s and `StructuredParser`'s mark-indexed
+arrays deliberately keep `splitlines()`, and a test pins both halves of that claim so a later "unify the splitters"
+refactor fails there rather than silently shifting every YAML line number. Salt's *fallback* scan is the exception
+that proves the rule: it runs precisely because PyYAML refused the content, so PyYAML's line breaks no longer govern
+and it uses the source-grammar splitter.
+
+**Classic-Mac line endings are normalized before tree-sitter sees them.** The TypeScript, Ruby and Bash grammars do
+not accept a lone `\r` as a line terminator, so a CR-only file collapsed into one line: in a seven-line TypeScript
+file, `beta` on lines 5-7 was reported at `1-1`, and Bash lost both function definitions outright. A wrong line for
+*real* content is worse than a phantom line at EOF, because grounding will believe it. `parse_tree` rewrites `\r`
+to `\n` only when the file contains no `\n` at all — the unambiguous classic-Mac case — and leaves mixed files
+alone, since there nothing can distinguish a terminator from a carriage return inside a string. Both are one byte,
+so every tree-sitter offset, and every slice taken with it, is unchanged.
+
+**An empty file claims no lines.** `ParsedSymbol.line_start`/`line_end` are optional, and exactly one thing makes
+them absent: the symbol is the whole of an empty file. The entity still exists — an empty `__init__.py` is a real,
+importable module, and dropping it would strand every import of that package — it simply asserts nothing about
+source it does not have. `None` rather than a sentinel because that is already what a fact about a file rather than
+a range inside it looks like: the `file` entity, and `Evidence`'s path-only citation. Anchoring an empty file at
+`1-1`, which is what it used to do, names a line the file does not contain — the same fabricated citation, in the
+one file where it is easiest to excuse.
+
+**Whole-file and structural provenance are different.** A module, script or Dockerfile config entity spans the file,
+so a trailing comment is inside it — Salt's smallest-enclosing-subtree rule (§5) is about a *state's* provenance and
+does not apply. Structural symbols keep the ranges their parser's AST reports; those were always right, and the fix
+touches only whole-file range construction. A **path-only** evidence candidate is a third thing again: it has no line
+range at all, and inventing a whole-file span for it to make output uniform would manufacture provenance.
+
+**The fix is at the point the fact is created**, not in the renderer. A `min(line_end, len(lines))` in rendering
+would have hidden the symptom while storage, `--json` and grounding stayed wrong — and grounding is where it
+mattered, because it clamps a model's citation to *the supplied span*. While that span was `1-8` for a seven-line
+file, a model citing `config.py:8-8` was believed. A test asserts no such clamp exists downstream.
+
+Correcting a parser changes derived facts, so each affected parser's `version` was bumped, and `CHUNKING_VERSION`
+joined the facts version for the same reason — a chunk's range is cited evidence exactly as an entity's is, so a
+chunking-only fix that did not move the facts version would sit in the code and never reach an existing index.
+
+That is what makes an index converge: the stored `parser_version` no longer matches, so the next ordinary `sync`
+reparses those files and rewrites the spans (§9) — no `--full`, no manual intervention. **`status` says so.** A
+facts-version change is invisible to every other freshness signal, because the working tree genuinely did not
+change: HEAD, mtime and content hash all still agree. Without a check, an index full of facts the current build
+would compute differently reports itself `current` and the user has no way to learn otherwise. `_index_state` asks
+the file store how many rows carry a different facts version and reports `stale (indexed by an older build)`, which
+keeps the standing promise that RepoAtlas never claims currency it can cheaply tell it does not have.
+
 #### Why declared and resolved are separate rows
 
 A package can be declared without being locked (no lockfile yet) and locked without being declared (a transitive
@@ -389,6 +544,14 @@ them, so switching models finds none for the new id and re-embeds — without re
 `module.attr` survive tokenization. Because no tokenizer is exact for every query shape, **lexical hits are
 verified against the chunk text with a literal substring check before being reported as exact matches**
 (V1_SPEC §14). FTS provides recall; verification provides precision.
+
+**The query builder must agree with the tokenizer that built the index**, and for a long time it did not: the index
+tokenized with `unicode61` while `tokenize_query` split on `[A-Za-z0-9_.@$/-]+`. Non-ASCII text was not merely
+dropped, it was *shredded* — `créer_utilisateur` became the two terms `cr` and `er_utilisateur`, neither of which
+occurs in any source file. The class is now `[\w.@$/-]+`; for `str` patterns Python 3 makes `\w` Unicode-aware, so it
+is a strict superset and every ASCII token splits exactly as before. Enumerating scripts by hand (`À-ÿ`,
+`\u0400-\u04ff`, …) was rejected: Unicode is not a finite checklist of Western alphabets, and such a class answers
+"did the author remember this script?" rather than "is this a word character?".
 
 ---
 
@@ -1133,10 +1296,13 @@ is treated as **changed**. Parsing then fails conservatively for that file and i
 nothing. The alternative, letting the error escape, would abort the whole sync over one unreadable file and leave
 every other repository's facts stale.
 
-Schema and parser versions are handled **per file** rather than as a sixth global trigger: the version is stored on
-the file row, so affected files are reparsed directly instead of hashing the entire tree to learn that nothing
-moved. The embedding model is not part of that version at all — vectors are keyed by the model that produced them
-(§3), so a model change re-embeds without reparsing anything.
+The **facts version** — the schema version, both registries and the chunking rules — is handled **per file** rather
+than as a sixth global trigger: it is stored on the file row, so affected files are reparsed directly instead of
+hashing the entire tree to learn that nothing moved. Chunking is in it because a chunk range is cited evidence like
+any other, so a chunking fix that did not move the version would never reach an existing index. The embedding model
+is not part of it at all — vectors are keyed by the model that produced them (§3), so a model change re-embeds
+without reparsing anything. `status` reports a file row carrying an older facts version as stale, which is the only
+signal that a repository nobody has touched is nonetheless out of date.
 
 ### Deletion
 
@@ -1280,8 +1446,10 @@ throughout never observed a partial one.
 Two things had to change for that to be true. Opening the database used to stamp `schema_version` unconditionally,
 which made *opening* a write: a reader could then fail with `database is locked` against a running sync. It is now
 written only when it differs. And migrations, which run at open and so cannot be covered by the writer lock, apply
-under `BEGIN IMMEDIATE` with `user_version` re-read inside that transaction, so two processes opening a fresh
-database concurrently cannot both apply the same migration.
+under a transaction the migrator genuinely holds — `BEGIN IMMEDIATE`, every statement executed individually so
+nothing commits implicitly, `user_version` re-read inside that transaction and stamped within it (§3). Two processes
+opening the same database concurrently therefore cannot both apply the same migration: measured on the previous
+implementation, 7 of 150 concurrent opens failed; on this one, 0 of 150.
 
 `PRAGMA busy_timeout = 10000` is set on every connection. It is contention *behaviour*, not the synchronization
 protocol — it covers WAL checkpoints and the migration race above, and nothing relies on it for correctness.
@@ -1310,7 +1478,7 @@ question + RepositoryContext
    ├─ 1. query analysis (deterministic)
    │     quoted strings · ALL_CAPS env candidates · dotted.qualified.names
    │     path-like tokens · package names · snake_case and camelCase identifiers
-   │     error-shaped substrings
+   │     error-shaped substrings · non-ASCII tokens in any script
    │
    ├─ 2. exact          literal-substring verified chunk matches,     → DETERMINISTIC
    │                    including across chunk seams
@@ -1434,6 +1602,58 @@ an embedding model that scores every text 1.0, and with a reranker that delibera
 than against `fuse` alone.
 
 ### Suppressing similarity when the question named something specific
+
+### Unicode
+
+> **Invariant.** Exact retrieval does not depend on ASCII-only tokenization.
+
+> **Invariant.** A symbol or literal already present in the index cannot become undiscoverable solely because it
+> contains non-ASCII characters.
+
+> **Invariant.** The Unicode normalization and diacritic folding used by lexical search never promote an
+> approximate match into deterministic exact evidence.
+
+**Two layers had to agree.** Query analysis extracts the literal terms a question is about; the FTS builder turns
+them into a `MATCH` expression. Both were written with explicit `A-Za-z` ranges, and either alone was enough to make
+a Unicode query return nothing. `créer_utilisateur` matched none of the identifier patterns — Python's `\b` finds no
+boundary between `é` and `e`, so not even a suffix survived — and what did reach the FTS builder was shredded. The
+index was never at fault: `MATCH '"créer_utilisateur"'` on the same database has always returned the row, which is
+why this required no schema change.
+
+**Term extraction generalizes by rule, not by character range.** The ASCII patterns are kept exactly as they were,
+because they encode real distinctions that exact search depends on — SCREAMING_CASE is an environment variable, a
+dashed word might just be English. A Unicode-aware pass supplements them for tokens they cannot see at all, and
+classifies each by the same *shape* rule expressed through `str` methods: `str.isupper` knows about every alphabet's
+casing, a hand-written range knows about the ones its author remembered. `ÉCHEC_CONNEXION` is an environment
+variable for the reason `SERVICE_HOST` is; `créer_utilisateur` is a code name for the reason `create_user` is.
+
+**A lone non-ASCII token that is the whole question is treated as a pasted literal**, the same judgement already made
+for a dashed token that is the entire query. The asymmetry with ASCII is deliberate: a bare English word is filtered
+by a stopword list and shape heuristics that model *English*, and no such model exists for Greek, Japanese or Arabic.
+Absent one, a lone foreign token is far likelier to be a pasted error message than a filler word — and this is what
+makes `debug "接続できませんでした"` work at all. It cannot manufacture evidence, because a literal term is resolved by a
+Python substring test against the stored chunk text.
+
+**Exact and lexical are different claims, and Unicode is where the difference becomes visible.**
+`remove_diacritics 2` folds diacritics *and* case, so FTS genuinely matches `creer_utilisateur` and `Unicode`
+against `créer_utilisateur` and `Ünïcode` — verified directly against SQLite. That is legitimate recall and enters
+as `ASSOCIATIVE`. It is never promoted to `DETERMINISTIC`, because the deterministic tier is produced by
+`search_literal`'s Python substring test and by SQL equality on stored entity names, neither of which folds
+anything. The distinction is what stops "we found something spelled almost like this" being reported as "the source
+contains this".
+
+**Normalization policy.** Stored text is never normalized — provenance and symbol identity are the file's own bytes,
+and repository slugs, file keys, symbol keys and package normalization are untouched by any of this. SQLite's
+tokenizer does treat NFC and NFD as the same token, so a decomposed query still finds the row *lexically*. It is not
+byte-identical to what is stored, so it is not deterministic evidence.
+
+**CJK.** `unicode61` performs no language-aware word segmentation, and none is added here. A run of CJK characters is
+one token: `接続できませんでした` is retrievable exactly as pasted, while `接続` and `できませんでした` match nothing on their own.
+That is the honest boundary of the V1 guarantee — exact retrieval of pasted literals, not natural-language CJK
+segmentation.
+
+**Surrogates.** Undecodable filesystem bytes reach Python as lone surrogates. They are outside the supported text
+model; the requirement met here is only that such a query fails conservatively rather than crashing.
 
 When query analysis extracts literal terms and **none of them exist anywhere in the index**, the whole
 **associative half of the funnel** is skipped: FTS recall over chunks, entity-name recall and the embedding stage

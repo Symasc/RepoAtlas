@@ -3,6 +3,14 @@
 Chunks are the unit of lexical and semantic retrieval, so every chunk carries the
 line range that proves it. Symbol-aligned where the parser supplied ranges,
 fixed windows otherwise.
+
+The line array comes from :func:`~repoatlas.parsers.marks.split_lines`, the same
+splitter the parsers count with, and that sharing is load-bearing. Chunk spans and
+entity spans are compared, fused and cited side by side, so they have to be claims
+about the same lines. Splitting here with ``str.splitlines()`` instead — which
+breaks on form feed, vertical tab and U+2028 where no source grammar does — put a
+chunk containing ``b = 2`` at line 3 of a two-line file, and tore a string literal
+holding a vertical tab into two chunks on two lines that were really one.
 """
 
 from __future__ import annotations
@@ -12,6 +20,17 @@ from dataclasses import dataclass
 
 from repoatlas.config.settings import IndexingSettings
 from repoatlas.models.parsing import ParsedSymbol
+from repoatlas.parsers.marks import split_lines
+
+#: Version of the chunking rules, part of the facts version (V1_SPEC §12).
+#:
+#: A chunk carries a line range and is cited like any other deterministic fact, so
+#: a change to how spans are computed makes stored chunks stale exactly as a parser
+#: change does. Without this, a chunking-only fix would sit in the code and never
+#: reach an index whose files are all unchanged.
+#:
+#: 2: the line array is the shared source-grammar splitter, not ``str.splitlines()``.
+CHUNKING_VERSION = "2"
 
 #: Rough characters-per-token ratio, used only for budgeting.
 _CHARS_PER_TOKEN = 4
@@ -61,7 +80,7 @@ def chunk_content(
 ) -> list[Chunk]:
     """Split ``content`` into retrievable, line-provenanced chunks."""
     config = settings or IndexingSettings()
-    lines = content.splitlines()
+    lines = split_lines(content)
     if not lines:
         return []
 
@@ -110,23 +129,33 @@ def _symbol_spans(
     symbols: tuple[ParsedSymbol, ...], total_lines: int, config: IndexingSettings
 ) -> list[tuple[int, int]]:
     """Top-level symbol ranges, split when oversized, gaps filled with windows."""
+    # A symbol with no span is the whole-file symbol of an empty file, which this
+    # function is never reached for; it is filtered here so the arithmetic below
+    # never has to consider an absent line.
+    # Only spans are needed below, so they are extracted once. A symbol with no
+    # span is the whole-file symbol of an empty file, which this function is never
+    # reached for; dropping it here keeps the arithmetic free of absent lines.
     top_level = [
-        s
+        (s.line_start, s.line_end)
         for s in symbols
-        if s.parent is None and s.line_end >= s.line_start and s.line_end <= total_lines
+        if s.parent is None and s.line_start is not None and s.line_end is not None
     ]
     # A module symbol spans the whole file; using it would defeat chunking.
-    top_level = [s for s in top_level if not (s.line_start == 1 and s.line_end >= total_lines)]
+    top_level = [
+        (start, end)
+        for start, end in top_level
+        if start <= end <= total_lines and not (start == 1 and end >= total_lines)
+    ]
     if not top_level:
         return []
 
     spans: list[tuple[int, int]] = []
     cursor = 1
-    for symbol in sorted(top_level, key=lambda s: (s.line_start, s.line_end)):
-        if symbol.line_start > cursor:
-            spans.extend(_window_range(cursor, symbol.line_start - 1, config))
-        spans.extend(_split_oversized(symbol.line_start, symbol.line_end, config))
-        cursor = max(cursor, symbol.line_end + 1)
+    for start, end in sorted(top_level):
+        if start > cursor:
+            spans.extend(_window_range(cursor, start - 1, config))
+        spans.extend(_split_oversized(start, end, config))
+        cursor = max(cursor, end + 1)
     if cursor <= total_lines:
         spans.extend(_window_range(cursor, total_lines, config))
     return spans

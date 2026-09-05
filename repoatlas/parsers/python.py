@@ -22,6 +22,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
     Severity,
 )
+from repoatlas.parsers.marks import whole_file_span
 
 _SUFFIXES = frozenset({".py", ".pyi"})
 
@@ -267,7 +268,7 @@ class PythonParser:
     """Deterministic Python structure extraction."""
 
     name = "python-ast"
-    version = "1"
+    version = "2"  # 2: whole-file spans stop at EOF, and are absent for an empty file
     language = "Python"
 
     def supports(self, path: Path) -> bool:
@@ -305,12 +306,13 @@ class PythonParser:
         visitor = _Visitor(module_name)
         visitor.visit(tree)
 
+        whole_file_start, whole_file_last = whole_file_span(content)
         module_symbol = ParsedSymbol(
             kind=EntityType.MODULE,
             name=module_name,
             qualified_name=module_name,
-            line_start=1,
-            line_end=max(1, content.count("\n") + 1),
+            line_start=whole_file_start,
+            line_end=whole_file_last,
         )
 
         return ParsedFile(

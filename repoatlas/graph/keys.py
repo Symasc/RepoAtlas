@@ -23,8 +23,14 @@ def file_key(repo_slug: str, rel_path: str) -> str:
     return f"file:{repo_slug}:{rel_path}"
 
 
-def symbol_key(repo_slug: str, rel_path: str, qualified_name: str, line: int) -> str:
-    return f"sym:{repo_slug}:{rel_path}:{qualified_name}:{line}"
+def symbol_key(repo_slug: str, rel_path: str, qualified_name: str, line: int | None) -> str:
+    """Identity of a file-scoped symbol.
+
+    ``line`` is absent only for the whole-file symbol of an empty file, which has
+    no lines to name. It renders as ``-`` rather than as ``None`` so the key stays
+    readable, and it is a single fixed token so the key stays stable across syncs.
+    """
+    return f"sym:{repo_slug}:{rel_path}:{qualified_name}:{line if line is not None else '-'}"
 
 
 def env_key(name: str) -> str:
