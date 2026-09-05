@@ -22,7 +22,12 @@ from pathlib import Path
 
 from repoatlas.config.settings import DiscoverySettings
 from repoatlas.containment import RepositoryBoundary
-from repoatlas.discovery.ignore import IGNORE_FILENAME, IgnoreRules, is_secret_path
+from repoatlas.discovery.ignore import (
+    IGNORE_FILENAME,
+    MAX_IGNORE_BYTES,
+    IgnoreRules,
+    is_secret_path,
+)
 from repoatlas.gitstate.client import GitClient, is_git_repository
 
 _HASH_CHUNK_BYTES = 1 << 20
@@ -139,13 +144,18 @@ def scan_repository(
 def _load_ignore_rules(boundary: RepositoryBoundary) -> IgnoreRules:
     """``.repoatlasignore`` read through the boundary like any other file.
 
-    It is repository-supplied content, so it is subject to the same rule: a
-    ``.repoatlasignore`` that is a symlink out of the tree is not read.
+    It is repository-supplied content, so it is subject to both of the same
+    rules: a ``.repoatlasignore`` that is a symlink out of the tree is not read,
+    and it is read under a byte ceiling. The second matters as much as the first
+    — this is the *earliest* content read of a sync, before any file has been
+    classified, so an unbounded read here would exhaust memory before the size
+    cap protecting everything else was ever consulted.
     """
-    raw = boundary.read_bytes(IGNORE_FILENAME)
-    if raw is None:
+    found = boundary.read_content(IGNORE_FILENAME, max_bytes=MAX_IGNORE_BYTES)
+    if not found.ok or found.data is None:
+        # Absent, refused, or absurdly large: no rules rather than partial rules.
         return IgnoreRules()
-    return IgnoreRules.from_text(raw.decode("utf-8", errors="replace"))
+    return IgnoreRules.from_text(found.data.decode("utf-8", errors="replace"))
 
 
 def _is_excluded(rel_path: str, config: DiscoverySettings) -> bool:

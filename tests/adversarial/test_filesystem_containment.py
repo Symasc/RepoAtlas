@@ -46,6 +46,19 @@ from tests.conftest import git
 
 pytestmark = pytest.mark.adversarial
 
+#: Pass 5 gave the boundary a mandatory byte ceiling: `read_bytes` became
+#: `read_content(..., max_bytes=...)`. These tests are about *containment* — the
+#: payloads are kilobytes — so they ask for a limit far above anything they
+#: create and keep asserting what they always asserted. The cap itself has its
+#: own suite in `test_bounded_file_reads.py`.
+_AMPLE = 1 << 30
+
+
+def read_bytes(boundary, rel_path: str) -> bytes | None:
+    """The bytes, or ``None`` for every reason the boundary declines to give them."""
+    return boundary.read_content(rel_path, max_bytes=_AMPLE).data
+
+
 #: Planted in files that live outside every managed repository. None of these may
 #: reach any table, index, embedding, evidence set or prompt.
 OUTSIDE_CANARY = "P0_OUTSIDE_CANARY_5F3A9"
@@ -857,12 +870,12 @@ def test_the_boundary_refuses_traversal_and_absolute_paths(tmp_path: Path) -> No
     (tmp_path / "outside.py").write_text("B = 1\n", encoding="utf-8")
 
     boundary = RepositoryBoundary(root)
-    assert boundary.read_bytes("src/ok.py") == b"A = 1\n"
-    assert boundary.read_bytes("../outside.py") is None
-    assert boundary.read_bytes("/etc/passwd") is None
-    assert boundary.read_bytes("src/../../outside.py") is None
-    assert boundary.read_bytes("") is None
-    assert boundary.read_bytes("src/nope.py") is None
+    assert read_bytes(boundary, "src/ok.py") == b"A = 1\n"
+    assert read_bytes(boundary, "../outside.py") is None
+    assert read_bytes(boundary, "/etc/passwd") is None
+    assert read_bytes(boundary, "src/../../outside.py") is None
+    assert read_bytes(boundary, "") is None
+    assert read_bytes(boundary, "src/nope.py") is None
 
 
 def test_the_boundary_refuses_a_non_regular_file(tmp_path: Path) -> None:
@@ -876,7 +889,7 @@ def test_the_boundary_refuses_a_non_regular_file(tmp_path: Path) -> None:
 
     boundary = RepositoryBoundary(root)
     assert boundary.stat("pipe") is None
-    assert boundary.read_bytes("pipe") is None
+    assert read_bytes(boundary, "pipe") is None
     assert boundary.stat("ok.py") is not None
 
 
@@ -943,9 +956,9 @@ def test_two_repositories_get_independent_boundaries(tmp_path: Path) -> None:
     (a / "a.py").write_text("A = 1\n", encoding="utf-8")
     (b / "b.py").write_text("B = 1\n", encoding="utf-8")
 
-    assert RepositoryBoundary(a).read_bytes("a.py") == b"A = 1\n"
-    assert RepositoryBoundary(a).read_bytes("../b/b.py") is None
-    assert RepositoryBoundary(b).read_bytes("b.py") == b"B = 1\n"
+    assert read_bytes(RepositoryBoundary(a), "a.py") == b"A = 1\n"
+    assert read_bytes(RepositoryBoundary(a), "../b/b.py") is None
+    assert read_bytes(RepositoryBoundary(b), "b.py") == b"B = 1\n"
 
 
 def test_the_database_holds_no_foreign_row_after_indexing(
@@ -1011,11 +1024,11 @@ def test_a_hardlink_to_an_outside_file_is_refused(tmp_path: Path) -> None:
 
     boundary = RepositoryBoundary(root)
     assert boundary.stat("linked.py") is None
-    assert boundary.read_bytes("linked.py") is None
+    assert read_bytes(boundary, "linked.py") is None
     # The ordinary file beside it is untouched: this is a leaf rule, not a
     # repository-wide refusal.
     assert boundary.stat("src/app.py") is not None
-    assert INSIDE_CANARY.encode() in (boundary.read_bytes("src/app.py") or b"")
+    assert INSIDE_CANARY.encode() in (read_bytes(boundary, "src/app.py") or b"")
 
 
 def test_a_hardlinked_file_is_never_indexed(tmp_path: Path, containment_settings: Settings) -> None:
@@ -1073,7 +1086,7 @@ def test_a_file_rewritten_during_the_read_is_refused_not_spliced(tmp_path: Path)
     refused_before = boundary.refused
     os.read = tearing  # type: ignore[assignment]
     try:
-        result = boundary.read_bytes("big.py")
+        result = read_bytes(boundary, "big.py")
     finally:
         os.read = real_read  # type: ignore[assignment]
 
@@ -1082,7 +1095,7 @@ def test_a_file_rewritten_during_the_read_is_refused_not_spliced(tmp_path: Path)
     assert boundary.refused > refused_before
 
     # The settled file reads normally on the next attempt.
-    assert boundary.read_bytes("big.py") is not None
+    assert read_bytes(boundary, "big.py") is not None
 
 
 def test_a_torn_read_is_refused_by_the_hashing_path_too(tmp_path: Path) -> None:
@@ -1129,7 +1142,7 @@ def test_an_unchanged_file_read_is_not_mistaken_for_a_torn_one(tmp_path: Path) -
 
     boundary = RepositoryBoundary(root)
     for _ in range(5):
-        assert boundary.read_bytes("a/b/big.py") == payload
+        assert read_bytes(boundary, "a/b/big.py") == payload
     assert boundary.refused == 0
 
 
@@ -1156,7 +1169,7 @@ def test_an_unusable_boundary_admits_nothing(tmp_path: Path) -> None:
     object.__setattr__(boundary, "_usable", False)
     refused_before = boundary.refused
     assert boundary.stat("src/app.py") is None
-    assert boundary.read_bytes("src/app.py") is None
+    assert read_bytes(boundary, "src/app.py") is None
     assert boundary.readlink("src/app.py") is None
     with boundary.open("src/app.py") as handle:
         assert handle is None
@@ -1173,4 +1186,4 @@ def test_the_boundary_exposes_no_path_based_helper(tmp_path: Path) -> None:
     boundary = RepositoryBoundary(tmp_path)
     assert not hasattr(boundary, "contains")
     public = {name for name in dir(boundary) if not name.startswith("_")}
-    assert public == {"open", "read_bytes", "read_into", "readlink", "refused", "root", "stat"}
+    assert public == {"open", "read_content", "read_into", "readlink", "refused", "root", "stat"}

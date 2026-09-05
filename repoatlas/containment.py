@@ -72,6 +72,31 @@ a splice of two versions that never existed on disk, and they are refused rather
 than hashed. This does not prevent the write — nothing can — but it stops the
 result from being stored as though it were a file state.
 
+**Content is read under a ceiling, and the ceiling is not negotiable.** A
+repository decides how large its files are, so a size limit that is applied
+*after* the bytes arrive is not a limit at all: it reports that a 600 MB file was
+too big, having already allocated 600 MB to find out. :meth:`read_content`
+therefore takes ``max_bytes`` as a required keyword and enforces it twice —
+
+* a ``fstat`` on the descriptor about to be read answers "too large" for nothing,
+  so a five-gigabyte sparse file costs one syscall and zero content bytes;
+* the read itself stops after ``max_bytes + 1`` bytes whatever that ``fstat``
+  said, because the file can grow between the two calls, ``st_size`` can be stale,
+  and a repository can arrange either on purpose.
+
+Neither bound alone is enough. The first is only a hint about a mutable object;
+the second alone would read every huge file to its cap before rejecting it. And
+crossing the ceiling *is* the answer — the buffer is discarded, so no caller ever
+receives a prefix of a file that kept going. A prefix is not the file, and facts
+derived from one would be true of nothing.
+
+There is deliberately **no unbounded read of repository content** on this class.
+Asking for bytes means naming a limit, so no caller can omit one by accident, and
+a future caller cannot pick the wrong primitive from two. Hashing is the one
+thing that legitimately consumes a whole huge file, and :meth:`read_into` does it
+in fixed blocks without ever holding the file: bounded *memory* for unbounded
+*content*, which is a different guarantee and has its own method to say so.
+
 **There is no fallback.** Where ``openat``/``O_NOFOLLOW`` are unavailable,
 containment cannot be proven and nothing is admitted. An earlier revision
 degraded to an ``lstat``-per-component walk, which is correct at the instant it
@@ -87,10 +112,12 @@ canonicalized. The two are different questions and are answered separately.
 
 from __future__ import annotations
 
+import enum
 import os
 import stat as stat_module
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 #: ``O_NOFOLLOW`` makes an open fail rather than traverse a symlink, and
@@ -107,6 +134,40 @@ _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 _READ_CHUNK_BYTES = 1 << 20
+
+
+class ContentStatus(enum.Enum):
+    """Why :meth:`RepositoryBoundary.read_content` did or did not yield bytes."""
+
+    #: The whole file, within the caller's limit, unchanged across the read.
+    OK = "ok"
+    #: Larger than the caller's limit. No bytes are returned and none are kept.
+    OVERSIZED = "oversized"
+    #: Not a contained regular file, or unreadable. Indistinguishable on purpose.
+    REFUSED = "refused"
+    #: The file was rewritten while it was being read.
+    CHANGED = "changed"
+
+
+@dataclass(frozen=True, slots=True)
+class FileContent:
+    """The outcome of asking the boundary for a file's bytes.
+
+    A result object rather than ``bytes | None`` because "too large" and "not
+    allowed" are different answers that callers act on differently, and because a
+    caller that has to name a limit to get bytes at all cannot forget to.
+    """
+
+    status: ContentStatus
+    #: Present only when :attr:`status` is ``OK``.
+    data: bytes | None = None
+    #: For ``OVERSIZED``, what was observed: the file's own size when that alone
+    #: decided it, or ``limit + 1`` when the ceiling stopped a growing read.
+    size: int | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status is ContentStatus.OK
 
 
 def _supported() -> bool:
@@ -332,24 +393,61 @@ class RepositoryBoundary:
             finally:
                 os.close(handle)
 
-    def read_bytes(self, rel_path: str) -> bytes | None:
-        """The file's bytes, or ``None`` if it is not a contained regular file."""
+    def read_content(self, rel_path: str, *, max_bytes: int) -> FileContent:
+        """At most ``max_bytes`` bytes of a contained regular file.
+
+        The only way to obtain repository content, and it cannot be asked without
+        naming a limit. That is the point: an unbounded whole-file read of
+        repository-controlled content is not a primitive this class offers, so no
+        caller can reach for one by accident (V1_SPEC §17).
+
+        ``max_bytes`` is an **inclusive** maximum. A file of exactly that many
+        bytes is content; one byte more is :attr:`ContentStatus.OVERSIZED`.
+
+        Two independent bounds, because either alone is defeatable:
+
+        * the **pre-read fstat**, taken on the descriptor that will be read rather
+          than on the path, decides oversize without reading anything at all. A
+          five-gigabyte sparse file costs one ``fstat`` and zero content bytes;
+        * the **hard ceiling** stops after ``max_bytes + 1`` bytes however large
+          the file turns out to be. The fstat is a hint, not a guarantee — the
+          file can grow between the two, ``st_size`` can be stale on some
+          filesystems, and a repository can arrange both deliberately — so the
+          read is bounded whether or not the size agreed.
+
+        Reaching the ceiling is itself the oversize answer: the buffer is dropped
+        and no caller sees the first ``max_bytes`` bytes, because a prefix of a
+        file that kept going is not the file and must not become facts about it.
+
+        The post-read identity check from the containment work is retained and
+        runs last, on the same descriptor, so bytes spliced from two versions of a
+        file are still refused rather than stored.
+        """
+        if max_bytes < 0:  # pragma: no cover - configuration is validated
+            raise ValueError("max_bytes must not be negative")
         with self.open(rel_path) as handle:
             if handle is None:
-                return None
+                return FileContent(ContentStatus.REFUSED)
             try:
-                before = self._identity(os.fstat(handle))
-                data = _read_all(handle)
-                if self._identity(os.fstat(handle)) != before:
+                before = os.fstat(handle)
+                if before.st_size > max_bytes:
+                    # Decided from metadata: nothing is read, so nothing is held.
+                    return FileContent(ContentStatus.OVERSIZED, size=before.st_size)
+                data = _read_bounded(handle, max_bytes + 1)
+                if len(data) > max_bytes:
+                    # st_size said otherwise. The file grew, or lied; either way
+                    # the ceiling held and the partial buffer is discarded.
+                    return FileContent(ContentStatus.OVERSIZED, size=len(data))
+                if self._identity(os.fstat(handle)) != self._identity(before):
                     # The file changed underneath the read. What we hold is a
                     # splice of two versions that never existed on disk, and
                     # hashing it would store a content hash for bytes no file
                     # ever had. Refuse; the next sync sees the settled file.
                     self._reject()
-                    return None
+                    return FileContent(ContentStatus.CHANGED)
             except OSError:
-                return None
-            return data
+                return FileContent(ContentStatus.REFUSED)
+            return FileContent(ContentStatus.OK, data=data)
 
     def read_into(self, rel_path: str, update: object) -> bool:
         """Stream the file through ``update`` (a hash object's method).
@@ -396,8 +494,21 @@ class RepositoryBoundary:
                 return None
 
 
-def _read_all(handle: int) -> bytes:
+def _read_bounded(handle: int, limit: int) -> bytes:
+    """At most ``limit`` bytes from ``handle``.
+
+    Deliberately not ``os.read(handle, limit)`` in one call: that would ask the
+    kernel for a single allocation the size of the limit even for a one-byte
+    file. Each individual read is capped at the block size as well, so the peak
+    is the bytes actually kept plus one block — never a buffer sized from an
+    untrusted ``st_size``.
+    """
     blocks: list[bytes] = []
-    while block := os.read(handle, _READ_CHUNK_BYTES):
+    remaining = limit
+    while remaining > 0:
+        block = os.read(handle, min(remaining, _READ_CHUNK_BYTES))
+        if not block:
+            break
         blocks.append(block)
+        remaining -= len(block)
     return b"".join(blocks)

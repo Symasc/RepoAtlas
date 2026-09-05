@@ -19,13 +19,14 @@ has committed — in the same transaction (ARCHITECTURE.md §9).
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from repoatlas.config.settings import Settings
-from repoatlas.containment import RepositoryBoundary
+from repoatlas.containment import ContentStatus, FileContent, RepositoryBoundary
 from repoatlas.dependencies.registry import DependencyRegistry
 from repoatlas.discovery.languages import detect_language, is_lockfile, is_manifest
 from repoatlas.embeddings.protocol import EmbeddingModel, EmbeddingUnavailable
@@ -274,17 +275,30 @@ class SyncEngine:
         """
         assert repo.id is not None
         language = detect_language(rel_path)
+        cap = self._settings.indexing.max_file_bytes
 
-        raw = boundary.read_bytes(rel_path)
+        # The cap is applied by the reader, on the descriptor it reads from, so
+        # a file larger than it is never allocated (ARCHITECTURE.md §12). What
+        # comes back is at most `cap` bytes or a reason there are none.
+        found = boundary.read_content(rel_path, max_bytes=cap)
+
+        if found.status is ContentStatus.OVERSIZED:
+            return self._index_oversized(repo, rel_path, scanned_file, boundary, found, language)
+
+        raw = found.data
         if raw is None:
-            # Unreadable, vanished, or no longer inside the repository. All three
-            # mean the same thing to the indexer: there is nothing to record, and
-            # the file's previous facts are replaced by none.
+            # Unreadable, vanished, no longer inside the repository, or rewritten
+            # mid-read. All of them mean the same thing to the indexer: there is
+            # nothing to record, and the file's previous facts are replaced by none.
             return _FileOutcome(
                 diagnostics=[
                     ParseDiagnostic(
                         severity=Severity.WARNING,
-                        message="unreadable or not contained",
+                        message=(
+                            "changed while being read"
+                            if found.status is ContentStatus.CHANGED
+                            else "unreadable or not contained"
+                        ),
                     )
                 ]
             )
@@ -293,9 +307,8 @@ class SyncEngine:
         size = len(raw)
         mtime_ns = scanned_file.mtime_ns
         is_binary = b"\0" in raw[:_BINARY_SNIFF_BYTES]
-        oversized = size > self._settings.indexing.max_file_bytes
 
-        parser = None if (is_binary or oversized) else self._registry.for_path(Path(rel_path))
+        parser = None if is_binary else self._registry.for_path(Path(rel_path))
 
         file_id = self._files.upsert(
             repo.id,
@@ -312,8 +325,8 @@ class SyncEngine:
             ),
         )
 
-        if is_binary or oversized:
-            # Recorded so deletion tracking stays correct, but never read further.
+        if is_binary:
+            # Recorded so deletion tracking stays correct, but never parsed.
             self._knowledge.replace_file_facts(
                 file_id,
                 FileFacts(entities=(self._file_entity(repo, file_id, rel_path),)),
@@ -391,6 +404,88 @@ class SyncEngine:
             edges=link.edges,
             dependencies=dependency_outcome[0],
             diagnostics=[*parsed.diagnostics, *dependency_outcome[1]],
+        )
+
+    def _index_oversized(
+        self,
+        repo: Repository,
+        rel_path: str,
+        scanned_file: ScannedFile,
+        boundary: RepositoryBoundary,
+        found: FileContent,
+        language: str | None,
+    ) -> _FileOutcome:
+        """Record that an oversized file exists, without ever holding its content.
+
+        RepoAtlas may legitimately know that a path exists and is too large —
+        deletion tracking depends on the row, and an operator asking why a file
+        is missing from the index deserves an answer. What it may not do is turn
+        any of that file's bytes into a fact: no parser, no chunks, no
+        embeddings, no evidence (V1_SPEC §17).
+
+        The row still needs a **content** hash, because that hash is the sole
+        authority on whether a file changed (ARCHITECTURE.md §9) and the planner
+        compares this exact value against one it computes by streaming. Storing
+        anything else here — a hash of the metadata, a constant — would make every
+        forced rehash conclude the file had changed, forever. So the file is
+        streamed once through :meth:`RepositoryBoundary.read_into`, in fixed
+        blocks, with only the digest and an 8 KiB prefix retained: bounded memory
+        for an unbounded file, which is the distinction this whole pass turns on.
+        The prefix costs nothing extra — those bytes pass through anyway — and
+        keeps ``is_binary`` as truthful for a huge file as for a small one.
+        """
+        assert repo.id is not None
+        digest = hashlib.blake2b(digest_size=32)
+        prefix = bytearray()
+
+        def observe(block: bytes) -> None:
+            digest.update(block)
+            if len(prefix) < _BINARY_SNIFF_BYTES:
+                prefix.extend(block[: _BINARY_SNIFF_BYTES - len(prefix)])
+
+        if not boundary.read_into(rel_path, observe):
+            # Vanished, refused, or rewritten mid-stream. Same answer as any other
+            # unreadable file: record nothing, so its previous facts go with it.
+            return _FileOutcome(
+                diagnostics=[
+                    ParseDiagnostic(
+                        severity=Severity.WARNING, message="unreadable or not contained"
+                    )
+                ]
+            )
+
+        file_id = self._files.upsert(
+            repo.id,
+            IndexedFile(
+                rel_path=rel_path,
+                size=found.size if found.size is not None else scanned_file.size,
+                mtime_ns=scanned_file.mtime_ns,
+                content_hash=digest.hexdigest(),
+                language=language,
+                parser=None,
+                parser_version=self.facts_version,
+                is_binary=b"\0" in bytes(prefix),
+                indexed_at=datetime.now(UTC),
+            ),
+        )
+        # `replace_file_facts` with only the file entity is what removes whatever
+        # this path asserted when it was small enough to read: entities, edges,
+        # unresolved references, chunks, FTS rows and the embeddings reachable
+        # through them all cascade away (ARCHITECTURE.md §3).
+        self._knowledge.replace_file_facts(
+            file_id, FileFacts(entities=(self._file_entity(repo, file_id, rel_path),))
+        )
+        return _FileOutcome(
+            language=language,
+            diagnostics=[
+                ParseDiagnostic(
+                    severity=Severity.WARNING,
+                    message=(
+                        f"skipped: {found.size} bytes exceeds the "
+                        f"{self._settings.indexing.max_file_bytes}-byte content limit"
+                    ),
+                )
+            ],
         )
 
     def _index_dependencies(

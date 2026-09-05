@@ -1506,9 +1506,18 @@ re-index everything after one file changes
 re-embed unchanged data
 send entire repositories to the model
 use the LLM during deterministic parsing
+read a repository file into memory without a limit
 ```
 
 Use incremental state and bounded retrieval.
+
+The last rule is a memory bound rather than a speed one, and it is a security control: a repository decides how
+large its files are. `indexing.max_file_bytes` (default 1 MiB) is an **inclusive** maximum on the size of a file
+whose *content* is indexed, and it is enforced by the reader on the descriptor it reads from — never on a size
+observed earlier, and never after the bytes have arrived. A file past it is recorded as a path and a size, and
+contributes no parser facts, chunks, embeddings or prompt content. Change-detection hashing is a separate,
+streaming path that may legitimately consume a huge file in fixed blocks without holding it. See
+`ARCHITECTURE.md` §12.
 
 ---
 

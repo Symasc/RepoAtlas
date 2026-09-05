@@ -35,9 +35,18 @@ from repoatlas.security import is_secret_path
 
 IGNORE_FILENAME = ".repoatlasignore"
 
+#: Ceiling on a ``.repoatlasignore``. A pattern file is tens of lines; a megabyte
+#: of them is already far past anything meaningful. It is read under a bound
+#: because it is the *earliest* content read of a sync — before any file has been
+#: classified — so an unbounded read here would exhaust memory before the size cap
+#: protecting everything else was ever consulted. Deliberately its own constant
+#: rather than ``indexing.max_file_bytes``: this file is parsed for patterns and
+#: never indexed, so raising the content cap must not silently raise this one.
+MAX_IGNORE_BYTES = 1 << 20
+
 #: Re-exported so ``discovery`` stays the natural place to ask about ignoring,
 #: while the policy itself lives below every layer that must obey it.
-__all__ = ["IGNORE_FILENAME", "IgnoreRules", "is_secret_path"]
+__all__ = ["IGNORE_FILENAME", "MAX_IGNORE_BYTES", "IgnoreRules", "is_secret_path"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,14 +88,25 @@ class IgnoreRules:
 
     @classmethod
     def load(cls, directory: Path) -> IgnoreRules:
-        """Read ``.repoatlasignore`` from ``directory``, if present."""
+        """Read ``.repoatlasignore`` from ``directory``, if present.
+
+        This is the file at the **workspace root**, above every repository, so it
+        is the operator's own configuration rather than repository content and is
+        not subject to the containment boundary. It is still read under a byte
+        ceiling: the root is a directory full of untrusted repositories, the size
+        of anything in it is not RepoAtlas's to assume, and a bound costs nothing.
+        """
         target = directory / IGNORE_FILENAME
         if not target.is_file():
             return cls()
         try:
-            return cls.from_text(target.read_text(encoding="utf-8", errors="replace"))
+            with target.open("rb") as handle:
+                raw = handle.read(MAX_IGNORE_BYTES + 1)
         except OSError:
             return cls()
+        if len(raw) > MAX_IGNORE_BYTES:
+            return cls()
+        return cls.from_text(raw.decode("utf-8", errors="replace"))
 
     def matches(self, rel_path: str, *, is_dir: bool = False) -> bool:
         """Whether ``rel_path`` (POSIX, repository-relative) is ignored."""
