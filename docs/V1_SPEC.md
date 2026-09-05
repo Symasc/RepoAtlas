@@ -230,7 +230,7 @@ repoatlas watch
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | Runtime error (I/O, storage, unexpected failure) |
+| 1 | Unexpected/internal failure — including a defect in RepoAtlas itself |
 | 2 | Repository context could not be resolved (§6) |
 | 3 | Not initialized, or index missing/unusable |
 | 4 | Reasoning model unavailable or unusable |
@@ -240,6 +240,33 @@ Human-readable messages go to stderr; primary output to stdout.
 
 Code 5 is separate from code 1 on purpose: contention is an operational condition a wrapper script may
 sensibly retry, where a runtime error is not.
+
+#### What exit 3 covers, and what it does not
+
+Exit 3 means *there is no index this command can use*. Four distinct states share it, and the message is what
+tells them apart, because the remedy differs in each:
+
+| State | Message says | Remedy |
+|---|---|---|
+| Not initialized | no root is configured | `repoatlas init <directory>` |
+| Corrupt | the file is not a database, or its image is malformed | move it aside and re-`init` |
+| Inaccessible | the index cannot be read or written | fix the path or the permissions |
+| Unsupported schema | it was written by a newer RepoAtlas, is missing a required object, or is a shape no migration produces | match the build, or start a fresh index |
+
+An inaccessible index is never described as corrupt. A database whose permissions are merely wrong is intact, and
+telling an operator to replace it would destroy a healthy index.
+
+**Exit 3 is not a catch-all.** An unexpected exception — a `TypeError`, a bug in a parser, a SQLite result code
+RepoAtlas has not positively identified as an index condition — stays exit 1. Reporting a defect as "your index is
+corrupt" would invite the user to delete their index *and* hide the bug.
+
+Related states keep their own codes: writer-lock contention is 5, a migration another process is still applying is
+1 (transient, retry), and a reasoning-model failure is 4. When more than one is true, the index is opened first, so
+an unusable index is reported ahead of the model backend (which is never contacted), the writer lock, and
+repository-context resolution.
+
+**RepoAtlas never repairs, replaces, renames or deletes an index automatically**, including during `init`. A
+refused database is left byte-for-byte as it was found.
 
 ### Constraints
 

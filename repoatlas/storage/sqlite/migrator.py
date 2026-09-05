@@ -68,9 +68,16 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass
+from functools import lru_cache
 from importlib import resources
 
-from repoatlas.errors import MigrationError
+from repoatlas.errors import (
+    MigrationContentionError,
+    MigrationError,
+    MigrationFailedError,
+    UnrecognizedSchemaError,
+)
+from repoatlas.storage.sqlite.errors import is_index_condition
 
 #: What a statement did to the schema, as far as the schema can tell.
 APPLIED = "applied"
@@ -288,6 +295,25 @@ def _scratch_at(version: int, migrations: list[Migration]) -> sqlite3.Connection
     return scratch
 
 
+@lru_cache(maxsize=1)
+def schema_objects() -> frozenset[str]:
+    """Every object name the current schema defines, tables and shadows included.
+
+    Built by running the migrations into memory rather than by listing names in
+    Python, so it cannot drift from the ``.sql`` files. Used by the storage
+    error classifier to tell "the database lost a table RepoAtlas creates" from
+    "a query names a table RepoAtlas has never created" — the first is an
+    unusable index, the second is a bug, and SQLite reports both as
+    ``SQLITE_ERROR``.
+    """
+    migrations = load_migrations()
+    scratch = _scratch_at(migrations[-1].version if migrations else 0, migrations)
+    try:
+        return frozenset(str(row[0]) for row in scratch.execute("SELECT name FROM sqlite_master"))
+    finally:
+        scratch.close()
+
+
 def resume_point(
     connection: sqlite3.Connection, migration: Migration, migrations: list[Migration]
 ) -> int:
@@ -334,7 +360,7 @@ def resume_point(
     finally:
         scratch.close()
 
-    raise MigrationError(
+    raise UnrecognizedSchemaError(
         f"The database schema is not a state {migration.name} can produce.",
         detail=(
             "It is neither the schema before the migration nor any point part-way "
@@ -364,6 +390,8 @@ def _apply_one(
     try:
         connection.execute("BEGIN IMMEDIATE")
     except sqlite3.OperationalError as error:
+        if is_index_condition(error):
+            raise
         raise _contention(migration, error) from error
 
     try:
@@ -382,7 +410,12 @@ def _apply_one(
         connection.rollback()
         if "locked" in str(error) or "busy" in str(error):
             raise _contention(migration, error) from error
-        raise MigrationError(
+        # A database that cannot be written at all did not fail *this migration*;
+        # saying so would send the reader after a defect in a `.sql` file when
+        # the fault is a file mode. The storage boundary describes it truthfully.
+        if is_index_condition(error):
+            raise
+        raise MigrationFailedError(
             f"{migration.name} failed and was rolled back.",
             detail=f"The database is unchanged at schema version {user_version(connection)}.",
         ) from error
@@ -393,7 +426,7 @@ def _apply_one(
 
 
 def _contention(migration: Migration, error: Exception) -> MigrationError:
-    return MigrationError(
+    return MigrationContentionError(
         "Timed out waiting for another process to finish upgrading the database.",
         detail=(
             f"Another RepoAtlas process is applying {migration.name}.\n\n"

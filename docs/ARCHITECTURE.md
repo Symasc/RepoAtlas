@@ -218,11 +218,106 @@ A statement with no detectable schema effect (today, one `DELETE`) cannot be dis
 shape comparison, so recovery replays it. Every such statement must therefore be idempotent; a test enumerates them
 across all migrations and fails if a future migration adds one that is not.
 
-**Unknown schemas fail closed.** If no prefix matches, RepoAtlas raises `MigrationError` and changes nothing. A
-column of the wrong type, an index with a different definition, or an unrelated object holding a needed name is not
-a partially applied migration, and blanket `IF NOT EXISTS` would silently bless it. Idempotent DDL is deliberately
-*not* the mechanism here: it makes re-running less explosive without establishing atomicity, and it cannot tell a
-recognized partial migration from arbitrary schema damage.
+**Unknown schemas fail closed.** If no prefix matches, RepoAtlas raises `UnrecognizedSchemaError` and changes
+nothing. A column of the wrong type, an index with a different definition, or an unrelated object holding a needed
+name is not a partially applied migration, and blanket `IF NOT EXISTS` would silently bless it. Idempotent DDL is
+deliberately *not* the mechanism here: it makes re-running less explosive without establishing atomicity, and it
+cannot tell a recognized partial migration from arbitrary schema damage.
+
+
+### When the index cannot be used
+
+An unusable index is a **product state**, and V1_SPEC §4 has always reserved exit 3 for it. Until this was
+implemented, nothing reached that code: `echo "not sqlite" > atlas.db` produced exit 1 and a Rich traceback panel
+naming `sqlite3.DatabaseError`, which is indistinguishable from a crash in the parser and gives an operator nothing
+to act on.
+
+The translation happens in exactly one place — `storage/sqlite/errors.py` — and everything above it receives a
+`RepoAtlasError` with its exit code already decided. No service, renderer or CLI command inspects a `sqlite3` type
+or an exception message.
+
+```
+sqlite3.Error / OSError                      raised by SQLite or the filesystem
+        ↓  storage/sqlite/errors.classify    the only code that reads sqlite_errorcode
+IndexCorruptError | IndexInaccessibleError | IndexSchemaError
+        ↓  cli/main._fail                    one boundary, six commands
+exit 3
+```
+
+**Codes, not prose.** `sqlite3.Error` carries `sqlite_errorcode` and `sqlite_errorname` (Python 3.11+), so
+classification is by SQLite's own result codes. Extended codes reduce to their primary code
+(`errorcode & 0xFF`), so `SQLITE_READONLY_DIRECTORY` (1544) is handled as `SQLITE_READONLY` (8) and SQLite may add
+extended codes without a change here. Measured on this build (SQLite 3.53.1, CPython 3.13):
+
+| Index state | Raised at | Code | Category | Exit |
+|---|---|---|---|---|
+| random bytes | `PRAGMA busy_timeout` | `SQLITE_NOTADB` (26) | corrupt | 3 |
+| truncated / scrambled image | first pragma or first query | `SQLITE_CORRUPT` (11) | corrupt | 3 |
+| directory at the DB path | `sqlite3.connect` | `SQLITE_CANTOPEN` (14) | inaccessible | 3 |
+| file mode 000 | `sqlite3.connect` | `SQLITE_CANTOPEN` (14) | inaccessible | 3 |
+| file mode 400 | on the first **write** | `SQLITE_READONLY` (8) | inaccessible | 3 |
+| unwritable parent directory | `Path.mkdir` | `OSError` `EACCES` | inaccessible | 3 |
+| required table dropped | on the query that needs it | `SQLITE_ERROR` (1) + name check | schema | 3 |
+| `user_version` > `SCHEMA_VERSION` | explicit check before any write | — | schema | 3 |
+| unrecognized migration shape | migrator, fail-closed | — | schema | 3 |
+| zero-byte file | — | — | **an empty database** | 0 |
+
+The last row is measured, not assumed: SQLite reads a zero-length file as a new database, so RepoAtlas creates the
+schema in it. Reporting that as corruption would be a lie an operator could act on by moving aside a file RepoAtlas
+was about to fill.
+
+**Corrupt is not the same as unreachable.** Both exit 3 — from the shell's point of view the index is equally
+unavailable — but the messages are different because the remedies are opposite. A corrupt index has to be replaced;
+an unreadable one has to be made readable, and telling someone to rebuild a database whose permissions are merely
+wrong destroys a healthy index for no reason.
+
+**One exception to codes-not-prose, and it is bounded.** A database missing a table reports `SQLITE_ERROR` (1) —
+the same code as a typo in RepoAtlas's own SQL, which is the case that must *not* become exit 3. The code cannot
+separate them, so the object name SQLite reports as missing is checked against `migrator.schema_objects()`, the set
+of names the current migrations actually create (computed by running them into memory, so it cannot drift from the
+`.sql` files). Missing an object RepoAtlas creates means the database lost it. Naming an object RepoAtlas never
+creates means the query is wrong, and that stays a bug at exit 1.
+
+**Fail open.** A recognized condition is translated; everything else is re-raised exactly as it was raised.
+`SQLITE_BUSY`, `SQLITE_LOCKED`, `SQLITE_CONSTRAINT`, `SQLITE_FULL`, `SQLITE_IOERR`, `SQLITE_SCHEMA` and every
+`errno` outside a small access-fault set are deliberately *not* classified: none was reproduced, and a guess about
+what they mean for an index is the thing this rule forbids. The asymmetry is intentional. Exit 3 tells an operator
+their index is the problem and the obvious next move is to delete it, so a RepoAtlas defect laundered into exit 3
+costs the user their index *and* buries the bug — strictly worse than one more traceback.
+
+**Not only at connect time.** A damaged database can open cleanly and fail on the first query that reads the
+damage, so the translator wraps `Database.execute` and the outermost `Database.transaction` as well as
+`open_database`. Every store reaches SQLite through those two methods, which is what makes the coverage complete
+without a `try` in each of them.
+
+**No proactive integrity scan.** `PRAGMA integrity_check` reads every page and is not run on open. This machinery
+reports failures that normal, safe operation already encountered; it does not go looking for them, and paying a
+full scan on every `locate` to find corruption a few milliseconds earlier is not a trade V1 makes.
+
+**Migration errors are three conditions, not one.** `MigrationError` keeps exit 1 and is subtyped, because its
+instances do not mean the same thing:
+
+| Subtype | Cause | Exit | Why |
+|---|---|---|---|
+| `MigrationContentionError` | another process held the write transaction past the busy timeout | 1 | transient; the next run succeeds. Telling someone mid-upgrade their index is unusable would be false |
+| `MigrationFailedError` | a statement failed and the migration rolled back | 1 | a shipped migration that cannot run is a RepoAtlas defect, not a state of the user's index |
+| `UnrecognizedSchemaError` | the schema is not a state any migration produces | **3** | a property of the database the operator has to resolve |
+
+`UnrecognizedSchemaError` inherits from both `MigrationError` and `IndexSchemaError` and says so rather than
+picking one: it is the migrator's fail-closed refusal *and* an unusable-index condition.
+
+**Nothing is repaired, replaced or deleted.** Refusing an index never modifies it. The future-version check runs
+before `PRAGMA journal_mode`, because that pragma writes the file header — refusing afterwards would be a downgrade
+by one pragma. `init` is held to the same rule: a corrupt, future-version or foreign database is reported and left
+byte-for-byte intact.
+
+> **Invariant.** An expected unusable RepoAtlas index is a product state, not an uncaught Python exception.
+
+> **Invariant.** Exit code 3 never serves as a catch-all for unexpected application defects.
+
+> **Invariant.** RepoAtlas does not automatically destroy, replace, or silently rebuild an unusable database.
+
+> **Invariant.** Recognized recoverable migration states are recovered before being classified as unusable.
 
 
 ### Tables
