@@ -22,6 +22,7 @@ from repoatlas.models.parsing import (
     ParsedReference,
     ParsedSymbol,
 )
+from repoatlas.parsers.marks import whole_file_span
 
 _SUFFIXES = frozenset({".jinja", ".j2", ".jinja2", ".tmpl"})
 
@@ -172,22 +173,20 @@ class JinjaParser:
     """Deterministic Jinja template relationships."""
 
     name = "jinja-scan"
-    version = "1"
+    version = "2"  # 2: whole-file spans stop at EOF, and are absent for an empty file
     language = "Jinja"
 
     def supports(self, path: Path) -> bool:
         return path.suffix in _SUFFIXES
 
     def parse(self, path: Path, content: str) -> ParsedFile:
+        whole_file_start, whole_file_last = whole_file_span(content)
         template = ParsedSymbol(
             kind=EntityType.TEMPLATE,
             name=path.name,
             qualified_name=path.as_posix(),
-            line_start=1,
-            # splitlines, not a newline count: a trailing newline terminates the
-            # last line rather than starting another. Claiming a line that does not
-            # exist is a fabricated citation, however small.
-            line_end=max(1, len(content.splitlines())),
+            line_start=whole_file_start,
+            line_end=whole_file_last,
         )
         return ParsedFile(
             language=self.language,

@@ -155,6 +155,9 @@ class StructuredParser:
                 ),
             )
 
+        # ``splitlines()`` deliberately: this array is indexed by PyYAML marks and
+        # must use PyYAML's line-break set rather than the source-grammar splitter
+        # in :mod:`repoatlas.parsers.marks`.
         collector = _KeyCollector(lines=content.splitlines())
         for document in documents:
             if document is not None:

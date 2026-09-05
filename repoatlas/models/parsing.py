@@ -75,15 +75,29 @@ class ParseDiagnostic(BaseModel):
 
 
 class ParsedSymbol(BaseModel):
-    """A definition the parser found, with the line range that proves it."""
+    """A definition the parser found, with the line range that proves it.
+
+    The span is optional, and exactly one thing makes it absent: the definition is
+    the **whole of an empty file**. An empty ``__init__.py`` is a real, importable
+    module and must stay in the graph, but it has no lines, so it makes no claim
+    about any. Every other symbol comes from source that occupies lines and always
+    carries them.
+
+    ``None`` rather than a sentinel line number because that is already what a
+    fact about a file rather than a range inside it looks like everywhere else —
+    the ``file`` entity, and :class:`~repoatlas.models.evidence.Evidence`'s
+    path-only citation. Anchoring an empty file at ``1-1`` instead would name a
+    line the file does not contain, which is the defect a whole-file span is
+    computed carefully to avoid (ARCHITECTURE.md §11).
+    """
 
     model_config = ConfigDict(frozen=True)
 
     kind: EntityType
     name: str
     qualified_name: str
-    line_start: int
-    line_end: int
+    line_start: int | None
+    line_end: int | None
     signature: str | None = None
     parent: str | None = None
     meta: dict[str, str] = Field(default_factory=dict)

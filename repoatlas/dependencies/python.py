@@ -27,6 +27,7 @@ from repoatlas.models.dependencies import (
     ResolvedDependency,
 )
 from repoatlas.models.parsing import ParseDiagnostic, Severity
+from repoatlas.parsers.marks import line_at, split_lines
 
 _REQUIREMENTS = re.compile(r"^requirements.*\.txt$")
 _OPTIONS = frozenset({"-r", "--requirement", "-c", "--constraint", "-e", "--editable"})
@@ -34,7 +35,7 @@ _OPTIONS = frozenset({"-r", "--requirement", "-c", "--constraint", "-e", "--edit
 
 def _find_line(content: str, needle: str, start: int = 0) -> int:
     index = content.find(needle, start)
-    return content.count("\n", 0, index) + 1 if index != -1 else 1
+    return line_at(content, index) if index != -1 else 1
 
 
 def _declared(
@@ -57,7 +58,7 @@ class PyProjectParser:
     ecosystem = PYPI
     kind: DependencyKind = "manifest"
     name = "pyproject"
-    version = "1"
+    version = "2"  # 2: line numbers follow the shared source-line model
 
     def supports(self, path: Path) -> bool:
         return path.name == "pyproject.toml"
@@ -199,7 +200,7 @@ class RequirementsParser:
     ecosystem = PYPI
     kind: DependencyKind = "manifest"
     name = "requirements-txt"
-    version = "1"
+    version = "2"  # 2: line numbers follow the shared source-line model
 
     def supports(self, path: Path) -> bool:
         return bool(_REQUIREMENTS.match(path.name))
@@ -211,7 +212,7 @@ class RequirementsParser:
             group = stem.removeprefix("requirements-")
 
         declared: list[DeclaredDependency] = []
-        for number, line in enumerate(content.splitlines(), start=1):
+        for number, line in enumerate(split_lines(content), start=1):
             text = line.strip()
             if not text or text.startswith("#") or text.split(" ", 1)[0] in _OPTIONS:
                 continue
@@ -232,7 +233,7 @@ class SetupPyParser:
     ecosystem = PYPI
     kind: DependencyKind = "manifest"
     name = "setup-py"
-    version = "1"
+    version = "2"  # 2: line numbers follow the shared source-line model
 
     def supports(self, path: Path) -> bool:
         return path.name == "setup.py"
@@ -352,7 +353,7 @@ class SetupCfgParser:
     ecosystem = PYPI
     kind: DependencyKind = "manifest"
     name = "setup-cfg"
-    version = "1"
+    version = "2"  # 2: line numbers follow the shared source-line model
 
     def supports(self, path: Path) -> bool:
         return path.name == "setup.cfg"
@@ -417,7 +418,7 @@ class UvLockParser:
     ecosystem = PYPI
     kind: DependencyKind = "lockfile"
     name = "python-lock"
-    version = "1"
+    version = "2"  # 2: line numbers follow the shared source-line model
 
     def supports(self, path: Path) -> bool:
         return path.name in {"uv.lock", "poetry.lock"}

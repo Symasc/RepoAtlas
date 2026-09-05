@@ -54,6 +54,7 @@ def state(source: str, name: str) -> ParsedSymbol:
 
 def covered(source: str, symbol: ParsedSymbol) -> list[str]:
     """Exactly the lines the symbol claims as its evidence."""
+    assert symbol.line_start is not None and symbol.line_end is not None, symbol
     return source.splitlines()[symbol.line_start - 1 : symbol.line_end]
 
 
@@ -136,6 +137,7 @@ def test_a_state_never_absorbs_its_sibling(gap: str, second_start: int) -> None:
         text=["state_a:", "  pkg.installed:", "    - name: a"],
     )
     first, second = state(source, "state_a"), state(source, "state_b")
+    assert first.line_end is not None and second.line_start is not None
     assert first.line_end < second.line_start
     assert second.line_start == second_start
     forbid(source, "state_a", "state_b:", "# a comment", "{% if")
@@ -475,6 +477,7 @@ def test_malformed_input_never_swallows_a_sibling_construct(source: str) -> None
     parsed = parse(source)
     lines = source.splitlines()
     for symbol in parsed.symbols:
+        assert symbol.line_start is not None and symbol.line_end is not None, symbol
         assert 1 <= symbol.line_start <= symbol.line_end <= len(lines), symbol
         for text in lines[symbol.line_start : symbol.line_end]:
             assert not text.strip() or text[0].isspace(), (symbol, text)

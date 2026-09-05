@@ -65,3 +65,22 @@ class SyncInProgressError(RepoAtlasError):
     """
 
     exit_code = ExitCode.SYNC_LOCKED
+
+
+class MigrationError(RepoAtlasError):
+    """A schema migration could not be applied (ARCHITECTURE.md §3).
+
+    Raised for the failures migration logic can recognize and describe: another
+    process holding the write transaction past the busy timeout, a statement that
+    failed and was rolled back, and a schema that is not a state any RepoAtlas
+    migration produces. Each of those is an operational condition with a useful
+    thing to say, so it is said — rather than a ``sqlite3.OperationalError``
+    traceback reaching the terminal.
+
+    The exit code stays ``RUNTIME``. Mapping unusable-index conditions onto
+    ``NOT_INITIALIZED`` is a separate, wider question about every way a database
+    can be unusable, and answering half of it here would make the CLI's exit
+    codes less predictable, not more.
+    """
+
+    exit_code = ExitCode.RUNTIME

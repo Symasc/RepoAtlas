@@ -6,6 +6,7 @@ from repoatlas.models.context import ContextScope, RepositoryContext
 from repoatlas.models.reports import RepositoryStatus, StatusReport
 from repoatlas.models.repository import Repository, SyncStatus
 from repoatlas.services.workspace import Workspace
+from repoatlas.sync.planner import facts_version
 
 
 def _index_state(repo: Repository, workspace: Workspace) -> str:
@@ -18,6 +19,15 @@ def _index_state(repo: Repository, workspace: Workspace) -> str:
     if repo.last_sync_status is not SyncStatus.OK:
         return "interrupted"
 
+    # Checked before the git state, and independently of it: a facts-version change
+    # makes stored facts stale while the working tree is untouched, so HEAD, mtime
+    # and content hash all still agree. This is the only signal that a build which
+    # fixed a parser has not yet reached this index — without it, an index full of
+    # facts the current build would compute differently reports itself as current,
+    # and the user has no way to learn otherwise (V1_SPEC §12).
+    if repo.id is not None and workspace.files.count_outdated(repo.id, _facts_version(workspace)):
+        return "stale (indexed by an older build)"
+
     live = workspace.git.state(repo.path)
     if not live.known:
         return "unknown"
@@ -28,6 +38,10 @@ def _index_state(repo: Repository, workspace: Workspace) -> str:
     if live.is_dirty:
         return "current (dirty working tree)"
     return "current"
+
+
+def _facts_version(workspace: Workspace) -> str:
+    return facts_version(workspace.registry, workspace.dependency_registry)
 
 
 def status(workspace: Workspace, context: RepositoryContext) -> StatusReport:

@@ -313,6 +313,21 @@ class SqliteFileStore:
         with self._db.transaction() as conn:
             conn.executemany("DELETE FROM files WHERE id = ?", [(fid,) for fid in file_ids])
 
+    def count_outdated(self, repo_id: int, parser_version: str) -> int:
+        """Files whose facts were produced by a different facts version.
+
+        The cheap half of freshness. A parser fix, a new parser or a chunking
+        change makes stored facts stale while every file on disk is untouched, so
+        HEAD, mtime and content hash all still agree and nothing else would notice
+        (V1_SPEC §12). ``status`` asks this so it never reports an index as current
+        when RepoAtlas can cheaply tell that a sync would rewrite it.
+        """
+        row = self._db.execute(
+            "SELECT COUNT(*) AS n FROM files WHERE repo_id = ? AND parser_version <> ?",
+            (repo_id, parser_version),
+        ).fetchone()
+        return int(row["n"])
+
     def count(self, repo_ids: Sequence[int] | None = None) -> int:
         if repo_ids is None:
             row = self._db.execute("SELECT COUNT(*) AS n FROM files").fetchone()

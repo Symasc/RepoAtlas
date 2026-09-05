@@ -39,7 +39,7 @@ from repoatlas.models.parsing import (
     Severity,
 )
 from repoatlas.parsers.jinja import extract_references, neutralize
-from repoatlas.parsers.marks import diagnostic_line, node_span
+from repoatlas.parsers.marks import diagnostic_line, node_span, split_lines
 from repoatlas.parsers.structured import collect_config_keys
 
 _SUFFIXES = frozenset({".sls"})
@@ -365,8 +365,14 @@ def _fallback_scan(content: str) -> tuple[list[ParsedSymbol], list[ParsedReferen
 
     Recovers state IDs and requisites only, at reduced confidence, because
     indentation alone cannot prove the nesting the YAML parser would have.
+
+    Split with the source-grammar splitter, not ``str.splitlines()``. This path is
+    reached precisely because PyYAML *refused* the content, so PyYAML's line-break
+    set no longer governs the numbering — and one of the two things it refuses
+    outright is a form feed, which ``splitlines()`` would count as a line break and
+    every state after it would then be reported one line too low.
     """
-    lines = content.splitlines()
+    lines = split_lines(content)
     symbols: list[ParsedSymbol] = []
     references: list[ParsedReference] = []
     current: str | None = None
@@ -439,7 +445,7 @@ class SaltParser:
     """Deterministic Salt SLS extraction."""
 
     name = "salt-sls"
-    version = "1"
+    version = "2"  # 2: the fallback scan splits lines like a source grammar
     language = "Salt"
 
     def supports(self, path: Path) -> bool:
@@ -448,6 +454,10 @@ class SaltParser:
     def parse(self, path: Path, content: str) -> ParsedFile:
         neutralized = neutralize(content)
         diagnostics: list[ParseDiagnostic] = []
+        # ``splitlines()`` deliberately: this array is indexed by PyYAML marks, so
+        # it must use PyYAML's line-break set, not the source-grammar one. They
+        # differ only on characters PyYAML either rejects (form feed, vertical tab)
+        # or breaks on exactly as ``splitlines()`` does (U+0085, U+2028, U+2029).
         collector = _Collector(path, content.splitlines())
 
         try:

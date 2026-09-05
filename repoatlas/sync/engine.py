@@ -39,7 +39,6 @@ from repoatlas.models.reports import RepositorySyncReport, SyncReport
 from repoatlas.models.repository import IndexedFile, Repository, repository_slug
 from repoatlas.parsers.registry import ParserRegistry
 from repoatlas.storage.protocols import ChunkRecord, EntityRecord, FileFacts, SyncCompletion
-from repoatlas.storage.sqlite.database import SCHEMA_VERSION
 from repoatlas.storage.sqlite.stores import (
     SqliteDependencyStore,
     SqliteFileStore,
@@ -47,7 +46,7 @@ from repoatlas.storage.sqlite.stores import (
     SqliteRepositoryStore,
 )
 from repoatlas.storage.sqlite.vectors import SqliteVectorIndex
-from repoatlas.sync.planner import decide_rehash, plan_sync
+from repoatlas.sync.planner import decide_rehash, facts_version, plan_sync
 from repoatlas.sync.scanner import ScannedFile, hash_bytes, hash_within, scan_repository
 
 #: Bytes above which a file is recorded but never read (V1_SPEC §17 zip-bomb guard).
@@ -99,24 +98,8 @@ class SyncEngine:
 
     @property
     def facts_version(self) -> str:
-        """Version of everything that turns a file into facts.
-
-        The schema version and both registries contribute, because a change to any
-        of them makes stored facts stale even though the file on disk is untouched
-        (V1_SPEC §12). It is stored per file, so a version change reparses the
-        affected files directly instead of hashing the whole tree to learn that
-        nothing moved.
-
-        The embedding model is deliberately *not* part of this. Vectors are keyed
-        by the model that produced them, so switching models simply finds no
-        vectors for the new id and re-embeds — without reparsing anything
-        (ARCHITECTURE.md §9).
-        """
-        return (
-            f"schema:{SCHEMA_VERSION}"
-            f"||{self._registry.version}"
-            f"||deps:{self._dependency_registry.version}"
-        )
+        """See :func:`repoatlas.sync.planner.facts_version`."""
+        return facts_version(self._registry, self._dependency_registry)
 
     def forget_if_missing(self, repo: Repository) -> bool:
         """Drop a repository whose directory no longer exists, and say whether it did.
