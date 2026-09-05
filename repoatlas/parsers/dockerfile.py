@@ -4,12 +4,30 @@ Dockerfiles are read as text, never built. ``RUN`` bodies are scanned for the
 package installations the specification asks for (V1_SPEC §13, "reliable
 dependency references found in Dockerfile, Bash and Salt") but nothing in them
 is executed.
+
+Which makes target position the hard part, and the invariant this module exists
+to hold (ARCHITECTURE.md §5):
+
+    A Dockerfile target is emitted only when the instruction statically names it
+    under Docker's semantics. A build or shell expression is not a target name.
+
+``RUN $TOOL`` does not execute a program called ``$TOOL``; it executes a program
+whose name this file does not contain. The honest record of that is **nothing** —
+not a ``cmd:$TOOL`` node, not a lower confidence on one, and not an
+``unresolved_refs`` row carrying the expression, which would put the same
+invented target one indirection away.
+
+**But ``$`` does not mean the same thing in every instruction**, so proof is
+decided by :mod:`repoatlas.parsers.dockerwords` under each instruction's own
+rules rather than by looking for a dollar sign. ``COPY ["$SRC", "/app/"]`` is
+computed because the builder expands JSON operands too; ``RUN ["$TOOL", …]`` is
+literal because the exec form invokes no shell and Docker really does try to run
+a program named ``$TOOL``. Both were checked against a real daemon.
 """
 
 from __future__ import annotations
 
 import re
-import shlex
 from pathlib import Path
 
 from repoatlas.models.parsing import (
@@ -18,6 +36,14 @@ from repoatlas.models.parsing import (
     ParsedFile,
     ParsedReference,
     ParsedSymbol,
+)
+from repoatlas.parsers.dockerwords import (
+    Word,
+    exec_form,
+    expanded,
+    split_flags,
+    split_words,
+    verbatim,
 )
 from repoatlas.parsers.marks import split_lines, whole_file_span
 
@@ -46,7 +72,9 @@ _INSTRUCTIONS = frozenset(
 
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _INSTRUCTION_LINE = re.compile(r"^\s*(?P<keyword>[A-Za-z]+)\s*(?P<rest>.*)$", re.DOTALL)
-_JSON_ARRAY = re.compile(r"^\s*\[.*\]\s*$", re.DOTALL)
+
+#: Shell operators after which the next word is again in command position.
+_SEPARATORS = frozenset({"&&", "||", ";", "|"})
 
 #: ``pip install x`` / ``npm install y`` / ``gem install z`` inside a RUN body.
 _INSTALLERS: dict[str, str] = {
@@ -112,26 +140,24 @@ def _logical_lines(content: str) -> list[_Instruction]:
     return instructions
 
 
-def _split(arguments: str) -> list[str]:
-    """Best-effort shell split that never raises on unbalanced quotes."""
-    try:
-        return shlex.split(arguments)
-    except ValueError:
-        return arguments.split()
+def _has_heredoc(words: list[Word]) -> bool:
+    """Whether this instruction redirects a here-document into its command.
 
-
-def _json_array(arguments: str) -> list[str] | None:
-    if not _JSON_ARRAY.match(arguments):
-        return None
-    inner = arguments.strip()[1:-1]
-    return [part.strip().strip('"').strip("'") for part in inner.split(",") if part.strip()]
+    The real command then lives in the body, which is shell source this parser
+    does not read — and the introducer itself is a redirection operator, not a
+    program. Recording it produced ``cmd:<<EOF``, a node naming nothing at all.
+    Fail closed: the instruction contributes no target.
+    """
+    return any(word.raw.startswith("<<") for word in words)
 
 
 class DockerfileParser:
     """Deterministic Dockerfile instruction extraction."""
 
     name = "dockerfile"
-    version = "2"  # 2: whole-file spans stop at EOF, and are absent for an empty file
+    # 3: computed targets — builder or shell expansions — no longer become
+    #    deterministic or unresolved target names.
+    version = "3"
     language = "Dockerfile"
 
     def supports(self, path: Path) -> bool:
@@ -182,13 +208,30 @@ class DockerfileParser:
         index: int,
         stages: set[str],
     ) -> str | None:
-        parts = _split(instruction.arguments)
-        parts = [p for p in parts if not p.startswith("--")]
-        if not parts:
-            return None
-        image = parts[0]
-        alias = parts[2] if len(parts) >= 3 and parts[1].lower() == "as" else f"stage{index}"
+        """``FROM`` names a base image, and always begins a stage.
 
+        The two facts are independent, which is why a computed image does not
+        take the stage with it: ``FROM ${BASE_IMAGE} AS builder`` proves a stage
+        called ``builder`` exists and proves nothing about what it is built on.
+
+        V1 performs **no constant propagation**, so even ``ARG BASE=python:3.13``
+        followed by ``FROM $BASE`` yields no image. Doing that correctly needs
+        rules for ARG scope, redeclaration, build-time overrides, defaults, stage
+        boundaries and the automatic platform args; guessing at it would put a
+        fabricated image in the graph whenever any of them applied.
+        """
+        _flags, rest = split_flags(instruction.arguments)
+        words = [word for word in split_words(rest) if not word.raw.startswith("--")]
+        if not words:
+            return None
+
+        image = words[0]
+        aliased = len(words) >= 3 and (words[1].literal or "").lower() == "as"
+        alias = (words[2].literal if aliased else None) or f"stage{index}"
+
+        meta = {"stage": str(index)}
+        if image.literal is not None:
+            meta["image"] = image.literal
         symbols.append(
             ParsedSymbol(
                 kind=EntityType.CONFIG,
@@ -196,17 +239,23 @@ class DockerfileParser:
                 qualified_name=alias,
                 line_start=instruction.line_start,
                 line_end=instruction.line_end,
-                signature=f"FROM {image}",
-                meta={"image": image, "stage": str(index)},
+                # The raw text, quoted rather than resolved: a signature reports
+                # what the line says, and for a computed image that is all there
+                # is to report.
+                signature=f"FROM {image.raw}",
+                meta=meta,
             )
         )
+
+        if image.literal is None:
+            return alias
         # ``FROM builder`` continues an earlier stage; it is not an image pull.
-        base_is_stage = image in stages
+        base_is_stage = image.literal in stages
         references.append(
             ParsedReference(
                 edge_type=EdgeType.REFERENCES if base_is_stage else EdgeType.DEPENDS_ON,
                 target_kind=EntityType.CONFIG if base_is_stage else EntityType.PACKAGE,
-                target_key=image,
+                target_key=image.literal,
                 line_start=instruction.line_start,
                 line_end=instruction.line_end,
                 source_symbol=alias,
@@ -234,7 +283,15 @@ class DockerfileParser:
     _arg = _env
 
     def _assigned_names(self, arguments: str) -> list[str]:
-        parts = _split(arguments)
+        """The variables this ``ENV``/``ARG`` declares.
+
+        A declared *name* is static syntax — it sits to the left of the ``=`` and
+        no expansion produces it — so ``ENV HOST=$OTHER`` still proves that
+        ``HOST`` exists and is set here. Only the value is computed, and the value
+        is not recorded. A computed name (``ENV $NAME=x``) fails the name pattern
+        and is dropped, as it already was.
+        """
+        parts = [word.literal or word.raw for word in split_words(arguments)]
         if not parts:
             return []
         if "=" not in parts[0]:
@@ -247,80 +304,134 @@ class DockerfileParser:
     def _run(
         self, instruction: _Instruction, references: list[ParsedReference], stage: str | None
     ) -> None:
-        array = _json_array(instruction.arguments)
-        commands = array if array is not None else _split(instruction.arguments)
-        self._commands(commands, instruction, references, stage)
-        if array is None:
-            self._installed_packages(commands, instruction, references, stage)
+        argv = exec_form(instruction.arguments)
+        if argv is not None:
+            self._exec_command(argv, instruction, references, stage)
+            return
+        words = split_words(instruction.arguments, substitution=True)
+        if _has_heredoc(words):
+            return
+        self._shell_commands(words, instruction, references, stage)
+        self._installed_packages(words, instruction, references, stage)
 
     def _entrypoint(
         self, instruction: _Instruction, references: list[ParsedReference], stage: str | None
     ) -> None:
-        array = _json_array(instruction.arguments)
-        self._commands(
-            array if array is not None else _split(instruction.arguments),
-            instruction,
-            references,
-            stage,
-        )
+        argv = exec_form(instruction.arguments)
+        if argv is not None:
+            self._exec_command(argv, instruction, references, stage)
+            return
+        words = split_words(instruction.arguments, substitution=True)
+        if _has_heredoc(words):
+            return
+        self._shell_commands(words, instruction, references, stage)
 
     _cmd = _entrypoint
 
-    def _commands(
+    def _exec_command(
         self,
-        parts: list[str],
+        argv: list[str],
+        instruction: _Instruction,
+        references: list[ParsedReference],
+        stage: str | None,
+    ) -> None:
+        """The exec form runs exactly one program: ``argv[0]``, verbatim.
+
+        No shell means no operators and no substitution, so the remaining
+        elements are arguments however they are spelled — ``["./a.sh", "&&",
+        "./b.sh"]`` runs ``./a.sh`` and passes it two arguments — and a ``$`` in
+        ``argv[0]`` is part of the program's name rather than a reference to one.
+        """
+        if not argv:
+            return
+        self._record_command(verbatim(argv[0]), instruction, references, stage)
+
+    def _shell_commands(
+        self,
+        words: list[Word],
         instruction: _Instruction,
         references: list[ParsedReference],
         stage: str | None,
     ) -> None:
         """First word of each shell-separated segment is an executed command."""
         expect_command = True
-        for part in parts:
-            if part in {"&&", "||", ";", "|"}:
+        for word in words:
+            if word.raw in _SEPARATORS:
                 expect_command = True
                 continue
             if not expect_command:
                 continue
             expect_command = False
-            if not part or part.startswith("-"):
-                continue
-            references.append(
-                ParsedReference(
-                    edge_type=EdgeType.EXECUTES,
-                    target_kind=EntityType.COMMAND,
-                    target_key=Path(part).name if "/" in part else part,
-                    line_start=instruction.line_start,
-                    line_end=instruction.line_end,
-                    source_symbol=stage,
-                    meta={"via": instruction.keyword},
-                )
-            )
+            self._record_command(word, instruction, references, stage)
 
-    def _installed_packages(
+    def _record_command(
         self,
-        parts: list[str],
+        word: Word,
         instruction: _Instruction,
         references: list[ParsedReference],
         stage: str | None,
     ) -> None:
-        """``RUN pip install foo bar`` names dependencies (V1_SPEC §13)."""
+        name = word.literal
+        if name is None:
+            # The builder or the shell decides what runs. The source proves that
+            # *an* execution happens; it does not prove *what* runs, so nothing
+            # resolvable is recorded — not even at a reduced confidence, which
+            # would be the same invented node with a smaller number on it
+            # (V1_SPEC §2).
+            return
+        if not name or name.startswith("-") or word.raw.startswith(("<", ">")):
+            return
+        references.append(
+            ParsedReference(
+                edge_type=EdgeType.EXECUTES,
+                target_kind=EntityType.COMMAND,
+                target_key=Path(name).name if "/" in name else name,
+                line_start=instruction.line_start,
+                line_end=instruction.line_end,
+                source_symbol=stage,
+                meta={"via": instruction.keyword},
+            )
+        )
+
+    def _installed_packages(
+        self,
+        words: list[Word],
+        instruction: _Instruction,
+        references: list[ParsedReference],
+        stage: str | None,
+    ) -> None:
+        """``RUN pip install foo bar`` names dependencies (V1_SPEC §13).
+
+        Each of the three positions must be proven on its own. A computed
+        installer (``$PIP install requests``) means the ecosystem is unknown, so
+        nothing is claimed; a computed verb means the operation is unknown; a
+        computed package name is skipped while its literal siblings are kept,
+        because ``requests`` in ``pip install $PKG requests`` is independently
+        named by the source.
+        """
         index = 0
-        while index < len(parts):
-            ecosystem = _INSTALLERS.get(parts[index])
-            if ecosystem is None or index + 1 >= len(parts):
+        while index < len(words):
+            installer = words[index].literal
+            if installer is None:
+                # A computed installer: the ecosystem is unknowable, so nothing
+                # after it can be attributed to one.
+                index += 1
+                continue
+            ecosystem = _INSTALLERS.get(installer)
+            if ecosystem is None or index + 1 >= len(words):
                 index += 1
                 continue
             cursor = index + 1
-            while cursor < len(parts) and parts[cursor].startswith("-"):
+            while cursor < len(words) and (words[cursor].literal or "").startswith("-"):
                 cursor += 1
-            if cursor >= len(parts) or parts[cursor] not in _INSTALL_VERBS:
+            if cursor >= len(words) or words[cursor].literal not in _INSTALL_VERBS:
                 index += 1
                 continue
             cursor += 1
-            while cursor < len(parts) and parts[cursor] not in {"&&", "||", ";", "|"}:
-                package = parts[cursor]
+            while cursor < len(words) and words[cursor].raw not in _SEPARATORS:
+                package = words[cursor].literal
                 cursor += 1
-                if package.startswith("-") or package.startswith("."):
+                if package is None or package.startswith(("-", ".")):
                     continue
                 references.append(
                     ParsedReference(
@@ -331,7 +442,7 @@ class DockerfileParser:
                         line_end=instruction.line_end,
                         source_symbol=stage,
                         confidence=0.9,
-                        meta={"ecosystem": ecosystem, "via": parts[index]},
+                        meta={"ecosystem": ecosystem, "via": installer},
                     )
                 )
             index = cursor
@@ -339,13 +450,29 @@ class DockerfileParser:
     def _copy(
         self, instruction: _Instruction, references: list[ParsedReference], stage: str | None
     ) -> None:
-        parts = [p for p in _split(instruction.arguments) if not p.startswith("--")]
-        for source in parts[:-1]:
+        """``COPY``/``ADD`` sources, when the build context proves which files they are.
+
+        Both forms are expanded by the builder, so both are classified the same
+        way — the JSON form exists to quote paths containing whitespace, not to
+        suppress substitution. A computed source names no file: ``${BASE}/x.yaml``
+        is not partial evidence about ``x.yaml``, it is a path this file does not
+        contain.
+        """
+        _flags, rest = split_flags(instruction.arguments)
+        argv = exec_form(rest)
+        words = (
+            [expanded(element) for element in argv]
+            if argv is not None
+            else [word for word in split_words(rest) if not word.raw.startswith("--")]
+        )
+        for source in words[:-1]:
+            if source.literal is None:
+                continue
             references.append(
                 ParsedReference(
                     edge_type=EdgeType.REFERENCES,
                     target_kind=EntityType.FILE,
-                    target_key=source,
+                    target_key=source.literal,
                     line_start=instruction.line_start,
                     line_end=instruction.line_end,
                     source_symbol=stage,
