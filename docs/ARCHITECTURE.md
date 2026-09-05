@@ -2036,7 +2036,74 @@ Repositories are **untrusted input**. Static analysis only.
 | Discovered commands | Recorded as entities; never executed |
 | Git hooks / config | `core.hooksPath=/dev/null`, read-only plumbing allowlist (§8) |
 | Path traversal via symlinks | Every read goes through the containment boundary below: the *object opened*, not the path, is proven to be inside the root |
-| Zip-bomb / huge files | Size and line caps before content is read into memory |
+| Zip-bomb / huge files | `max_file_bytes` enforced *by the reader*, on the descriptor it reads from, with a hard ceiling independent of any prior `stat` (below) |
+
+### Bounded repository-content reads
+
+> **Invariant.** Repository content is never read into an unbounded in-memory buffer.
+
+> **Invariant.** `max_file_bytes` is enforced on the same admitted file descriptor the content is read from,
+> with a hard read ceiling independent of any prior `stat` result.
+
+> **Invariant.** A file that becomes oversized between scan and read cannot bypass the configured memory bound.
+
+> **Invariant.** Oversized files produce no partial parser facts, chunks, embeddings or prompt content.
+
+The cap used to be applied to `len(raw)` *after* `raw` had been read, which is not a cap. Pointed at a repository
+holding a 600 MiB file and a 5 GiB sparse file with `max_file_bytes` at 1 MiB, peak RSS reached **10.2 GiB** — the
+configured limit correctly reported both files as too large, having already allocated them to find out.
+
+`RepositoryBoundary.read_content(rel_path, max_bytes=...)` is now the only way to obtain repository content, and
+`max_bytes` is a required keyword with no default. That is a design property, not a convention: there is no
+unbounded whole-file read primitive for a future caller to pick by mistake, and a caller cannot forget a limit it
+has to name. `read_bytes` was removed rather than deprecated.
+
+**Two bounds, because either alone is defeatable.**
+
+| | what it does | why it is not enough alone |
+|---|---|---|
+| pre-read `fstat` | decides oversize from metadata; a 5 GiB sparse file costs one syscall and **zero** content bytes | `st_size` describes a mutable object. The file can grow between the `fstat` and the read, and a repository can arrange exactly that |
+| hard ceiling | stops after `max_bytes + 1` bytes whatever the `fstat` said | alone it would read every huge file up to the cap before rejecting it, and a `stat`-then-`read_bytes` pair would admit *two different files* |
+
+The second row is why a scan-time size check cannot be the safety boundary. `ScannedFile.size` is real and current
+when the scanner takes it, and it is still only a hint by the time the indexer opens the file. The bound that
+matters is the one held by the reader on its own descriptor.
+
+**Crossing the ceiling is the answer, not a truncation.** The buffer is discarded and no caller receives the first
+`max_bytes` bytes. A prefix of a file that kept going is not the file, and a parse of one would produce entities,
+chunks and citations that are true of nothing.
+
+**The cap is an inclusive maximum.** A file of exactly `max_file_bytes` is content; one byte more is oversized.
+`N-1`, `N` and `N+1` are pinned by test. The setting is bounded below at zero — a negative memory bound has no
+meaning — and zero does what it says: only an empty file has content within it.
+
+**What an oversized file leaves behind.** A `files` row and its `file` entity, so deletion tracking stays exact and
+an operator can see the path was seen; a `WARNING` diagnostic naming the repository-relative path, the observed size
+and the configured limit — never content, never an absolute host path. No parser, no chunks, no FTS rows, no
+embeddings, no evidence. When a previously-small file crosses the cap, `replace_file_facts` with only the file
+entity is what removes everything the small version asserted: entities, edges, unresolved references, chunks, FTS
+rows and the embeddings reachable through them all cascade away (§3). "Skipped for size" must never mean "kept
+whatever we had".
+
+**Byte cap and line cap.** There is no line cap, and this document previously implied there was. There is nothing
+for one to do that the byte cap does not already do better: a line count is not knowable without reading, so a line
+cap could never be the memory bound, and the byte cap already refuses the 500 MiB single-line file that would
+motivate one. Chunking's `max_chunk_lines` and `max_chunk_chars` bound a *chunk*, not a file, and apply after the
+byte cap has already decided the content exists (§6).
+
+**Hashing is a different guarantee and has its own method.** `read_into` streams a file through a callback in fixed
+1 MiB blocks and never holds it: **bounded memory for unbounded content**. Change detection needs the whole file —
+the content hash is the sole authority on whether a file changed (§9) — so an oversized file is still hashed, and
+its `files.content_hash` is a real hash of its real content. Storing anything else would make every forced rehash
+conclude the file had changed, forever. The 8 KiB prefix that decides `is_binary` is taken from that same pass, so
+a huge binary is still recorded truthfully at no cost in retained memory. The git working-tree comparison
+(`_blob_hash`, §8) streams the same way for the same reason.
+
+**`.repoatlasignore` is repository content too.** It is read through the boundary, and under its own ceiling
+(`MAX_IGNORE_BYTES`), because it is the *earliest* content read of a sync — before any file has been classified and
+before `max_file_bytes` has been consulted about anything. An unbounded read there would exhaust memory ahead of
+every protection below it. A rule file past the ceiling yields *no* rules rather than partial ones. The ceiling is
+deliberately its own constant: raising the content cap must not silently raise this one.
 
 ### Filesystem containment
 
