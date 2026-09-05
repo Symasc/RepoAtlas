@@ -105,7 +105,8 @@ RepoAtlas/
 │   │   ├── salt.py         Jinja neutralization + lenient YAML + fallback line scan
 │   │   ├── jinja.py        template relationships; owns neutralize()
 │   │   ├── structured.py   YAML / JSON config keys; owns collect_config_keys()
-│   │   └── dockerfile.py
+│   │   ├── dockerfile.py   instruction extraction; asks dockerwords.py for proof
+│   │   └── dockerwords.py  static-vs-computed classification of Dockerfile operands
 │   ├── dependencies/   manifest and lockfile parsers; declared↔resolved join; name normalization
 │   │   ├── base.py         DependencyParser protocol
 │   │   ├── registry.py     filename → dependency parser dispatch
@@ -946,6 +947,89 @@ command position yields a `READS DEPLOY_CMD`, and `LOG_LEVEL=debug $CMD` still y
 invented target disappears. No pseudo-entity stands in for the unknown target either: `unresolved_refs` rows are
 claims the global pass tries to *resolve*, and a claim naming `$CMD` would put the same fabrication one indirection
 away.
+
+### Dockerfile targets: static proof under Docker's own semantics
+
+A Dockerfile decides what an image is built from, what is copied into it and what it runs — the same three
+temptations to guess that shell scripts present, in a syntax where the guess is easier to make.
+
+> **Invariant.** A Dockerfile target is emitted only when its identity is statically named by the instruction under
+> Docker's semantics. A build or shell expression is not a target name.
+
+> **Invariant.** A computed Dockerfile target produces neither a deterministic edge nor a standing unresolved
+> target claim.
+
+> **Invariant.** Confidence cannot convert an unproven target identity into a fact.
+
+`RUN $TOOL` does not execute a program called `$TOOL`; `FROM ${BASE_IMAGE}` does not depend on a package spelled
+`${BASE_IMAGE}`; `COPY $SRC_DIR /app` does not reference a file named `$SRC_DIR`. Each of the three produced exactly
+that before this pass — the first as a `cmd:$TOOL` entity with an `EXECUTES` edge at confidence 1.0, the other two
+as rows in `unresolved_refs`. The `unresolved_refs` route is not the softer option: a claim is a *definite source
+claim awaiting linkage*, so `COPY missing.py /app/` legitimately produces `unresolved file missing.py` while
+`COPY $SRC /app/` must produce nothing. Otherwise the same invented target simply lives one indirection away.
+
+**`$` does not mean the same thing in every instruction, and that is the whole difficulty.** A rule that rejected
+any word containing `$` would be its own bug. Docker's reference splits the instructions in two:
+
+| Family | Instructions | Who expands `$` |
+|---|---|---|
+| Builder-expanded | `ADD` `COPY` `ENV` `EXPOSE` `FROM` `LABEL` `ONBUILD` `STOPSIGNAL` `USER` `VOLUME` `WORKDIR` | the **builder**, in shell form *and* inside a JSON array |
+| Shell-expanded | `RUN` `CMD` `ENTRYPOINT` | the **command shell** — so the exec form, which invokes no shell, expands nothing at all |
+
+The consequence is that `RUN ["$TOOL", "app.py"]` genuinely names its target: the exec form passes `$TOOL` through
+as `argv[0]` and the container tries to run a program with that name. Recording it is truthful; suppressing it would
+be a cosmetic fix that discards a real fact. `COPY ["$SRC", "/app/"]` is the mirror image — JSON supplies the
+quoting, the builder still substitutes, so it names no file.
+
+**These were verified against a real daemon (Docker 29.7.2), not assumed.** No image was pulled; `python:3.13-slim`
+was already present.
+
+| Experiment | Result |
+|---|---|
+| `ARG TOOL=echo` + `RUN ["$TOOL", …]` | build fails: `exec: "$TOOL": executable file not found` — **no substitution** |
+| `ENV MSG=…` + `ENTRYPOINT ["echo", "$MSG"]` | container prints `$MSG` — **no substitution** |
+| `ENV MSG=…` + `CMD echo "$MSG"` | container prints the value — the shell substitutes |
+| `ARG SRC=real.txt` + `COPY ["$SRC", "/app/"]` | copies `real.txt` — **the builder substitutes in JSON form** |
+| `COPY \$FOO /quux` and `COPY ["\\$FOO", "/quux"]` | both copy the file literally named `$FOO` — `\$` is the escape |
+| `COPY $$FOO /quux` | build fails resolving `/FOO` — `$$` is **not** a literal-dollar escape |
+
+**Proof is decided while the syntax is still visible.** `parsers/dockerwords.py` tokenizes an instruction's operands
+and returns each as a `Word` that is either `LITERAL` — carrying the value with quoting and escaping removed — or
+`COMPUTED`, carrying nothing. Doing it there rather than downstream is what makes it possible at all: `shlex.split`
+unescapes `\$FOO` to `$FOO`, after which the escaped literal and the expansion are spelled identically and no later
+check can tell them apart. It is the same discipline `parsers/bash.py` applies through the tree-sitter tree, reached
+by a different route because Docker's grammar is not shell's.
+
+Half a computed word is not a smaller claim, it is a different and false one, so an expansion anywhere in a word
+makes the whole word computed: `${BASE}/config.yaml` is not evidence about a file called `config.yaml`.
+
+| Instruction | Static | Computed |
+|---|---|---|
+| `RUN` shell form | `RUN ./build.sh` → `EXECUTES build.sh`; `RUN echo "$X"` → `EXECUTES echo` | `RUN $TOOL`, `RUN "${TOOL}"`, `RUN $BASE/$NAME`, `RUN $(pick)`, `` RUN `pick` `` → **nothing** |
+| `RUN` exec form | `RUN ["python3", "app.py"]` → `EXECUTES python3`; `RUN ["$TOOL", …]` → `EXECUTES $TOOL`, because nothing expands it | — |
+| `FROM` | `FROM python:3.13` → `DEPENDS_ON pkg`; `FROM builder` → stage `REFERENCES` | `FROM $BASE`, `FROM image:${TAG}`, `FROM ${STAGE}` → stage symbol only, **no image** |
+| `COPY` / `ADD` | `COPY src/app.py /app/`; `COPY ["a b.txt", "/app/"]`; `COPY \$FOO /quux` → file `$FOO` | `COPY $SRC /app`, `COPY ${BASE}/x.yaml /app/`, `COPY ["$SRC", "/app/"]` → **nothing** |
+| `COPY --from` | the flag is removed before operands are read | `--from=$STAGE` names no stage and no image |
+| `CMD` / `ENTRYPOINT` | `ENTRYPOINT ["python3", "app.py"]`; `CMD echo "$MSG"` → `EXECUTES echo` | `ENTRYPOINT $RUNNER app.py` → **nothing** |
+| `HEALTHCHECK`, `ONBUILD`, `SHELL` | not modelled — no facts either way | not modelled; `$PROBE` cannot arrive through them |
+| `RUN <installer> install …` | `pip install requests` → `DEPENDS_ON requests` | `$PIP install x` claims nothing; `pip install $PKG requests` keeps `requests` only |
+
+**A computed target does not delete the evidence around it.** `ARG TOOL` still records `EXPORTS env:TOOL`, and
+`ENV HOST=$OTHER` still records `HOST` — a declared *name* is static syntax whatever its value is. `FROM ${BASE}`
+still produces its stage symbol, because the stage is a definite fact and only the image is unknown. What
+disappears is the invented target, not the instruction.
+
+**V1 performs no constant propagation.** `ARG BASE=python:3.13` followed by `FROM $BASE` yields no image, even
+though the answer looks obvious. Doing it correctly needs rules for ARG scope, redeclaration, build-time overrides,
+defaults, stage boundaries, the automatic platform args and ENV interaction; a version that handled the easy case
+and guessed at the rest would fabricate an image exactly when one of them applied. "Target unknown" is the
+supportable answer, and the absence of a fact is preferable to a fabricated one.
+
+**Two related conservatisms.** A here-document (`RUN <<EOF`) contributes nothing: the real command is in the body,
+which this parser does not read, and the introducer is a redirection operator — recording it produced `cmd:<<EOF`, a
+node naming nothing at all. An unparseable JSON array falls back to shell form, as Docker itself does, rather than
+being salvaged into target keys; the previous hand-rolled comma split turned `COPY ["src/file with space.txt",
+"/app/"]` into a file reference called `[src/file with space.txt,`.
 
 ### The two link passes
 
