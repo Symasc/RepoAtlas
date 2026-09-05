@@ -19,6 +19,7 @@ from repoatlas.models.parsing import (
     ParsedReference,
     ParsedSymbol,
 )
+from repoatlas.parsers.marks import split_lines, whole_file_span
 
 _INSTRUCTIONS = frozenset(
     {
@@ -76,12 +77,18 @@ class _Instruction:
 
 
 def _logical_lines(content: str) -> list[_Instruction]:
-    """Join continuations and drop comments, keeping true line numbers."""
+    """Join continuations and drop comments, keeping true line numbers.
+
+    Split with the shared source-grammar splitter so these numbers mean the same
+    thing as the whole-file span computed from the same content. ``splitlines()``
+    would break on a form feed, and every instruction after one would be reported
+    a line too low.
+    """
     instructions: list[_Instruction] = []
     buffer: list[str] = []
     start = 0
 
-    for number, raw in enumerate(content.splitlines(), start=1):
+    for number, raw in enumerate(split_lines(content), start=1):
         stripped = raw.strip()
         if not buffer and (not stripped or stripped.startswith("#")):
             continue
@@ -124,7 +131,7 @@ class DockerfileParser:
     """Deterministic Dockerfile instruction extraction."""
 
     name = "dockerfile"
-    version = "1"
+    version = "2"  # 2: whole-file spans stop at EOF, and are absent for an empty file
     language = "Dockerfile"
 
     def supports(self, path: Path) -> bool:
@@ -149,12 +156,13 @@ class DockerfileParser:
             if handler is not None:
                 handler(instruction, references, stage)
 
+        whole_file_start, whole_file_last = whole_file_span(content)
         image = ParsedSymbol(
             kind=EntityType.CONFIG,
             name=path.name,
             qualified_name=path.as_posix(),
-            line_start=1,
-            line_end=max(1, content.count("\n") + 1),
+            line_start=whole_file_start,
+            line_end=whole_file_last,
         )
         return ParsedFile(
             language=self.language,

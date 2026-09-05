@@ -865,7 +865,10 @@ permitted shortcut for skipping the hash, and it is **disabled** whenever anythi
   files while preserving or back-dating mtime;
 - the repository's dirty/clean state changed since the last sync;
 - the previous sync did not complete cleanly;
-- the schema version, parser version, or embedding model recorded in storage changed;
+- the **facts version** — the schema version, the parser and dependency-parser registries, and the chunking rules
+  — differs from the one recorded on the file row. This one is handled *per file* rather than by rehashing the
+  tree, since the version is stored on the row itself. The embedding model is deliberately not part of it: vectors
+  are keyed by the model that produced them, so a model change re-embeds without reparsing anything;
 - `--full` / `--rehash` was passed.
 
 In those cases every file is hashed. Otherwise: stat match ⇒ skip, stat mismatch ⇒ hash ⇒ reparse only if the hash
@@ -1277,6 +1280,11 @@ tools           Python, Ruby
 
 RepoAtlas must track whether its index may be stale and must **not knowingly present stale information as
 current**. Where a repository's HEAD or dirty state differs from what was indexed, say so.
+
+The same applies where the *build* differs. A parser fix, a new parser or a change to how chunks are cut makes
+stored facts stale while every file on disk is untouched, so HEAD, mtime and content hash all still agree and no
+other signal notices. `status` compares the facts version recorded on each file row against the running build and
+reports `stale (indexed by an older build)`. An ordinary `sync` repairs it — no `--full`, no manual step.
 
 V1 may require an explicit `repoatlas sync` before freshness is guaranteed. Automatic pre-query sync is **not**
 required.

@@ -63,6 +63,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S603", "S607"]          # tests invoke git deliberately
 "tests/fixtures/repos/*" = ["ALL"]    # fixture content is sample code, not project code
+# Confusable characters are this suite's subject, not a mistake in it: the
+# supplementary-plane round-trip case needs codepoints that look like ASCII.
+"tests/adversarial/test_unicode_exact_retrieval.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/adversarial/fixtures/repos/*" = ["ALL"]
 
 [tool.pyright]

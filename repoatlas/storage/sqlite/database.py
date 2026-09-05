@@ -5,8 +5,9 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from importlib import resources
 from pathlib import Path
+
+from repoatlas.storage.sqlite.migrator import apply_migrations, load_migrations
 
 SCHEMA_VERSION = 5
 
@@ -82,45 +83,14 @@ class Database:
         )
 
 
-def _migration_files() -> list[tuple[int, str]]:
-    package = resources.files("repoatlas.storage.sqlite.migrations")
-    found: list[tuple[int, str]] = []
-    for entry in package.iterdir():
-        name = entry.name
-        if not name.endswith(".sql"):
-            continue
-        found.append((int(name.split("_", 1)[0]), entry.read_text(encoding="utf-8")))
-    return sorted(found)
-
-
 def _apply_migrations(connection: sqlite3.Connection) -> None:
-    """Bring the schema up to date, safely against another process doing the same.
+    """Bring the schema up to date. See :mod:`repoatlas.storage.sqlite.migrator`.
 
-    Migrations run at *open*, which readers do too, so the writer lock cannot
-    cover them: requiring it would make ``locate`` wait on a sync. Each migration
-    is instead applied under ``BEGIN IMMEDIATE`` with ``user_version`` re-read
-    **inside** that transaction, so of two processes opening a fresh database at
-    once, exactly one applies each migration and the other sees it already done.
+    Migrations run at *open*, which readers do too, so the sync writer lock
+    cannot cover them: requiring it would make ``locate`` queue behind a running
+    ``sync``. Serialization is SQLite's own write transaction instead.
     """
-    for version, sql in _migration_files():
-        if version <= _user_version(connection):
-            continue
-        connection.execute("BEGIN IMMEDIATE")
-        try:
-            if version <= _user_version(connection):
-                connection.rollback()
-                continue
-            connection.executescript(sql)
-            connection.execute(f"PRAGMA user_version = {version}")
-        except BaseException:
-            connection.rollback()
-            raise
-        connection.commit()
-
-
-def _user_version(connection: sqlite3.Connection) -> int:
-    row = connection.execute("PRAGMA user_version").fetchone()
-    return int(row[0]) if row else 0
+    apply_migrations(connection, load_migrations())
 
 
 def open_database(path: Path) -> Database:

@@ -98,6 +98,11 @@ def test_broken_input_never_fabricates_provenance(filename: str, name: str, text
     parsed = _parse(filename, text)
     line_count = max(1, len(text.splitlines()))
     for symbol in parsed.symbols:
+        # A whole-file symbol over an empty file legitimately claims no lines.
+        if symbol.line_start is None or symbol.line_end is None:
+            assert not text, symbol
+            assert symbol.line_start is None and symbol.line_end is None, symbol
+            continue
         assert 1 <= symbol.line_start <= line_count
         assert symbol.line_start <= symbol.line_end <= line_count
     for reference in parsed.references:
