@@ -661,6 +661,45 @@ CMD
 WORKDIR
 ```
 
+**Dockerfiles are read as text, never built.**
+
+**Targets must be statically proven, under the instruction's own semantics.** The same rule §7.3 applies to shell
+commands applies here, and for the same reason — a Dockerfile decides what an image is built from, what enters it
+and what it runs:
+
+> A Dockerfile target is emitted only when its identity is statically named by the instruction under Docker's
+> semantics. A build or shell expression is not a target name.
+
+> A computed Dockerfile target produces neither a deterministic edge nor a standing unresolved target claim.
+> Confidence cannot convert an unproven target identity into a fact.
+
+`unresolved_refs` holds **definite source claims awaiting linkage**, which is why it is not the softer option:
+`COPY missing.py /app/` may legitimately stand as `unresolved file missing.py`, because the source names
+`missing.py`; `COPY $SRC /app/` may not, because the source names nothing. Recording the expression there is the
+same invented target one indirection away.
+
+**`$` is not the test — the instruction is.** Docker expands `ADD`, `COPY`, `ENV`, `EXPOSE`, `FROM`, `LABEL`,
+`ONBUILD`, `STOPSIGNAL`, `USER`, `VOLUME` and `WORKDIR` in the *builder*, in shell form and inside a JSON array
+alike. `RUN`, `CMD` and `ENTRYPOINT` are expanded by the *command shell*, so their exec form — which invokes no
+shell — expands nothing: `RUN ["$TOOL", "app.py"]` really does try to run a program named `$TOOL`, and recording
+that is truthful. A blanket rejection of `$` would be a false-negative bug in its own right.
+
+| Proven — must resolve | Not proven — must resolve to nothing |
+|---|---|
+| `RUN ./build.sh`, `RUN echo "$X"` (the command is `echo`) | `RUN $TOOL`, `RUN "${TOOL}"`, `RUN prefix-$TOOL` |
+| `RUN ["python3", "app.py"]`, `RUN ["$TOOL", …]` (exec form expands nothing) | `RUN $(pick)`, `` RUN `pick` ``, `RUN <<EOF …` |
+| `FROM python:3.13`, `FROM builder` (a declared stage) | `FROM $BASE`, `FROM image:${TAG}`, `FROM ${STAGE}` |
+| `COPY src/app.py /app/`, `COPY ["a b.txt", "/app/"]`, `COPY \$FOO /quux` | `COPY $SRC /app`, `COPY ${BASE}/x.yaml /app/`, `COPY ["$SRC", "/app/"]` |
+| `ENTRYPOINT ["python3", "app.py"]`, `CMD echo "$MSG"` | `ENTRYPOINT $RUNNER app.py`, `COPY --from=$STAGE …` |
+| `RUN pip install requests` | `RUN $PIP install requests`; the `$PKG` in `pip install $PKG requests` |
+
+**V1 performs no constant propagation.** `ARG BASE=python:3.13` followed by `FROM $BASE` yields no image. ARG
+scope, redeclaration, build-time overrides, defaults, stage boundaries and the automatic platform args are a
+separate feature; a partial version of it would fabricate an image whenever one of those rules applied.
+
+Suppressing a computed target does not remove the evidence around it: `ARG TOOL` still records the variable,
+`ENV HOST=$OTHER` still records `HOST`, and `FROM ${BASE}` still opens its stage.
+
 ---
 
 ## 8. Knowledge representation
