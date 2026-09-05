@@ -84,8 +84,15 @@ class DiscoverySettings(BaseModel):
 class IndexingSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    #: Files larger than this are recorded but never read for content.
-    max_file_bytes: int = 1_048_576
+    #: Inclusive maximum on a file's size for its **content** to be indexed. A
+    #: file of exactly this many bytes is read; one byte more is recorded as
+    #: oversized and never allocated (ARCHITECTURE.md §12).
+    #:
+    #: Bounded below at zero because it is a memory bound, and a negative one has
+    #: no meaning: it would make every file oversized while reading as though the
+    #: operator had asked for something. Zero is legal and does exactly what it
+    #: says — only an empty file has content within it.
+    max_file_bytes: int = Field(default=1_048_576, ge=0)
     #: Fixed-window chunking parameters used when no symbol range applies.
     chunk_lines: int = 40
     chunk_overlap_lines: int = 8
