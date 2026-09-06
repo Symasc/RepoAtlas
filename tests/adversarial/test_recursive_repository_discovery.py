@@ -600,14 +600,17 @@ def test_repeated_init_is_idempotent_over_deep_repositories(workspace: Workspace
 
 
 @pytest.mark.skipif(not CLI.exists(), reason="the repoatlas console script is not installed")
-def test_a_deep_repository_added_later_appears_on_reinit_not_on_sync(
+def test_a_deep_repository_added_later_is_discovered_by_a_plain_sync(
     workspace: Workspace,
 ) -> None:
-    """§24: proves P2-4 is fixed while leaving the separate `sync` finding intact.
+    """Depth is not a reason to miss a repository, whichever command discovers it.
 
-    `sync` not noticing a *new* repository is its own release-review finding and
-    is deliberately untouched here. What this asserts is that when discovery does
-    run, depth 12 is no longer a reason to miss one.
+    This test used to assert the opposite half: that a plain ``sync`` did *not*
+    find a late repository, because "new repositories are invisible to sync" was a
+    separate release-review finding at the time and deliberately out of scope.
+    That finding is fixed (V1_SPEC §12), so the assertion is inverted — and the
+    point it was making survives intact, because what it really pins is that depth
+    12 is no reason to miss one *wherever* discovery runs from.
     """
     make_repo(at_depth(workspace.root, 1))
     assert workspace.run("init", str(workspace.root)).returncode == ExitCode.OK
@@ -615,10 +618,11 @@ def test_a_deep_repository_added_later_appears_on_reinit_not_on_sync(
     late = make_repo(at_depth(workspace.root, 12, name="late"))
     assert late.exists()
 
-    workspace.run("sync")
-    after_sync = workspace.run("repos").stdout
-    assert "late" not in after_sync, "the separate sync-discovery finding is unchanged"
+    synced = workspace.run("sync")
+    assert synced.returncode == ExitCode.OK
+    assert "late" in workspace.run("repos").stdout
 
+    # And re-running init changes nothing that sync did not already do.
     reinit = workspace.run("init", str(workspace.root))
     assert reinit.returncode == ExitCode.OK
     assert "late" in workspace.run("repos").stdout
