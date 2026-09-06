@@ -3090,6 +3090,72 @@ silently switch off a security control. User ignore rules keep their documented 
 **case sensitivity**, because that is what gitignore does on a case-sensitive filesystem and what the user wrote
 the file expecting. The two systems are deliberately not merged.
 
+#### The ignore matcher does not consult the host
+
+`.repoatlasignore` is a pattern language RepoAtlas defines, so its meaning has to come from RepoAtlas. For a while
+it did not. Matching went through `fnmatch.fnmatch`, and `fnmatch.fnmatch` is not a text operation: it runs both
+the name and the pattern through `os.path.normcase` first. On Linux that is the identity function. On Windows it is
+`ntpath.normcase`, which lowercases *and* rewrites `/` to `\` — so the same pattern file over the same repository
+produced a different index on a different operating system, and every part of the language moved at once:
+
+| Pattern | Path | Linux | Windows (before) |
+|---|---|---|---|
+| `Src/**` | `src/main.py` | not ignored | **ignored** |
+| `*.PY` | `main.py` | not ignored | **ignored** |
+| `[A-Z]*.py` | `main.py` | not ignored | **ignored** — the class itself was lowercased to `[a-z]` |
+| `Generated/` | `generated/b.py` | not ignored | **ignored** |
+| `foo/bar.py` | `foo\bar.py` | not ignored | **ignored** — one component, treated as two |
+| `*.py` + `!Keep.py` | `keep.py` | ignored | **re-admitted** — the negation inverted |
+
+None of that was chosen. It was inherited from a helper whose convenience normalization is meant for host paths.
+The same defect had already been found and fixed one layer down, in the secret policy (§12), for the same reason.
+
+A second, quieter inconsistency came with it. The anchored branch fell through to a plain `startswith`, which is
+case-sensitive everywhere, while the unanchored branch went through `fnmatch`, which was not — so on Windows `Src`
+ignored `src/main.py` and `/Src` did not. The same directory, two answers, decided by whether the user happened to
+write a leading slash.
+
+**The fix is to keep the half of `fnmatch` that is pure text and drop the half that is not.** `fnmatch.translate`
+turns glob syntax into a regular expression and touches no `os` module; compiling its output directly preserves the
+wildcard language exactly — `*`, `?`, `[...]`, `[!...]`, an unterminated `[` matched literally — while removing the
+host normalization. No `re.IGNORECASE`, no `re.LOCALE`. Each pattern is compiled once, when the file is parsed, and
+carried on the rule; matching a repository's worth of paths compiles nothing.
+
+```
+.repoatlasignore text → parse (comments, !, /, trailing /) → fnmatch.translate → re.compile → _Rule.regex
+                                                                                                   ↓
+                     canonical repository-relative path  ────────────────────────────────→  bool
+```
+
+There is one matcher, and both callers reach it: `discovery/finder.py` asks about directories while walking, and
+`sync/scanner.py` asks about files — on the primary path *after* `git ls-files` has applied `.gitignore`, and on
+the Pass 13 fallback path in the same place. So a path ignored during discovery is ignored during scanning, and
+what is indexed does not depend on which enumerator ran.
+
+Case sensitivity and Unicode normalization are separate questions, and only the first was in scope: the matcher
+never normalized NFC/NFD and still does not. Making composed and decomposed forms match would be a new behaviour,
+not a correction, and it is pinned as unchanged rather than left to drift.
+
+Two other case behaviours nearby were checked and deliberately left alone. Built-in directory exclusions never went
+through `fnmatch` — they are an exact membership test on a path component, which asks the host nothing — and the
+built-in secret policy folds case on purpose. Neither was affected.
+
+Four invariants:
+
+> Ignore decisions are functions of the pattern and the canonical repository-relative path, not the host operating
+> system.
+
+> Filesystem case-insensitivity does not implicitly broaden `.repoatlasignore` patterns.
+
+> Discovery and scanning use the same ignore semantics — and so do the primary and fallback enumerators.
+
+> Changing platforms does not change the logical RepoAtlas index of the same repository tree.
+
+The suite catches this from Linux, which it has to: there is no Windows worker. It substitutes `ntpath.normcase`
+for `os.path.normcase` — the exact stdlib primitive responsible — and asserts the whole golden matrix is unmoved.
+A potency control sits beside it asserting that `fnmatch.fnmatch` *does* flip under that same substitution, so the
+simulation cannot quietly become inert and let a regression through a green suite.
+
 The git working-tree comparison (§8) obeys the same policy: `_worktree_differs_from_index` hashes every tracked
 file to decide whether a repository is dirty, and skips the ones the policy claims. "Is this tree dirty?" is not a
 reason to open a private key. The narrowed meaning is the useful one anyway — an edit to an excluded file cannot
@@ -3335,6 +3401,7 @@ full reindex.
 | `sudo`, `xargs` and `chroot` are recorded as themselves | Unwrap them for recall | Each is genuinely the executed command, so naming it omits a fact rather than adding one — and `chroot` would be actively wrong, since the wrapped path resolves inside a different root (§5) |
 | `sh -c` / `bash -c` / `eval` payloads are never followed | Parse the literal payload when it looks like a path | The payload is shell source re-parsed at run time with expansion; reading a path out of it would be a second, unwritten shell parser. It also removes the split where `bash -c "x"` linked and `sh -c 'x'` did not, purely on tree-sitter node type (§5) |
 | Built-in secret exclusion is case-insensitive; `.repoatlasignore` is not | One matching rule for both, either way | They answer different questions. Security policy must hold whatever the file is called; a user ignore rule must do what gitignore does, or it silently drops files nobody asked to drop (§12) |
+| `.repoatlasignore` matching is defined by RepoAtlas, not by `os.path.normcase` | `fnmatch.fnmatch`, which is one call and already there | `fnmatch` normcases its inputs, so on Windows it lowercased patterns and rewrote `/` to `\`. The same repository indexed differently on different platforms, and character classes and negations inverted with it. `fnmatch.translate` + `re.compile` keeps the language and drops the host (§12) |
 | `fnmatchcase` over a `casefold`ed basename | `fnmatch`, as before | `fnmatch` applies `os.path.normcase`, so the same code excluded `.ENV` on macOS and indexed it on Linux. A security control whose behaviour depends on the platform is not a control (§12) |
 | The secret check runs first in enumeration | Keep it last, after the ignore rules | Order is what makes it mandatory. Last-and-unconditional worked, but only by inspection; first is structural, and it also means an excluded file is never stat-ed (§12) |
 | `is_secret_path` moved to a top-level `security` module | Leave it in `discovery/` and duplicate the rule in `gitstate/` | `gitstate` must obey the same policy and `discovery` already imports `gitstate`. A second copy would be a second policy, and a security control with two implementations has whichever behaviour the caller reached (§12) |
