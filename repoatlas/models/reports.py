@@ -58,6 +58,11 @@ class SyncReport(BaseModel):
     pending_embeddings: int = 0
     embedding_detail: str = ""
     link_trace: LinkTrace | None = None
+    #: Canonical identities of repositories this run discovered and registered for
+    #: the first time. Empty on an ordinary run; non-empty is the machine-readable
+    #: form of "the managed root gained repositories since the last sync"
+    #: (V1_SPEC §12).
+    repositories_added: tuple[str, ...] = ()
     #: Directories discovery could not read, so could not search for repositories.
     #: Empty on every ordinary run. Present because "there were no repositories
     #: there" and "we were refused permission to look" are different claims, and
@@ -114,4 +119,16 @@ class StatusReport(BaseModel):
     symbols: int = 0
     relationships: int = 0
     last_sync: datetime | None = None
+    #: Canonical identities of repositories that exist beneath the managed root
+    #: and are **not registered**. The next global ``sync`` will register and index
+    #: them; until then the workspace is not current, whatever every registered
+    #: repository individually reports (V1_SPEC §12).
+    new_repositories: tuple[str, ...] = ()
+    #: Registered repositories whose directory is gone. The next global ``sync``
+    #: retires these.
+    missing_repositories: tuple[str, ...] = ()
+    #: Directories discovery was refused. Their contents could not be searched for
+    #: repositories, so completeness is unestablished rather than confirmed — which
+    #: is a different statement from "current" and is printed as one (V1_SPEC §5).
+    unreadable_paths: tuple[Path, ...] = ()
     index_state: str = "unknown"

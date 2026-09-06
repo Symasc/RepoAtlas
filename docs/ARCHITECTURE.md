@@ -1252,6 +1252,97 @@ set and its order depend on the tree, never on filesystem enumeration order.
 
 > **Invariant.** Discovery never reports a subtree it could not read as a subtree that held nothing.
 
+### Repository-set reconciliation
+
+> **Invariant.** A managed root is authoritative for repository membership; registration is not a permanent
+> snapshot taken only at `init` time.
+
+> **Invariant.** `status` cannot report `current` when a repository that current discovery would manage remains
+> unregistered.
+
+> **Invariant.** A successful `sync` leaves every newly discovered repository either indexed and current, or
+> explicitly reported as failed.
+
+> **Invariant.** Repository-set reconciliation and content synchronization use the same discovery semantics as
+> initialization.
+
+`init` was the only command that ever looked at the filesystem for repositories. Everything after it read the
+`repositories` table and believed it. A repository created beneath the managed root the day after initialization
+was therefore invisible in a way that produced no error anywhere: `sync` iterated the stored rows, found them all
+current and said `Sync complete`; `status` compared those same rows against their own working trees and answered
+`current`; `locate` answered *no indexed evidence matches* about a repository sitting in the managed tree. Every
+individual answer was correct. The question "what is in this root?" had simply stopped being asked after the first
+time.
+
+Recovery was re-running `init` — which requires already knowing the thing the tool exists to report.
+
+**One plan, three consumers.** `discovery/reconcile.py` holds the whole concept, and the split that matters is
+between the function that reads and the function that writes:
+
+```
+plan_repository_set(root, settings, registered) -> RepositorySetPlan      # reads only
+    discovered   every repository the current walk found
+    added        discovered, not registered
+    existing     registered and still discovered
+    missing      registered, and the directory is gone
+    unreadable   directories the OS refused
+
+register(candidates, store) -> [Repository]                               # the only writer
+```
+
+| Command | Uses |
+|---|---|
+| `init` | `plan` → `register(plan.discovered)` → index all |
+| `sync` | `plan` → `register(plan.added)` → index the reconciled set |
+| `status` | `plan` → *look at it* |
+
+Reads-only is a contract, not an implementation detail. `status` is a read command; one that quietly registered
+repositories would make "check whether anything changed" a mutating operation, indistinguishable in a terminal
+from having run a sync.
+
+**`register` is called only with repositories the caller will index in the same run.** A `Repository` built from a
+candidate carries no indexed state — no `last_indexed_at`, `last_sync_status` `NEVER` — and `upsert` writes those
+columns. Registering an already-indexed repository therefore *erases the record of it having been indexed*. That
+is correct for `init`, which reindexes everything it discovers, and would be silent data loss in `sync`, which is
+why `sync` passes only `plan.added` and re-reads the table for the run's repository list.
+
+**Reconciliation runs inside the writer lock**, before any repository is indexed. Registration mutates repository
+rows, and two concurrent syncs must not race to create the same one. Putting it outside is not a theoretical
+hazard: a sync that is then refused the lock (exit 5) leaves the repository registered with no facts — counted as
+managed, reported by `repos`, and citable — which is a worse state than the one this whole section exists to fix.
+
+**Scope decides whether a run reconciles, and it is not the same rule as detection.**
+
+- `sync` reconciles when the run **covers the managed root**: global scope, or a run scoped to the repository that
+  *is* the root. The second is not a special case so much as the same one in different clothing — if the configured
+  root is itself a managed Git repository, being at the root resolves to that repository rather than to global
+  scope (§7, deliberately), so global scope becomes unreachable and treating only it as covering the root would
+  mean that running `git init` on a workspace directory silently restores the defect for good.
+- `repoatlas sync <repo>` reconciles nothing. A scoped run never touches another row (§9), and registering there
+  would create a repository the run is not permitted to index.
+- `status` detects at **every** scope, because detection writes nothing and a person who works inside their
+  repositories should still be told the root has grown.
+
+**`missing` is narrower than "registered but not discovered", on purpose.** A repository whose `.git` was deleted
+while its files remain is still registered — by `init` and by `sync` alike — because a repository's path is its
+identity and that path still exists (§3). Reporting it as missing would describe a retirement that neither command
+performs. `missing` is exactly the set `forget_if_missing` will retire, so the report and the behaviour cannot
+drift apart.
+
+**Snapshot semantics.** Discovery is a snapshot taken at the start of the run. A repository created after that
+point is not in this sync; it is in the next one, and `status` reports it in the meantime. There is no filesystem
+transaction and none is claimed — what is guaranteed is that nothing stays invisible indefinitely.
+
+**`repos` lists the registered set.** A discovered-but-unregistered directory has no identity, no slug and no
+facts; listing it would offer a name `--repo` cannot select and `locate` cannot answer about. Drift is reported
+where it is actionable — `status` names it, `sync` fixes it.
+
+**Cost.** The added work is one tree walk, the same one §6 already measured: 0.3 ms at one repository, 192 ms over
+100 repositories and 3,604 directories. `is_git_repository` is a filesystem probe, so no git subprocess runs per
+directory. Against a `status` that already spends ~790 ms on per-repository git state at that size, and a no-op
+`sync` that spends ~1.7 s, reconciliation is ~19% and ~13% respectively. No repository-set cache is kept: a cache
+is how the invisibility returns.
+
 ### Enumeration and indexing
 
 ```
@@ -1374,7 +1465,10 @@ that names the fix.
 - **Containment**: `Path.is_relative_to`, never string prefix comparison — `/work/repos-old` must not match
   `/work/repos`.
 - **Nearest-first ordering** in step 2 gives "closest managed repository wins" with no special-casing.
-- **`sync` never registers.** Step 4 reports and exits; adding repositories is `init`'s job alone.
+- **`sync` never registers a repository outside the managed root.** Step 4 reports and exits: an enclosing
+  Git repository that is not beneath the configured root is not RepoAtlas's to adopt. Membership *within*
+  the root is reconciled by every sync that covers it (§9) — `init` establishes the root, not a permanent
+  snapshot of what was in it.
 - **Scope is data, not behavior**: `RepositoryContext` carries `scope`, `primary`, `repositories` and a
   human-readable `reason`, which `--verbose` prints. Commands branch on the value; none of them re-derives it.
 
@@ -2925,3 +3019,8 @@ full reindex.
 | Specificity is a rank position, never a score bonus | Add a large constant to the fused score | A bonus is a number, and numbers can be accumulated past. Twelve copies of the lexical stage's votes changes every fused score and changes the ranking not at all — which is the property that had to be true, and a constant can only ever be true until the fixture changes (§10) |
 | A repository-qualified path is a fourth exact shape | Leave `other/src/config.py` to fall back to the basename | It is the spelling RepoAtlas prints in every citation, so it is the one that gets pasted back — and falling back to the basename let the primary-repository bias answer with the repository the user had just ruled out (§10) |
 | A bare `config.py` stays a **basename** query even when it is some file's whole path | Treat a term with no separator as a path when it equals a `rel_path` | A root-level file would then outrank `src/config.py` for a query that reads, to everyone, as "find files called config.py". The ambiguity is real and returning it is the honest answer (§10, V1_SPEC §14) |
+| `sync` reconciles membership only when the run **covers the managed root** | Reconcile on every sync, whatever the scope | A scoped run that registered another repository would create a row it is not permitted to index — registered, with no facts, and counted as managed. `status` detects at every scope instead, so nothing goes unsaid (§6) |
+| `status` detects drift but never registers | Let `status` register what it finds, since it already discovered it | "Check whether anything changed" would become a mutating operation, indistinguishable in a terminal from having run a sync. Detect and reconcile are different commands (§6, V1_SPEC §4) |
+| `missing` means "the directory is gone", not "no longer discovered" | Report any registered-but-undiscovered repository as missing | A repository whose `.git` was deleted stays registered, by `init` and `sync` alike, because its path is its identity and that path exists. Calling it missing would describe a retirement neither command performs (§3, §6) |
+| Reconciliation is inside the writer lock | Discover and register before taking the lock, to hold it for less time | A sync then refused the lock (exit 5) still leaves the repository registered with no facts — worse than not finding it. The lock is what makes six concurrent syncs converge on one row (§9) |
+| No repository-set cache or fingerprint | Cache the discovered set and invalidate it on a signal | A stale cache is precisely how the invisibility returns, and the walk it would save is 192 ms on a 100-repository tree. Measured rather than assumed (§6) |
