@@ -6,6 +6,9 @@ action. Expanded reasoning belongs behind ``--verbose``, not in the default view
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from pathlib import Path
+
 from repoatlas.models.dependencies import Agreement, DependencyPackage
 from repoatlas.models.evidence import Evidence, EvidenceSet, Hypothesis, RepoAtlasAnswer
 from repoatlas.models.reports import StatusReport, SyncReport
@@ -62,22 +65,68 @@ def render_status(report: StatusReport) -> str:
             f"Last sync: {_format_time(report.last_sync)}",
             f"Index state: {repo.index_state}",
         ]
+        # Drift is about the workspace, not about this repository, so it is stated
+        # separately rather than folded into this repository's index state — but it
+        # is stated, because someone who only ever works inside a repository would
+        # otherwise never be told the managed root has grown.
+        lines.extend(_drift_notice(report))
         return "\n".join(lines)
 
-    return "\n".join(
-        [
-            f"Root: {report.root}",
-            f"Repositories: {report.repository_count:,}",
-            f"Indexed files: {report.indexed_files:,}",
-            f"Symbols: {report.symbols:,}",
-            f"Relationships: {report.relationships:,}",
-            f"Last sync: {_format_time(report.last_sync)}",
-            f"Index state: {report.index_state}",
-        ]
-    )
+    lines = [
+        f"Root: {report.root}",
+        f"Repositories: {report.repository_count:,}",
+        f"Indexed files: {report.indexed_files:,}",
+        f"Symbols: {report.symbols:,}",
+        f"Relationships: {report.relationships:,}",
+        f"Last sync: {_format_time(report.last_sync)}",
+        f"Index state: {_state_reason(report)}",
+    ]
+    lines.extend(_drift_notice(report))
+    return "\n".join(lines)
 
 
-def _unreadable_notice(report: SyncReport) -> list[str]:
+def _drift_notice(report: StatusReport) -> list[str]:
+    """Name the repositories the managed root holds and the index does not."""
+    lines: list[str] = []
+    if report.new_repositories:
+        count = len(report.new_repositories)
+        lines.extend(
+            [
+                "",
+                f"{count} repositor{'y' if count == 1 else 'ies'} beneath the root "
+                f"{'is' if count == 1 else 'are'} not indexed:",
+                *_named(report.new_repositories),
+                "",
+                "Run:",
+                "",
+                "  repoatlas sync",
+            ]
+        )
+    if report.missing_repositories:
+        lines.extend(["", "No longer on disk:", *_named(report.missing_repositories)])
+    lines.extend(_unreadable_notice(report.unreadable_paths))
+    return lines
+
+
+def _state_reason(report: StatusReport) -> str:
+    """The index state, with the repository-set reason attached when there is one.
+
+    "stale" on its own asks the reader to guess which of several things changed.
+    Repository-set drift is the one case the per-repository lines cannot show at
+    all — the repository is not among them — so it is named here or nowhere.
+    """
+    new, gone = len(report.new_repositories), len(report.missing_repositories)
+    reasons: list[str] = []
+    if new:
+        reasons.append(f"{new} repositor{'y' if new == 1 else 'ies'} not indexed")
+    if gone:
+        reasons.append(f"{gone} no longer on disk")
+    if not reasons:
+        return report.index_state
+    return f"{report.index_state} — {', '.join(reasons)}"
+
+
+def _unreadable_notice(paths: Sequence[Path]) -> list[str]:
     """Name the directories discovery was refused, if any.
 
     Printed rather than counted silently: a walk that could not read a subtree has
@@ -85,24 +134,56 @@ def _unreadable_notice(report: SyncReport) -> list[str]:
     the same way is how a discovery gap goes unnoticed (V1_SPEC §5). At most five
     paths, because the point is that it happened and where to start looking.
     """
-    if not report.unreadable_paths:
+    if not paths:
         return []
-    shown = [f"  {path}" for path in report.unreadable_paths[:5]]
-    remainder = len(report.unreadable_paths) - len(shown)
+    shown = [f"  {path}" for path in paths[:5]]
+    remainder = len(paths) - len(shown)
     if remainder > 0:
         shown.append(f"  ... and {remainder} more")
     return [
         "",
-        f"Could not read {len(report.unreadable_paths)} director"
-        f"{'y' if len(report.unreadable_paths) == 1 else 'ies'}; "
+        f"Could not read {len(paths)} director"
+        f"{'y' if len(paths) == 1 else 'ies'}; "
         "any repositories inside were not discovered:",
         *shown,
     ]
 
 
+def _named(identities: Sequence[str], limit: int = 5) -> list[str]:
+    """An indented list of repository identities, bounded."""
+    shown = [f"  {identity}" for identity in identities[:limit]]
+    remainder = len(identities) - len(shown)
+    if remainder > 0:
+        shown.append(f"  ... and {remainder} more")
+    return shown
+
+
+def _discovered_notice(report: SyncReport) -> list[str]:
+    """Say which repositories this sync found for the first time.
+
+    A sync that silently grew the managed set would be indistinguishable from one
+    that did nothing, and the whole point of reconciling membership is that the
+    operator stops having to know (V1_SPEC §12).
+    """
+    if not report.repositories_added:
+        return []
+    count = len(report.repositories_added)
+    return [
+        "",
+        f"Discovered {count} new repositor{'y' if count == 1 else 'ies'}:",
+        *_named(report.repositories_added),
+    ]
+
+
 def render_sync(report: SyncReport) -> str:
     if not report.repositories:
-        return "\n".join(["No repositories to sync.", *_unreadable_notice(report)])
+        return "\n".join(
+            [
+                "No repositories to sync.",
+                *_discovered_notice(report),
+                *_unreadable_notice(report.unreadable_paths),
+            ]
+        )
 
     lines: list[str] = []
     if len(report.repositories) == 1:
@@ -146,7 +227,8 @@ def render_sync(report: SyncReport) -> str:
         # Not a failure: a reference to something outside the managed set stays a
         # recorded claim, and is resolved if that repository is added later.
         lines.append(f"  {report.unresolved_references} references still unresolved")
-    lines.extend(_unreadable_notice(report))
+    lines.extend(_discovered_notice(report))
+    lines.extend(_unreadable_notice(report.unreadable_paths))
     lines.extend(["", "Sync complete."])
     return "\n".join(lines)
 

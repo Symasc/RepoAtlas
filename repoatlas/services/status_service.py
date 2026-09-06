@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from repoatlas.discovery.reconcile import RepositorySetPlan, plan_repository_set
 from repoatlas.models.context import ContextScope, RepositoryContext
 from repoatlas.models.reports import RepositoryStatus, StatusReport
 from repoatlas.models.repository import Repository, SyncStatus
@@ -44,9 +45,36 @@ def _facts_version(workspace: Workspace) -> str:
     return facts_version(workspace.registry, workspace.dependency_registry)
 
 
+def _drift(workspace: Workspace, context: RepositoryContext) -> RepositorySetPlan | None:
+    """Re-derive what the managed root contains. **Reads only.**
+
+    ``status`` is a read command, so it detects and never reconciles: it says the
+    workspace is not current and names why, and ``sync`` is what changes anything.
+    Registering a repository here would make "check whether anything changed" a
+    mutating operation, indistinguishable in a terminal from having run a sync
+    (V1_SPEC §4).
+
+    Run at **every** scope, unlike reconciliation. ``sync`` only reconciles
+    membership globally, because registering a repository during
+    ``repoatlas sync --repo foo`` would touch a row outside the requested scope
+    and leave it registered without facts. Detection has no such constraint: it
+    writes nothing, so a repository-scoped status can say "this repository is
+    current, and the workspace is missing two" without overstepping. Reporting it
+    only from the root would leave anyone who works inside their repositories
+    exactly as uninformed as before.
+    """
+    if workspace.root is None:
+        return None
+    return plan_repository_set(
+        workspace.root, workspace.settings.discovery, workspace.repositories.list_all()
+    )
+
+
 def status(workspace: Workspace, context: RepositoryContext) -> StatusReport:
     root = workspace.root
     assert root is not None
+
+    drift = _drift(workspace, context)
 
     per_repo: list[RepositoryStatus] = []
     for repo in context.repositories:
@@ -81,6 +109,14 @@ def status(workspace: Workspace, context: RepositoryContext) -> StatusReport:
     else:
         overall = sorted(states)[0]
 
+    # Repository-set drift outranks every per-repository verdict. Each registered
+    # repository can be perfectly current and the workspace still not be: a
+    # repository the managed root holds and the index does not is exactly the case
+    # where "current" was a false statement, and it was the *only* thing status
+    # used to report (V1_SPEC §12).
+    if drift is not None and drift.drifted:
+        overall = "stale"
+
     return StatusReport(
         root=root,
         scope=str(context.scope),
@@ -92,10 +128,21 @@ def status(workspace: Workspace, context: RepositoryContext) -> StatusReport:
         symbols=workspace.knowledge.count_entities(all_ids),
         relationships=workspace.knowledge.count_edges(all_ids),
         last_sync=max(last_syncs) if last_syncs else None,
+        new_repositories=tuple(c.slug for c in drift.added) if drift else (),
+        missing_repositories=tuple(r.slug or r.name for r in drift.missing) if drift else (),
+        unreadable_paths=drift.unreadable if drift else (),
         index_state=overall,
     )
 
 
 def list_repositories(workspace: Workspace) -> list[Repository]:
-    """``repos`` is always global (V1_SPEC §4)."""
+    """``repos`` is always global (V1_SPEC §4).
+
+    The **registered** set, deliberately. ``repos`` lists what RepoAtlas manages —
+    what has an identity, a slug and facts that evidence can be attributed to — and
+    a discovered-but-unregistered directory has none of those yet. Listing it here
+    would offer a name that ``--repo`` cannot select and ``locate`` cannot answer
+    about. Drift is reported where it is actionable: ``status`` names the
+    unregistered repositories, and a global ``sync`` registers them.
+    """
     return workspace.repositories.list_all()

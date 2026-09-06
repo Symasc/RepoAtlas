@@ -271,7 +271,8 @@ refused database is left byte-for-byte as it was found.
 ### Constraints
 
 - The CLI layer contains **no indexing logic**. It resolves context, calls a service, and renders (§ARCHITECTURE 1).
-- `sync` never auto-registers a repository (§6).
+- `sync` never auto-registers a repository from **outside** the managed root (§6). Membership *within* the
+  root is part of what a sync synchronizes (§12).
 
 ---
 
@@ -294,6 +295,44 @@ RepoAtlas must:
 9. Persist the configured root.
 
 The user must **not** manually register repositories.
+
+### Membership is re-derived, not snapshotted
+
+> **Invariant.** A managed root is authoritative for repository membership; registration is not a permanent
+> snapshot taken only at `init` time.
+
+> **Invariant.** `status` cannot report `current` when a repository that current discovery would manage remains
+> unregistered.
+
+> **Invariant.** A successful `sync` leaves every newly discovered repository either indexed and current, or
+> explicitly reported as failed.
+
+> **Invariant.** Repository-set reconciliation and content synchronization use the same discovery semantics as
+> initialization.
+
+`init` establishes the **root**. It does not take a census that everything afterwards believes. A repository
+created beneath the managed root the day after initialization is part of that root, and ordinary synchronization
+finds it:
+
+| Command | Repository set | Repository contents |
+|---|---|---|
+| `init` | discovers and registers everything beneath the root | indexes all of it |
+| `sync` | rediscovers and reconciles, when the run covers the root | indexes the reconciled set |
+| `status` | rediscovers and **reports**, at every scope, writing nothing | reports per-repository freshness |
+| `repos` | lists the **registered** set | — |
+
+Requiring a re-run of `init` to see a new repository asks the operator to already know the thing the tool exists
+to tell them — and offers no signal that they should. `status` said *current*, `sync` said *complete*, and
+`locate` said the symbol did not exist.
+
+Discovery is one implementation, used three times. `sync` and `status` do not carry a simplified walk of their
+own: a second walker would be a second set of answers to "what is in this root?", and the exclusions,
+`.repoatlasignore` rules, nested-repository semantics, `.git`-file recognition, symlink policy, containment,
+cycle detection and unreadable-path reporting would have to be right in both.
+
+**Ignored and excluded directories do not make a workspace stale.** Only a repository discovery would legitimately
+register counts, because the drift signal is computed from discovery's own output rather than from a separate
+notion of what is out there.
 
 ### Recursion is not bounded by depth
 
@@ -922,6 +961,31 @@ the next construct, which is a different question. See `ARCHITECTURE.md` §5.
 ## 12. Incremental synchronization and branch awareness
 
 `repoatlas sync` must **not** re-index everything.
+
+### The repository set is part of what is synchronized
+
+A sync reconciles two things, and for a long time it only reconciled the second:
+
+```
+repository set        which repositories exist beneath the managed root
+repository contents   which files, facts and relationships each one has
+```
+
+The set is re-derived from the managed root by the same discovery used at `init` (§5), inside the writer lock,
+before any repository is indexed. Repositories discovery found and the index does not hold are registered and
+indexed **in that same run** — a registered repository with no facts is a worse outcome than an undiscovered one,
+because it is counted as managed. Repositories whose directory is gone are retired, which sync already did.
+
+Reconciliation happens when the run **covers the managed root**: global scope, or — where the root is itself a
+managed repository and global scope is therefore unreachable (§6) — a run scoped to that repository.
+`repoatlas sync <repo>` is a statement about one repository and registers nothing, because a scoped run that
+registered another repository would leave a row it is not permitted to index.
+
+`status` detects the same drift at **every** scope and reconciles nothing. Detection writes nothing, so a
+repository-scoped status can say "this repository is current, and the workspace is missing two" without
+overstepping; reporting it only from the root would leave anyone who works inside their repositories exactly as
+uninformed as before. Registering during a read command would make "check whether anything changed"
+indistinguishable, in a terminal, from having run a sync.
 
 Track per file:
 

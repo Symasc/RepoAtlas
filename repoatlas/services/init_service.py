@@ -5,20 +5,22 @@ from __future__ import annotations
 from pathlib import Path
 
 from repoatlas.config.settings import save_settings
-from repoatlas.discovery.finder import discover_repositories
+from repoatlas.discovery.reconcile import plan_repository_set, register
 from repoatlas.errors import RepoAtlasError
 from repoatlas.models.reports import SyncReport
-from repoatlas.models.repository import Repository
 from repoatlas.services.workspace import Workspace
 
 
 def initialize(
     workspace: Workspace, root: Path, *, config_path: Path | None = None
 ) -> tuple[SyncReport, int]:
-    """Discover every repository beneath ``root``, record it, and index it.
+    """Establish the managed root, then discover and index everything beneath it.
 
     The user never registers repositories by hand: discovery is the only path by
-    which a repository becomes managed (V1_SPEC §5).
+    which a repository becomes managed (V1_SPEC §5). What ``init`` owns is the
+    *root* — membership of that root is re-derived by every ordinary ``sync``
+    from the same plan this uses (:mod:`repoatlas.discovery.reconcile`), so a
+    repository created later does not wait for someone to re-run this command.
 
     Discovery is recursive to the bottom of the tree; nothing is omitted for being
     deeply nested. Directories the operating system refuses are skipped and named
@@ -34,10 +36,9 @@ def initialize(
     if not resolved.is_dir():
         raise RepoAtlasError(f"Not a directory: {root}")
 
-    unreadable: list[Path] = []
     with workspace.writer_lock():
-        candidates = discover_repositories(
-            resolved, workspace.settings.discovery, unreadable=unreadable
+        plan = plan_repository_set(
+            resolved, workspace.settings.discovery, workspace.repositories.list_all()
         )
 
         settings = workspace.settings.model_copy(
@@ -55,15 +56,19 @@ def initialize(
         for stored in workspace.repositories.list_all():
             engine.forget_if_missing(stored)
 
-        managed: list[Repository] = []
-        for candidate in candidates:
-            workspace.repositories.upsert(
-                Repository(name=candidate.name, slug=candidate.slug, path=candidate.path)
-            )
-            stored = workspace.repositories.get_by_path(candidate.path)
-            assert stored is not None
-            managed.append(stored)
+        # Every discovered repository, not only the new ones: `init` reindexes the
+        # whole root, and registering a repository resets its indexed state to
+        # match (see `register`).
+        managed = register(plan.discovered, workspace.repositories)
 
         report = engine.run(managed, scope="global", embed_repo_ids=None)
 
-    return report.model_copy(update={"unreadable_paths": tuple(unreadable)}), len(candidates)
+    return (
+        report.model_copy(
+            update={
+                "repositories_added": tuple(candidate.slug for candidate in plan.added),
+                "unreadable_paths": plan.unreadable,
+            }
+        ),
+        len(plan.discovered),
+    )
