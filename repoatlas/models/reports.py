@@ -127,6 +127,12 @@ class StatusReport(BaseModel):
     #: Registered repositories whose directory is gone. The next global ``sync``
     #: retires these.
     missing_repositories: tuple[str, ...] = ()
+    #: Identities claimed by both a registered repository that still exists and a
+    #: different repository beneath the managed root. Named rather than silently
+    #: skipped: `sync` cannot register one without merging two repositories, so it
+    #: leaves it alone, and a repository that is neither indexed nor mentioned is
+    #: the invisibility this reporting exists to prevent (ARCHITECTURE.md §3).
+    conflicting_repositories: tuple[str, ...] = ()
     #: Directories discovery was refused. Their contents could not be searched for
     #: repositories, so completeness is unestablished rather than confirmed — which
     #: is a different statement from "current" and is printed as one (V1_SPEC §5).

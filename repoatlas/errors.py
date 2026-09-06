@@ -114,6 +114,51 @@ class IndexSchemaError(IndexUnavailableError):
     """
 
 
+class IndexNotRecognizedError(IndexSchemaError):
+    """The file at the index path is a valid SQLite database RepoAtlas does not own.
+
+    Distinct from :class:`IndexCorruptError`, and the distinction is the whole
+    point: the file is perfectly good SQLite, it simply belongs to something
+    else. Saying "corrupt" would send an operator to repair or delete a database
+    that has nothing wrong with it.
+
+    Raised only after ownership could not be established *positively* — no
+    RepoAtlas ``application_id``, and a schema that is not a state any committed
+    RepoAtlas migration produces. Absence of a name collision is not evidence of
+    ownership, so a foreign database is refused even when nothing in it would
+    have clashed (ARCHITECTURE.md §3).
+    """
+
+
+class IndexForeignApplicationError(IndexNotRecognizedError):
+    """The database carries another application's ``application_id``.
+
+    The strongest form of the refusal above: the file does not merely lack
+    RepoAtlas's mark, it carries someone else's. RepoAtlas never overwrites
+    another application's identity.
+    """
+
+
+class RepositoryRootConflictError(RepoAtlasError):
+    """A root change would give one identity to two different repositories.
+
+    Raised by ``init`` when a discovered repository's slug is already held by a
+    registered repository **that is still present on disk at its old path**. That
+    combination is not a relocation: both directories exist, so RepoAtlas is being
+    asked to decide which of two live working trees owns one identity, and it has
+    no evidence with which to decide (ARCHITECTURE.md §3).
+
+    Refusing is the whole point. Rewriting the registered row because the slugs
+    match would silently merge two unrelated repositories and attribute the old
+    one's indexed facts to the new one's contents; letting the write proceed is
+    what produced ``UNIQUE constraint failed: repositories.slug`` as a traceback.
+    A slug collision is not by itself proof of relocation.
+
+    Nothing is written before this is raised — neither the repository rows nor the
+    configured root — so the workspace is left exactly as it was found.
+    """
+
+
 class MigrationError(RepoAtlasError):
     """A schema migration could not be applied (ARCHITECTURE.md §3).
 

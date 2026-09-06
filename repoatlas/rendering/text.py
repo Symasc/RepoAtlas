@@ -104,6 +104,17 @@ def _drift_notice(report: StatusReport) -> list[str]:
         )
     if report.missing_repositories:
         lines.extend(["", "No longer on disk:", *_named(report.missing_repositories)])
+    if report.conflicting_repositories:
+        lines.extend(
+            [
+                "",
+                "Already registered elsewhere, at a path that still exists:",
+                *_named(report.conflicting_repositories),
+                "",
+                "These are not indexed. RepoAtlas will not give one identity to two",
+                "repositories; move or remove the other location, or use a separate index.",
+            ]
+        )
     lines.extend(_unreadable_notice(report.unreadable_paths))
     return lines
 
@@ -116,11 +127,14 @@ def _state_reason(report: StatusReport) -> str:
     all — the repository is not among them — so it is named here or nowhere.
     """
     new, gone = len(report.new_repositories), len(report.missing_repositories)
+    clashing = len(report.conflicting_repositories)
     reasons: list[str] = []
     if new:
         reasons.append(f"{new} repositor{'y' if new == 1 else 'ies'} not indexed")
     if gone:
         reasons.append(f"{gone} no longer on disk")
+    if clashing:
+        reasons.append(f"{clashing} already registered elsewhere")
     if not reasons:
         return report.index_state
     return f"{report.index_state} — {', '.join(reasons)}"

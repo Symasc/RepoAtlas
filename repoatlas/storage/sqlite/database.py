@@ -9,7 +9,15 @@ from pathlib import Path
 
 from repoatlas.errors import IndexSchemaError
 from repoatlas.storage.sqlite.errors import opening_errors, storage_errors
-from repoatlas.storage.sqlite.migrator import apply_migrations, load_migrations, user_version
+from repoatlas.storage.sqlite.identity import Ownership, establish
+from repoatlas.storage.sqlite.migrator import (
+    APPLICATION_ID,
+    application_id,
+    apply_migrations,
+    load_migrations,
+    stamp_application_id,
+    user_version,
+)
 
 SCHEMA_VERSION = 5
 
@@ -25,10 +33,15 @@ BUSY_TIMEOUT_MS = 10_000
 class Database:
     """Owns the connection. The only object that opens SQLite."""
 
-    def __init__(self, connection: sqlite3.Connection, path: Path) -> None:
+    def __init__(
+        self, connection: sqlite3.Connection, path: Path, *, unmarked: bool = False
+    ) -> None:
         self.connection = connection
         self.path = path
         self._depth = 0
+        #: A pre-marker RepoAtlas index, recognized by schema shape and not yet
+        #: carrying the identity marker — see :meth:`_claim`.
+        self._unmarked = unmarked
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -64,10 +77,41 @@ class Database:
 
         self._depth = 1
         try:
+            self._claim()
             with storage_errors(self.path), self.connection:
                 yield self.connection
         finally:
             self._depth = 0
+
+    def _claim(self) -> None:
+        """Mark a recognized pre-marker index, at the first write and not before.
+
+        A legacy index already at the current schema version has no migration to
+        ride along with, so the marker has to be written by something else. That
+        something must not be a *read*: ``status`` exists to report whether the
+        workspace changed, and a command that rewrites the database in order to
+        answer that is no longer answering it (V1_SPEC §12). The same rule keeps a
+        read-only historical index readable instead of failing on a metadata write
+        nobody asked for.
+
+        So the write happens exactly where a write was already happening — the
+        first application transaction, which only ``sync``, ``init`` and the
+        linker open. It is serialized with ``BEGIN IMMEDIATE`` like a migration,
+        rather than joining the caller's transaction, because it is not part of
+        the caller's work: it is a standalone, idempotent assertion about a
+        database whose identity was already proven at open, and it stays true
+        whether or not the work that follows commits.
+
+        On a read-only database this raises, and truthfully — the command that got
+        here was going to write regardless (ARCHITECTURE.md §3).
+        """
+        if not self._unmarked:
+            return
+        self._unmarked = False
+        with storage_errors(self.path):
+            self.connection.execute("BEGIN IMMEDIATE")
+            stamp_application_id(self.connection)
+            self.connection.commit()
 
     @property
     def in_transaction(self) -> bool:
@@ -110,23 +154,31 @@ def open_database(path: Path) -> Database:
     escaping ``sqlite3`` exception: :func:`opening_errors` translates the ones
     that are recognized (V1_SPEC §4) and passes on the ones that are not.
 
-    The version check runs **before** anything writes. ``PRAGMA journal_mode``
-    changes the file header, so an index written by a newer RepoAtlas has to be
-    refused while the connection is still read-only in effect — refusing after
-    modifying it would be a downgrade by one pragma.
+    **Ownership is established before the version check, and both before anything
+    writes.** ``PRAGMA journal_mode`` changes the file header — measured — so a
+    database RepoAtlas does not own, and one written by a newer RepoAtlas, both
+    have to be refused while the connection has still only read. Refusing
+    afterwards would mean the refusal itself had modified the file.
     """
     with opening_errors(path):
         path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(path, isolation_level="DEFERRED")
         connection.row_factory = sqlite3.Row
         connection.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+        ownership = _establish_ownership(connection, path)
         _refuse_future_schema(connection, path)
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA synchronous = NORMAL")
         _apply_migrations(connection)
+        # Whether the marker still has to be written is asked of the database
+        # rather than inferred from `ownership`: a legacy index below the current
+        # version was marked by the migration that just ran, one already at the
+        # current version had no migration to ride along with, and reading the
+        # header is exact where reasoning about which case happened would not be.
+        unmarked = ownership is Ownership.LEGACY and application_id(connection) != APPLICATION_ID
 
-    database = Database(connection, path)
+    database = Database(connection, path, unmarked=unmarked)
     # Written only when it actually changes. Stamping it unconditionally made
     # *opening* the database a write, so `locate` and `status` competed for
     # SQLite's write lock with a running sync and could fail with "database is
@@ -159,3 +211,17 @@ def _refuse_future_schema(connection: sqlite3.Connection, path: Path) -> None:
             "Upgrade RepoAtlas, or point REPOATLAS_DB at a different index."
         ),
     )
+
+
+def _establish_ownership(connection: sqlite3.Connection, path: Path) -> Ownership:
+    """Refuse a database RepoAtlas cannot prove it owns, changing nothing.
+
+    See :mod:`repoatlas.storage.sqlite.identity`. The connection is closed before
+    the refusal escapes, so a caller that catches it leaves no handle open on a
+    file RepoAtlas has just declined to touch.
+    """
+    try:
+        return establish(connection, path, schema_version=SCHEMA_VERSION)
+    except BaseException:
+        connection.close()
+        raise
