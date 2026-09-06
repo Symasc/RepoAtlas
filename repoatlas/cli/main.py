@@ -297,6 +297,12 @@ def _report_retrieval(evidence: EvidenceSet) -> None:
         f"{trace.associative_candidates} associative, ~{trace.token_estimate} tokens",
         err=True,
     )
+    if trace.named_paths:
+        # Which files the question identified by their whole path, and therefore
+        # which ones took precedence over every less specific match. Printed
+        # because "why is this first?" is otherwise unanswerable from the outside
+        # (ARCHITECTURE.md §10).
+        typer.echo(f"  named path(s): {', '.join(trace.named_paths)}", err=True)
     for stage in trace.stages:
         typer.echo(
             f"  {stage.name:<8} {stage.duration_ms:>8.2f}ms  "

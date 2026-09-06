@@ -47,6 +47,11 @@ class RetrievalTrace(BaseModel):
     graph_nodes_visited: int = 0
     deterministic_candidates: int = 0
     associative_candidates: int = 0
+    #: ``repository/path`` for each file the query identified by its whole
+    #: relative path. These are the candidates that take precedence over every
+    #: less specific match, so a review of *why* something ranked where it did
+    #: starts here (ARCHITECTURE.md §10).
+    named_paths: tuple[str, ...] = ()
     token_estimate: int = 0
 
     @property

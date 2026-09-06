@@ -18,6 +18,7 @@ performance can be measured later without changing anything structural
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, replace
 
 from repoatlas.config.settings import RetrievalSettings
@@ -28,6 +29,7 @@ from repoatlas.models.evidence import (
     EvidenceSet,
     EvidenceSource,
     EvidenceTier,
+    MatchClass,
 )
 from repoatlas.models.parsing import EdgeType
 from repoatlas.models.telemetry import RetrievalTrace, StageTiming, Stopwatch
@@ -37,7 +39,7 @@ from repoatlas.retrieval.ranking import (
     Reranker,
     apply_budget,
     deduplicate,
-    enforce_tier_order,
+    enforce_precedence,
     fuse,
 )
 from repoatlas.storage.protocols import ChunkHit, FileHit, VectorHit
@@ -247,16 +249,18 @@ class Retriever:
         stages.append(_recorded(watch))
 
         with Stopwatch("rerank", candidates_in=len(deduped)) as watch:
-            # The tier order is re-imposed on whatever comes back. The reranker is
-            # a seam for code that does not exist yet, and the guarantee of
-            # V1_SPEC §14 must hold at this boundary rather than depend on every
-            # future implementation choosing to honour it.
+            # Tier order and path specificity are re-imposed on whatever comes
+            # back. The reranker is a seam for code that does not exist yet, and
+            # the guarantees of V1_SPEC §14 must hold at this boundary rather than
+            # depend on every future implementation choosing to honour them.
             reordered = self._reranker.rerank(question, deduped)
-            reranked = enforce_tier_order(reordered)
+            reranked = enforce_precedence(reordered)
             watch.candidates_out = len(reranked)
             watch.detail = type(self._reranker).__name__
             if [c.tier for c in reordered] != [c.tier for c in reranked]:
                 watch.detail += " (tier order restored)"
+            elif [c.identity for c in reordered] != [c.identity for c in reranked]:
+                watch.detail += " (path specificity restored)"
         stages.append(_recorded(watch))
 
         with Stopwatch("budget", candidates_in=len(reranked)) as watch:
@@ -287,6 +291,13 @@ class Retriever:
                 associative_candidates=sum(
                     1 for c in bounded if c.tier is EvidenceTier.ASSOCIATIVE
                 ),
+                named_paths=tuple(
+                    dict.fromkeys(
+                        f"{c.repository}/{c.path}"
+                        for c in bounded
+                        if c.match is MatchClass.EXACT_PATH
+                    )
+                ),
                 token_estimate=tokens,
             ),
         )
@@ -309,6 +320,11 @@ class Retriever:
                             hit,
                             EvidenceSource.EXACT,
                             EvidenceTier.DETERMINISTIC,
+                            # The literal occurs *in* this span. That is a
+                            # different claim from "this file's path is that
+                            # literal", and conflating them is how a note
+                            # mentioning `src/config.py` outranked the file.
+                            MatchClass.EXACT_CONTENT,
                             f"contains {term}",
                         )
                         for hit in self._search.search_literal(term, scope, self._limits.per_source)
@@ -338,7 +354,10 @@ class Retriever:
                     lists.append(
                         [
                             self._chunk_candidate(
-                                hit, EvidenceSource.LEXICAL, EvidenceTier.ASSOCIATIVE
+                                hit,
+                                EvidenceSource.LEXICAL,
+                                EvidenceTier.ASSOCIATIVE,
+                                MatchClass.LEXICAL,
                             )
                             for hit in hits
                         ]
@@ -410,6 +429,7 @@ class Retriever:
                             score=hit.score,
                             source=EvidenceSource.SYMBOL,
                             tier=EvidenceTier.DETERMINISTIC,
+                            match=MatchClass.EXACT_NAME,
                             description=f"defines {hit.name}",
                             entity_id=hit.entity_id,
                         )
@@ -441,6 +461,7 @@ class Retriever:
                             tier=(
                                 EvidenceTier.DETERMINISTIC if exact else EvidenceTier.ASSOCIATIVE
                             ),
+                            match=MatchClass.EXACT_NAME if exact else MatchClass.LEXICAL,
                             description=f"defines {hit.name}",
                             entity_id=hit.entity_id,
                         )
@@ -472,6 +493,12 @@ class Retriever:
         would be RepoAtlas guessing. Ranking still says which is most specific: a
         full path precedes a trailing sub-path, which precedes a bare basename.
 
+        That grading leaves this stage on the candidate itself, as a
+        :class:`MatchClass`, and not only in the description. It used to leave as
+        prose, which fusion cannot read — so a file named by its whole path and a
+        file that merely shares its basename arrived downstream indistinguishable,
+        and the one with more retrieval-stage votes won (ARCHITECTURE.md §10).
+
         The second return value is the set of terms this stage *proved to exist*.
         Suppression consumes it, which is the whole reason the stage runs this
         early — see :meth:`_suppress_associative`.
@@ -499,14 +526,21 @@ class Retriever:
                     score=hit.score,
                     source=EvidenceSource.FILE,
                     tier=EvidenceTier.DETERMINISTIC,
+                    # The specificity the search index computed is carried here
+                    # rather than only into the human-readable description. It was
+                    # dropped at exactly this line, which is why fusion could no
+                    # longer tell an exact path from a shared basename.
+                    match=_MATCH_BY_SPECIFICITY[hit.specificity],
                     description=_file_reason(hit),
                     entity_id=hit.entity_id,
                 )
                 for hit in ordered
             ]
-            paths = sum(1 for hit in ordered if hit.specificity < 2)
+            graded = Counter(hit.specificity for hit in ordered)
             watch.candidates_out = len(candidates)
-            watch.detail = f"{paths} exact path, {len(ordered) - paths} exact basename"
+            watch.detail = (
+                f"{graded[0]} exact path, {graded[1]} exact sub-path, {graded[2]} exact basename"
+            )
         stages.append(_recorded(watch))
         return candidates, {hit.term for hit in ordered}
 
@@ -682,6 +716,7 @@ class Retriever:
                 score=1.0,
                 source=EvidenceSource.GRAPH,
                 tier=EvidenceTier.DETERMINISTIC,
+                match=MatchClass.RELATED,
                 # The edge that reached it is better evidence than what it
                 # declares: the reader asked about a relationship.
                 description=(reason or {}).get(row.entity_id) or row.description,
@@ -708,6 +743,7 @@ class Retriever:
         hit: ChunkHit,
         source: EvidenceSource,
         tier: EvidenceTier,
+        match: MatchClass,
         description: str = "",
     ) -> EvidenceCandidate:
         return EvidenceCandidate(
@@ -720,6 +756,7 @@ class Retriever:
             score=hit.score,
             source=source,
             tier=tier,
+            match=match,
             description=description,
         )
 
@@ -735,8 +772,19 @@ class Retriever:
             score=hit.score,
             source=EvidenceSource.SEMANTIC,
             tier=EvidenceTier.ASSOCIATIVE,
+            match=MatchClass.SIMILAR,
             description="semantically similar",
         )
+
+
+#: ``FileHit.specificity`` as a match class. The search index grades an identity
+#: match 0/1/2 — whole path, trailing sub-path, basename — and this is where that
+#: grade becomes part of the candidate rather than only part of its description.
+_MATCH_BY_SPECIFICITY = {
+    0: MatchClass.EXACT_PATH,
+    1: MatchClass.EXACT_SUBPATH,
+    2: MatchClass.EXACT_BASENAME,
+}
 
 
 def _file_reason(hit: FileHit) -> str:

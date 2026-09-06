@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from repoatlas.models.evidence import EvidenceSet, EvidenceTier
+from repoatlas.models.evidence import EvidenceSet, EvidenceTier, MatchClass
 from repoatlas.services.query_service import QueryIntent, locate, retrieve_for
 from repoatlas.services.workspace import Workspace
 
@@ -46,12 +46,23 @@ class Case:
     forbidden_evidence: tuple[str, ...] = ()
     expect_unknown: bool = False
     expect_cross_repo: bool = False
+    #: The :class:`MatchClass` every ``required_evidence`` path must come back
+    #: with, by name (``exact_path``, ``exact_basename``, …). Written for cases
+    #: whose point is *how* the file was identified rather than only whether it
+    #: was found: a query naming a whole path that comes back as a basename match
+    #: has been answered by coincidence, and recall alone cannot see the
+    #: difference.
+    expect_match: str = ""
     recall_k: int = 5
     notes: str = ""
 
     @property
     def is_global(self) -> bool:
         return self.context_repo == "__root__"
+
+    @property
+    def required_match(self) -> MatchClass | None:
+        return MatchClass[self.expect_match.upper()] if self.expect_match else None
 
 
 @dataclasses.dataclass
@@ -64,6 +75,17 @@ class Outcome:
     repositories: frozenset[str]
     deterministic_before_associative: bool
     evidence: EvidenceSet
+    #: Strongest match class returned for each required path, or ``None`` if the
+    #: path did not come back at all.
+    matches: dict[str, MatchClass | None] = dataclasses.field(default_factory=dict)
+
+    @property
+    def match_correct(self) -> bool | None:
+        """Whether every required path was identified the way the case expects."""
+        expected = self.case.required_match
+        if expected is None:
+            return None
+        return all(actual is expected for actual in self.matches.values())
 
     def recall_at(self, k: int) -> bool | None:
         """Whether every required path appears within the first ``k``.
@@ -124,6 +146,10 @@ def run_case(workspace: Workspace, root: Path, case: Case) -> Outcome:
         for required in case.required_evidence
     }
     tiers = [c.tier for c in evidence.candidates]
+    matches: dict[str, MatchClass | None] = {}
+    for required in case.required_evidence:
+        claimed = [c.match for c in evidence.candidates if f"{c.repository}/{c.path}" == required]
+        matches[required] = min(claimed) if claimed else None
     return Outcome(
         case=case,
         returned=returned,
@@ -132,6 +158,7 @@ def run_case(workspace: Workspace, root: Path, case: Case) -> Outcome:
         repositories=frozenset(c.repository for c in evidence.candidates),
         deterministic_before_associative=tiers == sorted(tiers),
         evidence=evidence,
+        matches=matches,
     )
 
 
@@ -157,7 +184,7 @@ def report(outcomes: Sequence[Outcome]) -> str:
     header = (
         f"{'category':<14}{'n':>4}"
         + "".join(f"{'r@' + str(k):>8}" for k in K_VALUES)
-        + f"{'forbid':>8}{'unknown':>9}{'x-repo':>8}{'tier':>7}"
+        + f"{'forbid':>8}{'unknown':>9}{'x-repo':>8}{'tier':>7}{'match':>8}"
     )
     lines = [header, "-" * len(header)]
 
@@ -173,12 +200,15 @@ def report(outcomes: Sequence[Outcome]) -> str:
         cross = [c for c in (o.cross_repo_correct for o in group) if c is not None]
         row += f"{_fraction(cross):>8}"
         row += f"{sum(1 for o in group if not o.deterministic_before_associative):>7}"
+        graded = [m for m in (o.match_correct for o in group) if m is not None]
+        row += f"{_fraction(graded):>8}"
         lines.append(row)
 
     lines.append("")
     lines.append(
         "forbid = cases returning forbidden evidence · "
-        "tier = deterministic-precedence violations · both must be 0"
+        "tier = deterministic-precedence violations · both must be 0 · "
+        "match = required evidence returned with the expected match specificity"
     )
     return "\n".join(lines)
 
@@ -198,6 +228,13 @@ def failures(outcomes: Sequence[Outcome]) -> list[str]:
             problems.append(
                 f"{case.id}: expected cross-repository evidence, got {sorted(outcome.repositories)}"
             )
+        if outcome.match_correct is False:
+            wrong = {
+                path: (match.name.lower() if match else None)
+                for path, match in outcome.matches.items()
+                if match is not case.required_match
+            }
+            problems.append(f"{case.id}: expected match {case.expect_match}, got {wrong}")
         missed = {
             path: rank
             for path, rank in outcome.ranks.items()
@@ -216,7 +253,10 @@ def _detail(outcome: Outcome) -> str:
         candidate = outcome.evidence.candidates[index - 1]
         mark = "*" if path in outcome.case.required_evidence else " "
         tier = "D" if candidate.tier is EvidenceTier.DETERMINISTIC else "A"
-        lines.append(f"   {mark}{index:>3}. [{tier}] {path}:{candidate.line_start}")
+        lines.append(
+            f"   {mark}{index:>3}. [{tier}] {candidate.match.name.lower():<14} "
+            f"{path}:{candidate.line_start}"
+        )
     if not outcome.returned:
         lines.append("       (no evidence)")
     return "\n".join(lines)
