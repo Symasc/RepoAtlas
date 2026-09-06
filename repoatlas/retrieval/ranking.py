@@ -30,12 +30,29 @@ So there are three ordering keys, not two, and each answers its own question:
 fused score    how strongly do the retrievers agree about it?
 ============== ==================================================================
 
-The specificity key is deliberately a **boundary rather than a gradient**: only a
-complete repository-relative path — the one spelling that identifies exactly one
-file and can mean nothing else — takes precedence, and everything below it is
-still ordered by agreement exactly as before. A gradient would have re-ranked the
-whole funnel on a signal nobody asked for; a boundary answers the one question
-that was actually ambiguous. See :func:`fuse`.
+The specificity key is deliberately a **set of boundaries rather than a
+gradient**, and there are exactly two of them:
+
+============================ =====================================================
+complete repository-relative the one spelling that identifies exactly one file and
+path (`EXACT_PATH`)          can mean nothing else
+component suffix path        an explicitly typed multi-component path matched on
+(`EXACT_SUBPATH`)            segment boundaries; explicit intent, but it can name
+                             several files
+============================ =====================================================
+
+Everything below them — a basename, an entity name, a content mention, a lexical
+or semantic neighbour — is still ordered by agreement exactly as before. A
+gradient over all eight classes would have re-ranked the whole funnel on a signal
+nobody asked for; these two boundaries answer the questions that were actually
+ambiguous.
+
+The second boundary was added because the first one alone left the same
+information loss one level down. ``locate api/config.py`` classified
+``services/api/config.py`` as `EXACT_SUBPATH` correctly — and then ranked it
+tenth, behind six chunks of a ``README.md`` that merely quotes the string
+``api/config.py`` two hundred times. The class was computed and then not used for
+anything, so a document *about* the file outranked the file. See :func:`fuse`.
 """
 
 from __future__ import annotations
@@ -81,18 +98,34 @@ class NoopReranker:
         return candidates
 
 
-#: What makes a candidate's *file* the one the query named. A candidate carries a
-#: match class of its own, but specificity is a property of the file: if the user
-#: spelled ``src/config.py``, then everything retrieved from ``src/config.py`` is
-#: about the file they named, and everything retrieved from ``tests/config.py`` is
-#: not. Anchoring the file rather than the single file-identity candidate is what
-#: keeps "why does src/config.py read DATABASE_URL?" answering with the assignment
-#: inside the named file rather than with the filename alone.
-_ANCHOR = MatchClass.EXACT_PATH
+#: Ordering positions for the specificity key. Three values, not eight: see the
+#: module docstring on why this is a set of boundaries rather than a gradient.
+_EXACT, _SUFFIX, _UNNAMED = 0, 1, 2
 
-#: Ordering positions for the specificity key. Two values, not eight: see the
-#: module docstring on why this is a boundary rather than a gradient.
-_NAMED, _UNNAMED = 0, 1
+#: The match classes that name a *file* rather than merely describe it, and the
+#: ordering position each earns. A candidate carries a match class of its own, but
+#: specificity is a property of the file: if the user spelled ``src/config.py``,
+#: then everything retrieved from ``src/config.py`` is about the file they named,
+#: and everything retrieved from ``tests/config.py`` is not. Anchoring the file
+#: rather than the single file-identity candidate is what keeps "why does
+#: src/config.py read DATABASE_URL?" answering with the assignment inside the
+#: named file rather than with the filename alone.
+#:
+#: Two positions, because the two classes are different claims. A complete
+#: repository-relative path identifies exactly one file and can mean nothing else.
+#: A component suffix identifies a file *shape* — ``api/config.py`` names every
+#: indexed file whose path ends on that boundary, which may be one file or five —
+#: so it is explicit intent without being proof of uniqueness, and it sits below
+#: exact identity and above everything the user did not spell.
+#:
+#: Nothing below `EXACT_SUBPATH` earns a position. A basename says what a file is
+#: called, not where it lives; an entity name, a content mention and a lexical or
+#: semantic neighbour are weaker still. They remain ordered by agreement, exactly
+#: as before.
+_ANCHORS = {
+    MatchClass.EXACT_PATH: _EXACT,
+    MatchClass.EXACT_SUBPATH: _SUFFIX,
+}
 
 
 def _key(candidate: EvidenceCandidate) -> _Key:
@@ -139,17 +172,25 @@ def fuse(
     retrievers, letting generated data outrank the answer purely by volume.
 
     Ordering is ``(tier, specificity, -score, tie-break)``. The specificity key
-    holds the one guarantee the score cannot express: **a candidate from the file
-    whose complete repository-relative path the query spelled outranks every
-    candidate from a file that was merely named less exactly** — a shared
-    basename, a symbol with a matching name, a lexical or semantic neighbour, or a
-    document that quotes the path. It is a rank position rather than a bonus, so
-    no quantity of agreement can add up to it, and it is applied strictly *inside*
-    a tier, so it can never lift a guess above a fact.
+    holds the guarantee the score cannot express: **a candidate from a file the
+    query named by path outranks every candidate from a file that was merely named
+    less exactly** — a shared basename, a symbol with a matching name, a lexical or
+    semantic neighbour, or a document that quotes the path. It is a rank position
+    rather than a bonus, so no quantity of agreement can add up to it, and it is
+    applied strictly *inside* a tier, so it can never lift a guess above a fact.
 
-    Everything the anchor does not touch is ordered exactly as before. When no
-    query names a whole path — the common case — every candidate sits on the same
-    side of the boundary and fusion is unchanged.
+    Two positions are anchored, in order: a complete repository-relative path, then
+    a component suffix path. The suffix position is explicit intent without a claim
+    of uniqueness — ``api/config.py`` may name ``services/api/config.py`` and
+    ``legacy/api/config.py`` both, and both are anchored. Ambiguity among them is
+    resolved *within* the class by the fused score, which is where the
+    primary-repository boost does its work: the candidate in the repository the
+    question was asked from sorts first, without either file being promoted over
+    the other by anything structural. RepoAtlas does not decide which one was meant.
+
+    Everything the anchors do not touch is ordered exactly as before. When no query
+    names a path — the common case — every candidate sits on the same side of both
+    boundaries and fusion is unchanged.
     """
     scores: dict[_Key, float] = {}
     tiers: dict[_Key, EvidenceTier] = {}
@@ -194,12 +235,12 @@ def fuse(
             if key[0] == primary_repository:
                 scores[key] += primary_boost
 
-    named = _named_files(matches)
+    anchored = _anchored_files(matches)
     ordered = sorted(
         scores,
         key=lambda key: (
             tiers[key],
-            _NAMED if key[:2] in named else _UNNAMED,
+            anchored.get(key[:2], _UNNAMED),
             -scores[key],
             _ordering(key),
         ),
@@ -212,14 +253,28 @@ def fuse(
     ]
 
 
-def _named_files(matches: Mapping[_Key, MatchClass]) -> frozenset[tuple[str, str]]:
-    """The ``(repository, path)`` pairs the query identified by their whole path.
+def _anchored_files(matches: Mapping[_Key, MatchClass]) -> dict[tuple[str, str], int]:
+    """``(repository, path)`` → ordering position, for every file the query named.
+
+    A file takes its **strongest** anchor. One reached both as a complete path and
+    as a component suffix was named completely, and the weaker reading of the same
+    evidence must not lower it — the same ``min`` rule fusion already applies to
+    tiers and match classes, for the same reason.
 
     Derived from the candidates themselves rather than passed in, which keeps
-    ``fuse`` a pure function of its input and makes the anchor independent of the
+    ``fuse`` a pure function of its input and makes the anchors independent of the
     order the stages appended their lists.
     """
-    return frozenset(key[:2] for key, match in matches.items() if match is _ANCHOR)
+    anchored: dict[tuple[str, str], int] = {}
+    for key, match in matches.items():
+        position = _ANCHORS.get(match)
+        if position is None:
+            continue
+        identity = key[:2]
+        current = anchored.get(identity)
+        if current is None or position < current:
+            anchored[identity] = position
+    return anchored
 
 
 def enforce_precedence(candidates: Sequence[EvidenceCandidate]) -> list[EvidenceCandidate]:
@@ -231,8 +286,11 @@ def enforce_precedence(candidates: Sequence[EvidenceCandidate]) -> list[Evidence
     seam, and a V2 cross-encoder is exactly the kind of component whose ranking is
     opaque. One that reordered across tiers would silently undo the rule the rest
     of the funnel is built on; one that reordered *within* a tier — which it is
-    explicitly allowed to do — could just as silently drop the file the user named
-    by its full path below one that merely shares its basename.
+    explicitly allowed to do — could just as silently drop a file the user named by
+    path below one that merely shares its basename or quotes it. Both anchored
+    positions are restored here, not only the exact-path one: a cross-encoder that
+    loves a README is exactly the component that would otherwise undo the suffix
+    boundary.
 
     Applying it before budgeting matters as much as applying it before returning:
     a hard token budget spent on embedding neighbours would starve deterministic
@@ -241,12 +299,19 @@ def enforce_precedence(candidates: Sequence[EvidenceCandidate]) -> list[Evidence
     ``sorted`` is stable, so within a tier and a specificity the incoming order —
     including whatever a reranker decided — is preserved exactly.
     """
-    named = frozenset(candidate.identity for candidate in candidates if candidate.match is _ANCHOR)
+    anchored: dict[tuple[str, str], int] = {}
+    for candidate in candidates:
+        position = _ANCHORS.get(candidate.match)
+        if position is None:
+            continue
+        current = anchored.get(candidate.identity)
+        if current is None or position < current:
+            anchored[candidate.identity] = position
     return sorted(
         candidates,
         key=lambda candidate: (
             candidate.tier,
-            _NAMED if candidate.identity in named else _UNNAMED,
+            anchored.get(candidate.identity, _UNNAMED),
         ),
     )
 
