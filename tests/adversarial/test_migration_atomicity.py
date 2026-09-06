@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from repoatlas.errors import MigrationError
+from repoatlas.errors import IndexNotRecognizedError, IndexSchemaError, MigrationError
 from repoatlas.storage.sqlite.database import SCHEMA_VERSION, open_database
 from repoatlas.storage.sqlite.migrator import (
     Migration,
@@ -374,11 +374,23 @@ def test_a_statement_failure_is_a_domain_error_not_a_raw_sqlite_error(tmp_path: 
     # Something else already owns the name the migration's index needs.
     connection.execute("CREATE TABLE idx_repositories_slug (x INTEGER)")
     connection.commit()
-    connection.close()
 
-    with pytest.raises(MigrationError) as caught:
+    try:
+        with pytest.raises(MigrationError) as caught:
+            apply_migrations(connection, load_migrations())
+        assert "migration 005" in str(caught.value).lower()
+    finally:
+        connection.close()
+    assert shape(path)["user_version"] == 4
+
+    # Through `open_database` this schema no longer reaches the migrator at all:
+    # a database carrying no RepoAtlas identity, whose shape is not one the
+    # committed migrations produce, is refused as unrecognized *before* anything
+    # writes. Both refusals are exit 3, and the earlier one is strictly stronger
+    # — the migrator's fires after `PRAGMA journal_mode = WAL` has already
+    # modified the header (ARCHITECTURE.md §3).
+    with pytest.raises(IndexSchemaError):
         open_database(path).close()
-    assert "migration 005" in str(caught.value).lower()
     assert shape(path)["user_version"] == 4
 
 
@@ -475,11 +487,17 @@ def test_an_unrecognized_schema_is_refused_rather_than_forced(tmp_path: Path) ->
     # interrupted migration produces this.
     connection.execute("ALTER TABLE repositories ADD COLUMN slug INTEGER NOT NULL DEFAULT 0")
     connection.commit()
-    connection.close()
 
-    with pytest.raises(MigrationError):
-        open_database(path).close()
+    try:
+        with pytest.raises(MigrationError):
+            apply_migrations(connection, load_migrations())
+    finally:
+        connection.close()
     assert shape(path)["user_version"] == 4, "a refused migration must change nothing"
+
+    with pytest.raises(IndexNotRecognizedError):
+        open_database(path).close()
+    assert shape(path)["user_version"] == 4
 
 
 def test_an_index_with_a_different_definition_is_refused(tmp_path: Path) -> None:
@@ -488,9 +506,15 @@ def test_an_index_with_a_different_definition_is_refused(tmp_path: Path) -> None
     connection.execute("ALTER TABLE repositories ADD COLUMN slug TEXT NOT NULL DEFAULT ''")
     connection.execute("CREATE INDEX idx_repositories_slug ON repositories (name)")
     connection.commit()
-    connection.close()
 
-    with pytest.raises(MigrationError):
+    try:
+        with pytest.raises(MigrationError):
+            apply_migrations(connection, load_migrations())
+    finally:
+        connection.close()
+    assert shape(path)["user_version"] == 4
+
+    with pytest.raises(IndexNotRecognizedError):
         open_database(path).close()
     assert shape(path)["user_version"] == 4
 

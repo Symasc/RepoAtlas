@@ -160,6 +160,31 @@ class SqliteRepositoryStore:
                 "UPDATE repositories SET slug = ? WHERE id = ? AND slug = ''", (slug, repo_id)
             )
 
+    def relocate(self, repo_id: int, path: Path) -> None:
+        """Move a registered repository to a new canonical path, keeping its identity.
+
+        Deliberately *not* folded into :meth:`upsert`. ``upsert`` keys on the path,
+        which is exactly the assumption that breaks when the managed root moves:
+        the same repository arrives with a path the table has never seen, so an
+        insert is attempted and the slug it still holds collides. Overloading
+        ``upsert`` with identity migration would hide that decision inside a method
+        whose contract is "insert or update by path"; a caller that means to
+        relocate a repository should have to say so.
+
+        Only the location changes. The row id is preserved because ``files``,
+        ``entities`` and every fact keyed by ``repo_id`` reference it, and the slug
+        is preserved because entity keys are built from it — a relocation that
+        renumbered either would strand the facts it was supposed to carry across
+        (ARCHITECTURE.md §3). Absolute location is mutable metadata; identity is
+        not.
+
+        Idempotent, and safe to call inside a caller's transaction: the whole
+        repository set must relocate as one unit, so the caller opens a single
+        transaction and every row moves within it (ARCHITECTURE.md §3).
+        """
+        with self._db.transaction() as conn:
+            conn.execute("UPDATE repositories SET path = ? WHERE id = ?", (str(path), repo_id))
+
     def get_by_path(self, path: Path) -> Repository | None:
         row = self._db.execute("SELECT * FROM repositories WHERE path = ?", (str(path),)).fetchone()
         return None if row is None else self._row_to_repository(row)

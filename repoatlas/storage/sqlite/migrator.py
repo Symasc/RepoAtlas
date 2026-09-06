@@ -182,9 +182,48 @@ def load_migrations() -> list[Migration]:
     return sorted(found, key=lambda m: m.version)
 
 
+#: RepoAtlas's registered value for SQLite's ``application_id`` header field —
+#: the big-endian encoding of the ASCII bytes ``RPAT``, which is the convention
+#: SQLite's own "application file format" guidance uses for the registry in
+#: ``magic.txt``. It is a *constant*, never derived and never configurable: a
+#: value that could vary would prove nothing about who wrote the file.
+#:
+#: The range is not a free choice. ``application_id`` is a **signed 32-bit**
+#: field, and SQLite silently stores ``0`` for anything outside it — measured:
+#: setting ``2**31`` reads back ``0``, which would leave RepoAtlas quietly
+#: unmarked. ``0x52504154`` is 1380991316, comfortably inside.
+APPLICATION_ID = 0x52504154
+
+
 def user_version(connection: sqlite3.Connection) -> int:
     row = connection.execute("PRAGMA user_version").fetchone()
     return int(row[0]) if row else 0
+
+
+def application_id(connection: sqlite3.Connection) -> int:
+    """The database's ``application_id`` header field. ``0`` on an unclaimed file.
+
+    A pure read: measured to leave the file byte-identical and to create no
+    ``-wal``/``-shm`` sibling, which is what makes it usable as the *first*
+    question asked of a database RepoAtlas may turn out not to own.
+    """
+    row = connection.execute("PRAGMA application_id").fetchone()
+    return int(row[0]) if row else 0
+
+
+def stamp_application_id(connection: sqlite3.Connection) -> None:
+    """Claim the database as a RepoAtlas index.
+
+    Idempotent, and transactional: measured to roll back with its enclosing
+    transaction and to stay invisible to other connections until that transaction
+    commits. That is what lets identity and schema land as one state change
+    rather than two (ARCHITECTURE.md §3).
+
+    ``PRAGMA`` takes no bound parameters — SQLite rejects ``PRAGMA
+    application_id = ?`` as a syntax error — so the value is interpolated. It is
+    a module constant of type ``int``, never anything the caller supplies.
+    """
+    connection.execute(f"PRAGMA application_id = {APPLICATION_ID:d}")
 
 
 def _object_sql(connection: sqlite3.Connection, name: str) -> str | None:
@@ -370,6 +409,50 @@ def resume_point(
     )
 
 
+def recognizes(connection: sqlite3.Connection, version: int, migrations: list[Migration]) -> bool:
+    """Whether the live schema is a state RepoAtlas's committed migrations produce.
+
+    The ownership question for a database that carries no marker: an index
+    written before RepoAtlas claimed an ``application_id`` has to be recognized by
+    *shape*, and nothing weaker will do. "It has a ``repositories`` table" is not
+    proof — another application may have one — so the whole schema is compared,
+    object by object and column by column, against the schema the committed
+    ``.sql`` files actually produce.
+
+    Two states count, and only two. The complete schema at ``version``, which is
+    what an ordinary older index looks like; and a **prefix** of the next
+    migration applied onto it, which is what a database damaged by the
+    pre-atomicity implementation looks like (ARCHITECTURE.md §3). Anything else —
+    a column of the wrong type, an extra table, a missing index, the right
+    objects under a version that never produced them — is not a RepoAtlas schema,
+    and RepoAtlas refuses to write to it.
+
+    The comparison is :func:`schema_fingerprint` against a scratch database built
+    by running the real migrations, so this cannot drift from the schema it
+    authorizes. There is no second list of table names anywhere.
+    """
+    if version < 0 or not migrations or version > migrations[-1].version:
+        return False
+    live = schema_fingerprint(connection)
+    scratch = _scratch_at(version, migrations)
+    try:
+        if schema_fingerprint(scratch) == live:
+            return True
+        pending = next((m for m in migrations if m.version == version + 1), None)
+        if pending is None:
+            return False
+        for statement in pending.statements:
+            try:
+                scratch.execute(statement)
+            except sqlite3.Error:
+                return False
+            if schema_fingerprint(scratch) == live:
+                return True
+        return False
+    finally:
+        scratch.close()
+
+
 def apply_migrations(connection: sqlite3.Connection, migrations: list[Migration]) -> None:
     """Bring the schema up to date, one atomic version transition at a time.
 
@@ -401,6 +484,13 @@ def _apply_one(
         if migration.version <= user_version(connection):
             connection.rollback()
             return
+
+        # Identity is claimed by the same transaction that advances the schema,
+        # so the two can never disagree: a process killed here leaves either the
+        # previous version unmarked, or this version marked. There is no window
+        # in which a database claims to be a RepoAtlas index while holding a
+        # schema no migration produced (ARCHITECTURE.md §3).
+        stamp_application_id(connection)
 
         start = resume_point(connection, migration, migrations)
         for statement in migration.statements[start:]:

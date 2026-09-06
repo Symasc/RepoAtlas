@@ -130,6 +130,7 @@ def status(workspace: Workspace, context: RepositoryContext) -> StatusReport:
         last_sync=max(last_syncs) if last_syncs else None,
         new_repositories=tuple(c.slug for c in drift.added) if drift else (),
         missing_repositories=tuple(r.slug or r.name for r in drift.missing) if drift else (),
+        conflicting_repositories=tuple(c.candidate.slug for c in drift.conflicts) if drift else (),
         unreadable_paths=drift.unreadable if drift else (),
         index_state=overall,
     )

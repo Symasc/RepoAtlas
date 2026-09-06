@@ -243,7 +243,7 @@ sensibly retry, where a runtime error is not.
 
 #### What exit 3 covers, and what it does not
 
-Exit 3 means *there is no index this command can use*. Four distinct states share it, and the message is what
+Exit 3 means *there is no index this command can use*. Five distinct states share it, and the message is what
 tells them apart, because the remedy differs in each:
 
 | State | Message says | Remedy |
@@ -252,9 +252,16 @@ tells them apart, because the remedy differs in each:
 | Corrupt | the file is not a database, or its image is malformed | move it aside and re-`init` |
 | Inaccessible | the index cannot be read or written | fix the path or the permissions |
 | Unsupported schema | it was written by a newer RepoAtlas, is missing a required object, or is a shape no migration produces | match the build, or start a fresh index |
+| **Not ours** | the file is a valid SQLite database that is not a RepoAtlas index, or belongs to another application | point `REPOATLAS_DB` elsewhere, or move the file aside |
 
 An inaccessible index is never described as corrupt. A database whose permissions are merely wrong is intact, and
 telling an operator to replace it would destroy a healthy index.
+
+A database RepoAtlas does not own is never described as corrupt either, and the distinction is not cosmetic: it is
+perfectly good SQLite belonging to something else, and "corrupt" would send an operator to repair or discard a file
+with nothing wrong with it. The message names the *path* and never the contents — the likeliest cause is a
+`REPOATLAS_DB` pointing at the wrong file, and a diagnostic that helpfully listed the tables would disclose the
+schema of whatever that turned out to be.
 
 **Exit 3 is not a catch-all.** An unexpected exception — a `TypeError`, a bug in a parser, a SQLite result code
 RepoAtlas has not positively identified as an index condition — stays exit 1. Reporting a defect as "your index is
@@ -267,6 +274,51 @@ repository-context resolution.
 
 **RepoAtlas never repairs, replaces, renames or deletes an index automatically**, including during `init`. A
 refused database is left byte-for-byte as it was found.
+
+#### The index is a file RepoAtlas must prove it owns
+
+The configured index path is a path to *a file*, and nothing guarantees that file is RepoAtlas's. Before this was
+enforced, a SQLite database containing a `payroll` table and `user_version = 0` was read as "a fresh RepoAtlas
+database awaiting its first migration": `repoatlas init` created twenty-one tables in it, ran every migration and
+stamped the schema version. No foreign row was destroyed, because no table name happened to collide.
+
+> **Invariant.** `user_version` is a schema version, not proof of database ownership.
+
+> **Invariant.** A non-empty SQLite database is never mutated unless RepoAtlas identity is already present, or its
+> schema is conclusively recognized as a committed historical RepoAtlas schema.
+
+> **Invariant.** Unknown SQLite state is refused before identity assignment or migration.
+
+> **Invariant.** Read commands do not write ownership metadata merely to upgrade a legacy index.
+
+> **Invariant.** Refusing a foreign database is byte-preserving: the file, its `user_version`, its `application_id`
+> and its sibling files are exactly as they were found.
+
+Identity is `PRAGMA application_id`, SQLite's own header field for naming the format a file belongs to. It is asked
+about *before* `user_version`, because the two answer different questions — "is this a RepoAtlas index?" and "which
+RepoAtlas schema is it?" — and only the first licenses a write.
+
+| The file at the index path | RepoAtlas |
+|---|---|
+| does not exist | creates it, claims it, initializes the schema |
+| is zero bytes | initializes it — SQLite reads zero bytes as an empty database, and it holds no foreign state |
+| is valid SQLite with no user objects | initializes it — an empty container has no owner to displace |
+| carries RepoAtlas's `application_id` | opens it, migrating if the schema version is behind |
+| carries another application's `application_id` | **refuses**, unchanged |
+| is unmarked, and its schema is exactly a committed RepoAtlas schema | recognizes it, and marks it on the next write |
+| is unmarked, and its schema is anything else | **refuses**, unchanged |
+| is stamped past this build's schema version | **refuses**, unchanged (the existing rule) |
+| is not a SQLite database at all | **refuses** as corrupt, unchanged (the existing rule) |
+
+"No user objects" excludes SQLite's own reserved `sqlite_*` bookkeeping and the connection's temporary objects, and
+includes views, indexes and triggers — a database whose only object is a view has no tables and is plainly not empty.
+
+**Historical indexes.** Every RepoAtlas index written before identity existed carries no marker, and none of them
+may suddenly read as foreign. They are recognized by schema *shape*, compared in full against the states the
+committed migrations actually produce — a shared table name is never evidence — and this includes the partially
+applied migration Pass 2 recovers from. A recognized index is marked by the next command that writes, never by a
+read: `status` on a pre-marker index leaves it byte-identical, and a read-only historical index stays readable
+rather than failing on a metadata write nobody asked for.
 
 ### Constraints
 
@@ -386,6 +438,41 @@ Two invariants follow, and both are asserted in the adversarial suite:
 A repository that is moved or renamed is a removal plus a discovery, not the same repository at a new path; the
 removed identity must not survive anywhere. Where a display name is genuinely ambiguous — in `repos`, in evidence,
 in `--repo` — output disambiguates and selection refuses rather than choosing. Ambiguity is reported, never resolved.
+
+### Moving the managed root
+
+The managed root may be renamed or moved. Re-running `init` against its new location reconciles the registered
+repositories to it rather than registering a second copy of each.
+
+A repository is identified by its path relative to the managed root, and moving the root does not change that: a
+repository at `service-a` under the old root is the same repository at `service-a` under the new one. Its database
+row, its identity and its indexed facts are carried across; only its recorded location changes.
+
+| The root you point `init` at | RepoAtlas |
+|---|---|
+| the same root as before | reconciles as usual; no relocation is considered |
+| the root, renamed or moved, original gone | **relocates** every repository, keeping identities and indexed facts |
+| a copy of the root, original deleted | **relocates** — a copied-then-deleted workspace is still a move |
+| a copy of the root, **original still present** | **refuses**, naming both locations, and changes nothing |
+| a root whose repositories share slugs with unrelated registered ones, originals gone | relocates the rows and **replaces their contents** — `init` reindexes, so no stale fact is reported as current |
+| a root in which a repository moved internally | not a relocation: the slug changed, so the old identity is retired and the new one discovered |
+
+**Two live directories are never merged.** If a repository is registered at a path that still exists, and the root
+being initialized contains a different repository with the same root-relative identity, RepoAtlas refuses. Both
+directories are real, both claim one identity, and nothing in the identity distinguishes them — so choosing is the
+operator's, not RepoAtlas's. The message names the registered path, the discovered path and the identity they are
+competing for, exits non-zero, and leaves the index and the configured root exactly as they were.
+
+**A relocation is all-or-nothing.** Every repository in the set moves in one transaction, and the configured root
+is only rewritten once that transaction has committed. There is no state in which some repositories point at the
+old root and some at the new one, and no state in which the configuration names one root while the index names the
+other. An interrupted relocation leaves the workspace wholly at the old root, and re-running `init` reaches the
+same result.
+
+**Freshness is not assumed.** `init` reindexes what it discovers, so a relocated repository whose contents also
+changed is brought up to date in the same run: modified, added and deleted files, a different HEAD, a new branch
+and uncommitted changes are all detected normally. Relocation rebinds *where* a repository is; it never asserts
+that its contents are unchanged.
 
 ### Default exclusions
 
