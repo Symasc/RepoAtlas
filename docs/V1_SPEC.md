@@ -537,6 +537,48 @@ Ignore precedence, most specific last:
 built-in defaults → .gitignore (via git) → .repoatlasignore → secret patterns (§17, always applied)
 ```
 
+**`.repoatlasignore` is a RepoAtlas language with one matching policy, and the host operating system is not part
+of it.** An ignore decision is a function of two strings — the pattern, and the canonical repository-relative path
+— and of nothing else. It does not consult the filesystem, the current directory, the locale, or the platform's
+path conventions.
+
+| Rule | Behaviour |
+|---|---|
+| case | **case-sensitive on every platform, Windows included** |
+| separator | `/` only. A backslash is an ordinary path character, never a separator |
+| paths | repository-relative and already canonical. Absolute paths never reach matching, so a Windows drive letter cannot |
+| `*` | any run of characters, `/` included |
+| `?` | exactly one character |
+| `[abc]`, `[a-z]`, `[!a-z]` | character classes, compared as written |
+| `#` | a comment, at the start of a line |
+| `!` | re-admits a path a previous pattern excluded |
+| trailing `/` | matches the directory and everything beneath it |
+| leading `/` | anchors the pattern to the repository root |
+| unterminated `[` | matched literally |
+
+Case-sensitive because the paths are: Git treats them as bytes, a repository may legitimately contain both `Foo.py`
+and `foo.py`, and a user writing a pattern on Linux gets what gitignore would give them. It is a *textual* policy,
+not a filesystem-lookup policy. A Windows checkout may physically prevent some case-distinct combinations from
+existing side by side; that constrains the tree, not the meaning of the pattern language.
+
+Two nearby policies are deliberately different and are not merged:
+
+- **built-in secret filenames** (§17) are matched case-**in**sensitively, because `.ENV` is a dotenv file. That is
+  security policy, and it cannot be negated;
+- **built-in directory exclusions** (`node_modules`, `.venv`, …) are an exact match on a path component, so
+  `vendor` is excluded and `Vendor` is not.
+
+Four invariants:
+
+> Ignore decisions are functions of the pattern and the canonical repository-relative path, not the host operating
+> system.
+
+> Filesystem case-insensitivity does not implicitly broaden `.repoatlasignore` patterns.
+
+> Discovery and scanning use the same ignore semantics — and so do the primary and fallback enumerators.
+
+> Changing platforms does not change the logical RepoAtlas index of the same repository tree.
+
 ### Repository metadata
 
 Track at least:
