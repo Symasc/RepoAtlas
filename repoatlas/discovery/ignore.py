@@ -3,9 +3,16 @@
 Two systems live here, and keeping them apart is the point:
 
 **User preference** — ``.repoatlasignore``, in :class:`IgnoreRules`. gitignore-like
-semantics, including negation, and **case-sensitive**, because that is what
-gitignore does on a case-sensitive filesystem and what the user wrote the file
-expecting.
+semantics, including negation, and **case-sensitive on every platform**, because
+that is what gitignore does on a case-sensitive filesystem and what the user
+wrote the file expecting.
+
+This is a RepoAtlas language, so its meaning comes from RepoAtlas and not from
+the host: an ignore decision is a function of the pattern and the canonical
+repository-relative path, and of nothing else. Separators are ``/``, a backslash
+is an ordinary path character, and matching consults no filesystem, no locale
+and no platform path conventions. See :func:`_compile` for what that cost, and
+what it replaced.
 
 **Security policy** — the built-in obvious-secret filenames, in
 :mod:`repoatlas.security`. Not a preference: it cannot be negated, cannot be
@@ -28,6 +35,7 @@ or logged.
 from __future__ import annotations
 
 import fnmatch
+import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -49,9 +57,39 @@ MAX_IGNORE_BYTES = 1 << 20
 __all__ = ["IGNORE_FILENAME", "MAX_IGNORE_BYTES", "IgnoreRules", "is_secret_path"]
 
 
+def _compile(pattern: str) -> re.Pattern[str]:
+    """One glob pattern as a host-independent regular expression.
+
+    This exists because ``fnmatch.fnmatch`` does not. It runs both the name and
+    the pattern through ``os.path.normcase``, which is ``ntpath.normcase`` on
+    Windows — and that does two things to a ``.repoatlasignore`` pattern:
+    lowercases it, and rewrites ``/`` to ``\\``. The same pattern file and the
+    same repository therefore produced *different indexes on different
+    operating systems*: ``Src/**`` ignored ``src/main.py`` on Windows and not on
+    Linux, ``[A-Z]*.py`` silently became ``[a-z]*.py``, a file literally named
+    ``foo\\bar.py`` matched the pattern ``foo/bar.py``, and a ``!Keep.py``
+    negation re-admitted ``keep.py``. None of that was chosen; it was inherited.
+
+    ``fnmatch.translate`` is the half of ``fnmatch`` that is pure text: glob
+    syntax to regex, no ``os`` module anywhere in it. Compiling its output
+    ourselves keeps the wildcard language exactly as it was — ``*``, ``?``,
+    ``[...]``, ``[!...]``, an unterminated ``[`` matched literally — and drops
+    only the host normalization. No ``re.IGNORECASE``, no ``re.LOCALE``: the
+    answer is a function of the two strings and nothing else.
+
+    Compiled once per rule when the pattern file is parsed, not once per
+    candidate path. The set is bounded by ``MAX_IGNORE_BYTES``.
+    """
+    return re.compile(fnmatch.translate(pattern))
+
+
 @dataclass(frozen=True, slots=True)
 class _Rule:
     pattern: str
+    #: ``pattern`` compiled. Carried on the rule so that matching a repository's
+    #: worth of paths compiles nothing, and so that the only matching primitive
+    #: in this module is one that cannot consult the host.
+    regex: re.Pattern[str]
     negated: bool
     directory_only: bool
     anchored: bool
@@ -71,7 +109,11 @@ def _parse_line(line: str) -> _Rule | None:
     if not stripped:
         return None
     return _Rule(
-        pattern=stripped, negated=negated, directory_only=directory_only, anchored=anchored
+        pattern=stripped,
+        regex=_compile(stripped),
+        negated=negated,
+        directory_only=directory_only,
+        anchored=anchored,
     )
 
 
@@ -129,13 +171,13 @@ class IgnoreRules:
             if rule.anchored or "/" in pattern:
                 prefix = pattern.rstrip("/")
                 return rel_path == prefix or rel_path.startswith(f"{prefix}/")
-            return any(fnmatch.fnmatch(part, pattern) for part in ancestors)
+            return any(rule.regex.match(part) is not None for part in ancestors)
 
         if rule.anchored or "/" in pattern:
-            if fnmatch.fnmatch(rel_path, pattern):
+            if rule.regex.match(rel_path) is not None:
                 return True
             # An anchored pattern also covers everything beneath a matching path.
             return rel_path.startswith(f"{pattern}/")
 
         # Unanchored patterns match any path component, as gitignore does.
-        return any(fnmatch.fnmatch(part, pattern) for part in parts)
+        return any(rule.regex.match(part) is not None for part in parts)
