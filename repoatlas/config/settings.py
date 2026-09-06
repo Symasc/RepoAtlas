@@ -74,10 +74,21 @@ class ReposSettings(BaseModel):
 
 
 class DiscoverySettings(BaseModel):
+    """How the managed tree is walked (V1_SPEC §5).
+
+    There is deliberately **no depth bound**. A ``max_depth`` of 6 used to live
+    here, and every repository below it was silently absent from an ``init`` that
+    still reported success. No finite value is correct — any ceiling is the same
+    defect with a different number — so the walk is bounded by the tree, the
+    exclusions and the ignore rules instead, and terminates on directory identity
+    rather than on a counter (see :mod:`repoatlas.discovery.finder`).
+    """
+
     model_config = ConfigDict(frozen=True)
 
-    max_depth: int = 6
     exclusions: tuple[str, ...] = DEFAULT_EXCLUSIONS
+    #: Off by default, and containment-checked when on: a followed symlink must
+    #: still resolve inside the managed root.
     follow_symlinks: bool = False
 
 

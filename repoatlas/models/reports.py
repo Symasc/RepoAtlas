@@ -58,6 +58,12 @@ class SyncReport(BaseModel):
     pending_embeddings: int = 0
     embedding_detail: str = ""
     link_trace: LinkTrace | None = None
+    #: Directories discovery could not read, so could not search for repositories.
+    #: Empty on every ordinary run. Present because "there were no repositories
+    #: there" and "we were refused permission to look" are different claims, and
+    #: reporting the second as the first is how a discovery gap goes unnoticed
+    #: (V1_SPEC §5).
+    unreadable_paths: tuple[Path, ...] = ()
 
     @property
     def files_indexed(self) -> int:

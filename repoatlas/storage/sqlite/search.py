@@ -440,11 +440,13 @@ class SqliteSearchIndex:
         only *content*, found no chunk that mentioned the string, and answered that
         nothing matched — about a file the index was holding.
 
-        Matching is exact in all three shapes it accepts, and deliberately nothing
-        more: the whole relative path, a trailing sub-path on a segment boundary,
-        or the basename. ``onfig.py`` matches nothing; this is not a substring
-        search, and turning it into one would replace a false negative with a
-        confident guess.
+        Matching is exact in every shape it accepts, and deliberately nothing more:
+        the whole relative path, that path qualified by the repository's own
+        identity (``svc/src/config.py`` — the spelling RepoAtlas itself prints in
+        a citation, so a user pasting one back gets what they cited), a trailing
+        sub-path on a segment boundary, or the basename. ``onfig.py`` matches
+        nothing; this is not a substring search, and turning it into one would
+        replace a false negative with a confident guess.
 
         Ambiguity is returned rather than resolved. Three files named
         ``config.py`` produce three hits, because choosing one of them would be
@@ -467,6 +469,7 @@ class SqliteSearchIndex:
         for hit in (
             *self._files_by_basename(basenames, repo_ids, limit),
             *self._files_by_path(paths, repo_ids, limit),
+            *self._files_by_qualified_path(paths, repo_ids, limit),
         ):
             key = (hit.repository, hit.path)
             current = found.get(key)
@@ -543,6 +546,59 @@ class SqliteSearchIndex:
             if term is None:  # pragma: no cover - the SQL predicate guarantees one
                 continue
             hits.append(_file_hit(row, term, 0 if path == term else 1))
+        return hits
+
+    def _files_by_qualified_path(
+        self, terms: Sequence[str], repo_ids: Sequence[int] | None, limit: int
+    ) -> list[FileHit]:
+        """Files named as ``<repository identity>/<relative path>``.
+
+        This is the spelling RepoAtlas prints in every citation, so it is the
+        spelling a user is most likely to paste back — and it is the only one that
+        can name *one* file in a workspace where several repositories hold the
+        same relative path. Without it, ``other/src/config.py`` asked from inside
+        ``svc`` fell back to the basename ``config.py``, where the
+        primary-repository bias then quietly answered with ``svc`` — inferring a
+        repository the user had just stated (V1_SPEC §6).
+
+        Matched by equality on the whole qualified name, never by suffix: a
+        qualified path is complete by definition, and accepting a partial one
+        would reintroduce the ambiguity it exists to remove. Narrowed by
+        ``basename`` first for the same reason the unqualified form is — that
+        predicate is an index seek, and the concatenation is not.
+        """
+        # A qualified path needs at least a repository segment and a path segment;
+        # a term with one slash could be either shape, so both are tried and the
+        # more specific hit wins in the caller.
+        wanted = [term for term in terms if "/" in term]
+        if not wanted:
+            return []
+
+        clause = " OR ".join("(f.basename = ? AND r.slug || '/' || f.rel_path = ?)" for _ in wanted)
+        params: list[object] = []
+        for term in wanted:
+            params.extend([term.rsplit("/", 1)[-1], term])
+        scope, scoped = _repo_scope("f", repo_ids, params)
+        if not scoped:
+            return []
+        params.append(limit)
+
+        rows = self._db.execute(
+            f"{_FILE_SELECT} WHERE ({clause}){scope} LIMIT ?",
+            tuple(params),
+        ).fetchall()
+
+        hits: list[FileHit] = []
+        for row in rows:
+            qualified = f"{row['repository_slug']}/{row['path']}"
+            term = next((t for t in wanted if t == qualified), None)
+            if term is None:  # pragma: no cover - the SQL predicate guarantees one
+                continue
+            # As specific as an unqualified whole path, and for the same reason:
+            # it names exactly one file. It is not *more* specific, because
+            # specificity here grades how exactly a file was identified, and both
+            # spellings identify it completely.
+            hits.append(_file_hit(row, term, 0))
         return hits
 
     def find_entities_by_name(

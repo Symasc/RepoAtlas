@@ -16,6 +16,9 @@
 #   required_evidence   every one of these paths must appear within recall_k
 #   alternate_evidence  acceptable additional support; never required
 #   forbidden_evidence  must NOT appear anywhere in the returned set, at any rank
+#   expect_match        match class every required path must come back with:
+#                       exact_path | exact_subpath | exact_basename | exact_name
+#                       | exact_content | related | lexical | similar
 #   expect_unknown      true ⇒ the set must be empty (INSUFFICIENT EVIDENCE)
 #   expect_cross_repo   true ⇒ evidence must span more than one repository
 #   recall_k            rank window the required evidence must fall inside
@@ -141,8 +144,121 @@ cases:
     context_repo: scripts
     required_evidence:
       - scripts/deploy.sh
+    alternate_evidence:
+      - python-service/src/app.py
     recall_k: 3
-    notes: A relative path with slashes, written verbatim at deploy.sh:6.
+    notes: >
+      A relative path with slashes, written verbatim at deploy.sh:6, so the script
+      is genuinely evidence and must be returned. It is no longer rank 1: query
+      analysis takes the path-shaped token out of the query, leaving the
+      root-relative spelling of a file that actually exists, and the file a path
+      names now outranks a file that merely quotes it. Both are correct answers to
+      different halves of the question and both are required to be present.
+
+  # ------------------------------------------------- exact path specificity ----
+  # Added with the P2-6 remediation. Each of these fails if fusion can be
+  # outvoted: the target is identified by its whole path, and every competitor
+  # below it accumulates more retrieval-stage agreement than the target does.
+
+  - id: exact-path-versus-content-mention
+    category: exact-path
+    command: locate
+    query: "python-service/src/app.py"
+    context_repo: scripts
+    required_evidence:
+      - python-service/src/app.py
+    alternate_evidence:
+      - scripts/deploy.sh
+    expect_match: exact_path
+    recall_k: 1
+    notes: >
+      deploy.sh:6 contains this path as a literal string and wins the exact-content
+      stage; app.py's whole claim is that its path *is* the query. The file must
+      lead. Asked from `scripts`, so the primary-repository bias is pointing at the
+      wrong repository as well.
+
+  - id: exact-path-duplicate-basename
+    category: exact-path
+    command: locate
+    query: "src/index.ts"
+    context_repo: ts-service
+    required_evidence:
+      - ts-service/src/index.ts
+    alternate_evidence:
+      - common-lib/src/index.ts
+    expect_match: exact_path
+    recall_k: 1
+    notes: >
+      `src/index.ts` is the whole relative path of two different files. Both are
+      exact-path matches and both are returned; context decides which leads, which
+      is the one thing context is for when the user was not explicit.
+
+  - id: exact-path-repository-qualified
+    category: exact-path
+    command: locate
+    query: "ts-service/src/settings.ts"
+    context_repo: python-service
+    required_evidence:
+      - ts-service/src/settings.ts
+    expect_match: exact_path
+    recall_k: 1
+    notes: >
+      The spelling RepoAtlas itself prints in a citation, pasted back from inside a
+      different repository. Explicit repository qualification must beat the
+      primary-repository bias, which is pointing at python-service.
+
+  # An exact **path** containing non-ASCII characters is deliberately NOT
+  # evaluated here. Adding one file to this ecosystem to carry it changed SQLite
+  # FTS5's corpus statistics — average document length and document frequency —
+  # which shifted lexical ranks everywhere and pushed a marginal candidate into
+  # the evidence budget for two unrelated adversarial tests. The shared corpus is
+  # ground truth for the whole suite; perturbing it to add one case is the wrong
+  # trade. Non-ASCII path identity (`résumé/config.py`, `配置/設定.py`) is covered in
+  # tests/adversarial/test_exact_path_ranking.py, which builds its own ecosystem.
+  # The Unicode cases below are about *content*, which is a different claim.
+
+  - id: exact-path-in-a-question
+    category: exact-path
+    command: ask
+    query: "why does src/config.py read SERVICE_HOST?"
+    context_repo: python-service
+    required_evidence:
+      - python-service/src/config.py
+    alternate_evidence:
+      - deployment/service/init.sls
+      - deployment/service/pillar.sls
+    expect_match: exact_path
+    recall_k: 1
+    notes: >
+      A path inside a natural-language question anchors retrieval without
+      collapsing it: config.py leads, and the evidence about where SERVICE_HOST
+      comes from is still in the set.
+
+  - id: exact-path-ambiguous-basename
+    category: exact-path
+    command: locate
+    query: settings.py
+    context_repo: common-lib
+    required_evidence:
+      - common-lib/common_lib/settings.py
+    alternate_evidence:
+      - unrelated-repo/src/settings.py
+    expect_match: exact_basename
+    recall_k: 3
+    notes: >
+      The control. A bare basename names two files in two repositories and is
+      genuinely ambiguous; it must be classified as a basename match, not promoted
+      to path specificity, and contextual bias decides the order.
+
+  - id: exact-path-absent
+    category: exact-path
+    command: locate
+    query: "src/no_such_module_918273.py"
+    context_repo: python-service
+    expect_unknown: true
+    notes: >
+      A well-formed path that names nothing. Specificity must not manufacture a
+      near miss: the answer is that it does not exist.
 
   # --------------------------------------------------------------- unknown ----
   - id: unanswerable-absent-token

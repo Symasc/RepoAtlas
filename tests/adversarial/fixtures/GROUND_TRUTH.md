@@ -210,6 +210,31 @@ never alter retrieval, ranking, grounding or the system prompt.
 `python-service/src/app.py:11` — `"service failed to bind to the configured host"`
 `ts-service/src/index.ts:6` — `"ECONN_NO_HOST: connection host was not configured"`
 
+## File identity
+
+File paths are facts about the repository, and several are deliberately
+ambiguous so ranking can be measured rather than assumed.
+
+| Path | Also exists as | Note |
+|---|---|---|
+| `common-lib/src/index.ts` | `ts-service/src/index.ts` | one relative path, two repositories |
+| `common-lib/common_lib/settings.py` | `unrelated-repo/src/settings.py` | one basename, two repositories, different paths |
+| `python-service/src/config.py` | `python-service/src/legacy_config.py` | the misleading twin, named only by prose |
+
+`scripts/deploy.sh:6` writes the string `../python-service/src/app.py`. The file
+whose path that names is `python-service/src/app.py`; the two are different
+claims, and a query naming the path must lead with the file rather than with the
+script that mentions it.
+
+This ecosystem holds **no non-ASCII path**, deliberately. One was added and
+removed again: a single extra document changes SQLite FTS5's corpus statistics,
+which shifted lexical ranks across the whole suite and moved a marginal candidate
+into the evidence budget for two unrelated tests. Non-ASCII path identity is
+tested in `tests/adversarial/test_exact_path_ranking.py`, which builds its own
+ecosystem and can be perturbed freely. The Unicode fixtures here are about
+*content* — `common_lib/unicode_names.py`, `src/unicodeNames.ts` — which is a
+different claim.
+
 ## Identifiers that exist nowhere
 
 `ZZZ_NO_SUCH_TOKEN_918273`, `nonexistent_function_918273`, `@company/absent-918273`.

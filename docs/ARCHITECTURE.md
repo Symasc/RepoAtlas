@@ -1187,6 +1187,73 @@ needs a real resolver per ecosystem (§14).
 
 ## 6. The indexing pipeline
 
+### Repository discovery
+
+Discovery runs before the pipeline below and decides *which* repositories exist. It is the only way a repository
+becomes managed — there is no manual registration — so anything it misses is invisible to every command that
+follows.
+
+The walk had a hard-coded ceiling of six levels. A repository at depth 6 was registered; an identical one at depth 7
+was not, and `init` still exited 0 reporting how many it had "discovered". Nothing documented the limit and nothing
+reported hitting it, so a workspace whose services sat one directory deeper than the constant assumed was simply not
+indexed. The constant is gone rather than raised: any finite ceiling is the same defect with a different number, and
+a *configurable* one would let an operator re-create it silently, so `DiscoverySettings` no longer has a depth field
+at all.
+
+```
+walk(root):                       iterative, explicit stack, depth-first
+  pop a directory
+    is it a Git repository?       .git as a directory or a file → yield it, and keep descending
+    read its entries              refused → record the path, do not claim it was empty
+    for each entry, descend if:
+      not named .git              structural, independent of the configurable exclusions
+      not in exclusions           node_modules, .venv, dist, vendor, …
+      a directory                 files and dangling links are not descended
+      not a symlink               unless follow_symlinks, and then only inside the root
+      not ignored                 .repoatlasignore, matched on the root-relative path
+      not already visited         keyed on (st_dev, st_ino)
+```
+
+**Termination is structural, not numeric.** Directory symlinks are not followed by default, so the walk descends
+only through real directories and a real tree is finite. A *followed* symlink — opt-in — must still resolve inside
+the managed root, decided on path components rather than a string prefix, so `root/foobar` is not inside `root/foo`.
+And every directory entered is recorded by `(st_dev, st_ino)` and never entered twice, so a cycle reached by any
+route — symlink, bind mount, hard-linked directory — closes the first time it repeats. No depth counter is needed
+for any of that, which is what makes removing the ceiling safe rather than merely bolder.
+
+**The walk is iterative.** The tree is untrusted input, and a recursive walker with the ceiling removed would trade a
+silent truncation at depth 6 for a `RecursionError` on a deep one: correctness would depend on the size of the call
+stack. Depth-first with an explicit stack also bounds memory to the unexplored siblings along one path rather than a
+whole breadth-first frontier.
+
+**`.git` is never descended into.** Recognizing it is what makes the directory holding it a repository; walking its
+object database afterwards is thousands of directories of pure cost. This is enforced separately from the
+configurable exclusion list, so overriding `exclusions` cannot turn a preference into a pathological walk.
+
+**Nested repositories stay separate.** The walk continues *into* a repository looking for more, because a repository
+inside another is its own managed repository (V1_SPEC §5) and the closest enclosing one wins at context resolution
+(§7). Discovery does not prune a subtree merely because its parent is a repository.
+
+**A refused directory is named, not silently emptied.** A directory the operating system will not let RepoAtlas read
+is skipped rather than made fatal — one bad subtree must not stop a whole workspace indexing — and its path is
+carried on the report and printed. "There were no repositories there" and "we could not look" are different claims,
+and reporting the second as the first is the same defect as the depth ceiling one layer down. This also fixed a
+crash: on a mode-000 directory the `.git` probe raised `PermissionError` straight out of the walk, so a single
+unreadable directory anywhere under the root turned `init` into a traceback at exit 1.
+
+**Ordering is deterministic.** Entries are sorted at each level and the result is sorted by path, so the repository
+set and its order depend on the tree, never on filesystem enumeration order.
+
+> **Invariant.** A valid, non-ignored repository beneath the managed root is not omitted solely because of nesting
+> depth.
+
+> **Invariant.** Traversal termination is guaranteed by filesystem and symlink rules, not by silently truncating
+> discovery at an arbitrary depth.
+
+> **Invariant.** Discovery never reports a subtree it could not read as a subtree that held nothing.
+
+### Enumeration and indexing
+
 ```
 enumerate       gitstate: git ls-files --cached --others --exclude-standard
                           + built-in exclusions + .repoatlasignore + secret patterns
@@ -1669,8 +1736,8 @@ question + RepositoryContext
    ├─ 7. graph          ≤2 hops from the exact entity hits,           → DETERMINISTIC
    │                    capped fan-out, cross-repo only via typed edges
    │
-   ├─ 8. fusion         tier first, then reciprocal-rank fusion
-   │                    + primary-repository boost (inside a tier)
+   ├─ 8. fusion         tier, then path specificity, then reciprocal-rank fusion
+   │                    + primary-repository boost (inside a tier and specificity)
    ├─ 9. dedup          drop spans that repeat a higher-ranked one
    ├─ 10. rerank        Reranker (NoopReranker in V1)
    └─ 11. budget        hard caps on candidate count and total tokens
@@ -1687,8 +1754,12 @@ are distinguished, all `DETERMINISTIC`, and the stage trace names each separatel
 |---|---|---|
 | exact **content** | `exact` | the literal text of a chunk, verified by substring |
 | exact **file path** | `file` | `files.rel_path`, whole or on a segment boundary |
+| exact **qualified path** | `file` | `repositories.slug` + `files.rel_path`, whole |
 | exact **file basename** | `file` | `files.basename` |
 | exact **entity name** | `symbol` | `entities.name` / `qualified_name` / `key` |
+
+(Five now, counting the repository-qualified path added with match specificity below. The heading keeps its
+original count because the distinction it draws — content, identity, name — is what it is about.)
 
 **File identity is evidence in its own right.** A question that names a file — `config.py`, `src/config.py`,
 `deployment/service/values.yaml` — is asking about the file, and the answer is the file. Before the `file` stage
@@ -1710,6 +1781,9 @@ seek on `files.basename` (`MULTI-INDEX OR` across terms) rather than a scan of e
 specificity: an exact whole path, then a trailing sub-path, then a basename. Choosing one would be RepoAtlas
 inventing the answer to a question the repository genuinely leaves open (V1_SPEC §14). Fusion sees one candidate
 per file, so a duplicated basename adds breadth to the answer and never rank weight.
+
+That grading is carried on the candidate as a `MatchClass`, not only in its description — see *Match specificity*
+below for why that distinction was load-bearing.
 
 #### File-level provenance is representable
 
@@ -1759,7 +1833,7 @@ enforced by a type rather than by a weight. Every candidate carries an `Evidence
 | `DETERMINISTIC` | literal-verified chunk matches, exact entity-name matches, graph expansion | facts about the code, each with provenance |
 | `ASSOCIATIVE` | FTS recall, embedding neighbours | leads about what the question might have meant |
 
-`fuse` sorts on `(tier, -score)`. Scores are therefore only ever compared **within** a tier, so no cosine
+`fuse` sorts on `(tier, specificity, -score)`. Scores are therefore only ever compared **within** a tier, so no cosine
 similarity — 0.99 or otherwise — can move an embedding neighbour above an exact identifier, an exact error string,
 an exact symbol name, an environment variable or a graph-supported relationship. A span reached by several
 retrievers takes its best tier: found deterministically once means deterministic.
@@ -1767,18 +1841,136 @@ retrievers takes its best tier: found deterministically once means deterministic
 The primary-repository boost is additive on the score, so it competes inside a tier and never promotes across one.
 
 **The rule is re-imposed at the boundary, not only inside `fuse`.** Between fusion and the caller sit deduplication,
-the `Reranker` seam and two hard budgets. `enforce_tier_order` — a stable partition by tier — is applied to whatever
-the reranker returns, before budgeting. Two things make that worth doing rather than documenting:
+the `Reranker` seam and two hard budgets. `enforce_precedence` — a stable partition by tier and then by path
+specificity — is applied to whatever the reranker returns, before budgeting. Two things make that worth doing
+rather than documenting:
 
 - a V2 cross-encoder that reordered across tiers would silently undo the rule the rest of the funnel is built on,
   and it is exactly the kind of component whose ranking is opaque;
 - the budget is spent immediately afterwards, so an order that put associative evidence first would **starve
   deterministic evidence out of the answer** just as effectively as ranking it lower.
 
-When the order is corrected the stage trace says so (`NoopReranker (tier order restored)`), because a silent
-correction is one nobody can audit. Tests assert the guarantee against the returned `EvidenceSet` — including with
+When the order is corrected the stage trace says so (`NoopReranker (tier order restored)`, or
+`(path specificity restored)`), because a silent correction is one nobody can audit. Tests assert the guarantee against the returned `EvidenceSet` — including with
 an embedding model that scores every text 1.0, and with a reranker that deliberately inverts the tiers — rather
 than against `fuse` alone.
+
+### Match specificity
+
+> **Invariant.** Fusion may combine relevance evidence, but it may not erase stronger deterministic match
+> specificity.
+
+> **Invariant.** An exact indexed path is more specific than an exact basename match.
+
+> **Invariant.** Explicit repository/path qualification outranks inferred primary-repository bias.
+
+> **Invariant.** Candidate merging preserves the strongest match provenance, independent of stage order.
+
+The tier settles whether a candidate is a fact or a guess. It does not settle **how precisely the query
+identified it**, and treating those as one question is how a file the user named by its whole path finished eighth
+in its own answer.
+
+`locate src/config.py`, in a repository holding nine other files called `config.py`:
+
+| | before | after |
+|---|---|---|
+| 1 | `docs/notes.txt:1-40` — the string `src/config.py`, 100 times | **`src/config.py`** |
+| 2 | `docs/notes.txt:33-72` | `examples/config.py:4` |
+| 3 | `docs/notes.txt:65-100` | `tests/config.py:10` |
+| … | symbols in `examples/`, `tests/`, `generated/` | … |
+| 8 | **`src/config.py`** | |
+
+Every candidate above was `DETERMINISTIC` — correctly, each is a fact — so the tier separated none of them and
+the fused score decided. RRF measures *agreement between retrievers*, and a `tests/config.py` full of
+`config`-shaped symbols is reached by the exact, entity-name, lexical and semantic stages, while a file whose only
+claim is that its path is what was typed is reached by exactly one. The wrong signal won because it was the only
+signal left.
+
+**The match class is what the `file` stage already knew and stopped saying.** `FileHit.specificity` grades an
+identity match 0/1/2 — whole path, trailing sub-path, basename — and the conversion to `EvidenceCandidate` folded
+that into a human-readable description and dropped the rest. `MatchClass` carries it through instead:
+
+| Class | Produced by | Means |
+|---|---|---|
+| `EXACT_PATH` | `file` | the query spelled the whole repository-relative path, optionally repository-qualified |
+| `EXACT_SUBPATH` | `file` | a trailing sub-path on a segment boundary |
+| `EXACT_BASENAME` | `file` | the basename |
+| `EXACT_NAME` | `symbol` | an entity's name, qualified name or key, spelled exactly |
+| `EXACT_CONTENT` | `exact` | the literal occurs in this span, verified by substring |
+| `RELATED` | `graph` | reached by an edge from something the query named |
+| `LEXICAL` | `lexical`, entity FTS | word-overlap recall |
+| `SIMILAR` | `semantic` | an embedding neighbour |
+
+**Ordering is `(tier, specificity, -score, tie-break)`, and specificity is a boundary rather than a gradient.**
+Only `EXACT_PATH` takes precedence; everything below it is ordered by agreement exactly as before. That is a
+deliberate limit. A full gradient would have re-ranked the entire funnel on a signal nobody asked about — an
+exact-name symbol hit would start outranking an exact error-string match, which is a different product decision
+with none of the evidence behind it. A boundary answers the one question that was actually ambiguous: *the user
+named one file completely, and something else won anyway.*
+
+Because it is a rank position rather than a bonus, no quantity of agreement adds up to it. Feeding fusion twelve
+copies of the lexical stage's votes changes the fused scores throughout and changes the ranking not at all.
+
+**The anchor is the file, not the one candidate.** If the query named `src/config.py`, then everything retrieved
+*from* `src/config.py` is about the file that was named and everything from `tests/config.py` is not. Anchoring the
+single file-identity candidate instead would have answered "why does `src/config.py` read `DATABASE_URL`?" with the
+filename rather than with the assignment — the file would lead and the line that answers the question would sit
+below three files that merely share its basename. This is also what keeps the existing tie-break honest: within the
+anchored file a span still precedes the bare file identity at equal score, so the assignment leads and the filename
+follows.
+
+**Ranking, not filtering.** The other `config.py` files are still returned, and still visible, in the order fusion
+gives them. "What calls `src/config.py`?" needs the neighbourhood; the fix is that the neighbourhood no longer
+outranks the house. Only the ordering changed — no candidate is dropped for failing to be the named path.
+
+#### Explicit qualification beats inferred context
+
+The primary-repository boost exists for questions that did not say which repository they meant (V1_SPEC §6). When
+the question *did* say, the boost was answering a question nobody asked: `other/src/config.py`, typed from inside
+`svc`, found no qualified path, fell back to the basename `config.py`, and the boost then quietly returned
+`svc/src/config.py` — the repository the user had just ruled out.
+
+`repositories.slug || '/' || files.rel_path` is therefore matched as a fourth exact shape. It is the spelling
+RepoAtlas prints in every citation, so it is the one a user is most likely to paste back, and it is the only shape
+that names a single file in a workspace where several repositories hold the same relative path. It is matched by
+equality on the whole qualified name, never by suffix — a qualified path is complete by definition — and narrowed
+by `basename` first, so it stays an index seek rather than a scan.
+
+Precedence then falls out of the ordering: specificity is compared before the boost is, so an explicitly qualified
+path outranks the contextual bias without the bias having to know about it. Ask for `config.py` and the bias still
+decides, which is right — that question really is ambiguous.
+
+#### Merging keeps the strongest claim
+
+A span reached several ways takes the **minimum** of the match classes claimed for it, exactly as it takes the
+minimum of the tiers. `min` is commutative, so a span that arrived once as an exact path and four times as a lexical
+neighbour is an exact path whichever order the stages ran in — asserted over every permutation of three stages,
+because a correctness property that depends on iteration order is one that will break the first time a stage moves.
+
+The representative candidate — the one that supplies the quoted text and the description — is still chosen by
+`(tier, -score)`; the merged tier and match class are stamped onto the copy that is returned. So what a caller sees
+carries the strongest claim about the span regardless of which stage happened to win the representative slot.
+
+#### Navigation and supporting context are different intents
+
+`locate src/config.py` is navigation, and the named file leads. `ask "why does src/config.py call X?"` is a
+question that *contains* a path: the path anchors the evidence set — the named file and its spans come first — and
+the rest of the question is still asked, so the evidence about `X` is retrieved and returned alongside. Neither
+command hard-filters on the anchor, and `debug` widens the funnel exactly as it did before. A query is not turned
+into pure navigation by containing a path.
+
+#### What an exact path is not
+
+Specificity is only ever granted to a spelling that identifies one file completely. `src/config.p`, `sr/config.py`,
+`x/src/config.py` and `srcc/config.py` are not exact paths and get nothing; a query naming a path that does not
+exist is still refused outright by suppression. `api/config.py` genuinely ends `services/api/config.py` and is
+classified as the sub-path it is — exact, but able to name several files, so not the unambiguous identification the
+anchor is reserved for. `a/config.py` does not match `data/config.py`, because `dat` is not a separator.
+
+Path identity is byte-exact and case-sensitive: `files.rel_path` carries no `COLLATE NOCASE`, and the diacritic- and
+case-folding the FTS tokenizer performs decides *lexical recall* and never identity. `caseful/Config.py` is an exact
+path; `caseful/config.py` is not one, on a filesystem where those are two files. A path containing a space must be
+quoted to be one token, because unquoted it is two words and query analysis does not guess.
 
 ### Suppressing similarity when the question named something specific
 
@@ -2610,7 +2802,7 @@ Every deferred capability (V1_SPEC §22) has a place to land that requires no re
 
 | V2 capability | Seam |
 |---|---|
-| Advanced reranking | `Reranker` protocol, stage 9 of §10. Swap `NoopReranker` for a cross-encoder. The tier rule is **re-imposed on whatever it returns** by `enforce_tier_order`, so a reranker may reorder within a tier and cannot cross one even by mistake; the correction is recorded in the stage trace rather than applied silently |
+| Advanced reranking | `Reranker` protocol, stage 9 of §10. Swap `NoopReranker` for a cross-encoder. The tier rule and the path-specificity boundary are **re-imposed on whatever it returns** by `enforce_precedence`, so a reranker may reorder within a tier and cannot cross one — or drop the file the user named by its full path — even by mistake; the correction is recorded in the stage trace rather than applied silently |
 | Version-specific documentation retrieval | A `DocumentationSource` protocol fed by `ResolvedDependency`. The retrieval funnel gains a source at stage 3; fusion and budgeting are unchanged |
 | Internet research / web provenance | `Evidence` gains an optional origin discriminator; the citation verifier (§11) extends to verify web citations against the fetched set, with the same drop-and-demote logic |
 | Git-history debugging, regression introduction | The provenance columns already pin every fact to `repo/file/lines`; history analysis joins against them without schema change |
@@ -2728,3 +2920,8 @@ full reindex.
 | A repair-call backend failure propagates | Keep folding it into INSUFFICIENT EVIDENCE | The same Ollama outage produced exit 4 or exit 0 depending only on whether the first response parsed. The first response being invalid does not reclassify what killed the run (§11) |
 | Read timeout is a server failure, not a transport one | Group all `httpx` timeouts together | The connection succeeded. Saying the server was unreachable hides the two things that would help — a longer timeout or a smaller model — and points at the one that would not (§11) |
 | Error messages carry no response body | Include a bounded excerpt for debugging | The body is model output, written from repository content. Shape — byte count, field names, parse position — debugs just as well and discloses nothing (§11, §12) |
+| Match specificity is a **boundary** at `EXACT_PATH`, not a full gradient | Rank every match class in order: path > sub-path > basename > entity name > content > … | A gradient re-ranks the whole funnel on a signal nobody complained about — an exact symbol name would begin outranking an exact error string, a separate product decision with none of the evidence behind it. The defect was that *one file, named completely, lost anyway*; a boundary fixes that and leaves everything else measurably unchanged (§10) |
+| The anchor is the **file**, not the file-identity candidate | Promote only the file-level candidate the `file` stage produced | Anchoring the single candidate answers "why does `src/config.py` read `DATABASE_URL`?" with the filename, and drops the assignment that answers it below three files that merely share a basename. What the user named is a file; every span from it is about the thing they named (§10) |
+| Specificity is a rank position, never a score bonus | Add a large constant to the fused score | A bonus is a number, and numbers can be accumulated past. Twelve copies of the lexical stage's votes changes every fused score and changes the ranking not at all — which is the property that had to be true, and a constant can only ever be true until the fixture changes (§10) |
+| A repository-qualified path is a fourth exact shape | Leave `other/src/config.py` to fall back to the basename | It is the spelling RepoAtlas prints in every citation, so it is the one that gets pasted back — and falling back to the basename let the primary-repository bias answer with the repository the user had just ruled out (§10) |
+| A bare `config.py` stays a **basename** query even when it is some file's whole path | Treat a term with no separator as a path when it equals a `rel_path` | A root-level file would then outrank `src/config.py` for a query that reads, to everyone, as "find files called config.py". The ambiguity is real and returning it is the honest answer (§10, V1_SPEC §14) |
