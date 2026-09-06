@@ -298,6 +298,13 @@ class Retriever:
                         if c.match is MatchClass.EXACT_PATH
                     )
                 ),
+                suffix_paths=tuple(
+                    dict.fromkeys(
+                        f"{c.repository}/{c.path}"
+                        for c in bounded
+                        if c.match is MatchClass.EXACT_SUBPATH
+                    )
+                ),
                 token_estimate=tokens,
             ),
         )

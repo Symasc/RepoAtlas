@@ -1597,6 +1597,72 @@ The global link stage runs at the end of any sync, including a single-repository
 repository can create or invalidate a cross-repository edge in another. It reads the standing `unresolved_refs`
 set and the file and symbol tables, all of which are indexed, and rebuilds only edges it owns.
 
+### Two enumerators, one admissible file set
+
+Enumeration has a primary authority and a fallback, and they must answer the same question the same way.
+
+```
+primary    git ls-files --cached --others --exclude-standard -z
+fallback   depth-first walk of the working tree
+```
+
+The fallback is reached when `GitClient.list_files` returns `None` — the git binary is missing or not executable,
+or the `ls-files` invocation fails. Repository *detection* never needs git (§8), so a repository stays managed and
+indexable when git is gone; the fallback is what keeps that true.
+
+Both feed the same admission pipeline, which is where every policy lives: the obvious-secret name policy, the
+built-in exclusions, `.repoatlasignore`, nested-repository ownership, and the `RepositoryBoundary` containment
+check. Enumeration proposes; nothing it returns is admitted by having been found.
+
+> **Invariant.** Fallback scanning must not silently return a proper subset of admissible repository files solely
+> because of nesting depth.
+
+> **Invariant.** Primary and fallback enumeration must agree on the admissible file set except for explicitly
+> documented differences.
+
+> **Invariant.** Traversal safety is structural; an arbitrary depth cutoff is not a security mechanism.
+
+> **Invariant.** A successful, complete fallback scan means RepoAtlas actually inspected every admissible reachable
+> directory, or explicitly reported which ones it could not.
+
+**There is no depth ceiling.** The walk used to begin `if depth > 64: return`, so a file 65 directories below the
+repository root was not enumerated, not indexed, not searchable and not mentioned — with a successful sync and an
+incomplete index. Measured on one tree: the primary path returned 9 files, the fallback returned 5, and nothing
+reported the difference.
+
+The comment on that line described a protection it did not provide. A cycle comes from symlinks, which this walk
+has always refused; the cost of a tree is its *size*, which a depth limit does not bound at all — a flat directory
+of 100,000 files costs the same at depth 1 as at depth 100. It bounded the one dimension that was never the risk,
+and what it actually did was truncate repositories. Raising 64 to 128 or 1024 would keep the defect and move it.
+
+**Termination is structural instead.** Symlinks are never followed, so no route out of the tree and no cycle
+through one exists; what remains is a finite acyclic directory tree, which a depth-first walk exhausts. Directory
+identity `(st_dev, st_ino)` is tracked as well, so a bind mount or any second route into a directory already
+visited is entered once — the same rule repository discovery uses, and the reason neither needs a counter.
+
+**Iterative, not recursive.** Lifting the ceiling on a recursive walk would have traded a silent truncation at
+depth 65 for a `RecursionError` near depth 1000; a scanner must not require user-controlled nesting to fit the
+Python call stack. The walk keeps an explicit stack and is depth-first, so the stack holds the unexplored siblings
+along one path rather than a whole level. Verified at depth 400 with the interpreter's recursion limit set to 100.
+
+**`.git` is refused structurally**, not by configuration. It is in the default exclusions, but those are
+configurable, and a root whose `exclusions` were set without it had this walk enumerate the object store, the hooks
+and `.git/config` as ordinary source — 18 files on a freshly initialized repository, content `git ls-files` would
+never report. The fallback was strictly less safe than the path it stands in for. Git internals are not repository
+source at any depth.
+
+**Incompleteness is reported, never implied.** A directory the walk cannot read is recorded and surfaced as a
+sync diagnostic naming the repository-relative path, because "this repository has no files there" and "RepoAtlas
+could not look" are different claims and only one of them is true. The nested-repository probe is inside the same
+guard as the directory read: on a directory the process can see but not enter, `(current / ".git").is_dir()` raises
+rather than answering, and when that probe sat outside the guard its `OSError` was caught by the per-entry handler
+and the whole subtree vanished with nothing recorded. One guard answers both questions.
+
+**Known differences between the two enumerators.** `git ls-files` applies `.gitignore`; the fallback does not,
+because reimplementing `.gitignore` is exactly what using git avoids. Every other filter is shared. Path length
+remains an operating-system limit rather than an application one: RepoAtlas fails only where the filesystem refuses
+the path, and depth and path length are separate constraints.
+
 ### Chunking
 
 Chunks are the unit of both lexical and semantic retrieval, so they carry line ranges for provenance. Preference
@@ -2173,6 +2239,16 @@ than against `fuse` alone.
 
 > **Invariant.** An exact indexed path is more specific than an exact basename match.
 
+> **Invariant.** A path-component suffix explicitly supplied by the user is stronger intent evidence than a
+> basename or a textual mention of that path.
+
+> **Invariant.** `EXACT_SUBPATH` does not imply uniqueness.
+
+> **Invariant.** Exact complete path identity remains stronger than suffix-path identity.
+
+> **Invariant.** Fusion and reranking may order candidates within a specificity class but may not erase the class
+> itself.
+
 > **Invariant.** Explicit repository/path qualification outranks inferred primary-repository bias.
 
 > **Invariant.** Candidate merging preserves the strongest match provenance, independent of stage order.
@@ -2212,12 +2288,57 @@ that into a human-readable description and dropped the rest. `MatchClass` carrie
 | `LEXICAL` | `lexical`, entity FTS | word-overlap recall |
 | `SIMILAR` | `semantic` | an embedding neighbour |
 
-**Ordering is `(tier, specificity, -score, tie-break)`, and specificity is a boundary rather than a gradient.**
-Only `EXACT_PATH` takes precedence; everything below it is ordered by agreement exactly as before. That is a
-deliberate limit. A full gradient would have re-ranked the entire funnel on a signal nobody asked about — an
-exact-name symbol hit would start outranking an exact error-string match, which is a different product decision
-with none of the evidence behind it. A boundary answers the one question that was actually ambiguous: *the user
-named one file completely, and something else won anyway.*
+**Ordering is `(tier, specificity, -score, tie-break)`, and specificity is a set of boundaries rather than a
+gradient.** Two classes take precedence, in this order, and they are the two the user has to have *typed a path*
+to reach:
+
+| Position | Class | The user | Uniqueness |
+|---|---|---|---|
+| 0 | `EXACT_PATH` | spelled the whole repository-relative path, optionally repository-qualified | names exactly one file |
+| 1 | `EXACT_SUBPATH` | spelled a multi-component trailing path, matched on segment boundaries | names every file ending that way — may be several |
+| 2 | everything else | did not spell a path | — |
+
+Everything at position 2 — a basename, an entity name, a content mention, a lexical or semantic neighbour — is
+ordered by agreement exactly as before. That limit is deliberate. A full gradient over all eight classes would
+re-rank the entire funnel on a signal nobody asked about: an exact-name symbol hit would start outranking an exact
+error-string match, which is a different product decision with none of the evidence behind it. These two
+boundaries answer the questions that were actually ambiguous.
+
+**Why `EXACT_SUBPATH` is one of them.** Anchoring only `EXACT_PATH` left the identical information loss one level
+down, and it reproduced the same way. `locate api/config.py` against a repository holding
+`services/api/config.py`, `legacy/api/config.py` and a `README.md` that quotes the string `api/config.py` two
+hundred times:
+
+| | before | after |
+|---|---|---|
+| 1 | `docs/README.md:33-72` — the string, repeated | **`legacy/api/config.py`** |
+| … | five more chunks of the same README | **`services/api/config.py`** |
+| 8 | **`legacy/api/config.py`** | `docs/README.md:33-72` |
+| 10 | **`services/api/config.py`** | … |
+
+The `file` stage classified both files `EXACT_SUBPATH` correctly, on segment boundaries, exactly as designed — and
+then nothing consumed the class, so a document *about* the files outranked the files. Note the fused scores: the
+README's is **higher** (0.5653 against 0.5164) and it ranks below them anyway, which is only possible because
+specificity is a rank position and not a number added to a score.
+
+**A suffix is explicit intent without a claim of uniqueness**, and the two halves are separate. `api/config.py`
+names a *shape*; two files may end that way and both are anchored. RepoAtlas does not choose between them —
+ambiguity is resolved *inside* the class by the fused score, which is where the primary-repository bias does its
+work, and a query answered from a suffix is never reported as a complete-path identification. `--verbose` prints
+`named path(s)` and `suffix path(s)` separately for exactly this reason.
+
+**Segment boundaries are what make it exact.** The match is `rel_path == term` or `rel_path` ending in `/term`,
+checked in SQL by comparing the character before the suffix against `/`. `pi/config.py` and `myapi/config.py`
+therefore match nothing: a substring test would have called both of them path matches, and turning identity into
+a substring search replaces a false negative with a confident guess. A bare basename stays `EXACT_BASENAME` and
+earns no position — `config.py` says what a file is called, not where it lives, so promoting it would make every
+common filename a path anchor.
+
+**Parent traversal never reaches classification.** Query analysis extracts path-shaped tokens at a word boundary,
+so `../api/config.py` yields the token `api/config.py` before any path is classified. What is matched is the clean
+component suffix that leaves; `..` is not a suffix anchor of its own, and the long-standing `exact-path-token`
+evaluation case (`../python-service/src/app.py`) has always relied on the same extraction to resolve to a
+repository-qualified exact path.
 
 Because it is a rank position rather than a bonus, no quantity of agreement adds up to it. Feeding fusion twelve
 copies of the lexical stage's votes changes the fused scores throughout and changes the ranking not at all.

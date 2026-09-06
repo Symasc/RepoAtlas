@@ -260,6 +260,135 @@ cases:
       A well-formed path that names nothing. Specificity must not manufacture a
       near miss: the answer is that it does not exist.
 
+  # --------------------------------------------- exact sub-path specificity ----
+  # Added with the suffix-path remediation. `EXACT_SUBPATH` was computed
+  # correctly and then used for nothing, so a file whose path *ends* where the
+  # user said could be outranked by a document that merely quotes the string. A
+  # suffix is explicit intent without a claim of uniqueness, so these cases assert
+  # both halves: it must beat weaker evidence, and it must not be granted to a
+  # basename or to a component that only looks like one.
+  #
+  # Two scenarios are deliberately NOT evaluated here, for the reason recorded
+  # above about non-ASCII paths: this ecosystem holds no two files sharing a
+  # multi-component tail, and no deep non-ASCII path, and adding either would
+  # perturb the shared FTS corpus that every other case is ground truth against.
+  # Ambiguous suffixes, Unicode suffixes, quoted spaced paths and the README-flood
+  # adversary are covered in tests/adversarial/test_suffix_path_ranking.py, which
+  # builds its own ecosystem.
+
+  - id: exact-subpath-unique
+    category: exact-subpath
+    command: locate
+    query: "h/helper.py"
+    context_repo: python-service
+    required_evidence:
+      - python-service/src/deep/a/b/c/d/e/f/g/h/helper.py
+    expect_match: exact_subpath
+    recall_k: 1
+    notes: >
+      A trailing two-component path. The file's whole claim is that its path ends
+      where the user said; nothing else in the ecosystem ends that way. It must
+      lead, and it must be classified as a sub-path rather than as the basename
+      match that would also have found it.
+
+  - id: exact-subpath-longer-tail
+    category: exact-subpath
+    command: locate
+    query: "g/h/helper.py"
+    context_repo: python-service
+    required_evidence:
+      - python-service/src/deep/a/b/c/d/e/f/g/h/helper.py
+    expect_match: exact_subpath
+    recall_k: 1
+    notes: >
+      More components of the same tail. Still a sub-path, not an exact path: the
+      file's relative path is longer than what was typed.
+
+  - id: exact-subpath-whole-path-is-exact
+    category: exact-subpath
+    command: locate
+    query: "src/deep/a/b/c/d/e/f/g/h/helper.py"
+    context_repo: python-service
+    required_evidence:
+      - python-service/src/deep/a/b/c/d/e/f/g/h/helper.py
+    expect_match: exact_path
+    recall_k: 1
+    notes: >
+      The control for the case above. Spelling the *whole* relative path is a
+      complete identification and must stay classified as one; sub-path
+      specificity is strictly weaker and must not absorb it.
+
+  - id: exact-subpath-basename-is-not-a-subpath
+    category: exact-subpath
+    command: locate
+    query: "helper.py"
+    context_repo: python-service
+    required_evidence:
+      - python-service/src/deep/a/b/c/d/e/f/g/h/helper.py
+    expect_match: exact_basename
+    recall_k: 1
+    notes: >
+      A bare filename says what a file is called, not where it lives. It must stay
+      a basename match: promoting every common filename to path specificity is the
+      failure mode this boundary exists to avoid.
+
+  - id: exact-subpath-near-miss-component
+    category: exact-subpath
+    command: locate
+    query: "x/helper.py"
+    context_repo: python-service
+    required_evidence:
+      - python-service/src/deep/a/b/c/d/e/f/g/h/helper.py
+    expect_match: exact_basename
+    recall_k: 3
+    notes: >
+      `x/` is not a component of the stored path, so this is not a sub-path match —
+      the file is still found, by its basename, and must be reported as such.
+      Matching on segment boundaries rather than by `endswith` is what makes the
+      difference; a substring test would have called this a path match.
+
+  - id: exact-subpath-parent-traversal
+    category: exact-subpath
+    command: locate
+    query: "../h/helper.py"
+    context_repo: python-service
+    required_evidence:
+      - python-service/src/deep/a/b/c/d/e/f/g/h/helper.py
+    expect_match: exact_subpath
+    recall_k: 1
+    notes: >
+      The control for parent traversal. Query analysis extracts path-shaped tokens
+      at a word boundary, so `..` never reaches path classification and what is
+      matched is the clean component suffix it leaves — the same extraction the
+      `exact-path-token` case has always relied on. Pinned so the behaviour is a
+      decision rather than a side effect.
+
+  - id: exact-subpath-cross-repository
+    category: exact-subpath
+    command: locate
+    query: "h/helper.py"
+    context_repo: scripts
+    required_evidence:
+      - python-service/src/deep/a/b/c/d/e/f/g/h/helper.py
+    expect_match: exact_subpath
+    recall_k: 1
+    notes: >
+      Asked from a repository that does not contain it, so the primary-repository
+      bias points elsewhere. Explicit path intent must still lead: the bias orders
+      candidates inside a specificity class, it does not create one. The evidence
+      is single-repository by construction — one file ends this way — so this is a
+      statement about the bias being overridden, not about spanning repositories.
+
+  - id: exact-subpath-absent
+    category: exact-subpath
+    command: locate
+    query: "nosuch/absent_918273.py"
+    context_repo: python-service
+    expect_unknown: true
+    notes: >
+      A well-formed sub-path that names nothing. Sub-path specificity must not
+      manufacture a near miss any more than exact-path specificity does.
+
   # --------------------------------------------------------------- unknown ----
   - id: unanswerable-absent-token
     category: unanswerable

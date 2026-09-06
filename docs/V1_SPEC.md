@@ -491,6 +491,41 @@ __pycache__
 vendor
 ```
 
+### File enumeration when Git is unavailable
+
+Repository *contents* are enumerated with `git ls-files`, which gives real `.gitignore` semantics without
+reimplementing them. When git cannot answer — the binary is missing, or the command fails — RepoAtlas walks the
+working tree itself rather than indexing nothing.
+
+**The fallback is complete.** It enumerates every admissible file in the repository at any nesting depth. There is
+no repository-relative depth ceiling; a file 500 directories below the repository root is indexed exactly like one
+at the top. A previous build stopped at depth 64 and reported success, so a deeper file was absent from the index
+with nothing said about it — the sync was not wrong about what it indexed, only about what it had looked at.
+
+Both enumerators feed the same admission rules, so what is indexed does not depend on which one ran:
+
+| Rule | Primary | Fallback |
+|---|---|---|
+| obvious-secret filenames (`.env`, `id_rsa`, `*.pem`, …) | refused | refused |
+| built-in exclusions (`node_modules`, `.venv`, `dist`, …) | refused | refused |
+| `.repoatlasignore` | applied | applied |
+| `.gitignore` | applied by git | **not applied** — the one documented difference |
+| `.git` internals | never listed | never walked |
+| files inside a nested managed repository | owned by that repository | owned by that repository |
+| symlinks | refused by containment | never followed |
+| containment, size and binary rules | applied | applied |
+
+**Traversal is safe by structure, not by a cutoff.** Symlinks are never followed, so the walk cannot leave the
+repository or loop through one; directories already visited are not re-entered. Depth is not a security property
+and is not treated as one.
+
+**An unreadable directory is reported, not passed over.** If the operating system refuses a directory, the sync
+still completes, and it says which directories it could not inspect. A successful sync therefore means RepoAtlas
+inspected everything admissible, or named what it could not — never that it quietly stopped.
+
+Operating-system path limits still apply. RepoAtlas fails only where the filesystem itself refuses a path, and
+nesting depth and total path length are separate constraints.
+
 ### `.repoatlasignore`
 
 Supported with gitignore-like semantics where practical. Placed at the RepoAtlas root and/or inside individual
@@ -1273,6 +1308,16 @@ never synthesized to satisfy a renderer (§11).
 
 > **Invariant.** An exact indexed path is more specific than an exact basename match.
 
+> **Invariant.** A path-component suffix explicitly supplied by the user is stronger intent evidence than a
+> basename or a textual mention of that path.
+
+> **Invariant.** `EXACT_SUBPATH` does not imply uniqueness.
+
+> **Invariant.** Exact complete path identity remains stronger than suffix-path identity.
+
+> **Invariant.** Fusion and reranking may order candidates within a specificity class but may not erase the class
+> itself.
+
 > **Invariant.** Explicit repository/path qualification outranks inferred primary-repository bias.
 
 > **Invariant.** Candidate merging preserves the strongest match provenance, independent of stage order.
@@ -1291,9 +1336,34 @@ therefore compared **before** any score is (ARCHITECTURE.md §10).
 
 Accepted spellings of a complete path are the repository-relative path itself, that path with a leading `./`, and
 the path qualified by the repository's identity (`svc/src/config.py` — what RepoAtlas prints in a citation).
-A trailing sub-path and a basename are still exact matches and are still returned; they are not *complete*
-identifications, so they do not take precedence. Path identity is byte-exact and case-sensitive; the folding the
-lexical index performs decides recall and never identity. A path containing a space must be quoted.
+Path identity is byte-exact and case-sensitive; the folding the lexical index performs decides recall and never
+identity. A path containing a space must be quoted.
+
+**A trailing sub-path is explicit too.** `api/config.py` for `services/api/config.py` is a path the user typed, and
+it must likewise lead — it may not be displaced by a basename match, a symbol name, word overlap, an embedding
+neighbour or a document that quotes it. Anchoring only complete paths left this exact failure one level down: a
+`README.md` quoting `api/config.py` two hundred times outranked both files whose paths actually end that way.
+
+It is weaker than a complete path, and it is weaker in a specific way — it does not identify **one** file:
+
+| The user types | Against `services/api/config.py` | Precedence |
+|---|---|---|
+| `services/api/config.py` | complete relative path | strongest; names one file |
+| `svc/services/api/config.py` | repository-qualified complete path | strongest; names one file |
+| `api/config.py` | trailing sub-path on a segment boundary | above everything unspelled; may name several files |
+| `config.py` | basename | no precedence — says what it is called, not where it lives |
+| `pi/config.py`, `myapi/config.py` | not a segment boundary | no match at all |
+| `api/config` | not a path-shaped token | no path match |
+
+When several files end the same way, **all** of them are anchored and none is declared the answer. Order among
+them is decided by ordinary retrieval agreement, including the primary-repository bias — which orders candidates
+inside the class and never creates one. A question answered from a sub-path is never reported as a complete-path
+identification, and `--verbose` lists `named path(s)` and `suffix path(s)` separately so the difference is visible
+from outside.
+
+Sub-path matching is on path components, not characters. `pi/config.py` matches nothing, because a substring test
+would turn identity into a guess. `..` never reaches path matching: query analysis extracts path-shaped tokens at a
+word boundary, so `../api/config.py` is matched as the clean suffix `api/config.py` that it leaves behind.
 
 Storage layout must likewise not decide discoverability. Chunk boundaries — including the character cap that
 bounds a file with no line structure — exist to bound *evidence size*. A literal that straddles one of them is

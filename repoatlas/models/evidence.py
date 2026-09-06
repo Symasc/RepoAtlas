@@ -61,19 +61,31 @@ class MatchClass(enum.IntEnum):
     whose sole claim is that its path is exactly what was typed, and the named file
     finished eighth.
 
-    Only the boundary at :attr:`EXACT_PATH` is load-bearing for ranking today (see
-    :func:`repoatlas.retrieval.ranking.fuse`): a complete repository-relative path
-    is an unambiguous identification of one file, and nothing weaker may outrank
-    it. The finer classes below it are retained provenance rather than additional
+    Two boundaries are load-bearing for ranking (see
+    :func:`repoatlas.retrieval.ranking.fuse`), and they are the two the user has to
+    have *typed a path* to reach:
+
+    * :attr:`EXACT_PATH` — a complete repository-relative path is an unambiguous
+      identification of one file, and nothing weaker may outrank it;
+    * :attr:`EXACT_SUBPATH` — a multi-component path matched on segment
+      boundaries. Explicit intent, but not proof of uniqueness: it may name several
+      files, and all of them are anchored rather than one being chosen.
+
+    The classes below them are retained provenance rather than additional
     precedence — they say what happened, they are shown in ``--json``, and they do
-    not silently re-rank the funnel.
+    not silently re-rank the funnel. :attr:`EXACT_BASENAME` is deliberately on that
+    side of the line: a basename says what a file is called, not where it lives, so
+    ``config.py`` is not an assertion about any one of the ten files that have it.
     """
 
     #: The query spelled this file's whole repository-relative path, optionally
     #: qualified by the repository's own identity (``svc/src/config.py``).
     EXACT_PATH = 0
     #: A trailing sub-path on a segment boundary: ``api/config.py`` for
-    #: ``services/api/config.py``. Exact, but it can name several files.
+    #: ``services/api/config.py``. Exact, but it can name several files, so it
+    #: anchors every file it matches and asserts uniqueness for none of them.
+    #: Segment boundaries are what make it exact — ``pi/config.py`` and
+    #: ``myapi/config.py`` match nothing, because this is not a substring test.
     EXACT_SUBPATH = 1
     #: The file's basename. The least specific exact match there is: it says what
     #: the file is called, not where it lives.
