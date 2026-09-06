@@ -52,6 +52,14 @@ class RetrievalTrace(BaseModel):
     #: less specific match, so a review of *why* something ranked where it did
     #: starts here (ARCHITECTURE.md §10).
     named_paths: tuple[str, ...] = ()
+    #: ``repository/path`` for each file the query identified by a *component
+    #: suffix* of its relative path. Separate from :attr:`named_paths` because the
+    #: two are different claims: a whole path names one file, a suffix names every
+    #: file ending on that boundary and asserts uniqueness for none of them. Both
+    #: take precedence over less specific matches, and a review of *why* something
+    #: ranked where it did needs to be able to tell which of the two happened
+    #: (ARCHITECTURE.md §10).
+    suffix_paths: tuple[str, ...] = ()
     token_estimate: int = 0
 
     @property

@@ -54,6 +54,44 @@ from repoatlas.sync.scanner import ScannedFile, hash_bytes, hash_within, scan_re
 _BINARY_SNIFF_BYTES = 8192
 
 
+def _enumeration_diagnostics(repo_path: Path, unreadable: list[Path]) -> list[ParseDiagnostic]:
+    """Say that enumeration was incomplete, and where, without saying too much.
+
+    Paths are reported **repository-relative**. An unreadable directory is inside
+    the repository by construction, so the relative form is the useful one, and it
+    keeps the diagnostic from printing host-absolute paths back at whoever can
+    write to the tree (ARCHITECTURE.md §12). A directory whose path cannot even be
+    made relative is counted rather than named.
+
+    Only the first few are listed. The message exists so that a successful sync
+    cannot be read as a complete one; enumerating a thousand refused directories
+    would bury that, and the count carries the same fact.
+    """
+    if not unreadable:
+        return []
+    shown: list[str] = []
+    for path in unreadable[:5]:
+        try:
+            shown.append(path.relative_to(repo_path).as_posix() or ".")
+        except ValueError:  # pragma: no cover - every entry descends from the root
+            continue
+    listed = ", ".join(shown)
+    if len(unreadable) > len(shown):
+        listed = f"{listed}, ..." if listed else "..."
+    count = len(unreadable)
+    return [
+        ParseDiagnostic(
+            severity=Severity.WARNING,
+            message=(
+                f"enumeration incomplete: {count} "
+                f"director{'y' if count == 1 else 'ies'} could not be read "
+                f"({listed}); files beneath "
+                f"{'it' if count == 1 else 'them'} are not indexed"
+            ),
+        )
+    ]
+
+
 @dataclass(frozen=True, slots=True)
 class EmbeddingResult:
     """What one embedding pass did. Never a failure: semantic retrieval is an aid."""
@@ -168,12 +206,19 @@ class SyncEngine:
         # content reading all measure containment against the same canonical root
         # and the refusal count is aggregated once (ARCHITECTURE.md §12).
         boundary = RepositoryBoundary(repo_path)
+        # Directories the fallback walk could not read. Only the filesystem
+        # fallback can produce these — `git ls-files` answers from the index — and
+        # they are the difference between "this repository has no files there" and
+        # "RepoAtlas could not look", which a successful sync must not conflate
+        # (ARCHITECTURE.md §6).
+        unreadable: list[Path] = []
         scanned = scan_repository(
             repo_path,
             git=self._git,
             settings=self._settings.discovery,
             managed_subrepos=managed,
             boundary=boundary,
+            unreadable=unreadable,
         )
         known = self._files.list_states(repo_id)
 
@@ -190,7 +235,7 @@ class SyncEngine:
         # Deletion first: a file's facts must never outlive the file.
         self._files.delete_many(plan.deleted_file_ids)
 
-        diagnostics: list[ParseDiagnostic] = []
+        diagnostics: list[ParseDiagnostic] = _enumeration_diagnostics(repo_path, unreadable)
         symbols_total = 0
         edges_total = 0
         dependencies_total = 0

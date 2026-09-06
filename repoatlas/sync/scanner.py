@@ -22,6 +22,7 @@ from pathlib import Path
 
 from repoatlas.config.settings import DiscoverySettings
 from repoatlas.containment import RepositoryBoundary
+from repoatlas.discovery.finder import GIT_DIRECTORY
 from repoatlas.discovery.ignore import (
     IGNORE_FILENAME,
     MAX_IGNORE_BYTES,
@@ -78,6 +79,7 @@ def scan_repository(
     settings: DiscoverySettings | None = None,
     managed_subrepos: frozenset[Path] = frozenset(),
     boundary: RepositoryBoundary | None = None,
+    unreadable: list[Path] | None = None,
 ) -> list[ScannedFile]:
     """Enumerate the indexable files of one repository.
 
@@ -111,8 +113,14 @@ def scan_repository(
     if listed is not None:
         candidates = iter(listed)
     else:
-        # Git unavailable or failed: fall back to walking. Discovery still works.
-        candidates = _walk_relative(repo_path, repo_path, config, depth=0)
+        # Git unavailable or failed: fall back to walking the working tree. The
+        # fallback enumerates the same admissible file set as `ls-files`, at any
+        # depth — it used to stop at 64 and report success, so a repository with
+        # deeper files was indexed incompletely with nothing said (ARCHITECTURE.md
+        # §6). Directories it could not read are appended to `unreadable` rather
+        # than passed over, because "nothing there" and "could not look" are
+        # different claims and only one of them is true.
+        candidates = _walk_relative(repo_path, config, unreadable=unreadable)
 
     results: list[ScannedFile] = []
     for rel_path in candidates:
@@ -185,26 +193,121 @@ def _belongs_to_nested_repository(
     return False
 
 
-def _walk_relative(
-    current: Path, root: Path, config: DiscoverySettings, depth: int
-) -> Iterator[str]:
-    if depth > 64:  # guard against pathological or symlink-induced depth
-        return
+def _identity(path: Path) -> tuple[int, int] | None:
+    """``(device, inode)`` — what makes two paths the same directory."""
     try:
-        entries = sorted(current.iterdir())
-    except (OSError, PermissionError):
-        return
-    for entry in entries:
-        if entry.name in config.exclusions:
-            continue
+        info = path.stat()
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def _walk_relative(
+    root: Path, config: DiscoverySettings, *, unreadable: list[Path] | None = None
+) -> Iterator[str]:
+    """Every admissible file beneath ``root``, at any depth. **Iterative.**
+
+    This walk used to stop at ``depth > 64`` and return, which meant a repository
+    nested deeper than that was indexed as though its lower files did not exist:
+    no error, no diagnostic, a successful sync and an incomplete index. The cap
+    was also not the safety property it was commented as being — a cycle is
+    created by symlinks, which this walk has always refused, and the cost of a
+    tree is its *size*, which a depth limit does not bound at all: a flat
+    directory of 100,000 files costs exactly the same at depth 1 as at depth 100
+    (ARCHITECTURE.md §6). It bounded the one dimension that was never the risk.
+
+    **Termination is structural.** Symlinks are never followed, so no route out
+    of the tree and no cycle through one exists; what remains is a finite acyclic
+    directory tree, which a depth-first walk exhausts. Directory identity
+    ``(st_dev, st_ino)`` is tracked as well, so a bind mount or any second route
+    to a directory already visited is entered once rather than twice — the same
+    rule repository discovery uses, and the reason neither needs a counter.
+
+    **Iterative rather than recursive**, with an explicit stack. The previous
+    implementation recursed through ``yield from`` once per directory level, so
+    lifting the ceiling on its own would have swapped a silent truncation at
+    depth 65 for a ``RecursionError`` somewhere near depth 1000 — a scanner must
+    not require user-controlled nesting to fit the Python call stack. Depth-first
+    rather than breadth-first because the stack then holds the unexplored
+    siblings along one path instead of a whole level, which is the difference
+    between bounded memory and a 100,000-entry frontier. Children are pushed
+    reversed so they pop in lexicographic order: results are sorted by the caller
+    regardless, but a walk that visits in a stable order is one whose diagnostics
+    can be compared between runs.
+
+    ``.git`` is refused **structurally**, not by configuration. It is in the
+    default exclusions, but those are configurable, and a root whose
+    ``exclusions`` were set without it had this walk enumerate the object store,
+    the hooks and ``.git/config`` as ordinary source — content ``git ls-files``
+    would never report, so the fallback was strictly less safe than the path it
+    stands in for. Git internals are not repository source at any depth.
+    """
+    stack: list[Path] = [root]
+    visited: set[tuple[int, int]] = set()
+    origin = _identity(root)
+    if origin is not None:
+        visited.add(origin)
+
+    while stack:
+        current = stack.pop()
         try:
-            if entry.is_symlink():
-                continue
-            if entry.is_dir():
-                if is_git_repository(entry) and entry != root:
-                    continue  # a nested repository is enumerated separately
-                yield from _walk_relative(entry, root, config, depth + 1)
-            elif entry.is_file():
-                yield entry.relative_to(root).as_posix()
+            # The nested-repository probe sits *inside* the guard deliberately. On
+            # a directory the process can see but not enter, `(current / ".git")
+            # .is_dir()` raises rather than answering — and when that probe ran
+            # before the push, its `OSError` was caught by the per-entry handler
+            # and the whole subtree was dropped with nothing recorded. One guard
+            # covers both questions, so a directory that cannot be inspected is
+            # reported instead of quietly becoming an empty one.
+            nested = current != root and is_git_repository(current)
+            entries = () if nested else sorted(current.iterdir())
         except OSError:
+            # Includes PermissionError. Recorded rather than swallowed: an empty
+            # result from a directory that could not be read is not evidence that
+            # it held no files, and a sync reporting success on the strength of it
+            # would claim a completeness it never established.
+            if unreadable is not None:
+                unreadable.append(current)
             continue
+        if nested:
+            continue  # a nested repository is enumerated as itself, separately
+
+        descend: list[Path] = []
+        blocked = False
+        for entry in entries:
+            if entry.name == GIT_DIRECTORY:
+                continue
+            if entry.name in config.exclusions:
+                continue
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir():
+                    descend.append(entry)
+                elif entry.is_file():
+                    yield entry.relative_to(root).as_posix()
+            except OSError:
+                # Listable but not stattable — a directory readable without being
+                # searchable does this to every one of its children. The entry is
+                # skipped, and the directory is named for the same reason an
+                # unreadable one is: something admissible may be under it.
+                blocked = True
+                continue
+        if blocked and unreadable is not None:
+            unreadable.append(current)
+
+        for child in reversed(descend):
+            identity = _identity(child)
+            if identity is None:
+                # Classified as a directory a moment ago and now un-stattable: it
+                # was removed mid-scan, or its permissions changed under us.
+                # Either way this walk did not inspect it, and the last silent
+                # way to drop a subtree is to decide that does not need saying.
+                if unreadable is not None:
+                    unreadable.append(child)
+                continue
+            if identity in visited:
+                # A cycle, a bind mount, or two routes to one directory. Entering
+                # it twice would duplicate everything beneath it.
+                continue
+            visited.add(identity)
+            stack.append(child)

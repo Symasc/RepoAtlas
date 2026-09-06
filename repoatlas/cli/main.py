@@ -303,6 +303,11 @@ def _report_retrieval(evidence: EvidenceSet) -> None:
         # because "why is this first?" is otherwise unanswerable from the outside
         # (ARCHITECTURE.md §10).
         typer.echo(f"  named path(s): {', '.join(trace.named_paths)}", err=True)
+    if trace.suffix_paths:
+        # And which ones it identified by a trailing component path. Reported
+        # separately: these also outrank every less specific match, but the query
+        # may have named several of them and RepoAtlas has not chosen between them.
+        typer.echo(f"  suffix path(s): {', '.join(trace.suffix_paths)}", err=True)
     for stage in trace.stages:
         typer.echo(
             f"  {stage.name:<8} {stage.duration_ms:>8.2f}ms  "
