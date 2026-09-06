@@ -52,16 +52,24 @@ def test_excluded_directories_are_not_descended(tmp_path: Path) -> None:
     assert discover_repositories(tmp_path) == []
 
 
-def test_max_depth_bounds_the_walk(tmp_path: Path) -> None:
+def test_depth_does_not_bound_the_walk(tmp_path: Path) -> None:
+    """The walk had a ``max_depth`` of 6 and this test asserted it.
+
+    That constant made an ``init`` that exited 0 report a repository set it knew
+    was incomplete, so the setting is gone rather than raised and the test now
+    asserts the opposite: nesting depth is not a reason to omit a repository
+    (V1_SPEC §5). The deep case lives in
+    ``tests/adversarial/test_recursive_repository_discovery.py``.
+    """
     from tests.conftest import init_git_repository
 
-    deep = tmp_path / "a" / "b" / "c" / "d" / "repo"
+    deep = tmp_path / "a" / "b" / "c" / "d" / "e" / "f" / "g" / "h" / "repo"
     deep.mkdir(parents=True)
     (deep / "f.py").write_text("y = 2\n")
     init_git_repository(deep)
 
-    assert discover_repositories(tmp_path, DiscoverySettings(max_depth=2)) == []
-    assert len(discover_repositories(tmp_path, DiscoverySettings(max_depth=6))) == 1
+    assert [c.path for c in discover_repositories(tmp_path)] == [deep]
+    assert not hasattr(DiscoverySettings(), "max_depth")
 
 
 def test_repoatlasignore_directory_pattern() -> None:

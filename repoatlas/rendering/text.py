@@ -77,9 +77,32 @@ def render_status(report: StatusReport) -> str:
     )
 
 
+def _unreadable_notice(report: SyncReport) -> list[str]:
+    """Name the directories discovery was refused, if any.
+
+    Printed rather than counted silently: a walk that could not read a subtree has
+    not established that the subtree holds no repositories, and reporting the two
+    the same way is how a discovery gap goes unnoticed (V1_SPEC §5). At most five
+    paths, because the point is that it happened and where to start looking.
+    """
+    if not report.unreadable_paths:
+        return []
+    shown = [f"  {path}" for path in report.unreadable_paths[:5]]
+    remainder = len(report.unreadable_paths) - len(shown)
+    if remainder > 0:
+        shown.append(f"  ... and {remainder} more")
+    return [
+        "",
+        f"Could not read {len(report.unreadable_paths)} director"
+        f"{'y' if len(report.unreadable_paths) == 1 else 'ies'}; "
+        "any repositories inside were not discovered:",
+        *shown,
+    ]
+
+
 def render_sync(report: SyncReport) -> str:
     if not report.repositories:
-        return "No repositories to sync."
+        return "\n".join(["No repositories to sync.", *_unreadable_notice(report)])
 
     lines: list[str] = []
     if len(report.repositories) == 1:
@@ -123,6 +146,7 @@ def render_sync(report: SyncReport) -> str:
         # Not a failure: a reference to something outside the managed set stays a
         # recorded claim, and is resolved if that repository is added later.
         lines.append(f"  {report.unresolved_references} references still unresolved")
+    lines.extend(_unreadable_notice(report))
     lines.extend(["", "Sync complete."])
     return "\n".join(lines)
 

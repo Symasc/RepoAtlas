@@ -20,6 +20,11 @@ def initialize(
     The user never registers repositories by hand: discovery is the only path by
     which a repository becomes managed (V1_SPEC §5).
 
+    Discovery is recursive to the bottom of the tree; nothing is omitted for being
+    deeply nested. Directories the operating system refuses are skipped and named
+    in the report, because "no repositories there" and "could not look" are
+    different claims and only one of them is true (V1_SPEC §5).
+
     Holds the same writer lock ``sync`` does, for the same database. ``init`` is a
     mutating operation on the shared knowledge base — it rewrites the repository
     set and rebuilds the global graph — so protecting only ``sync`` would leave the
@@ -29,8 +34,11 @@ def initialize(
     if not resolved.is_dir():
         raise RepoAtlasError(f"Not a directory: {root}")
 
+    unreadable: list[Path] = []
     with workspace.writer_lock():
-        candidates = discover_repositories(resolved, workspace.settings.discovery)
+        candidates = discover_repositories(
+            resolved, workspace.settings.discovery, unreadable=unreadable
+        )
 
         settings = workspace.settings.model_copy(
             update={"repos": workspace.settings.repos.model_copy(update={"root": resolved})}
@@ -58,4 +66,4 @@ def initialize(
 
         report = engine.run(managed, scope="global", embed_repo_ids=None)
 
-    return report, len(candidates)
+    return report.model_copy(update={"unreadable_paths": tuple(unreadable)}), len(candidates)

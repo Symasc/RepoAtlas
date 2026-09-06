@@ -11,14 +11,39 @@ ordering is the core retrieval principle of V1_SPEC §14 made structural: no
 similarity score, however high, moves an embedding neighbour above an exact
 identifier, an exact error string, an exact symbol, an environment variable or a
 graph-supported relationship.
+
+**Nor does fusion erase match specificity.** Tier and score together were not
+enough, because they conflate two different things a candidate can be strong
+*for*. A question naming ``src/config.py`` produced an exact-path candidate for
+that file — one deterministic vote — while a ``tests/config.py`` stuffed with
+``config``-shaped symbols collected exact-content, entity-name, lexical and
+semantic votes, and a ``docs/notes.txt`` mentioning the target path a hundred
+times won the literal stage outright. All were `DETERMINISTIC`, so the tier
+separated nothing and the fused score decided — by vote count. The file the user
+named finished eighth behind a text file that merely talks about it.
+
+So there are three ordering keys, not two, and each answers its own question:
+
+============== ==================================================================
+`EvidenceTier` is this a fact about the code, or a guess about the question?
+:class:`MatchClass` how precisely did the query identify it?
+fused score    how strongly do the retrievers agree about it?
+============== ==================================================================
+
+The specificity key is deliberately a **boundary rather than a gradient**: only a
+complete repository-relative path — the one spelling that identifies exactly one
+file and can mean nothing else — takes precedence, and everything below it is
+still ordered by agreement exactly as before. A gradient would have re-ranked the
+whole funnel on a signal nobody asked for; a boundary answers the one question
+that was actually ambiguous. See :func:`fuse`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Protocol
 
-from repoatlas.models.evidence import EvidenceCandidate, EvidenceTier
+from repoatlas.models.evidence import EvidenceCandidate, EvidenceTier, MatchClass
 
 #: RRF damping constant. 60 is the value from the original formulation.
 _RRF_K = 60.0
@@ -54,6 +79,20 @@ class NoopReranker:
 
     def rerank(self, question: str, candidates: list[EvidenceCandidate]) -> list[EvidenceCandidate]:
         return candidates
+
+
+#: What makes a candidate's *file* the one the query named. A candidate carries a
+#: match class of its own, but specificity is a property of the file: if the user
+#: spelled ``src/config.py``, then everything retrieved from ``src/config.py`` is
+#: about the file they named, and everything retrieved from ``tests/config.py`` is
+#: not. Anchoring the file rather than the single file-identity candidate is what
+#: keeps "why does src/config.py read DATABASE_URL?" answering with the assignment
+#: inside the named file rather than with the filename alone.
+_ANCHOR = MatchClass.EXACT_PATH
+
+#: Ordering positions for the specificity key. Two values, not eight: see the
+#: module docstring on why this is a boundary rather than a gradient.
+_NAMED, _UNNAMED = 0, 1
 
 
 def _key(candidate: EvidenceCandidate) -> _Key:
@@ -98,9 +137,23 @@ def fuse(
     split becomes many chunks sharing one line range — and summing those would
     make the fused score a measure of file size rather than of agreement between
     retrievers, letting generated data outrank the answer purely by volume.
+
+    Ordering is ``(tier, specificity, -score, tie-break)``. The specificity key
+    holds the one guarantee the score cannot express: **a candidate from the file
+    whose complete repository-relative path the query spelled outranks every
+    candidate from a file that was merely named less exactly** — a shared
+    basename, a symbol with a matching name, a lexical or semantic neighbour, or a
+    document that quotes the path. It is a rank position rather than a bonus, so
+    no quantity of agreement can add up to it, and it is applied strictly *inside*
+    a tier, so it can never lift a guess above a fact.
+
+    Everything the anchor does not touch is ordered exactly as before. When no
+    query names a whole path — the common case — every candidate sits on the same
+    side of the boundary and fusion is unchanged.
     """
     scores: dict[_Key, float] = {}
     tiers: dict[_Key, EvidenceTier] = {}
+    matches: dict[_Key, MatchClass] = {}
     best: dict[_Key, EvidenceCandidate] = {}
 
     for ranked in ranked_lists:
@@ -116,8 +169,19 @@ def fuse(
             current = tiers.get(key)
             tiers[key] = candidate.tier if current is None else min(current, candidate.tier)
 
+            # And its strongest *match class*, by the same rule and for the same
+            # reason. `min` is commutative, so merging cannot depend on the order
+            # the stages happened to run in: a span that arrived once as an exact
+            # path and four times as a lexical neighbour is an exact path either
+            # way round.
+            claimed = matches.get(key)
+            matches[key] = candidate.match if claimed is None else min(claimed, candidate.match)
+
             # The representative candidate is the strongest claim about this span:
-            # the best tier first, and within a tier the highest raw score.
+            # the best tier first, and within a tier the highest raw score. It
+            # supplies the text and the description; the merged tier and match
+            # class above are stamped onto the copy below, so what is *returned*
+            # carries the strongest of each regardless of which stage won here.
             existing = best.get(key)
             if existing is None or (candidate.tier, -candidate.score) < (
                 existing.tier,
@@ -130,29 +194,61 @@ def fuse(
             if key[0] == primary_repository:
                 scores[key] += primary_boost
 
-    ordered = sorted(scores, key=lambda key: (tiers[key], -scores[key], _ordering(key)))
+    named = _named_files(matches)
+    ordered = sorted(
+        scores,
+        key=lambda key: (
+            tiers[key],
+            _NAMED if key[:2] in named else _UNNAMED,
+            -scores[key],
+            _ordering(key),
+        ),
+    )
     return [
-        best[key].model_copy(update={"score": scores[key], "tier": tiers[key]}) for key in ordered
+        best[key].model_copy(
+            update={"score": scores[key], "tier": tiers[key], "match": matches[key]}
+        )
+        for key in ordered
     ]
 
 
-def enforce_tier_order(candidates: Sequence[EvidenceCandidate]) -> list[EvidenceCandidate]:
-    """Partition by tier, preserving order within each tier.
+def _named_files(matches: Mapping[_Key, MatchClass]) -> frozenset[tuple[str, str]]:
+    """The ``(repository, path)`` pairs the query identified by their whole path.
 
-    Fusion already orders by tier, so on the V1 path this changes nothing. It
-    exists because the guarantee of V1_SPEC §14 must hold at the **boundary**, not
+    Derived from the candidates themselves rather than passed in, which keeps
+    ``fuse`` a pure function of its input and makes the anchor independent of the
+    order the stages appended their lists.
+    """
+    return frozenset(key[:2] for key, match in matches.items() if match is _ANCHOR)
+
+
+def enforce_precedence(candidates: Sequence[EvidenceCandidate]) -> list[EvidenceCandidate]:
+    """Partition by tier and then by path specificity, preserving order inside each.
+
+    Fusion already orders by both, so on the V1 path this changes nothing. It
+    exists because the guarantees of V1_SPEC §14 must hold at the **boundary**, not
     merely inside one function: between fusion and the caller sits the ``Reranker``
-    seam, and a V2 cross-encoder that reordered across tiers would silently undo
-    the rule the rest of the funnel is built on.
+    seam, and a V2 cross-encoder is exactly the kind of component whose ranking is
+    opaque. One that reordered across tiers would silently undo the rule the rest
+    of the funnel is built on; one that reordered *within* a tier — which it is
+    explicitly allowed to do — could just as silently drop the file the user named
+    by its full path below one that merely shares its basename.
 
     Applying it before budgeting matters as much as applying it before returning:
     a hard token budget spent on embedding neighbours would starve deterministic
     evidence out of the answer just as effectively as ranking it lower.
 
-    ``sorted`` is stable, so within a tier the incoming order — including whatever
-    a reranker decided — is preserved exactly.
+    ``sorted`` is stable, so within a tier and a specificity the incoming order —
+    including whatever a reranker decided — is preserved exactly.
     """
-    return sorted(candidates, key=lambda candidate: candidate.tier)
+    named = frozenset(candidate.identity for candidate in candidates if candidate.match is _ANCHOR)
+    return sorted(
+        candidates,
+        key=lambda candidate: (
+            candidate.tier,
+            _NAMED if candidate.identity in named else _UNNAMED,
+        ),
+    )
 
 
 def _same_source(a: EvidenceCandidate, b: EvidenceCandidate) -> bool:

@@ -295,6 +295,34 @@ RepoAtlas must:
 
 The user must **not** manually register repositories.
 
+### Recursion is not bounded by depth
+
+"Recursively discover" means to the bottom of the tree. A repository is never omitted for being deeply nested, and
+there is no configurable depth setting — a ceiling of six levels used to exist, was documented nowhere, and made
+`init` exit 0 reporting a repository set it knew was truncated.
+
+Traversal is still bounded, by things that are about the tree rather than about a number:
+
+| Bound | Effect |
+|---|---|
+| default exclusions | `node_modules`, `.venv`, `dist`, `vendor`, … are not descended |
+| `.repoatlasignore` | matched on the root-relative path, at any depth |
+| `.git` | never descended into, whatever `exclusions` is set to |
+| directory symlinks | not followed; when explicitly enabled, they must still resolve **inside** the managed root |
+| directory identity | each directory is entered once, keyed on `(device, inode)`, so any cycle terminates |
+
+A directory RepoAtlas is refused permission to read is skipped rather than fatal, and is **named in the output**: a
+subtree that could not be read has not been shown to be empty.
+
+Discovery order is deterministic — the repository set and its order depend on the tree, never on filesystem
+enumeration order — and repeating `init` over the same tree changes nothing.
+
+> **Invariant.** A valid, non-ignored repository beneath the managed root is not omitted solely because of nesting
+> depth.
+
+> **Invariant.** Traversal termination is guaranteed by filesystem and symlink rules, not by silently truncating
+> discovery at an arbitrary depth.
+
 ### Nested repositories
 
 A Git repository inside another Git repository is a **separate managed repository**. Files belonging to an inner
@@ -1087,6 +1115,35 @@ a question the repository leaves open.
 A file matched this way is evidence about the file, so it cites the file and **no line number**. Provenance is
 never synthesized to satisfy a renderer (§11).
 
+#### An exact path must survive fusion
+
+> **Invariant.** Fusion may combine relevance evidence, but it may not erase stronger deterministic match
+> specificity.
+
+> **Invariant.** An exact indexed path is more specific than an exact basename match.
+
+> **Invariant.** Explicit repository/path qualification outranks inferred primary-repository bias.
+
+> **Invariant.** Candidate merging preserves the strongest match provenance, independent of stage order.
+
+Finding the file is not the same as ranking it. When the user supplies a complete repository-relative path and
+that path exists, the file it names must **lead** — it may not be displaced by a file that merely shares its
+basename, by a symbol whose name resembles the query, by word overlap, by an embedding neighbour, or by a document
+that quotes the path. Those are all legitimate evidence and all remain in the answer; none of them is what was
+asked for.
+
+The competitors win on *quantity*: a file called `config.py` full of `config`-shaped symbols is reached by four
+retrieval stages, and a file whose only claim is that its path is what the user typed is reached by one. Rank
+fusion measures agreement between retrievers, so agreement is what it rewards — correctly, for questions where
+nothing was named exactly. A query that names one file completely is not such a question, and specificity is
+therefore compared **before** any score is (ARCHITECTURE.md §10).
+
+Accepted spellings of a complete path are the repository-relative path itself, that path with a leading `./`, and
+the path qualified by the repository's identity (`svc/src/config.py` — what RepoAtlas prints in a citation).
+A trailing sub-path and a basename are still exact matches and are still returned; they are not *complete*
+identifications, so they do not take precedence. Path identity is byte-exact and case-sensitive; the folding the
+lexical index performs decides recall and never identity. A path containing a space must be quoted.
+
 Storage layout must likewise not decide discoverability. Chunk boundaries — including the character cap that
 bounds a file with no line structure — exist to bound *evidence size*. A literal that straddles one of them is
 still present in the repository, and exact search must still find it. Both properties are asserted in the
@@ -1844,8 +1901,16 @@ followed raised the suite to 935 and could not re-check the container: see the n
       the same hash. This is the case a `chunk_id` cascade would get wrong
 - [x] **The precedence guarantee is asserted at the final retrieval boundary**, not only inside `fuse`. Against an
       embedding model that scores every text 1.0, and against a reranker that deliberately inverts the tiers. The
-      order is re-imposed by `enforce_tier_order` before budgeting, so a hostile order can neither outrank
-      deterministic evidence nor starve it out of the token budget
+      order is re-imposed by `enforce_precedence` before budgeting, so a hostile order can neither outrank
+      deterministic evidence nor starve it out of the token budget, and cannot drop a file the user named by its
+      full path below one that merely shares its basename
+- [x] **Exact-path ranking specificity**, against ten files sharing one basename, one of them stuffed with
+      matching symbols and imports and another quoting the target path a hundred times. Full paths, nested paths,
+      quoted paths, paths with spaces, dots, dashes and non-ASCII characters; repository-qualified paths against
+      the primary-repository bias; the negative controls (`src/config.p`, `sr/config.py`, `x/src/config.py`,
+      a bare basename, a suffix-only path, a case-folded path, a path that does not exist); order-independent
+      candidate merging over every stage permutation; and the whole thing again through the installed CLI in text
+      and `--json`
 - [x] **Stale-index stress**: diverged branches, content-only branch changes, directory deletion, a deleted file
       that returns, renames, moves into a deeper path, moves *between repositories*, two files swapping content,
       uncommitted edits, untracked files, staged deletions, reverting to clean, and dependency edits in both
