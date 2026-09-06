@@ -57,10 +57,31 @@ def sync(workspace: Workspace, context: RepositoryContext, *, full: bool = False
             plan = plan_repository_set(
                 root, workspace.settings.discovery, workspace.repositories.list_all()
             )
-            # Only the new ones: `upsert` writes the indexed-state columns, so
-            # re-registering an already-indexed repository would erase the record
-            # of it having been indexed (see `register`).
-            register(plan.added, workspace.repositories)
+            # Relocation first, and in the same transaction as registration.
+            # `sync` reaches this only when the configured root already names a
+            # place the repository rows do not — the state the pre-fix `init`
+            # crash left behind, config moved and rows not. Without this the rows
+            # would be *retired* instead: their directories are gone, so
+            # `forget_if_missing` would delete every one of them and register
+            # nothing in their place, because a relocated candidate is deliberately
+            # not an added one. On an ordinary run `relocated` is empty and this
+            # costs a loop over nothing (ARCHITECTURE.md §3).
+            #
+            # Conflicts are left alone rather than raised. `sync` was asked to
+            # index a workspace, not to adjudicate its root, and a candidate whose
+            # identity is held by a live repository elsewhere is simply not
+            # registered — which is what keeps the old `UNIQUE constraint failed:
+            # repositories.slug` out of an ordinary sync. `status` reports it.
+            with workspace.database.transaction():
+                for relocation in plan.relocated:
+                    assert relocation.repository.id is not None
+                    workspace.repositories.relocate(
+                        relocation.repository.id, relocation.candidate.path
+                    )
+                # Only the new ones: `upsert` writes the indexed-state columns, so
+                # re-registering an already-indexed repository would erase the
+                # record of it having been indexed (see `register`).
+                register(plan.added, workspace.repositories)
             # Re-read rather than splice, so the run's ordering is the one every
             # other command sees and a newly registered repository is indistinguish-
             # able from one that was there all along.

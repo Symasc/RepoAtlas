@@ -225,6 +225,133 @@ deliberately *not* the mechanism here: it makes re-running less explosive withou
 cannot tell a recognized partial migration from arbitrary schema damage.
 
 
+### Database ownership: identity before schema version
+
+The configured index path names *a file*. Nothing about it guarantees that file is RepoAtlas's, and until this was
+enforced RepoAtlas never asked. A database containing a `payroll` table and `user_version = 0` was read as "a fresh
+RepoAtlas database awaiting migration 001": `repoatlas init` created twenty-one tables in it, ran every migration
+and stamped the schema version, leaving the foreign table intact. Nothing was destroyed **because nothing
+collided**, and that is the finding rather than the mitigation. Absence of a name collision is not evidence of
+ownership.
+
+`user_version` could not supply the missing evidence. It is generic SQLite metadata that every database in the
+world has, and `0` is what it says about a file that has never heard of RepoAtlas. So identity and schema version
+are now two questions, asked in that order:
+
+```
+application_id == RepoAtlas?          "is this a RepoAtlas index?"       ← ownership
+        ↓
+user_version                          "which RepoAtlas schema is it?"   ← version
+        ↓
+migrate / accept / refuse as future
+```
+
+**The marker is `PRAGMA application_id`** — SQLite's own header field for naming the format a file belongs to,
+which exists precisely because "SQLite as an application file format" is a supported use. RepoAtlas's value is
+`0x52504154`, the big-endian encoding of the ASCII bytes `RPAT`, following the convention SQLite's own `magic.txt`
+registry uses. It is chosen on measured properties, not on taste (SQLite 3.53.1, CPython 3.13):
+
+| Property | Measured |
+|---|---|
+| default on a database nobody claimed | `0` |
+| reading it | leaves the file byte-identical, creates no `-wal`/`-shm` |
+| set inside a transaction, rolled back | reverts to `0` — it is transactional |
+| set inside a transaction, before commit | invisible to other connections |
+| `VACUUM`, the backup API, a plain file copy | survives all three |
+| relationship to `user_version` | independent; changing one does not touch the other |
+| accepted range | **signed 32-bit**; `2**31` silently stores `0` |
+
+That last row is load-bearing. A value chosen above the signed 32-bit range would be stored as `0`, leaving every
+RepoAtlas index quietly unmarked — and therefore unowned. It is asserted in the test suite rather than trusted.
+
+**Why not a `meta` identity row.** The question has to be answerable *before* RepoAtlas is allowed to write, and on
+a foreign database `meta` does not exist — so answering "do I own this?" would require creating the table that
+answers it. A row would also have to be maintained by every migration and folded into the schema fingerprint, and
+would still not survive being read from a database whose schema is unknown. The pragma is one header field, read
+without a transaction, on any SQLite file. One mechanism is used, not both.
+
+**Ownership is established before anything writes**, and before the future-version check. `PRAGMA journal_mode =
+WAL` modifies the file header — measured — so a database RepoAtlas does not own has to be refused while the
+connection has still only read; refusing afterwards would mean the refusal itself had modified the file. Ordering
+in `open_database` is therefore: connect → `busy_timeout` → **ownership** → future-version → `journal_mode` →
+migrations.
+
+The classification is ordered so the cheapest and most conclusive evidence comes first, and the expensive evidence
+is gathered only when a write is imminent anyway:
+
+| Order | Condition | Outcome |
+|---|---|---|
+| 1 | `application_id` is some other non-zero value | refuse: another application's database |
+| 2 | `application_id` is ours **and** `user_version` is current | **open** — the hot path: two header reads, no schema inspection |
+| 3 | no user objects and `user_version` is 0 | **initialize** — an empty container has no owner |
+| 4 | the schema is a state the committed migrations produce | **open**: ours by marker, or a recognized legacy index |
+| 5 | anything else | refuse, unchanged |
+
+Step 2 is why a normal open pays almost nothing for identity: **0.3 ms**, against 1.6 ms for the open around it. (Skipping the read transaction for that case was measured and dropped — the cost is the pragma round-trips, not the transaction, and it bought 0.03 ms for a second copy of the decision.) Step 4 costs a schema fingerprint, and is reached only by a
+pre-marker index or by a marked database that is *about to be migrated* — where inspecting the schema is strictly
+cheaper than migrating it blind.
+
+**Recognition is by shape, and the shape authority is the migrator's.** `migrator.recognizes()` compares the live
+schema against a scratch database built by running the real `.sql` migrations, using the same `schema_fingerprint`
+Pass 2 already uses for resume points. There is no second list of table names anywhere, so this cannot drift from
+the schema it authorizes. Two states count and only two: the complete schema at the stamped version, and a
+**prefix** of the next migration applied onto it — which is exactly the shape a database damaged by the
+pre-atomicity implementation has, and refusing it would strand the databases Pass 2 exists to rescue. A column of
+the wrong type, a missing index, an extra table, or the right objects under a version that never produced them is
+not a RepoAtlas schema.
+
+> **Invariant.** `user_version` is a schema version, not proof of database ownership.
+
+> **Invariant.** A non-empty SQLite database is never mutated unless RepoAtlas identity is already present or its
+> schema is conclusively recognized as a committed historical RepoAtlas schema.
+
+> **Invariant.** Unknown SQLite state is refused before identity assignment or migration.
+
+> **Invariant.** Read commands do not write ownership metadata merely to upgrade a legacy index.
+
+> **Invariant.** Foreign-database refusal is byte-preserving.
+
+**A marker proves ownership and nothing else.** It is never a licence to operate on a schema RepoAtlas cannot
+account for: a marked database whose `user_version` is 0 while user objects exist is a state no migration can
+produce — 001 creates the schema and stamps 1 in one transaction — and is refused rather than migrated onto
+someone else's tables. A marked database at the current version whose schema is *missing* something is caught
+where the schema is used, by the existing missing-object classification, and nothing is repaired.
+
+**Identity and schema commit together.** The marker is written by `_apply_one`, inside the same `BEGIN IMMEDIATE`
+transaction that runs the migration's statements and stamps `user_version`. The ordering question the alternative
+raises — mark the file, then create the schema — has a crash window in which a database claims to be a complete
+RepoAtlas index and is empty. Riding the migration's transaction removes the window rather than handling it: a
+process killed at any point leaves either the previous version unmarked, or the new version marked. Verified under
+`SIGTERM` and `SIGKILL` at three points: before the marker, after the marker and before the migration completes,
+and mid-migration.
+
+**Legacy identity upgrade: recognition first, the write second.** An index already at the current schema version
+has no migration to ride along with, so its marker has to be written by something else — and that something must
+not be a read. `status` exists to report whether anything changed; a `status` that rewrote the database in order to
+answer would make its own answer untrue, and would break the read-only guarantee §6 establishes for it. So the
+marker is written by `Database._claim()` at the **first application transaction**, which only `sync`, `init` and
+the linker open. It is serialized with its own `BEGIN IMMEDIATE` rather than joining the caller's transaction,
+because it is not part of the caller's work: it is a standalone, idempotent assertion about a database whose
+identity was already proven at open, and it stays true whether or not the work that follows commits.
+
+The consequence worth stating is the one that made this the right choice: a read-only pre-marker index stays
+**readable**. `status`, `repos` and `locate` succeed against a mode-400 legacy database and leave it
+byte-identical; only the writer fails, and it fails as *inaccessible* — the truthful reason — rather than as
+foreign. An architecture that stamped identity at open would tell an operator that their own historical index,
+which they had merely made read-only, belongs to somebody else.
+
+**Ownership outranks the writer lock.** The workspace is opened before the lock is taken, so a foreign database is
+exit 3 whether or not another process is writing. Reporting contention would tell the operator to wait for a sync
+that could never have run. Exit 5 keeps its meaning for a genuine index.
+
+**Consistency of the ownership reads.** The marker, the version and the schema are read inside one deferred
+transaction. Taken in autocommit they could land on different sides of another process's commit — two
+`repoatlas init` runs against one new database is not hypothetical — and the loser could observe a version stamp
+with the next version's shape and refuse a database that is perfectly sound. A deferred transaction reads and never
+writes: measured to leave the file byte-identical with no journal sibling, which it must, because at that point
+RepoAtlas may still turn out not to own the file.
+
+
 ### When the index cannot be used
 
 An unusable index is a **product state**, and V1_SPEC §4 has always reserved exit 3 for it. Until this was
@@ -260,6 +387,8 @@ extended codes without a change here. Measured on this build (SQLite 3.53.1, CPy
 | required table dropped | on the query that needs it | `SQLITE_ERROR` (1) + name check | schema | 3 |
 | `user_version` > `SCHEMA_VERSION` | explicit check before any write | — | schema | 3 |
 | unrecognized migration shape | migrator, fail-closed | — | schema | 3 |
+| valid SQLite that is not ours | ownership check before any write | — | not recognized | 3 |
+| another application's `application_id` | ownership check before any write | — | not recognized | 3 |
 | zero-byte file | — | — | **an empty database** | 0 |
 
 The last row is measured, not assumed: SQLite reads a zero-length file as a new database, so RepoAtlas creates the
@@ -456,6 +585,86 @@ Interned **global** entities are untouched by this. `env:SERVICE_HOST` is one no
 reach, and that is the point of it (V1_SPEC §10): the entity is a concept, while the *edges* carry the
 repository and file that asserted them. Strengthening repository identity must not make a shared hub
 repository-local, and a test asserts it did not.
+
+### The managed root can move
+
+`repoatlas init` against a moved managed root used to crash:
+
+```
+sqlite3.IntegrityError: UNIQUE constraint failed: repositories.slug
+```
+
+Discovery found the same repositories at new absolute paths, the registered rows still carried the old ones, and
+registration tried to *insert* a second row for each — carrying the slug the old row already held. The constraint
+was correct. What was missing is that nothing had decided what a moved root means before a write reached it, so a
+uniqueness constraint became the decision by default.
+
+> **Invariant.** Absolute repository location is mutable metadata, not the repository's sole logical identity.
+
+> **Invariant.** A whole managed-root relocation must not create duplicate repository identities.
+
+> **Invariant.** A slug collision is not by itself proof of relocation.
+
+> **Invariant.** Relocation reconciliation is atomic across the repository set.
+
+> **Invariant.** RepoAtlas never resolves an ambiguous root change by silently merging unrelated repositories.
+
+**Why the slug already answers this.** A repository's identity is its path *relative to the managed root* (above).
+Moving the root is precisely the operation that leaves every such path unchanged: `/old/service-a` and
+`/new/service-a` are both `service-a`. So relocation needs no Git inspection, no inode comparison and no new
+identity mechanism — it needs the identity RepoAtlas already has, matched against a set of discoveries. Git
+identity was considered and is not used: it would mean running more repo-controlled machinery inside the trust
+boundary of §8 to re-derive a fact the slug already carries, and it cannot speak for the uncommitted working tree
+RepoAtlas actually indexes.
+
+**Inode identity is deliberately not the mechanism.** `mv` within a filesystem preserves inode and device, and a
+`cp -a` followed by a delete does not — yet both are the same operation to the person who did them. Making
+relocation depend on inode identity would support the first and refuse the second, and would break entirely on
+network and container filesystems. It is not consulted.
+
+**What proves a relocation.** Two conditions, both required, evaluated only on the repositories that path matching
+could not account for:
+
+| Condition | Why it is necessary |
+|---|---|
+| the registered row's slug equals a discovered candidate's slug | identity is root-relative, so this is what a move preserves |
+| the registered row's directory **no longer exists** | a repository that moved left its old location behind |
+| the slug is collision-free on both sides | slugs are unique by construction; an ambiguous group means an assumption already failed |
+
+The second condition is the one that makes the first safe. A matching slug while *both* directories exist is not a
+repository that moved — it is two working trees claiming one identity, which is what a second workspace on the same
+machine looks like. There is nothing in a slug that says which one the operator meant, so `init` refuses with
+`RepositoryRootConflictError`, names both paths, and writes nothing.
+
+| Situation | Outcome |
+|---|---|
+| whole root renamed or moved | **relocated** — row id and slug preserved, path rebound |
+| root copied, original deleted | **relocated** — identity does not depend on inode preservation |
+| old root still present, new root has the same slugs | **refused** — a conflict, not a relocation |
+| old repository deleted, unrelated repository at the same slug | **relocated row, replaced contents** — `init` reindexes, so no stale fact survives as current |
+| repository moved *within* the root (`services/api` → `archive/api`) | **not a relocation** — the slug itself changed, so the old identity is retired and the new one discovered |
+| root unchanged | no relocation is even considered — paths match first |
+
+That last row is why this costs an ordinary run nothing. Paths are matched before identities, so on an unchanged
+root there is nothing left for identity matching to look at, and every ordinary `sync` and `status` reaches exactly
+the plan it reached before. Relocation is detected in `plan_repository_set` — which still writes nothing, so
+`status` can keep calling it — and *applied* only by `init`, which is the command that owns the root.
+
+**Preserving the row id is the point, not an optimization.** `files`, `entities`, `dependencies` and every fact
+keyed by `repo_id` reference it, and entity keys are built from the slug. A relocation that deleted and reinserted
+the row would cascade away every fact the move was supposed to carry across and renumber the identity those facts
+hang from — which is what the pre-fix code did on a pure move, silently, whenever the old paths happened to be
+gone. `SqliteRepositoryStore.relocate` is a deliberate, separate operation for this reason: `upsert` keys on the
+path, which is exactly the assumption a root move breaks, and overloading it would hide an identity migration
+inside a method whose contract is "insert or update by path".
+
+**Atomicity.** A root move rewrites every row in the repository set, and a half-applied move is a workspace split
+across two roots — the state from which no later command can recover deterministically, because neither root is
+wholly right. Every relocation, retirement and registration for one `init` therefore commits inside a single
+transaction. The configured root is written to disk **after** that transaction commits, for the same reason: the
+failure that leaves `config.root = new` while the rows still say `old` is the one an operator cannot diagnose, and
+ordering the writes removes it. If the config write fails, both halves still describe the old root and the next
+`init` reaches the same plan again.
 
 ### The two-tier entity design
 
@@ -1282,19 +1491,27 @@ between the function that reads and the function that writes:
 ```
 plan_repository_set(root, settings, registered) -> RepositorySetPlan      # reads only
     discovered   every repository the current walk found
-    added        discovered, not registered
-    existing     registered and still discovered
-    missing      registered, and the directory is gone
+    added        discovered, not registered, and not a relocation of anything
+    existing     registered and still discovered at the path on record
+    missing      registered, the directory is gone, and not relocated
+    relocated    registered, found again at a new path under a new root
+    conflicts    one identity claimed by two live directories
     unreadable   directories the OS refused
 
 register(candidates, store) -> [Repository]                               # the only writer
+store.relocate(repo_id, path)                                             # identity kept, location rebound
 ```
 
 | Command | Uses |
 |---|---|
-| `init` | `plan` → `register(plan.discovered)` → index all |
+| `init` | `plan` → refuse on `conflicts` → `relocate(plan.relocated)` → `register(plan.discovered)` → index all |
 | `sync` | `plan` → `register(plan.added)` → index the reconciled set |
 | `status` | `plan` → *look at it* |
+
+`relocated` and `conflicts` are computed here so there is one authority on what the repository set is, and applied
+only by `init`, which is the command that owns the managed root. They cost an ordinary run nothing: paths are
+matched before identities, so on an unchanged root nothing reaches identity matching — see *The managed root can
+move* in §3 for what proves a relocation and what refuses one.
 
 Reads-only is a contract, not an implementation detail. `status` is a read command; one that quietly registered
 repositories would make "check whether anything changed" a mutating operation, indistinguishable in a terminal
@@ -3024,3 +3241,9 @@ full reindex.
 | `missing` means "the directory is gone", not "no longer discovered" | Report any registered-but-undiscovered repository as missing | A repository whose `.git` was deleted stays registered, by `init` and `sync` alike, because its path is its identity and that path exists. Calling it missing would describe a retirement neither command performs (§3, §6) |
 | Reconciliation is inside the writer lock | Discover and register before taking the lock, to hold it for less time | A sync then refused the lock (exit 5) still leaves the repository registered with no facts — worse than not finding it. The lock is what makes six concurrent syncs converge on one row (§9) |
 | No repository-set cache or fingerprint | Cache the discovered set and invalidate it on a signal | A stale cache is precisely how the invisibility returns, and the walk it would save is 192 ms on a 100-repository tree. Measured rather than assumed (§6) |
+| Ownership is `PRAGMA application_id` | A `meta` identity row, or a schema fingerprint alone | The question has to be answerable *before* RepoAtlas may write, and on a foreign database `meta` does not exist — answering it would mean creating the table that answers it. The pragma is transactional, survives `VACUUM`/backup/copy, and reads without touching the file (§3) |
+| Identity and schema version stay separate concepts | Keep overloading `user_version`, or derive identity from it | `user_version` is generic SQLite metadata every database has, and `0` is what it says about a file that never heard of RepoAtlas. Reading it as "fresh, awaiting migration 001" is the whole defect (§3) |
+| The marker is written inside the migration's transaction | Stamp identity first, then create the schema | Marking first opens a crash window in which a database claims to be a complete RepoAtlas index and is empty. Riding the migration's transaction removes the window instead of handling it (§3) |
+| Pre-marker indexes are recognized by full schema shape | Accept "it has a `repositories` table" as proof | Another application may have one, and blessing an unproven database with the marker is worse than refusing it — it converts a refusal into permission to migrate someone else's tables (§3) |
+| A legacy index is marked by the first **write**, never at open | Stamp on first open, whoever opened it | `status` would rewrite the database in order to report that nothing changed, and a read-only historical index would be reported as foreign because the marker could not be written. Recognition first, write second (§3, §6) |
+| A marked database below the current version still has its shape checked | Trust the marker and migrate | A marker proves ownership, not schema correctness. Where a write is imminent anyway, inspecting the schema is strictly cheaper than migrating it blind; on the hot path (marked, current) nothing is inspected at all (§3) |
