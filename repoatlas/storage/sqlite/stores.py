@@ -377,10 +377,18 @@ class SqliteKnowledgeStore:
     def transaction(self) -> Iterator[None]:
         """Make several store calls one atomic unit.
 
-        The seam exists for exactly one caller: the global-link swap, which must
-        delete the previous graph and insert its replacement in a single commit so
-        no other connection can observe the gap (ARCHITECTURE.md §9). Store
-        methods keep their own transactions and join this one when it is open.
+        Two callers need it, and both for the same reason — a group of writes that
+        is only meaningful whole (ARCHITECTURE.md §9):
+
+        * the **global-link swap**, which must delete the previous graph and insert
+          its replacement in a single commit so no other connection can observe the
+          gap;
+        * the **per-file indexing unit**, which must commit a file's row together
+          with every fact derived from that content, because the row carries the
+          hash a later sync uses to decide the file needs no work.
+
+        Store methods keep their own transactions, for when each is called alone,
+        and join this one when it is open.
         """
         with self._db.transaction():
             yield

@@ -913,8 +913,11 @@ class VectorIndex(Protocol):
     def delete(self, chunk_ids) -> None: ...
 ```
 
-`replace_file_facts` is the single write path for parsed facts and is transactional: a sync that crashes mid-file
-leaves either the old facts or the new ones, never a mixture.
+`replace_file_facts` is the single write path for a file's entities and chunks, and is transactional. It is *not*
+the only write a file produces: `link_file` writes that file's edges and standing claims, and the dependency store
+writes its package rows. All of them — together with the `files` row itself — run inside one transaction opened by
+`SyncEngine._index_file`, so a sync that crashes mid-file leaves either the old facts or the new ones, never a
+mixture, and never a file row without the facts it claims. See §9.
 
 ### Parsing
 
@@ -2013,14 +2016,35 @@ The property both of them serve:
 |---|---|---|
 | repository row created / identity assigned | immediately | `RepositoryStore` |
 | `mark_sync_started` (status → `interrupted`) | immediately | `SyncEngine.sync_repository` |
-| stale file facts deleted, new facts written, per-file edges and claims | per file | `SyncEngine._index_file` |
+| **the file row, its facts, its edges, its claims and its dependency rows** | **one transaction per file** | **`SyncEngine._index_file`** |
 | detected metadata (languages, manifests, lockfiles) | per repository | `SyncEngine.sync_repository` |
 | **global graph replaced + every repository marked synchronized** | **one transaction** | **`SyncEngine.run`** |
 | embeddings | per batch, after the run | `SyncEngine.embed_pending` |
 
-Per-file work commits as it is produced. Holding one write transaction across a fifty-repository parse would block
-every other writer for the duration and buy nothing: a half-parsed repository is *recoverable* state, because its
-status still says `interrupted` and the next run redoes it.
+Per-file work commits as it is produced, one *file* at a time. Holding a single write transaction across a
+fifty-repository parse would block every other writer for the duration and buy nothing, so the unit is the file —
+but it is the **whole** file, and that part is not an optimization detail.
+
+**Why the unit is the file and not the write.** The file row carries the content hash, and the content hash is what
+the next run's planner compares. So a committed file row is a claim: *this content is indexed*. If the row commits
+and the facts derived from it do not, the claim is false and nothing later contradicts it — the bytes on disk really
+have not changed, so every subsequent sync agrees the file is up to date and skips it, `--full` included, because
+`--full` forces a re-*hash* and the hash is genuinely unchanged. The loss is silent and permanent.
+
+That is not hypothetical: it was the release-blocking defect this boundary was redrawn to remove. The row, the
+entities, the chunks, the per-file edges, the standing claims and the dependency rows are now written inside one
+transaction, so a process killed at any point either wrote all of them or none of them:
+
+> **Invariant.** A file row exists only if every fact derived from that exact content committed with it. The commit
+> **is** the completeness marker; there is no separate flag to get out of step with it.
+
+Recovery therefore needs no repair path and no new state. A file that was mid-flight has either no row or its
+*previous* row, so the ordinary planner classifies it new-or-changed and reprocesses it — which is why plain
+`repoatlas sync` is the whole recovery procedure after any interruption, and why a healthy unchanged file still
+takes the fast path.
+
+Parsing, dependency extraction and chunking all happen **before** the transaction opens. They are the expensive
+half and touch nothing, so the write lock is held only for the writes themselves.
 
 What must not commit early is the **claim that those facts are current**, and that is why the last two rows are one
 transaction. `SyncEngine.run` is the boundary that guarantees old complete state → new complete state.
@@ -2052,8 +2076,15 @@ caller that needs a group of them to land together simply opens one around them.
 `current` means file facts **and** the global graph correspond to the same successful run. Mechanically:
 `mark_sync_started` sets a repository to `interrupted` before any of its facts are written, and only
 `mark_many_synced` — called inside the swap transaction — sets it back to `ok`. So a run that fails anywhere,
-including in the link pass, leaves every repository it touched recorded as unfinished, which both stops `status`
-claiming currency and forces a full rehash next time.
+including in the link pass, leaves every repository it touched recorded as unfinished, which stops `status`
+claiming currency and forces a full re-*hash* next time.
+
+The re-hash is not what recovers a half-written file, and it must not be mistaken for it. Re-hashing only defeats
+the *stat* shortcut; it reads the same bytes and computes the same digest, so a file whose content never changed is
+still classified unchanged. What makes an interrupted file recoverable is the per-file transaction above: the file
+row and its facts commit together, so an interrupted file has no row at the new content and is reprocessed as new
+or changed. The `interrupted` status and the per-file transaction answer different questions — *is the graph this
+repository's facts justify current?* and *are this file's facts complete?* — and neither substitutes for the other.
 
 A generation counter was considered and rejected. Ordering already gives the guarantee: a repository is `ok` only
 if a full global rebuild committed after its facts did, and the rebuild is global, so it covers everything

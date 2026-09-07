@@ -9,12 +9,25 @@ The run boundary is where the synchronization invariant lives:
 > A successful sync moves RepoAtlas from one complete logical knowledge state to
 > another complete logical knowledge state.
 
-Per-repository file facts commit as they are produced, because holding a write
-transaction open across a fifty-repository parse would block every other writer
-for the duration and gain nothing. What must *not* commit early is the claim that
-those facts are current: the cross-repository graph is rebuilt once, at the end,
-over all of them, so a repository is marked synchronized only after that rebuild
-has committed — in the same transaction (ARCHITECTURE.md §9).
+File facts commit as they are produced, because holding a write transaction open
+across a fifty-repository parse would block every other writer for the duration
+and gain nothing. The unit is **one file, entirely**: its row, its entities, its
+chunks, its edges, its standing claims and its dependency rows are written in a
+single transaction by :meth:`SyncEngine._index_file`.
+
+That is a correctness boundary, not a batching choice. The file row carries the
+content hash the next run's planner compares, so committing it separately from the
+facts derived from that content publishes a false claim — *this content is
+indexed* — that nothing later contradicts, because the bytes really have not
+changed. Every subsequent sync then skips the file, ``--full`` included, since
+``--full`` forces a re-hash and the hash is unchanged. The commit is therefore the
+completeness marker, and plain ``sync`` is the whole recovery path after an
+interruption (ARCHITECTURE.md §9).
+
+What must *not* commit early is the claim that those facts are current: the
+cross-repository graph is rebuilt once, at the end, over all of them, so a
+repository is marked synchronized only after that rebuild has committed — in the
+same transaction (ARCHITECTURE.md §9).
 """
 
 from __future__ import annotations
@@ -34,7 +47,7 @@ from repoatlas.gitstate.client import GitClient
 from repoatlas.graph.keys import file_key, repository_key, symbol_key
 from repoatlas.graph.linker import GlobalLinkResult, ReferenceLinker
 from repoatlas.indexing.chunking import chunk_content
-from repoatlas.models.dependencies import DependencyRecord
+from repoatlas.models.dependencies import DependencyRecord, DependencyReport
 from repoatlas.models.parsing import EntityType, ParsedFile, ParseDiagnostic, Severity
 from repoatlas.models.reports import RepositorySyncReport, SyncReport
 from repoatlas.models.repository import IndexedFile, Repository, repository_slug
@@ -355,101 +368,122 @@ class SyncEngine:
 
         parser = None if is_binary else self._registry.for_path(Path(rel_path))
 
-        file_id = self._files.upsert(
-            repo.id,
-            IndexedFile(
-                rel_path=rel_path,
-                size=size,
-                mtime_ns=mtime_ns,
-                content_hash=content_hash,
-                language=language,
-                parser=parser.name if parser else None,
-                parser_version=self.facts_version,
-                is_binary=is_binary,
-                indexed_at=datetime.now(UTC),
-            ),
+        record = IndexedFile(
+            rel_path=rel_path,
+            size=size,
+            mtime_ns=mtime_ns,
+            content_hash=content_hash,
+            language=language,
+            parser=parser.name if parser else None,
+            parser_version=self.facts_version,
+            is_binary=is_binary,
+            indexed_at=datetime.now(UTC),
         )
 
         if is_binary:
             # Recorded so deletion tracking stays correct, but never parsed.
-            self._knowledge.replace_file_facts(
-                file_id,
-                FileFacts(entities=(self._file_entity(repo, file_id, rel_path),)),
-            )
+            self._record_without_facts(repo, rel_path, record)
             return _FileOutcome(language=language)
 
         try:
             content = raw.decode("utf-8")
         except UnicodeDecodeError:
-            self._knowledge.replace_file_facts(
-                file_id,
-                FileFacts(entities=(self._file_entity(repo, file_id, rel_path),)),
-            )
+            self._record_without_facts(repo, rel_path, record)
             return _FileOutcome(
                 language=language,
                 diagnostics=[ParseDiagnostic(severity=Severity.WARNING, message="not valid UTF-8")],
             )
 
+        # Everything below this line up to the transaction is a pure function of
+        # `content`. Parsing, dependency extraction and chunking are the expensive
+        # half and none of them touch the database, so they run *before* the write
+        # lock is taken and the transaction stays as short as the writes it makes.
         parsed = (
             parser.parse(Path(rel_path), content)
             if parser
             else ParsedFile(language=language or "unknown", parser="none", parser_version="0")
         )
-
-        entities: list[EntityRecord] = [self._file_entity(repo, file_id, rel_path)]
-        for symbol in parsed.symbols:
-            entities.append(
-                EntityRecord(
-                    type=symbol.kind,
-                    key=symbol_key(repo.slug, rel_path, symbol.qualified_name, symbol.line_start),
-                    name=symbol.name,
-                    qualified_name=symbol.qualified_name,
-                    repo_id=repo.id,
-                    file_id=file_id,
-                    line_start=symbol.line_start,
-                    line_end=symbol.line_end,
-                    signature=symbol.signature,
-                )
-            )
-
+        dependencies, dependency_diagnostics = self._dependency_reports(rel_path, content)
         chunks = chunk_content(content, parsed.symbols, self._settings.indexing)
-        chunk_records = tuple(
-            ChunkRecord(
-                file_id=file_id,
-                repo_id=repo.id,
-                line_start=chunk.line_start,
-                line_end=chunk.line_end,
-                text=chunk.text,
-                token_estimate=chunk.token_estimate,
-                content_hash=chunk.content_hash,
-                span_index=chunk.span_index,
-                split_index=chunk.split_index,
-                split_total=chunk.split_total,
+
+        # One transaction for every durable consequence of this file's content: the
+        # row that claims the content is indexed, and every fact derived from it.
+        # The commit *is* the completeness marker, which is what makes the file row
+        # and its facts inseparable (ARCHITECTURE.md §9).
+        with self._knowledge.transaction():
+            file_id = self._files.upsert(repo.id, record)
+
+            entities: list[EntityRecord] = [self._file_entity(repo, file_id, rel_path)]
+            for symbol in parsed.symbols:
+                entities.append(
+                    EntityRecord(
+                        type=symbol.kind,
+                        key=symbol_key(
+                            repo.slug, rel_path, symbol.qualified_name, symbol.line_start
+                        ),
+                        name=symbol.name,
+                        qualified_name=symbol.qualified_name,
+                        repo_id=repo.id,
+                        file_id=file_id,
+                        line_start=symbol.line_start,
+                        line_end=symbol.line_end,
+                        signature=symbol.signature,
+                    )
+                )
+
+            chunk_records = tuple(
+                ChunkRecord(
+                    file_id=file_id,
+                    repo_id=repo.id,
+                    line_start=chunk.line_start,
+                    line_end=chunk.line_end,
+                    text=chunk.text,
+                    token_estimate=chunk.token_estimate,
+                    content_hash=chunk.content_hash,
+                    span_index=chunk.span_index,
+                    split_index=chunk.split_index,
+                    split_total=chunk.split_total,
+                )
+                for chunk in chunks
             )
-            for chunk in chunks
-        )
 
-        self._knowledge.replace_file_facts(
-            file_id, FileFacts(entities=tuple(entities), chunks=chunk_records)
-        )
+            self._knowledge.replace_file_facts(
+                file_id, FileFacts(entities=tuple(entities), chunks=chunk_records)
+            )
 
-        link = self._linker.link_file(
-            repo_id=repo.id,
-            repo_slug=repo.slug,
-            file_id=file_id,
-            rel_path=rel_path,
-            parsed=parsed,
-        )
+            link = self._linker.link_file(
+                repo_id=repo.id,
+                repo_slug=repo.slug,
+                file_id=file_id,
+                rel_path=rel_path,
+                parsed=parsed,
+            )
 
-        dependency_outcome = self._index_dependencies(repo.id, file_id, rel_path, content)
+            dependency_count = self._write_dependencies(repo.id, file_id, dependencies)
 
         return _FileOutcome(
             language=parsed.language if parser else language,
             symbols=len(parsed.symbols),
             edges=link.edges,
-            dependencies=dependency_outcome[0],
-            diagnostics=[*parsed.diagnostics, *dependency_outcome[1]],
+            dependencies=dependency_count,
+            diagnostics=[*parsed.diagnostics, *dependency_diagnostics],
         )
+
+    def _record_without_facts(self, repo: Repository, rel_path: str, record: IndexedFile) -> None:
+        """Record a file RepoAtlas will not derive facts from, atomically.
+
+        Binary, undecodable and oversized files still need a row — deletion
+        tracking depends on it — and still need whatever they previously asserted
+        removed. Both happen in one transaction for the same reason the parsed path
+        does: a row claiming the content is indexed must never outlive the removal
+        of the facts it replaced.
+        """
+        assert repo.id is not None
+        with self._knowledge.transaction():
+            file_id = self._files.upsert(repo.id, record)
+            self._knowledge.replace_file_facts(
+                file_id, FileFacts(entities=(self._file_entity(repo, file_id, rel_path),))
+            )
 
     def _index_oversized(
         self,
@@ -499,8 +533,14 @@ class SyncEngine:
                 ]
             )
 
-        file_id = self._files.upsert(
-            repo.id,
+        # `replace_file_facts` with only the file entity is what removes whatever
+        # this path asserted when it was small enough to read: entities, edges,
+        # unresolved references, chunks, FTS rows and the embeddings reachable
+        # through them all cascade away (ARCHITECTURE.md §3). It commits together
+        # with the row, so the removal and the claim that it happened are one fact.
+        self._record_without_facts(
+            repo,
+            rel_path,
             IndexedFile(
                 rel_path=rel_path,
                 size=found.size if found.size is not None else scanned_file.size,
@@ -512,13 +552,6 @@ class SyncEngine:
                 is_binary=b"\0" in bytes(prefix),
                 indexed_at=datetime.now(UTC),
             ),
-        )
-        # `replace_file_facts` with only the file entity is what removes whatever
-        # this path asserted when it was small enough to read: entities, edges,
-        # unresolved references, chunks, FTS rows and the embeddings reachable
-        # through them all cascade away (ARCHITECTURE.md §3).
-        self._knowledge.replace_file_facts(
-            file_id, FileFacts(entities=(self._file_entity(repo, file_id, rel_path),))
         )
         return _FileOutcome(
             language=language,
@@ -533,27 +566,41 @@ class SyncEngine:
             ],
         )
 
-    def _index_dependencies(
-        self, repo_id: int, file_id: int, rel_path: str, content: str
-    ) -> tuple[int, list[ParseDiagnostic]]:
-        """Extract declared, resolved and provided packages from one file.
+    def _dependency_reports(
+        self, rel_path: str, content: str
+    ) -> tuple[list[tuple[str, DependencyReport]], list[ParseDiagnostic]]:
+        """Parse one file for declared, resolved and provided packages.
 
         Runs for every indexed file, not only those the language registry claimed:
         a manifest such as ``package.json`` is parsed twice on purpose, once as
         configuration keys and once as dependencies, and the two answer different
         questions.
+
+        Pure, and separate from the write for that reason: it is the expensive
+        half, and the per-file transaction must not be held open across it
+        (ARCHITECTURE.md §9).
         """
         path = Path(rel_path)
-        parsers = self._dependency_registry.for_path(path)
-        if not parsers:
-            return 0, []
-
-        records: list[DependencyRecord] = []
+        reports: list[tuple[str, DependencyReport]] = []
         diagnostics: list[ParseDiagnostic] = []
-
-        for parser in parsers:
+        for parser in self._dependency_registry.for_path(path):
             report = parser.parse(path, content)
             diagnostics.extend(report.diagnostics)
+            reports.append((parser.name, report))
+        return reports, diagnostics
+
+    def _write_dependencies(
+        self, repo_id: int, file_id: int, reports: list[tuple[str, DependencyReport]]
+    ) -> int:
+        """Persist parsed dependency reports for one file. Caller owns the transaction."""
+        if not reports:
+            # Nothing to write, and nothing to clear either: `replace_file_facts`
+            # ran earlier in this same transaction and already deleted this file's
+            # dependency rows.
+            return 0
+
+        records: list[DependencyRecord] = []
+        for parser_name, report in reports:
             for declared in report.declared:
                 records.append(
                     DependencyRecord(
@@ -567,7 +614,7 @@ class SyncEngine:
                         group=declared.group,
                         line_start=declared.line,
                         line_end=declared.line,
-                        parser=parser.name,
+                        parser=parser_name,
                     )
                 )
             for resolved in report.resolved:
@@ -582,7 +629,7 @@ class SyncEngine:
                         version=resolved.version,
                         line_start=resolved.line,
                         line_end=resolved.line,
-                        parser=parser.name,
+                        parser=parser_name,
                     )
                 )
             for provided in report.provides:
@@ -597,12 +644,12 @@ class SyncEngine:
                         version=provided.version,
                         line_start=provided.line,
                         line_end=provided.line,
-                        parser=parser.name,
+                        parser=parser_name,
                     )
                 )
 
         self._dependencies.replace_for_file(file_id, records)
-        return len(records), diagnostics
+        return len(records)
 
     def run(
         self,
