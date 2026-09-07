@@ -2831,8 +2831,8 @@ grounding       answer valid; citations unsupported    not a backend failure at 
 | `CONFIGURATION` | `ModelConfigurationError` | Unknown provider, or a `base_url` that is not an absolute http(s) URL | no |
 | `TRANSPORT` | `ModelUnavailable` | Connection refused or connect timeout | yes |
 | `SERVER` | `ModelServerError` | HTTP status error, read timeout after connect, or a broken response stream | 408/425/429/5xx only |
-| `MODEL_ABSENT` | availability probe | The server listed its models; the configured one is not among them | no |
-| `PROTOCOL` | `ModelProtocolError` | Body is not JSON, not an object, or has no usable `message.content` | no |
+| `MODEL_ABSENT` | availability probe | The server returned a **valid** model listing and the configured model is not in it | no |
+| `PROTOCOL` | `ModelProtocolError` | Body is not JSON, not an object, not a usable `/api/tags` listing, or has no usable `message.content` | no |
 | `OUTPUT` | `ModelOutputError` | Envelope fine; the model's text is empty, not JSON, or not the answer schema | no |
 | `TRUNCATED` | `ModelOutputTruncated` | The **server reported** generation stopped at its output limit | yes |
 | `REPAIR` | `ModelRepairFailed` | The output was invalid and the one repair attempt was invalid too | no |
@@ -2841,6 +2841,77 @@ Every class derives from `ModelError`, so a caller that only needs "the backend 
 one exit code (4); a caller that must tell a dead server from a bad answer reads `.category` or catches the
 subclass. The categories are generic and live in `protocol.py`; only `ollama.py` knows that `done_reason` is
 spelled that way. A second backend translates its own protocol into the same vocabulary.
+
+**Model absence is a conclusion, and it needs a premise.** Saying "the configured model is not installed" is a
+claim about the server's *state*, so it may only be drawn from a model listing RepoAtlas actually understood. It
+was not. `GET /api/tags` returning HTTP 200 and `{"models": "x"}` produced:
+
+```
+Ollama is running at http://localhost:11434, but the configured model
+'gpt-oss:20b' is not installed.
+
+Pull it:
+
+  ollama pull gpt-oss:20b
+
+Installed models:
+
+  (none)
+```
+
+Every clause of that is false, and the advice is unfollowable — pulling the model changes nothing, because the
+response was never a listing. The cause was three individually reasonable fallbacks whose sum is an empty set:
+
+```python
+listed = body.get("models")  # missing key   -> None
+{
+    str(model.get("name", ""))  # absent name   -> ""
+    for model in (listed if isinstance(listed, list) else [])  # wrong type    -> []
+    if isinstance(model, dict)
+}  # bad entry     -> skipped
+```
+
+An empty set of installed models is exactly what a healthy server with nothing pulled returns, so *could not read
+the answer* and *the answer says no* became the same value. A proxy login page, a gateway's `{"error": ...}` with
+status 200, and a future Ollama that renamed the field all arrived at `ollama pull`.
+
+`_installed_names` now returns the names **or** the reason the body is not a listing, and the caller reports
+`PROTOCOL` before any model lookup happens. The ordering is the fix, not the message:
+
+```
+HTTP status  ->  JSON syntax  ->  listing shape  ->  model lookup
+```
+
+Each stage may only run on what the previous one proved. A non-2xx status is a server failure whatever the body
+says; a body that is not a listing is never searched for a model.
+
+| `/api/tags` returned | Category |
+|---|---|
+| `{"models": [{"name": "gpt-oss:20b"}]}` | available |
+| `{"models": []}` | `MODEL_ABSENT` — a **valid** listing that genuinely has nothing in it |
+| `{"models": [{"name": "other"}]}` | `MODEL_ABSENT` |
+| `{}`, `{"models": "x"}`, `{"models": {}}`, `{"error": "unauthorized"}` | `PROTOCOL` |
+| `{"models": [123]}`, `{"models": [{}]}`, `{"models": [{"name": ""}]}` | `PROTOCOL` |
+| `not-json`, an HTML login page | `PROTOCOL` |
+| HTTP 4xx/5xx, whatever the body | `SERVER` |
+| connection refused, connect timeout | `TRANSPORT` |
+
+`{"models": []}` is what makes this a distinction rather than a blanket refusal: it is valid, it genuinely means
+absent, and `ollama pull` is the right advice for it. A real Ollama 0.32.14 returns exactly that with no models
+pulled, and the test suite validates against one when it is reachable.
+
+**Strict about what is consumed, tolerant about everything else.** The only field RepoAtlas reads is each entry's
+`name`, so that is all that must be well-formed; `model`, `size`, `digest`, `details`, `modified_at` and anything a
+later server adds are ignored rather than rejected. Validating fields nobody consumes would break on the next
+Ollama release for no gain. The limit of that tolerance is the shape RepoAtlas has to interpret: if a future server
+stops returning an array, the listing is unreadable and `PROTOCOL` is the truthful answer.
+
+**A malformed entry fails the whole listing** rather than being skipped. Skipping is how a partial answer becomes a
+confident one — drop the entry that could not be read, and the remainder is reported as *the* installed set, so a
+listing RepoAtlas half-understood yields a definite claim about what the server does not have.
+
+**`models` must be a list, not merely iterable.** Iterating `"x"` walks characters and iterating a dict walks keys;
+both would "work" and both are wrong, so the type is checked rather than the ability to loop.
 
 **Truncation is reported, never inferred.** Ollama sets `done_reason: "length"` exactly when llama-server reports
 `finish_reason == "length"` — the `num_predict` budget was exhausted. That is a fact the server stated, so
