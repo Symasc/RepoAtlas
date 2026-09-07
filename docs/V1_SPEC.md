@@ -1239,8 +1239,18 @@ The mechanism and its crash behaviour are in `ARCHITECTURE.md` §9.
 2. An incremental sync across any HEAD change yields **state equivalent to a full reindex** of the same tree.
 3. A failed sync leaves the **previous complete graph** intact and does not report the affected repositories as
    current.
+4. A file row exists **only if every fact derived from that exact content committed with it**. One file's row,
+   entities, chunks, edges, standing claims and dependency rows are a single transaction, so a process killed at
+   any point — including by `SIGKILL`, which no handler can intercept — wrote all of them or none of them.
+5. After *any* unclean termination, one ordinary `repoatlas sync` converges to the same logical index as a clean
+   rebuild of the same tree. No flag, no manual deletion, no separate repair command.
 
-Stale-data bugs are serious: a deleted symbol must not continue appearing in answers.
+Invariants 4 and 5 are the reason a content hash alone never proves an index entry is complete. Skipping a file
+requires two things, not one: the bytes are unchanged **and** the facts for those bytes were committed. The second
+is proven by the row existing at all, because it cannot exist without them.
+
+Stale-data bugs are serious: a deleted symbol must not continue appearing in answers. So is silent loss — a symbol
+that was never recorded because a container stopped mid-sync is just as wrong an answer, and harder to notice.
 
 ---
 
