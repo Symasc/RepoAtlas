@@ -32,6 +32,11 @@ class RepositorySyncReport(BaseModel):
     dependencies: int = 0
     full_rehash: bool = False
     rehash_reason: str | None = None
+    #: Git could not establish this repository's file set, so nothing was indexed
+    #: from it and it is not current. Distinct from "synced and found nothing":
+    #: a zero-count report is a fact about the tree, this is the absence of one
+    #: (ARCHITECTURE.md §6).
+    enumeration_failed: bool = False
     diagnostics: tuple[ParseDiagnostic, ...] = ()
 
     @property
@@ -69,6 +74,18 @@ class SyncReport(BaseModel):
     #: reporting the second as the first is how a discovery gap goes unnoticed
     #: (V1_SPEC §5).
     unreadable_paths: tuple[Path, ...] = ()
+
+    @property
+    def unavailable(self) -> tuple[str, ...]:
+        """Repositories whose file set git could not establish, so nothing was indexed.
+
+        A run containing one of these is not a success, however well the others
+        went: RepoAtlas was asked to synchronize them and could not. The CLI turns
+        a non-empty tuple into a non-zero exit so a scripted caller sees it, and
+        the healthy repositories in the same run keep their facts either way
+        (V1_SPEC §12).
+        """
+        return tuple(r.repository for r in self.repositories if r.enumeration_failed)
 
     @property
     def files_indexed(self) -> int:

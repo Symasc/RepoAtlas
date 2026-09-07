@@ -1648,71 +1648,111 @@ The global link stage runs at the end of any sync, including a single-repository
 repository can create or invalidate a cross-repository edge in another. It reads the standing `unresolved_refs`
 set and the file and symbol tables, all of which are indexed, and rebuilds only edges it owns.
 
-### Two enumerators, one admissible file set
+### One enumerator, or none
 
-Enumeration has a primary authority and a fallback, and they must answer the same question the same way.
+Enumeration has exactly one authority:
 
 ```
-primary    git ls-files --cached --others --exclude-standard -z
-fallback   depth-first walk of the working tree
+git ls-files --cached --others --exclude-standard -z
 ```
 
-The fallback is reached when `GitClient.list_files` returns `None` — the git binary is missing or not executable,
-or the `ls-files` invocation fails. Repository *detection* never needs git (§8), so a repository stays managed and
-indexable when git is gone; the fallback is what keeps that true.
+**What that command means**, measured against git 2.43 rather than assumed. It returns *tracked* files plus
+*untracked files git does not ignore*, so the admissible set is decided by the index and by four exclusion sources:
 
-Both feed the same admission pipeline, which is where every policy lives: the obvious-secret name policy, the
-built-in exclusions, `.repoatlasignore`, nested-repository ownership, and the `RepositoryBoundary` containment
-check. Enumeration proposes; nothing it returns is admitted by having been found.
+| source | where it lives |
+|---|---|
+| `.gitignore` at the repository root | repository content |
+| `.gitignore` in any subdirectory, scoped to that subtree | repository content |
+| `.git/info/exclude` | repository metadata, not content |
+| `core.excludesFile`, defaulting to `~/.config/git/ignore` | **the user's git configuration** |
 
-> **Invariant.** Fallback scanning must not silently return a proper subset of admissible repository files solely
-> because of nesting depth.
+and by the index, because a **tracked** file is returned whether or not it is ignored: `git add -f secrets.conf`
+and a file that started tracked and only later matched a `.gitignore` rule are both still listed. A negated rule
+(`!build/keep.txt`) re-includes, and `.gitignore` files themselves are ordinary content that git lists.
 
-> **Invariant.** Primary and fallback enumeration must agree on the admissible file set except for explicitly
-> documented differences.
+**There used to be a second enumerator**, a depth-first walk of the working tree, reached when
+`GitClient.list_files` returned `None`. It answered a different question — *what files are here* — and the
+difference between the two questions is every file the user told git to ignore. Local overrides, generated
+configuration and private notes entered `files`, `chunks`, the FTS index, embeddings, retrieval and model prompts,
+while `sync` exited 0 and reported success.
+
+The version of this section that shipped before named that divergence under "known differences" and moved on. That
+is the deeper failure: an invariant reading *primary and fallback must agree except for explicitly documented
+differences* is not an invariant, because documenting the difference discharges it. The rule now has no exception
+clause, and the way it is kept is by not having a second enumerator to disagree with.
+
+> **Invariant.** The set RepoAtlas indexes is the set `git ls-files` returned. When git cannot answer, RepoAtlas
+> indexes nothing for that repository and says so — it never substitutes a file set derived some other way.
+
+**Why not reproduce it faithfully.** Three separate pieces of git would be needed: a `.git/index` parser (v2/3/4,
+extensions, split index, and the indirection a worktree's `.git` *file* adds) for tracked state; a complete
+gitignore engine (nested scope, negation and the rule that a re-include cannot resurrect a file under an excluded
+directory, anchoring, `**`, character classes, escapes); and git's configuration cascade to resolve
+`core.excludesFile` across system, global, XDG and repository config including `include`/`includeIf`. The last is
+decisive: it is *host* configuration outside the repository, and the fallback existed precisely for the case where
+git cannot be asked what it resolves to. Any approximation reintroduces the same defect in a narrower form, and a
+scoped variant — "walk only when no exclusion source exists" — was rejected too, because it makes RepoAtlas's
+behaviour depend on whether the host has a `~/.gitconfig`, which is neither testable nor explainable.
+
+Nor is the obvious shortcut correct. *Walk the tree and drop everything matching `.gitignore`* is wrong in the
+other direction: git keeps listing a tracked file after a rule starts matching it, so that approach silently
+**omits** real content — trading this defect for its mirror image.
+
+**What fails closed means.** `scan_repository` raises `EnumerationUnavailable` before the first candidate is
+admitted, so there is no partial scan to undo. The repository is recorded `failed`, keeps whatever a previous
+successful sync stored, stops being reported as current, and the run exits non-zero naming it. Other repositories
+in the same run sync normally and keep their facts: one repository RepoAtlas cannot establish a file set for does
+not invalidate the ones it can.
+
+**This is a trust boundary, not a secret-storage guarantee.** `.gitignore` is not a security control and RepoAtlas
+does not present it as one — the built-in secret policy is separate, stronger, and applies to git-tracked files too
+(§12). The narrower property protected here is that the set RepoAtlas indexes is the set it reports indexing.
+
+The admission pipeline is unchanged and is where every RepoAtlas policy still lives: the obvious-secret name
+policy, the built-in exclusions, `.repoatlasignore`, nested-repository ownership, and the `RepositoryBoundary`
+containment check. Enumeration proposes; nothing it returns is admitted by having been found. `.gitignore` and
+`.repoatlasignore` remain different languages with different matchers, and are not merged.
 
 > **Invariant.** Traversal safety is structural; an arbitrary depth cutoff is not a security mechanism.
 
-> **Invariant.** A successful, complete fallback scan means RepoAtlas actually inspected every admissible reachable
-> directory, or explicitly reported which ones it could not.
+> **Invariant.** A successful sync means RepoAtlas inspected every admissible file git reported, or explicitly
+> reported what it could not look at.
 
-**There is no depth ceiling.** The walk used to begin `if depth > 64: return`, so a file 65 directories below the
-repository root was not enumerated, not indexed, not searchable and not mentioned — with a successful sync and an
-incomplete index. Measured on one tree: the primary path returned 9 files, the fallback returned 5, and nothing
-reported the difference.
+**Incompleteness is still reported.** `git ls-files` reports a directory it could not open as a *warning* and
+still exits 0, so a short listing looks like a complete one. Those warnings are returned alongside the paths and
+surfaced as a sync diagnostic, because "this repository has no files there" and "RepoAtlas could not look" are
+different claims and only one of them is true.
 
-The comment on that line described a protection it did not provide. A cycle comes from symlinks, which this walk
-has always refused; the cost of a tree is its *size*, which a depth limit does not bound at all — a flat directory
-of 100,000 files costs the same at depth 1 as at depth 100. It bounded the one dimension that was never the risk,
-and what it actually did was truncate repositories. Raising 64 to 128 or 1024 would keep the defect and move it.
+**The walk is gone, and so is its depth ceiling.** The record is kept here because the defect it embodied is easy
+to reintroduce. The walk used to begin `if depth > 64: return`, so a file 65 directories below the repository root
+was not enumerated, not indexed, not searchable and not mentioned — with a successful sync and an incomplete index.
+Measured on one tree at the time: the primary path returned 9 files, the walk returned 5, and nothing reported the
+difference.
 
-**Termination is structural instead.** Symlinks are never followed, so no route out of the tree and no cycle
-through one exists; what remains is a finite acyclic directory tree, which a depth-first walk exhausts. Directory
-identity `(st_dev, st_ino)` is tracked as well, so a bind mount or any second route into a directory already
-visited is entered once — the same rule repository discovery uses, and the reason neither needs a counter.
+The comment on that line described a protection it did not provide. A cycle comes from symlinks, which the walk
+always refused; the cost of a tree is its *size*, which a depth limit does not bound at all — a flat directory of
+100,000 files costs the same at depth 1 as at depth 100. It bounded the one dimension that was never the risk, and
+what it actually did was truncate repositories. Raising 64 to 128 or 1024 would have kept the defect and moved it.
+Removing the ceiling was correct and insufficient: the walk and `ls-files` disagreed about far more than depth.
 
-**Iterative, not recursive.** Lifting the ceiling on a recursive walk would have traded a silent truncation at
-depth 65 for a `RecursionError` near depth 1000; a scanner must not require user-controlled nesting to fit the
-Python call stack. The walk keeps an explicit stack and is depth-first, so the stack holds the unexplored siblings
-along one path rather than a whole level. Verified at depth 400 with the interpreter's recursion limit set to 100.
+The properties that had to be argued for the walk are now git's, and are asserted against git directly:
 
-**`.git` is refused structurally**, not by configuration. It is in the default exclusions, but those are
-configurable, and a root whose `exclusions` were set without it had this walk enumerate the object store, the hooks
-and `.git/config` as ordinary source — 18 files on a freshly initialized repository, content `git ls-files` would
-never report. The fallback was strictly less safe than the path it stands in for. Git internals are not repository
-source at any depth.
+| property | how it holds now |
+|---|---|
+| no depth ceiling | `ls-files` has none; verified at depth 400 |
+| termination | `ls-files` records a symlink as an entry and never descends through one, so no cycle and no route out of the tree exists |
+| no recursion limit | enumeration is one subprocess, not a Python traversal |
+| `.git` never enumerated | git never lists its own internals, whatever `exclusions` is set to — the walk enumerated the object store, the hooks and `.git/config` as ordinary source (18 files on a fresh repository) whenever a root's `exclusions` omitted `.git` |
+| cost is one process | one `ls-files` per repository, independent of tree size or depth |
 
-**Incompleteness is reported, never implied.** A directory the walk cannot read is recorded and surfaced as a
-sync diagnostic naming the repository-relative path, because "this repository has no files there" and "RepoAtlas
-could not look" are different claims and only one of them is true. The nested-repository probe is inside the same
-guard as the directory read: on a directory the process can see but not enter, `(current / ".git").is_dir()` raises
-rather than answering, and when that probe sat outside the guard its `OSError` was caught by the per-entry handler
-and the whole subtree vanished with nothing recorded. One guard answers both questions.
+One property did *not* survive, and is recorded rather than glossed: the walk reported a directory that vanished
+between being classified and being entered. `ls-files` has no equivalent — a path git listed that is gone by the
+time it is stat-ed is skipped silently. The window is between one `ls-files` and one `stat`, the file is genuinely
+absent from the tree at that moment, and the next sync re-enumerates from scratch, so this is not silent truncation
+of present content. The reportable case — git could not *look* — is preserved through git's own warnings, above.
 
-**Known differences between the two enumerators.** `git ls-files` applies `.gitignore`; the fallback does not,
-because reimplementing `.gitignore` is exactly what using git avoids. Every other filter is shared. Path length
-remains an operating-system limit rather than an application one: RepoAtlas fails only where the filesystem refuses
-the path, and depth and path length are separate constraints.
+Path length remains an operating-system limit rather than an application one: RepoAtlas fails only where the
+filesystem refuses the path, and depth and path length are separate constraints.
 
 ### Chunking
 
@@ -1879,8 +1919,10 @@ about.
 
 It is retained anyway, for a concrete deployment reason: the container mounts repositories read-only from the host
 (§12) and runs as uid 10001, so the repositories are owned by a different uid essentially always. Without it,
-`rev-parse` and `ls-files` fail, RepoAtlas silently falls back to `os.walk`, and branch/HEAD reporting degrades —
-a functional regression on the primary supported deployment.
+`rev-parse` and `ls-files` fail. That used to mean a silent fall back to `os.walk` with degraded branch/HEAD
+reporting; since §6 removed the fallback it means the repository cannot be enumerated at all and is refused. The
+container would index nothing — the argument for keeping the setting is now considerably stronger than when it was
+written.
 
 The decision is therefore to **keep it and stop depending on it**: git's ownership check is treated as unavailable,
 and safety comes from the allowlist and the neutralized configuration above, which hold whoever owns the
@@ -1898,8 +1940,11 @@ V1_SPEC §5 declares authoritative — uncommitted changes included, `.gitignore
 semantics rather than a reimplementation. Built-in exclusions, `.repoatlasignore` and secret patterns are applied
 on top.
 
-Fallback when git is unavailable or the command fails: `os.walk` with the exclusion set, and repository state
-recorded as unknown. Discovery still works; freshness reporting degrades honestly.
+**When git is unavailable or the command fails there is no fallback.** `scan_repository` raises
+`EnumerationUnavailable`, the repository is recorded `failed` with nothing indexed from it, and the run exits
+non-zero naming it. A filesystem walk answers a different question — *what files are here* — and the difference is
+every file the user told git to ignore. See §6 for the measured contract, why reproducing it without git was
+refused, and what fails closed means for the other repositories in the same run.
 
 ### Repository *detection* does not invoke git
 
@@ -2085,6 +2130,13 @@ still classified unchanged. What makes an interrupted file recoverable is the pe
 row and its facts commit together, so an interrupted file has no row at the new content and is reprocessed as new
 or changed. The `interrupted` status and the per-file transaction answer different questions — *is the graph this
 repository's facts justify current?* and *are this file's facts complete?* — and neither substitutes for the other.
+
+`failed` is a third value and means something narrower than `interrupted`. `interrupted` says a run started on
+this repository and did not finish, so its facts may be partial and the next run should redo them. `failed` says
+the run could not establish what to do at all — git could not enumerate the repository and RepoAtlas refused to
+substitute a different file set (§6) — so *nothing* of this run was written and whatever is stored is a previous
+run's. Both are "not `ok`", so both stop `status` claiming currency and both force a full rehash next time; only
+one of them is worth telling an operator to go and look at something, and a shared value could not say which.
 
 A generation counter was considered and rejected. Ordering already gives the guarantee: a repository is `ok` only
 if a full global rebuild committed after its facts did, and the rebuild is global, so it covers everything
@@ -3278,9 +3330,9 @@ carried on the rule; matching a repository's worth of paths compiles nothing.
 ```
 
 There is one matcher, and both callers reach it: `discovery/finder.py` asks about directories while walking, and
-`sync/scanner.py` asks about files — on the primary path *after* `git ls-files` has applied `.gitignore`, and on
-the Pass 13 fallback path in the same place. So a path ignored during discovery is ignored during scanning, and
-what is indexed does not depend on which enumerator ran.
+`sync/scanner.py` asks about files, *after* `git ls-files` has applied `.gitignore`. So a path ignored during
+discovery is ignored during scanning. (This once had to hold across two enumerators as well; §6 removed the second
+one, which is a weaker thing to have to prove, not a stronger one.)
 
 Case sensitivity and Unicode normalization are separate questions, and only the first was in scope: the matcher
 never normalized NFC/NFD and still does not. Making composed and decomposed forms match would be a new behaviour,
@@ -3297,7 +3349,7 @@ Four invariants:
 
 > Filesystem case-insensitivity does not implicitly broaden `.repoatlasignore` patterns.
 
-> Discovery and scanning use the same ignore semantics — and so do the primary and fallback enumerators.
+> Discovery and scanning use the same ignore semantics, on the one enumerator there is.
 
 > Changing platforms does not change the logical RepoAtlas index of the same repository tree.
 

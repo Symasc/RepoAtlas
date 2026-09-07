@@ -59,7 +59,7 @@ from repoatlas.services.query_service import locate
 from repoatlas.services.status_service import status
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace
-from repoatlas.sync.scanner import scan_repository
+from repoatlas.sync.scanner import EnumerationUnavailable, scan_repository
 from tests.conftest import init_git_repository
 
 pytestmark = pytest.mark.adversarial
@@ -661,43 +661,43 @@ def test_the_primary_scanner_applies_the_case_policy(case_sensitive_root: Path) 
     assert not (CASED_DROPPED & found), sorted(CASED_DROPPED & found)
 
 
-def test_the_fallback_scanner_applies_the_same_case_policy(case_sensitive_root: Path) -> None:
-    """§15: no return of the platform bug through the Pass 13 fallback path."""
-    fallback = GitClient(git_binary=NO_GIT)
-    found = {f.rel_path for f in scan_repository(case_sensitive_root / "svc", git=fallback)}
-    assert found >= CASED_KEPT
-    assert not (CASED_DROPPED & found), sorted(CASED_DROPPED & found)
+def test_there_is_no_second_enumerator_to_apply_a_different_policy(
+    case_sensitive_root: Path,
+) -> None:
+    """§15 restated: the platform bug cannot return through a second enumerator.
+
+    It used to be able to, because there were two — `git ls-files` and a filesystem
+    walk — and this suite asserted the case policy held on both. There is now one:
+    when git cannot enumerate, enumeration refuses rather than answering from a
+    walk, so "the other enumerator disagrees" is no longer a reachable state.
+    """
+    with pytest.raises(EnumerationUnavailable):
+        scan_repository(case_sensitive_root / "svc", git=GitClient(git_binary=NO_GIT))
 
 
-def test_primary_and_fallback_agree_exactly(case_sensitive_root: Path) -> None:
-    """§11 and §36: one matcher, so one admissible set, whichever enumerator ran."""
+def test_the_admissible_set_comes_from_one_enumerator(case_sensitive_root: Path) -> None:
+    """§11 and §36: one matcher and one enumerator, so one admissible set."""
     repo = case_sensitive_root / "svc"
     primary = {f.rel_path for f in scan_repository(repo)}
-    fallback = {f.rel_path for f in scan_repository(repo, git=GitClient(git_binary=NO_GIT))}
-    assert primary == fallback
+    assert primary >= CASED_KEPT
+    assert not (CASED_DROPPED & primary)
+    with pytest.raises(EnumerationUnavailable):
+        scan_repository(repo, git=GitClient(git_binary=NO_GIT))
 
 
-def test_both_scanners_agree_under_the_windows_simulation(
+def test_the_case_policy_holds_under_the_windows_simulation(
     case_sensitive_root: Path, as_windows: None
 ) -> None:
     del as_windows
     repo = case_sensitive_root / "svc"
     primary = {f.rel_path for f in scan_repository(repo)}
-    fallback = {f.rel_path for f in scan_repository(repo, git=GitClient(git_binary=NO_GIT))}
-    assert primary == fallback
     assert primary >= CASED_KEPT
     assert not (CASED_DROPPED & primary)
 
 
-def test_the_indexed_set_is_the_same_on_both_enumerators(
-    case_sensitive_root: Path, tmp_path: Path
-) -> None:
-    """The product-level form: the logical index does not depend on the path taken."""
+def test_the_indexed_set_applies_the_case_policy(case_sensitive_root: Path, tmp_path: Path) -> None:
+    """The product-level form, through the one enumerator that exists."""
     primary = indexed_via(settings_for(tmp_path, "p"), case_sensitive_root, tmp_path / "p.yaml")
-    fallback = indexed_via(
-        settings_for(tmp_path, "f"), case_sensitive_root, tmp_path / "f.yaml", fallback=True
-    )
-    assert primary == fallback
     assert CASED_DROPPED.isdisjoint(primary)
     assert {"src/config.py", "foo.py", "cased/deep/b.py"} <= primary
 
@@ -993,10 +993,9 @@ def test_git_internals_stay_structurally_excluded(tmp_path: Path) -> None:
     repo = make_repo(root / "svc", {"a.py": "A = 1\n"})
     (repo / ".repoatlasignore").write_text("!.git\n!.git/**\n!.GIT/**\n", encoding="utf-8")
     empty = DiscoverySettings(exclusions=())
-    for git_client in (None, GitClient(git_binary=NO_GIT)):
-        found = {f.rel_path for f in scan_repository(repo, settings=empty, git=git_client)}
-        assert not any(p == ".git" or p.startswith(".git/") for p in found), sorted(found)
-        assert "a.py" in found
+    found = {f.rel_path for f in scan_repository(repo, settings=empty, git=None)}
+    assert not any(p == ".git" or p.startswith(".git/") for p in found), sorted(found)
+    assert "a.py" in found
 
 
 # --- 25. no real state ---------------------------------------------------------

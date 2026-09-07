@@ -493,35 +493,50 @@ vendor
 
 ### File enumeration when Git is unavailable
 
-Repository *contents* are enumerated with `git ls-files`, which gives real `.gitignore` semantics without
-reimplementing them. When git cannot answer — the binary is missing, or the command fails — RepoAtlas walks the
-working tree itself rather than indexing nothing.
+Repository *contents* are enumerated with `git ls-files --cached --others --exclude-standard`, which gives real
+`.gitignore` semantics without reimplementing them. It returns **tracked** files plus **untracked files git does
+not ignore** — so a tracked file is listed whether or not a rule matches it, and the exclusion sources are the
+root `.gitignore`, any subdirectory `.gitignore`, `.git/info/exclude`, and `core.excludesFile`, which lives in the
+user's own git configuration rather than in the repository.
 
-**The fallback is complete.** It enumerates every admissible file in the repository at any nesting depth. There is
-no repository-relative depth ceiling; a file 500 directories below the repository root is indexed exactly like one
-at the top. A previous build stopped at depth 64 and reported success, so a deeper file was absent from the index
-with nothing said about it — the sync was not wrong about what it indexed, only about what it had looked at.
+**When git cannot answer, RepoAtlas indexes nothing for that repository and says so.** It does not walk the working
+tree instead. It used to, and the walk answered a different question: *what files are here*, which is a superset of
+what git admits by exactly the files the user asked git to ignore. Local overrides, generated configuration and
+private notes reached the index, retrieval and model prompts while `sync` exited 0 and reported success.
 
-Both enumerators feed the same admission rules, so what is indexed does not depend on which one ran:
+Reproducing git's answer without git would mean carrying a `.git/index` parser, a complete gitignore engine and
+git's configuration cascade — a second git implementation, whose every gap is the same defect in a smaller form.
+V1 prefers refusing a repository over indexing an unverified superset of it. Nor is the obvious shortcut correct:
+*walk and drop everything matching `.gitignore`* silently **omits** tracked files that a rule matches, which is the
+same defect pointed the other way.
 
-| Rule | Primary | Fallback |
-|---|---|---|
-| obvious-secret filenames (`.env`, `id_rsa`, `*.pem`, …) | refused | refused |
-| built-in exclusions (`node_modules`, `.venv`, `dist`, …) | refused | refused |
-| `.repoatlasignore` | applied | applied |
-| `.gitignore` | applied by git | **not applied** — the one documented difference |
-| `.git` internals | never listed | never walked |
-| files inside a nested managed repository | owned by that repository | owned by that repository |
-| symlinks | refused by containment | never followed |
-| containment, size and binary rules | applied | applied |
+This is a **trust boundary, not a secret-storage guarantee**. `.gitignore` is not a security control and RepoAtlas
+does not treat it as one; the obvious-secret policy in §17 is separate, stronger, and applies to git-tracked files
+too. What is guaranteed here is narrower: the set RepoAtlas indexes is the set it reports indexing.
 
-**Traversal is safe by structure, not by a cutoff.** Symlinks are never followed, so the walk cannot leave the
-repository or loop through one; directories already visited are not re-entered. Depth is not a security property
-and is not treated as one.
+What that looks like:
 
-**An unreadable directory is reported, not passed over.** If the operating system refuses a directory, the sync
-still completes, and it says which directories it could not inspect. A successful sync therefore means RepoAtlas
-inspected everything admissible, or named what it could not — never that it quietly stopped.
+| | |
+|---|---|
+| the repository | recorded `failed`; nothing of it indexed; a previous successful index is kept, not deleted |
+| `status` | `unavailable (git could not enumerate the repository)` — never `current` |
+| `sync` / `init` | prints `Sync incomplete.`, names the repository and what to check, and exits non-zero |
+| other repositories in the run | synced normally, facts kept, marked current |
+| recovery | when git can answer again, an ordinary `repoatlas sync` converges |
+
+RepoAtlas's own admission rules run after enumeration and are unchanged — obvious-secret filenames, built-in
+exclusions, `.repoatlasignore`, nested-repository ownership, containment, size and binary rules. `.gitignore` and
+`.repoatlasignore` stay separate languages with separate matchers.
+
+**Traversal is safe by structure, not by a cutoff.** `ls-files` records a symlink as an entry and never descends
+through one, so enumeration cannot leave the repository or loop through one, and there is no depth at which it
+stops. Repository *discovery*, which does walk, follows the same rules: no symlink is followed and a directory
+already visited is not re-entered. Depth is not a security property and is not treated as one.
+
+**An unreadable directory is reported, not passed over.** `git ls-files` reports a directory it could not open as
+a *warning* and still exits 0, so the listing comes back short and successful-looking. RepoAtlas surfaces those
+warnings as sync diagnostics: a successful sync therefore means RepoAtlas inspected everything admissible, or named
+what it could not — never that it quietly stopped.
 
 Operating-system path limits still apply. RepoAtlas fails only where the filesystem itself refuses a path, and
 nesting depth and total path length are separate constraints.
@@ -575,7 +590,7 @@ Four invariants:
 
 > Filesystem case-insensitivity does not implicitly broaden `.repoatlasignore` patterns.
 
-> Discovery and scanning use the same ignore semantics — and so do the primary and fallback enumerators.
+> Discovery and scanning use the same ignore semantics.
 
 > Changing platforms does not change the logical RepoAtlas index of the same repository tree.
 
