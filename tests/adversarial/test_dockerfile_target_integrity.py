@@ -463,18 +463,18 @@ def test_a_computed_source_under_copy_from_is_still_suppressed() -> None:
     assert files("COPY --from=builder $OUT /app/app\n") == set()
 
 
-def test_a_copy_from_source_is_still_recorded_as_a_repository_file() -> None:
-    """Pinned, not endorsed.
+def test_a_copy_from_source_is_no_longer_recorded_as_a_repository_file() -> None:
+    """The behaviour this pass pinned, inverted once it was acted on.
 
     ``/out/app`` lives in the *builder stage*, not in the build context, so
-    calling it a repository file reference is wrong — but it is wrong for a
-    static-modelling reason that has nothing to do with computed targets, and it
-    behaves identically whether ``--from`` is literal or an expression. Reported
-    separately rather than changed here (§14). This test exists so the behaviour
-    cannot drift silently before that report is acted on.
+    calling it a repository file reference was wrong. Pass 6 recorded the
+    behaviour rather than changing it, because it is wrong for a
+    static-modelling reason that has nothing to do with computed targets. The
+    namespace is now part of the proof, so it is gone — for the literal stage and
+    the computed one alike, which is the same answer for a stronger reason.
     """
-    assert files("COPY --from=builder /out/app /app/app\n") == {"/out/app"}
-    assert files("COPY --from=$STAGE /out/app /app/app\n") == {"/out/app"}
+    assert files("COPY --from=builder /out/app /app/app\n") == set()
+    assert files("COPY --from=$STAGE /out/app /app/app\n") == set()
 
 
 def test_a_remote_add_source_is_still_recorded_as_a_repository_file() -> None:

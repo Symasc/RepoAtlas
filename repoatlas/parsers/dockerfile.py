@@ -38,9 +38,11 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
 )
 from repoatlas.parsers.dockerwords import (
+    SourceDomain,
     Word,
     exec_form,
     expanded,
+    source_domain,
     split_flags,
     split_words,
     verbatim,
@@ -157,7 +159,12 @@ class DockerfileParser:
     name = "dockerfile"
     # 3: computed targets — builder or shell expansions — no longer become
     #    deterministic or unresolved target names.
-    version = "3"
+    # 4: `COPY --from` sources name another stage, image or named context, not
+    #    the build context, so they no longer become repository file references.
+    #    The bump is load-bearing: the Dockerfile that produced a false edge is
+    #    byte-identical afterwards, so only a facts-version change makes an
+    #    ordinary `sync` reparse it and drop the edge (V1_SPEC §12).
+    version = "4"
     language = "Dockerfile"
 
     def supports(self, path: Path) -> bool:
@@ -452,13 +459,30 @@ class DockerfileParser:
     ) -> None:
         """``COPY``/``ADD`` sources, when the build context proves which files they are.
 
-        Both forms are expanded by the builder, so both are classified the same
-        way — the JSON form exists to quote paths containing whitespace, not to
-        suppress substitution. A computed source names no file: ``${BASE}/x.yaml``
-        is not partial evidence about ``x.yaml``, it is a path this file does not
-        contain.
+        Two things must both be proven before a source is a repository file, and
+        only the first used to be asked.
+
+        *What is it called* — both forms are expanded by the builder, so both are
+        classified the same way; the JSON form exists to quote paths containing
+        whitespace, not to suppress substitution. A computed source names no
+        file: ``${BASE}/x.yaml`` is not partial evidence about ``x.yaml``, it is a
+        path this file does not contain.
+
+        *Where is that name resolved* — without ``--from`` the answer is the
+        build context, which is this tree. With it, the answer is the root of
+        another stage, image or named context, and a repository file that happens
+        to share the spelling is a different file. ``COPY --from=builder
+        assets/main.js /app/`` named ``assets/main.js`` in the *builder stage*,
+        and RepoAtlas resolved it against the working tree at confidence 1.0 —
+        a deterministic fact that was simply untrue, and one citation
+        verification could not catch because both the Dockerfile line and the
+        repository file genuinely exist. The instruction is still parsed, still
+        chunked and still retrievable as text; what it no longer does is claim a
+        file it never named.
         """
-        _flags, rest = split_flags(instruction.arguments)
+        flags, rest = split_flags(instruction.arguments)
+        if source_domain(flags) is SourceDomain.FOREIGN:
+            return None
         argv = exec_form(rest)
         words = (
             [expanded(element) for element in argv]
