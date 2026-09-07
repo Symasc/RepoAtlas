@@ -61,45 +61,49 @@ from repoatlas.storage.sqlite.stores import (
 )
 from repoatlas.storage.sqlite.vectors import SqliteVectorIndex
 from repoatlas.sync.planner import decide_rehash, facts_version, plan_sync
-from repoatlas.sync.scanner import ScannedFile, hash_bytes, hash_within, scan_repository
+from repoatlas.sync.scanner import (
+    EnumerationUnavailable,
+    ScannedFile,
+    hash_bytes,
+    hash_within,
+    scan_repository,
+)
 
 #: Bytes above which a file is recorded but never read (V1_SPEC §17 zip-bomb guard).
 _BINARY_SNIFF_BYTES = 8192
 
 
-def _enumeration_diagnostics(repo_path: Path, unreadable: list[Path]) -> list[ParseDiagnostic]:
-    """Say that enumeration was incomplete, and where, without saying too much.
+def _enumeration_diagnostics(reasons: list[str]) -> list[ParseDiagnostic]:
+    """Say that enumeration was incomplete, and why, without saying too much.
 
-    Paths are reported **repository-relative**. An unreadable directory is inside
-    the repository by construction, so the relative form is the useful one, and it
-    keeps the diagnostic from printing host-absolute paths back at whoever can
-    write to the tree (ARCHITECTURE.md §12). A directory whose path cannot even be
-    made relative is counted rather than named.
+    ``git ls-files`` reports a directory it could not open as a *warning* and still
+    exits 0, so the listing comes back short and successful-looking. Those warnings
+    are the only evidence that "there is nothing under there" and "I could not
+    look" are different claims here, and a sync that reported the second as the
+    first would claim a completeness it never established (ARCHITECTURE.md §6).
+
+    Git names the directory relative to the repository, so the message is already
+    the useful form and carries no host-absolute path back to whoever can write to
+    the tree (ARCHITECTURE.md §12).
 
     Only the first few are listed. The message exists so that a successful sync
-    cannot be read as a complete one; enumerating a thousand refused directories
-    would bury that, and the count carries the same fact.
+    cannot be read as a complete one; a thousand refused directories would bury
+    that, and the count carries the same fact.
     """
-    if not unreadable:
+    if not reasons:
         return []
-    shown: list[str] = []
-    for path in unreadable[:5]:
-        try:
-            shown.append(path.relative_to(repo_path).as_posix() or ".")
-        except ValueError:  # pragma: no cover - every entry descends from the root
-            continue
-    listed = ", ".join(shown)
-    if len(unreadable) > len(shown):
-        listed = f"{listed}, ..." if listed else "..."
-    count = len(unreadable)
+    shown = reasons[:5]
+    listed = "; ".join(shown)
+    if len(reasons) > len(shown):
+        listed = f"{listed}; ..."
+    count = len(reasons)
     return [
         ParseDiagnostic(
             severity=Severity.WARNING,
             message=(
-                f"enumeration incomplete: {count} "
-                f"director{'y' if count == 1 else 'ies'} could not be read "
-                f"({listed}); files beneath "
-                f"{'it' if count == 1 else 'them'} are not indexed"
+                f"enumeration incomplete: git could not read {count} "
+                f"director{'y' if count == 1 else 'ies'} ({listed}); files "
+                f"beneath {'it' if count == 1 else 'them'} are not indexed"
             ),
         )
     ]
@@ -224,14 +228,14 @@ class SyncEngine:
         # they are the difference between "this repository has no files there" and
         # "RepoAtlas could not look", which a successful sync must not conflate
         # (ARCHITECTURE.md §6).
-        unreadable: list[Path] = []
+        incomplete: list[str] = []
         scanned = scan_repository(
             repo_path,
             git=self._git,
             settings=self._settings.discovery,
             managed_subrepos=managed,
             boundary=boundary,
-            unreadable=unreadable,
+            incomplete=incomplete,
         )
         known = self._files.list_states(repo_id)
 
@@ -248,7 +252,7 @@ class SyncEngine:
         # Deletion first: a file's facts must never outlive the file.
         self._files.delete_many(plan.deleted_file_ids)
 
-        diagnostics: list[ParseDiagnostic] = _enumeration_diagnostics(repo_path, unreadable)
+        diagnostics: list[ParseDiagnostic] = _enumeration_diagnostics(incomplete)
         symbols_total = 0
         edges_total = 0
         dependencies_total = 0
@@ -651,6 +655,41 @@ class SyncEngine:
         self._dependencies.replace_for_file(file_id, records)
         return len(records)
 
+    def _enumeration_failed(self, repo: Repository) -> RepositorySyncReport:
+        """Record that a repository's file set could not be established.
+
+        Nothing of this repository is read, parsed or written — the refusal happens
+        in :func:`~repoatlas.sync.scanner.scan_repository` before the first
+        candidate is admitted, so there is no partial scan to undo (V1_SPEC §12).
+        Facts from a *previous* successful sync are left exactly as they were:
+        deleting them would destroy a known-good index because git is temporarily
+        unreachable, and rewriting them is impossible without the file set. They
+        stop being reported as current, which is the honest position.
+
+        The diagnostic names the repository and what could not be done, and nothing
+        else. Git configuration, environment and command output are deliberately
+        not echoed (ARCHITECTURE.md §12).
+        """
+        assert repo.id is not None
+        self._repositories.mark_sync_failed(repo.id)
+        return RepositorySyncReport(
+            repository=repo.name,
+            enumeration_failed=True,
+            diagnostics=(
+                ParseDiagnostic(
+                    severity=Severity.ERROR,
+                    message=(
+                        "git could not enumerate this repository, so RepoAtlas does "
+                        "not know which files belong to it. Nothing was indexed: a "
+                        "filesystem scan would admit files git excludes, and "
+                        "indexing a different set than the one reported is the one "
+                        "thing this must not do. Check that `git` is installed and "
+                        "on PATH and that the repository's git metadata is readable."
+                    ),
+                ),
+            ),
+        )
+
     def run(
         self,
         repositories: Sequence[Repository],
@@ -689,7 +728,18 @@ class SyncEngine:
             if self.forget_if_missing(repo):
                 continue
             self.ensure_repository_entity(repo)
-            report, completion = self.sync_repository(repo, full=full)
+            try:
+                report, completion = self.sync_repository(repo, full=full)
+            except EnumerationUnavailable:
+                # One repository RepoAtlas cannot establish the file set for does
+                # not invalidate the others: healthy repositories in the same run
+                # still sync, keep their facts and are marked current, and this one
+                # is recorded `failed` with a diagnostic saying so. Withholding its
+                # completion is what keeps `status` from calling it current, and
+                # the same `failed` status forces a full rehash if it ever becomes
+                # syncable again (V1_SPEC §12).
+                reports.append(self._enumeration_failed(repo))
+                continue
             reports.append(report)
             completions.append(completion)
 

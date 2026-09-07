@@ -17,6 +17,11 @@ def _index_state(repo: Repository, workspace: Workspace) -> str:
     """
     if repo.last_indexed_at is None:
         return "not indexed"
+    if repo.last_sync_status is SyncStatus.FAILED:
+        # Git could not say which files belong to this repository, so RepoAtlas
+        # indexed none of them. Whatever is stored is a previous run's, and saying
+        # "interrupted" would suggest a run that merely needs finishing.
+        return "unavailable (git could not enumerate the repository)"
     if repo.last_sync_status is not SyncStatus.OK:
         return "interrupted"
 

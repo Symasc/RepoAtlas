@@ -1,8 +1,16 @@
 """Working-tree file enumeration (ARCHITECTURE.md §6, §8, §12).
 
-The working tree is authoritative, so enumeration prefers ``git ls-files``: it
-returns tracked plus untracked-not-ignored files, giving real ``.gitignore``
-semantics without reimplementing them, and it reflects uncommitted changes.
+The working tree is authoritative, so enumeration is ``git ls-files``: it returns
+tracked plus untracked-not-ignored files, giving real ``.gitignore`` semantics
+without reimplementing them, and it reflects uncommitted changes.
+
+**There is no second enumerator.** When git cannot answer, :class:`
+EnumerationUnavailable` is raised and the repository is reported failed rather
+than enumerated some other way. A filesystem walk answers "what files are here",
+which is a different question from "what files does git consider part of this
+repository", and the gap between them is precisely the content a user told git to
+leave alone. See :class:`EnumerationUnavailable` for the measured contract and
+for why reproducing it without git was refused.
 
 That authority is also what makes enumeration a security boundary. ``ls-files``
 reports the paths git has in its *index*, and an index path is not a promise
@@ -16,20 +24,18 @@ filesystem rather than from the path (V1_SPEC §17).
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 from repoatlas.config.settings import DiscoverySettings
 from repoatlas.containment import RepositoryBoundary
-from repoatlas.discovery.finder import GIT_DIRECTORY
 from repoatlas.discovery.ignore import (
     IGNORE_FILENAME,
     MAX_IGNORE_BYTES,
     IgnoreRules,
     is_secret_path,
 )
-from repoatlas.gitstate.client import GitClient, is_git_repository
+from repoatlas.gitstate.client import GitClient
 
 _HASH_CHUNK_BYTES = 1 << 20
 
@@ -41,6 +47,69 @@ class ScannedFile:
     rel_path: str
     size: int
     mtime_ns: int
+
+
+class EnumerationUnavailable(Exception):
+    """Git could not enumerate this repository, and nothing else may stand in.
+
+    The primary enumerator is::
+
+        git ls-files --cached --others --exclude-standard -z
+
+    which returns *tracked* files plus *untracked files Git does not ignore*.
+    Measured against git 2.43, that admissible set is decided by four exclusion
+    sources and by the index:
+
+    ==============================================  ==================================
+    source                                          where it lives
+    ==============================================  ==================================
+    ``.gitignore`` at the repository root           repository content
+    ``.gitignore`` in any subdirectory              repository content
+    ``.git/info/exclude``                           repository metadata, not content
+    ``core.excludesFile`` (default ``~/.config/     **the user's Git configuration**
+    git/ignore``)
+    ==============================================  ==================================
+
+    plus the index itself, because a **tracked** file is returned whether or not
+    it is ignored — ``git add -f secrets.conf`` and a file that started tracked and
+    was later added to ``.gitignore`` are both still listed.
+
+    RepoAtlas used to answer this question with a filesystem walk when Git could
+    not be reached. That walk is a faithful answer to "what files are here", and it
+    is not an answer to the question above at all: it admitted every ignored file,
+    which is how content a user deliberately kept out of Git — local overrides,
+    generated configuration, private notes — reached chunks, embeddings, retrieval
+    and model prompts, while ``sync`` exited 0 and reported success.
+
+    **Reproducing the set faithfully is not a small job**, and this class records
+    why the attempt was refused rather than made. It needs three separate pieces of
+    Git: a ``.git/index`` parser (v2/3/4, extensions, split index, and the
+    indirection a worktree's ``.git`` *file* adds) for tracked state; a complete
+    gitignore engine (nested scope, negation and the rule that a re-include cannot
+    resurrect a file under an excluded directory, anchoring, ``**``, character
+    classes, escapes); and Git's configuration cascade to resolve
+    ``core.excludesFile`` across system, global, XDG and repository config
+    including ``include``/``includeIf``. The last one is decisive: it is *host*
+    configuration outside the repository, and this code path exists precisely for
+    the case where Git cannot be asked what it resolves to. Any approximation
+    reintroduces the same defect in a narrower form.
+
+    So RepoAtlas fails closed. A repository whose file set cannot be established is
+    reported as failed, with nothing indexed from it and no claim that it is
+    current — which is the trade V1 makes everywhere else too: *say UNKNOWN rather
+    than answer from something weaker than evidence* (V1_SPEC §2).
+
+    This is a **trust boundary, not a secret-storage guarantee**. ``.gitignore``
+    is not a security control and RepoAtlas does not present it as one; the
+    built-in secret policy is separate and stronger, and applies to Git-tracked
+    files as well (V1_SPEC §17). What this class protects is narrower and still
+    worth protecting: the set RepoAtlas indexes must be the set it says it
+    indexes, whichever enumerator answered.
+    """
+
+    def __init__(self, repo_path: Path) -> None:
+        super().__init__(f"git could not enumerate the files of {repo_path}")
+        self.repo_path = repo_path
 
 
 def hash_bytes(data: bytes) -> str:
@@ -79,7 +148,7 @@ def scan_repository(
     settings: DiscoverySettings | None = None,
     managed_subrepos: frozenset[Path] = frozenset(),
     boundary: RepositoryBoundary | None = None,
-    unreadable: list[Path] | None = None,
+    incomplete: list[str] | None = None,
 ) -> list[ScannedFile]:
     """Enumerate the indexable files of one repository.
 
@@ -108,22 +177,24 @@ def scan_repository(
     limit = boundary if boundary is not None else RepositoryBoundary(repo_path)
     ignore = _load_ignore_rules(limit)
 
-    listed = client.list_files(repo_path)
-    candidates: Iterator[str]
-    if listed is not None:
-        candidates = iter(listed)
-    else:
-        # Git unavailable or failed: fall back to walking the working tree. The
-        # fallback enumerates the same admissible file set as `ls-files`, at any
-        # depth — it used to stop at 64 and report success, so a repository with
-        # deeper files was indexed incompletely with nothing said (ARCHITECTURE.md
-        # §6). Directories it could not read are appended to `unreadable` rather
-        # than passed over, because "nothing there" and "could not look" are
-        # different claims and only one of them is true.
-        candidates = _walk_relative(repo_path, config, unreadable=unreadable)
+    listing = client.list_files(repo_path)
+    if listing is None:
+        # Git could not answer, and there is no honest substitute. See
+        # `EnumerationUnavailable`: a filesystem walk answers a *different*
+        # question, and the difference is content the user told Git to leave
+        # alone. Raised before any of it is read, let alone persisted.
+        raise EnumerationUnavailable(repo_path)
+    if incomplete is not None:
+        # Git reports a directory it could not open as a warning and still exits
+        # 0, so a short listing looks like a complete one. Passing the warnings up
+        # keeps "a successful sync is not necessarily a complete one" true on the
+        # path that now always runs (ARCHITECTURE.md §6). Git's own wording is
+        # kept: it names the directory relative to the repository and says why,
+        # which is exactly what the diagnostic needs and nothing more.
+        incomplete.extend(listing.warnings)
 
     results: list[ScannedFile] = []
-    for rel_path in candidates:
+    for rel_path in listing.paths:
         # Security policy first: not configurable, not negotiable, and decided
         # from the name alone so nothing below it ever sees the file.
         if is_secret_path(rel_path):
@@ -191,123 +262,3 @@ def _belongs_to_nested_repository(
         if resolved_sub != boundary.root and absolute.is_relative_to(resolved_sub):
             return True
     return False
-
-
-def _identity(path: Path) -> tuple[int, int] | None:
-    """``(device, inode)`` — what makes two paths the same directory."""
-    try:
-        info = path.stat()
-    except OSError:
-        return None
-    return (info.st_dev, info.st_ino)
-
-
-def _walk_relative(
-    root: Path, config: DiscoverySettings, *, unreadable: list[Path] | None = None
-) -> Iterator[str]:
-    """Every admissible file beneath ``root``, at any depth. **Iterative.**
-
-    This walk used to stop at ``depth > 64`` and return, which meant a repository
-    nested deeper than that was indexed as though its lower files did not exist:
-    no error, no diagnostic, a successful sync and an incomplete index. The cap
-    was also not the safety property it was commented as being — a cycle is
-    created by symlinks, which this walk has always refused, and the cost of a
-    tree is its *size*, which a depth limit does not bound at all: a flat
-    directory of 100,000 files costs exactly the same at depth 1 as at depth 100
-    (ARCHITECTURE.md §6). It bounded the one dimension that was never the risk.
-
-    **Termination is structural.** Symlinks are never followed, so no route out
-    of the tree and no cycle through one exists; what remains is a finite acyclic
-    directory tree, which a depth-first walk exhausts. Directory identity
-    ``(st_dev, st_ino)`` is tracked as well, so a bind mount or any second route
-    to a directory already visited is entered once rather than twice — the same
-    rule repository discovery uses, and the reason neither needs a counter.
-
-    **Iterative rather than recursive**, with an explicit stack. The previous
-    implementation recursed through ``yield from`` once per directory level, so
-    lifting the ceiling on its own would have swapped a silent truncation at
-    depth 65 for a ``RecursionError`` somewhere near depth 1000 — a scanner must
-    not require user-controlled nesting to fit the Python call stack. Depth-first
-    rather than breadth-first because the stack then holds the unexplored
-    siblings along one path instead of a whole level, which is the difference
-    between bounded memory and a 100,000-entry frontier. Children are pushed
-    reversed so they pop in lexicographic order: results are sorted by the caller
-    regardless, but a walk that visits in a stable order is one whose diagnostics
-    can be compared between runs.
-
-    ``.git`` is refused **structurally**, not by configuration. It is in the
-    default exclusions, but those are configurable, and a root whose
-    ``exclusions`` were set without it had this walk enumerate the object store,
-    the hooks and ``.git/config`` as ordinary source — content ``git ls-files``
-    would never report, so the fallback was strictly less safe than the path it
-    stands in for. Git internals are not repository source at any depth.
-    """
-    stack: list[Path] = [root]
-    visited: set[tuple[int, int]] = set()
-    origin = _identity(root)
-    if origin is not None:
-        visited.add(origin)
-
-    while stack:
-        current = stack.pop()
-        try:
-            # The nested-repository probe sits *inside* the guard deliberately. On
-            # a directory the process can see but not enter, `(current / ".git")
-            # .is_dir()` raises rather than answering — and when that probe ran
-            # before the push, its `OSError` was caught by the per-entry handler
-            # and the whole subtree was dropped with nothing recorded. One guard
-            # covers both questions, so a directory that cannot be inspected is
-            # reported instead of quietly becoming an empty one.
-            nested = current != root and is_git_repository(current)
-            entries = () if nested else sorted(current.iterdir())
-        except OSError:
-            # Includes PermissionError. Recorded rather than swallowed: an empty
-            # result from a directory that could not be read is not evidence that
-            # it held no files, and a sync reporting success on the strength of it
-            # would claim a completeness it never established.
-            if unreadable is not None:
-                unreadable.append(current)
-            continue
-        if nested:
-            continue  # a nested repository is enumerated as itself, separately
-
-        descend: list[Path] = []
-        blocked = False
-        for entry in entries:
-            if entry.name == GIT_DIRECTORY:
-                continue
-            if entry.name in config.exclusions:
-                continue
-            try:
-                if entry.is_symlink():
-                    continue
-                if entry.is_dir():
-                    descend.append(entry)
-                elif entry.is_file():
-                    yield entry.relative_to(root).as_posix()
-            except OSError:
-                # Listable but not stattable — a directory readable without being
-                # searchable does this to every one of its children. The entry is
-                # skipped, and the directory is named for the same reason an
-                # unreadable one is: something admissible may be under it.
-                blocked = True
-                continue
-        if blocked and unreadable is not None:
-            unreadable.append(current)
-
-        for child in reversed(descend):
-            identity = _identity(child)
-            if identity is None:
-                # Classified as a directory a moment ago and now un-stattable: it
-                # was removed mid-scan, or its permissions changed under us.
-                # Either way this walk did not inspect it, and the last silent
-                # way to drop a subtree is to decide that does not need saying.
-                if unreadable is not None:
-                    unreadable.append(child)
-                continue
-            if identity in visited:
-                # A cycle, a bind mount, or two routes to one directory. Entering
-                # it twice would duplicate everything beneath it.
-                continue
-            visited.add(identity)
-            stack.append(child)

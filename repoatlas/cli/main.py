@@ -109,6 +109,10 @@ def init(
         typer.echo("")
         typer.echo(render_sync(report))
     workspace.close()
+    if report.unavailable:
+        # Same rule as `sync`: a run that could not establish a repository's file
+        # set indexed nothing from it and did not succeed.
+        raise typer.Exit(ExitCode.RUNTIME)
 
 
 @app.command()
@@ -148,6 +152,14 @@ def sync(
     if verbose:
         _report_sync_telemetry(report)
     workspace.close()
+    if report.unavailable:
+        # Healthy repositories in the same run kept their facts and are current;
+        # this run still did not do what it was asked, so it must not report
+        # success. Exit 1 rather than a new code: the taxonomy already means
+        # "the command failed", and a wrapper that retries contention (5) or
+        # reconfigures a missing model (4) has nothing different to do here
+        # (V1_SPEC §4).
+        raise typer.Exit(ExitCode.RUNTIME)
 
 
 @app.command()

@@ -202,22 +202,28 @@ def render_sync(report: SyncReport) -> str:
     lines: list[str] = []
     if len(report.repositories) == 1:
         entry = report.repositories[0]
-        lines.extend(
-            [
-                f"Repository: {entry.repository}",
-                f"Branch: {entry.branch or 'unknown'}",
-                f"Working tree: {'dirty' if entry.is_dirty else 'clean'}",
-                "",
-                f"changed: {entry.changed}",
-                f"new: {entry.new}",
-                f"deleted: {entry.deleted}",
-            ]
-        )
+        if entry.enumeration_failed:
+            lines.extend([f"Repository: {entry.repository}", "", "not synchronized"])
+        else:
+            lines.extend(
+                [
+                    f"Repository: {entry.repository}",
+                    f"Branch: {entry.branch or 'unknown'}",
+                    f"Working tree: {'dirty' if entry.is_dirty else 'clean'}",
+                    "",
+                    f"changed: {entry.changed}",
+                    f"new: {entry.new}",
+                    f"deleted: {entry.deleted}",
+                ]
+            )
     else:
         lines.append(f"Syncing {len(report.repositories)} repositories...")
         lines.append("")
         for entry in report.repositories:
-            if entry.touched:
+            if entry.enumeration_failed:
+                # "unchanged" would be a lie here: nothing was compared at all.
+                detail = "not synchronized"
+            elif entry.touched:
                 detail = f"changed: {entry.changed}, new: {entry.new}, deleted: {entry.deleted}"
             else:
                 detail = "unchanged"
@@ -243,8 +249,35 @@ def render_sync(report: SyncReport) -> str:
         lines.append(f"  {report.unresolved_references} references still unresolved")
     lines.extend(_discovered_notice(report))
     lines.extend(_unreadable_notice(report.unreadable_paths))
-    lines.extend(["", "Sync complete."])
+    lines.extend(_unavailable_notice(report))
+    # "Sync complete." is a claim, so it is only made when it is true. A run that
+    # could not establish one repository's file set indexed nothing from it and
+    # says so instead (V1_SPEC §12).
+    lines.extend(["", "Sync incomplete." if report.unavailable else "Sync complete."])
     return "\n".join(lines)
+
+
+def _unavailable_notice(report: SyncReport) -> list[str]:
+    """Name the repositories that were not synchronized, and why, once.
+
+    The diagnostic is carried on the per-repository report; it is repeated here
+    rather than deep in a verbose stream because it is the reason the command did
+    not succeed. Bounded: the repositories are named, nothing about the host's Git
+    installation or configuration is echoed (ARCHITECTURE.md §12).
+    """
+    unavailable = report.unavailable
+    if not unavailable:
+        return []
+    lines = [
+        "",
+        f"Not synchronized ({len(unavailable)}):",
+        *(f"  {name}" for name in unavailable),
+    ]
+    for entry in report.repositories:
+        if entry.enumeration_failed:
+            lines.extend(["", *(f"  {d.message}" for d in entry.diagnostics)])
+            break
+    return lines
 
 
 def render_dependencies(packages: list[DependencyPackage]) -> str:
