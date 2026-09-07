@@ -820,9 +820,13 @@ Salt invocation references
 itself contains:
 
 > A Bash `EXECUTES` edge names only a target explicitly recoverable from static source syntax. Variable
-> expansion or runtime command construction never becomes a deterministic target.
+> expansion, tilde expansion or runtime command construction never becomes a deterministic target.
 
 > Absence of a deterministic target means *unresolved*, not low-confidence invention.
+
+> RepoAtlas does not substitute the analyzer machine's `HOME` or passwd database into indexed Bash semantics.
+
+> Quoting and escaping are evaluated *before* deciding whether an expansion applies.
 
 | Proven — must resolve | Not proven — must resolve to nothing |
 |---|---|
@@ -831,12 +835,23 @@ itself contains:
 | `source ./env.sh`, `. ./env.sh` | `source "$CONFIG"`, `python "$SCRIPT"` |
 | `salt-call state.apply app` | `$(find_tool)`, `eval "$COMMAND"`, `"${!INDIRECT}"` |
 | `timeout 30 ./migrate.sh` (wrapper grammar known) | `CMD=./x.sh` then `$CMD` — V1 does no constant propagation |
+| `"~/tool.sh"`, `'~'/tool.sh`, `\~/tool.sh` — the tilde is quoted | `~/tool.sh`, `~`, `~user/tool`, `~+/tool`, `~-/tool` |
 
 `cmd:$CMD` at confidence 0.5 is not an acceptable substitute for absence: the entity still exists and can still be
 cited. Quoting is shell syntax and is stripped from the target — `'./deploy.sh'` names the file `./deploy.sh`.
 A dynamic invocation still records what the file *does* prove: the environment read its expansion implies, and any
 leading `NAME=value` assignments. Wrapper policy, the `sh -c` / `eval` rule and the full table live in
 `ARCHITECTURE.md` §5.
+
+**A word spelled out in full is not automatically proven.** `~/scripts/tool.sh` contains every character of its
+target and Bash still runs something else: tilde expansion happens before the command lookup, against the `HOME` of
+the machine that runs the script. The analyzer's own `HOME` and passwd database are facts about the indexing host
+and are never substituted — `~nosuchuser/tool` stays *literal* in Bash when the account is missing, so even whether
+`~name/` expands is runtime state. Quoting decides whether any of it applies, and is read from the syntax tree
+before it is stripped, because `~/tool` and `"~/tool"` unquote to the same string and mean different things.
+
+The source spelling remains evidence throughout: the line is indexed and retrievable, `LOG_LEVEL=debug ~/tool` still
+records `EXPORTS LOG_LEVEL`, and only the claim about *what runs* is withheld.
 
 ### 7.4 Ruby
 

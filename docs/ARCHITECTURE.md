@@ -1188,9 +1188,14 @@ Shell scripts are where a deployment decides what runs, which makes command posi
 tempted to guess. RepoAtlas does not:
 
 > **Invariant.** A Bash `EXECUTES` edge names only a target explicitly recoverable from static source syntax.
-> Variable expansion or runtime command construction never becomes a deterministic target.
+> Variable expansion, tilde expansion or runtime command construction never becomes a deterministic target.
 
 > **Invariant.** Absence of a deterministic target means *unresolved*, not low-confidence invention.
+
+> **Invariant.** RepoAtlas does not substitute the analyzer machine's `HOME` or passwd database into indexed Bash
+> semantics.
+
+> **Invariant.** Quoting and escaping are evaluated *before* deciding whether an expansion applies.
 
 `$CMD` is not a program called `$CMD`. It is a program whose name the file does not contain, and the honest record
 of that is nothing at all — not `cmd:$CMD` at confidence 0.5. A downgraded confidence is the same fabricated node
@@ -1211,9 +1216,52 @@ right in both directions: `"$BASE/script.sh"` is rejected despite ending in a pl
 | `$CMD`, `"${TOOL}"`, `$BASE/$NAME`, `$(pick)` | **nothing** — plus the `READS` its expansion proves |
 | `CMD=./x.sh` then `$CMD` | **nothing**: V1 does no constant propagation |
 | `FOO=bar ./app` | `EXECUTES` → `./app`, and `EXPORTS FOO` |
+| `~/tool.sh`, `~`, `~user/tool`, `~+/tool`, `~-/tool` | **nothing** — the shell rewrites the word before the lookup |
+| `"~/tool.sh"`, `'~'/tool.sh`, `\~/tool.sh` | `EXECUTES` → the file literally named `~/tool.sh` |
 
 Quoting is shell syntax and never part of a filename. `cmd:'./deploy.sh'` and `cmd:./deploy.sh` would be two graph
 nodes for one file, and the quoted one joins to nothing — so quote stripping is a correctness fix, not cosmetics.
+
+**Spelled out is not the same as proven: tilde expansion.** `~/scripts/tool.sh` has every character of its target
+written in the source, so it passed the rule above — and it was recorded as an `EXECUTES` edge to a script by that
+name. Bash does not run that file. It expands the tilde first, using the `HOME` of whichever machine runs the
+script, so the one path Bash will certainly *not* look at is the literal `~/scripts/tool.sh`.
+
+`$CMD` looks unknown and is unknown. `~/tool` looks known and is not, which is why it survived a parser built
+around "record only what the source spells out". Static proof needs a second question — *does the shell rewrite
+this word before using it* — and `_tilde_expanded` asks it.
+
+**The analyzer's environment is not evidence.** `Path.expanduser`, `os.path.expanduser` and `pwd.getpwnam` all
+answer a question about the machine running the indexer, not the machine that will run the script, so none of them
+appears in Bash analysis and a test greps for them. `~nosuchuser/tool` shows why the temptation must be refused
+outright rather than handled case by case: Bash leaves it **literal** when the account is missing, so whether
+`~name/` expands at all depends on the runtime host's passwd database. `~-/tool` makes the same point with shell
+state — a shell that has never changed directory has no `OLDPWD` and leaves the word alone, so one spelling is both
+a literal and an expansion depending on something invisible from here.
+
+Measured against GNU bash 5.2.21 (`--noprofile --norc`, controlled `HOME`/`PWD`/`OLDPWD`):
+
+| Written in the source | Bash produces | Recorded |
+|---|---|---|
+| `~`, `~/`, `~/tool` | `$HOME`-relative | nothing |
+| `~root/tool` | that account's home, from the passwd database | nothing |
+| `~nosuchuser/tool` | **unchanged** — no such account | nothing |
+| `~+/tool`, `~-/tool` | `$PWD` / `$OLDPWD` | nothing |
+| `"~/tool"`, `'~'/tool`, `"~"/tool`, `\~/tool` | the literal `~/tool` | the target |
+
+**Quoting decides, and it has to be read before it is stripped.** After unquoting, all five spellings in the last
+row and the bare `~/tool` are the identical string — four literal filenames and one expansion, indistinguishable.
+So `_tilde_expanded` looks at the *first component node* of the command word: an unquoted `word` whose raw source
+text begins with `~` expands, and a `string`, a `raw_string` or a `word` beginning with `\~` does not. This is the
+Dockerfile lesson (`parsers/dockerwords.py`) in a second language — prove static semantics before tokenization
+destroys the syntax that decides them — reached independently rather than by sharing Docker's rules, which are
+Docker's.
+
+**Losing a false target does not lose true facts.** `LOG_LEVEL=debug ~/tool` still yields `EXPORTS LOG_LEVEL`,
+exactly as `LOG_LEVEL=debug $CMD` does, and the source line is chunked and indexed like any other — so `locate`
+still finds the script that writes `~/tool.sh`. What disappears is only the claim to know what that line executes.
+The sharpest case is a repository that genuinely contains a directory named `~`: `repo/~/tool.sh` is a legal POSIX
+path, and an unquoted `~/tool.sh` must not link to it while a quoted `"~/tool.sh"` must.
 
 **Wrappers.** A command that runs another command is unwrapped only when the wrapped word can be identified from a
 grammar written down for *that* wrapper. Every entry in `_WRAPPERS` lists the flags that stand alone, the flags that
