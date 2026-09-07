@@ -44,14 +44,17 @@ from __future__ import annotations
 
 import enum
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 __all__ = [
     "BUILDER_EXPANDED",
     "Proof",
+    "SourceDomain",
     "Word",
     "exec_form",
     "expanded",
+    "source_domain",
     "split_flags",
     "split_words",
     "verbatim",
@@ -88,6 +91,39 @@ class Proof(enum.StrEnum):
 
     LITERAL = "literal"
     COMPUTED = "computed"
+
+
+class SourceDomain(enum.StrEnum):
+    """Which filesystem a ``COPY``/``ADD`` source operand names.
+
+    Static proof has a second half, and only the first was ever asked. ``COPY``
+    proves *what a source is called*; it does not by itself prove *where that
+    name is resolved*. Docker's grammar is::
+
+        COPY [--from=<image|stage|context>] <src> ... <dest>
+
+    Without ``--from`` the sources are resolved in the **build context**, which
+    is the tree RepoAtlas indexes, so a repository file may genuinely be the
+    thing named. With ``--from`` they are resolved in the root filesystem of
+    another build stage, another image, or a named build context — none of which
+    RepoAtlas has, reads, or can read. A string that happens to be spelled the
+    same in both places is a coincidence, not a match.
+
+    Two values, not four, and deliberately. "Named stage", "numeric stage",
+    "external image" and "named context" differ in *how Docker resolves them*,
+    and RepoAtlas resolves none of them: the fact it needs is the one they share,
+    which is that the build context is not where the source lives. A dynamic
+    ``--from=${STAGE}`` collapses into the same answer for the same reason — the
+    stage is less knowable, not more.
+    """
+
+    #: No ``--from``: the sources are build-context paths, so they may name
+    #: repository files and are offered to the linker as file references.
+    BUILD_CONTEXT = "build-context"
+
+    #: ``--from`` is present: the sources name paths in a filesystem RepoAtlas
+    #: does not have. No repository file reference may be emitted for them.
+    FOREIGN = "foreign"
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +229,29 @@ def split_flags(arguments: str) -> tuple[list[str], str]:
         flags.append(rest[:end])
         rest = rest[end:].lstrip()
     return flags, rest
+
+
+def source_domain(flags: Sequence[str]) -> SourceDomain:
+    """Where this ``COPY``/``ADD`` resolves its sources, decided from its flags.
+
+    Asked once, of the flags :func:`split_flags` already separated, so no handler
+    inspects a raw line for ``--from`` and no operand can be classified by a
+    different rule than its siblings. Every source operand of one instruction
+    shares one domain: ``--from`` is an instruction-level flag, so
+    ``COPY --from=builder a.txt b.txt /dest/`` relocates *both* sources.
+
+    Matched on the flag's **name**, so neither ``--chown=1000 --from=builder``
+    nor a ``--from`` whose value is an expansion can slip past by position or by
+    being unknowable. Docker documents ``--from`` for ``COPY`` only; ``ADD``
+    shares this classifier anyway, because if a Dockerfile writes ``ADD --from``
+    the conservative reading costs a reference RepoAtlas cannot justify and the
+    permissive one invents the same false fact this exists to prevent.
+    """
+    for flag in flags:
+        name = flag.split("=", 1)[0]
+        if name == "--from":
+            return SourceDomain.FOREIGN
+    return SourceDomain.BUILD_CONTEXT
 
 
 def split_words(arguments: str, *, substitution: bool = False) -> list[Word]:

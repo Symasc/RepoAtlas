@@ -979,7 +979,27 @@ that is truthful. A blanket rejection of `$` would be a false-negative bug in it
 | `FROM python:3.13`, `FROM builder` (a declared stage) | `FROM $BASE`, `FROM image:${TAG}`, `FROM ${STAGE}` |
 | `COPY src/app.py /app/`, `COPY ["a b.txt", "/app/"]`, `COPY \$FOO /quux` | `COPY $SRC /app`, `COPY ${BASE}/x.yaml /app/`, `COPY ["$SRC", "/app/"]` |
 | `ENTRYPOINT ["python3", "app.py"]`, `CMD echo "$MSG"` | `ENTRYPOINT $RUNNER app.py`, `COPY --from=$STAGE …` |
+| `COPY assets/main.js /app/` → file `assets/main.js` | `COPY --from=builder assets/main.js /app/` → **no file**, whatever the repository contains |
 | `RUN pip install requests` | `RUN $PIP install requests`; the `$PKG` in `pip install $PKG requests` |
+
+**A path is not a file identity on its own.** `COPY` proves what a source is *called*; it does not prove *where
+that name is resolved*. Docker's grammar is `COPY [--from=<image|stage|context>] <src> ... <dest>` — without
+`--from` the sources come from the build context, which is the tree RepoAtlas indexes; with it they come from
+another stage, image or named build context, which RepoAtlas does not have and never reads.
+
+> A Dockerfile source is a repository file reference only when the instruction also proves it is resolved in the
+> build context. `COPY --from=...` changes the namespace of **every** source operand.
+
+So `COPY assets/main.js /app/` may reference the repository's `assets/main.js`, and
+`COPY --from=builder assets/main.js /app/` may not — even though the repository contains that exact path. The
+second names a file in the builder stage; the identically-spelled repository file is a different file. Named
+stage, numeric stage (`--from=0`), external image (`--from=nginx:1.27`), named context and a computed
+`--from=${STAGE}` are one case here, because RepoAtlas resolves none of them.
+
+This is not a confidence question. A reduced-confidence edge would state the same wrong thing more quietly, and
+recording it as associative "the strings match" evidence would be RepoAtlas guessing at artifact provenance nobody
+asked for. The absence of a relationship is the correct answer; the instruction itself is still parsed, chunked,
+and retrievable with its line number and raw text.
 
 **V1 performs no constant propagation.** `ARG BASE=python:3.13` followed by `FROM $BASE` yields no image. ARG
 scope, redeclaration, build-time overrides, defaults, stage boundaries and the automatic platform args are a
