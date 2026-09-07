@@ -12,8 +12,8 @@ Which makes command position the hard part, and the invariant this module exists
 to hold (ARCHITECTURE.md §5):
 
     A Bash ``EXECUTES`` edge names only a target explicitly recoverable from
-    static source syntax. Variable expansion or runtime command construction
-    never becomes a deterministic target.
+    static source syntax. Variable expansion, tilde expansion or runtime
+    command construction never becomes a deterministic target.
 
 ``$CMD`` is not a program called ``$CMD``. It is a program whose name this file
 does not contain — and the honest record of that is **nothing**, not a lower
@@ -21,6 +21,12 @@ confidence on a fabricated node. Absence of a deterministic target means
 unresolved, not low-confidence invention: a half-confident ``cmd:$CMD`` is the
 same invented entity with a smaller number on it, and retrieval would still
 surface it as a thing that exists.
+
+``~/tool`` is the same claim wearing a filename. Every character of it is in the
+source, so it *looks* proven — but Bash expands the tilde before the command
+lookup, using the HOME of whatever machine runs the script. RepoAtlas cannot know
+that value and must not substitute its own: the analyzer's environment is not
+evidence about the indexed script's runtime (:func:`_tilde_expanded`).
 
 Proof comes from the syntax tree rather than from pattern-matching the text.
 :func:`_literal_text` returns a node's value only when every part of it is
@@ -160,6 +166,66 @@ def _literal_text(source: bytes, node: Node) -> str | None:
             parts.append(piece)
         return "".join(parts)
     return None
+
+
+def _tilde_expanded(source: bytes, node: Node) -> bool:
+    """Whether Bash performs **tilde expansion** on this word before using it.
+
+    Tilde expansion happens at the start of an unquoted word, so the answer is a
+    property of the *first component's syntax* — which is why this is decided
+    here, on the tree, and not by asking whether some resulting string begins
+    with ``~``. By the time :func:`_literal_text` has run, quoting and escaping
+    are gone and ``~/tool``, ``"~/tool"``, ``'~'/tool``, ``"~"/tool`` and
+    ``\\~/tool`` have all become the identical string ``~/tool`` — four of which
+    Bash treats as a literal filename and one of which it does not. This is the
+    Dockerfile lesson (:mod:`repoatlas.parsers.dockerwords`) applied to a
+    different language: prove static semantics before tokenization destroys the
+    syntax that decides them.
+
+    Verified against GNU bash 5.2.21 with ``--noprofile --norc`` and a controlled
+    environment. Expanded, and therefore **not** statically knowable:
+
+    ===================== ==========================================
+    ``~/tool``            ``$HOME/tool``
+    ``~``                 ``$HOME``
+    ``~root/tool``        that account's home, from the passwd database
+    ``~+/tool``           ``$PWD/tool``
+    ``~-/tool``           ``$OLDPWD/tool``
+    ===================== ==========================================
+
+    ``~nosuchuser/tool`` stays literal, which is the sharpest reason none of
+    these may be resolved statically: whether ``~name/`` expands *at all*
+    depends on the account database of the machine that eventually runs the
+    script. RepoAtlas has no sound source for that and must not substitute its
+    own (V1_SPEC §7.3).
+
+    Quoted or escaped, the tilde is an ordinary character and the word is a
+    literal path like any other, so those keep their deterministic target.
+    """
+    leading = node
+    while leading.type in {"command_name", "concatenation"} and leading.children:
+        leading = leading.children[0]
+    if leading.type != "word":
+        # A quoted first component -- `"~/tool"`, `'~'/tool`, `"~"/tool`. The
+        # tilde is inside a string, where expansion does not reach it.
+        return False
+    # Raw source, deliberately: `\~/tool` is a `word` too, and only its
+    # unprocessed text still shows the backslash that suppresses the expansion.
+    return node_text(source, leading).startswith("~")
+
+
+def _proven_word(source: bytes, node: Node) -> str | None:
+    """The text this word is proven to produce *as a target*, or ``None``.
+
+    :func:`_literal_text` answers "is every character of this word written in the
+    source". That is necessary and not sufficient: ``~/tool`` is written out in
+    full and Bash still runs something else. This adds the second question — does
+    the shell rewrite the word before using it — and the two together are what
+    the deterministic-target invariant actually requires.
+    """
+    if _tilde_expanded(source, node):
+        return None
+    return _literal_text(source, node)
 
 
 def _literal_string(source: bytes, node: Node) -> str | None:
@@ -403,14 +469,17 @@ class _Walker:
                 if name_child is not None:
                     self._export(node_text(self._source, name_child), start, end)
 
-        command = _literal_text(self._source, name_node)
+        command = _proven_word(self._source, name_node)
         if not command:
-            # The shell computes this target at run time. The source proves that
-            # *an* execution happens; it does not prove *what* runs, so no
-            # resolvable target is recorded — not even a low-confidence one
-            # (V1_SPEC §2). The `$VAR` in command position is still recorded as an
-            # environment read by `_expansion`, which is a fact this file does
-            # support.
+            # The shell decides this target at run time, for either of two
+            # reasons: the word is computed (`$CMD`, `$(pick)`), or it is
+            # rewritten before use (`~/tool`, whose value is the *running*
+            # machine's HOME). The source proves that *an* execution happens; it
+            # does not prove *what* runs, so no resolvable target is recorded —
+            # not even a low-confidence one (V1_SPEC §2). The `$VAR` in command
+            # position is still recorded as an environment read by `_expansion`,
+            # and the line itself is still indexed, so the occurrence stays
+            # findable without a fabricated edge under it.
             return
 
         arguments = self._arguments(node)
@@ -448,7 +517,7 @@ class _Walker:
         literal word and name the wrong state.
         """
         return [
-            _literal_text(self._source, child)
+            _proven_word(self._source, child)
             for child in node.children
             if child.is_named and child.type not in _NON_ARGUMENT
         ]
