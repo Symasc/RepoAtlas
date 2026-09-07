@@ -209,6 +209,24 @@ class SqliteRepositoryStore:
                 (str(SyncStatus.INTERRUPTED), repo_id),
             )
 
+    def mark_sync_failed(self, repo_id: int) -> None:
+        """Record that this repository could not be synchronized at all.
+
+        Separate from ``interrupted``, which means a run started and did not
+        finish. This means the run could not establish what to do: git could not
+        enumerate the repository and RepoAtlas refused to substitute a different
+        file set (see :class:`~repoatlas.sync.scanner.EnumerationUnavailable`).
+
+        Both are "not ``ok``", so both stop ``status`` claiming currency and both
+        force a full rehash on the next run — but only one of them is worth telling
+        an operator to investigate, and a shared value could not.
+        """
+        with self._db.transaction() as conn:
+            conn.execute(
+                "UPDATE repositories SET last_sync_status = ? WHERE id = ?",
+                (str(SyncStatus.FAILED), repo_id),
+            )
+
     def mark_many_synced(self, completions: Sequence[SyncCompletion]) -> None:
         """Mark every repository of one run finished, in one commit.
 

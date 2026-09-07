@@ -88,6 +88,19 @@ _READ_CHUNK_BYTES = 1 << 20
 class GitResult:
     ok: bool
     stdout: str
+    #: Git's own stderr on a successful command. Almost always empty; it is kept
+    #: because `ls-files` reports a directory it could not open as a *warning* and
+    #: still exits 0, so the only evidence that enumeration was incomplete is
+    #: here (ARCHITECTURE.md §6).
+    stderr: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class FileListing:
+    """What git enumerated, and what it admits it could not look at."""
+
+    paths: list[str]
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +145,7 @@ class GitClient:
             return GitResult(ok=False, stdout="")
         if completed.returncode != 0:
             return GitResult(ok=False, stdout="")
-        return GitResult(ok=True, stdout=completed.stdout)
+        return GitResult(ok=True, stdout=completed.stdout, stderr=completed.stderr)
 
     def toplevel(self, path: Path) -> Path | None:
         """The working-tree root of the repository containing ``path``."""
@@ -205,19 +218,30 @@ class GitClient:
 
         return _worktree_differs_from_index(repo_path, entries)
 
-    def list_files(self, repo_path: Path) -> list[str] | None:
+    def list_files(self, repo_path: Path) -> FileListing | None:
         """Tracked plus untracked-not-ignored files, relative to the repo root.
 
         This is exactly the working tree V1_SPEC §5 declares authoritative, and it
         gives real ``.gitignore`` semantics without reimplementing them. Returns
-        ``None`` when git cannot answer, so the caller can fall back to walking.
+        ``None`` when git cannot answer at all, which is not a cue to enumerate
+        some other way: see
+        :class:`~repoatlas.sync.scanner.EnumerationUnavailable`.
+
+        A directory git could not open is reported as a **warning** on stderr and
+        does not change the exit status, so a listing can be short without being
+        wrong-looking. Those warnings are returned alongside the paths rather than
+        discarded, because "there is nothing under there" and "I could not look"
+        are different claims and a sync must not report the second as the first.
         """
         result = self._run(
             repo_path, "ls-files", "--cached", "--others", "--exclude-standard", "-z"
         )
         if not result.ok:
             return None
-        return [entry for entry in result.stdout.split("\0") if entry]
+        return FileListing(
+            paths=[entry for entry in result.stdout.split("\0") if entry],
+            warnings=tuple(line for line in result.stderr.splitlines() if line.strip()),
+        )
 
 
 def _parse_index_entries(raw: str) -> list[tuple[str, str, str]]:

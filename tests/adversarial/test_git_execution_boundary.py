@@ -333,7 +333,10 @@ def test_file_enumeration_still_reflects_the_working_tree(tmp_path: Path) -> Non
     listed = GitClient().list_files(repo)
 
     assert listed is not None
-    assert set(listed) == {".gitignore", "config.py", "untracked.py"}
+    assert set(listed.paths) == {".gitignore", "config.py", "untracked.py"}
+    # A readable tree produces no incompleteness warning, so a short listing that
+    # carries one is always distinguishable from a complete one.
+    assert listed.warnings == ()
 
 
 def test_the_repository_root_is_still_found(tmp_path: Path) -> None:
