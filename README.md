@@ -162,3 +162,9 @@ uv run ruff check .
 uv run ruff format --check .
 uv run pyright
 ```
+
+Every command is prefixed with `uv run` so the environment is guaranteed to match `uv.lock`, but Pyright is not
+*dependent* on it: `pyproject.toml` pins `venvPath`/`venv`, so a bare `pyright` from an activated shell analyses
+the same environment and reports the same result. Pyright locates its interpreter by searching `PATH` and ignores
+`VIRTUAL_ENV`, so without that setting the two invocations disagreed — `uv run pyright` was clean while a bare
+`pyright` reported 95 unresolved imports for dependencies that were installed all along.

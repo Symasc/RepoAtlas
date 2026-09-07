@@ -71,6 +71,18 @@ ignore = [
 [tool.pyright]
 include = ["repoatlas", "tests"]
 exclude = ["tests/fixtures/repos", "tests/adversarial/fixtures/repos"]
+# Point Pyright at the project environment. Without this it looks for `python`
+# on PATH -- it ignores VIRTUAL_ENV entirely -- so a bare `pyright` run resolved
+# the *system* interpreter and reported 95 unresolved-import errors for
+# dependencies that are installed, while `uv run pyright` reported none purely
+# because `uv run` prepends `.venv/bin` to PATH. Two commands, two answers, and
+# the wrong one was the shorter to type.
+#
+# `venvPath` is resolved relative to this file, so the setting is relocatable
+# and contains no host path; naming the directory rather than an executable
+# keeps it correct on Windows, where the interpreter is `.venv\Scripts\python.exe`.
+venvPath = "."
+venv = ".venv"
 pythonVersion = "3.13"
 typeCheckingMode = "standard"
 reportMissingTypeStubs = false
