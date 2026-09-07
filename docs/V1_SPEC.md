@@ -1577,12 +1577,41 @@ vocabulary of the layer below it. Only a connection that was never established m
 |---|---|
 | Nothing listening, or the connect timed out | could not reach the server |
 | Connected, then HTTP 4xx/5xx, or the response never finished | the server was reached and failed |
-| The server listed its models; the configured one is absent | the server is running, the model is not installed |
+| The server returned a **valid** model listing and the configured model is absent | the server is running, the model is not installed |
 | A body arrived that is not the API format | the server answered, but not in the expected format |
 | A valid envelope carrying unusable model text | the model returned invalid output |
 | The **server reported** generation stopped at its output limit | the response was truncated; raise the output limit |
 | Model output invalid and the repair also invalid | both attempts named, with what was wrong with each |
 | A valid answer citing unsupplied evidence | `INSUFFICIENT EVIDENCE` — a grounding outcome, not a backend failure |
+
+**Model absence is a conclusion drawn only from a structurally valid model-list response.** A malformed server
+response is not evidence that a model is absent. `GET /api/tags` answering HTTP 200 with `{"models": "x"}` is a
+body RepoAtlas cannot read, and the truthful report is that the answer was unreadable — not that the model is
+missing from it and should be pulled.
+
+The order is part of the contract, and each stage may only run on what the previous one proved:
+
+```
+HTTP status  ->  JSON syntax  ->  listing shape  ->  model lookup
+```
+
+A non-2xx status is a server failure whatever the body contains; a body that is not a valid listing is never
+searched for a model name. Four states that a permissive reader collapses into one:
+
+| `/api/tags` returned | Reported as |
+|---|---|
+| `{"models": [{"name": "<configured>"}]}` | available |
+| `{"models": []}`, or a listing without the configured model | the server is running, the model is not installed |
+| `{}`, `{"models": "x"}`, `{"models": [{}]}`, `{"error": "..."}`, an HTML page, invalid JSON | the server answered, but not in the expected format |
+| HTTP 4xx/5xx, or nothing listening | server failure / could not reach |
+
+`{"models": []}` is the case that keeps this a distinction rather than a blanket refusal: it is a valid listing, it
+genuinely means the model is absent, and `ollama pull` is the right advice for it.
+
+RepoAtlas validates only the response fields it consumes and tolerates unrelated extra fields. The one field read
+is each entry's `name`; `model`, `size`, `digest`, `details` and anything a later Ollama adds are ignored rather
+than rejected. A malformed entry fails the whole listing rather than being skipped, because skipping turns a
+listing that was only half understood into a confident claim about what the server does not have.
 
 Truncation is reported only when the server states it, never inferred from text that looks unfinished: a model that
 emitted confident nonsense will emit more of it with a larger budget, so "raise the output limit" would be a guess

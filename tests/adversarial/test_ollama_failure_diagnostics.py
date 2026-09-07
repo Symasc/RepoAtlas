@@ -437,10 +437,20 @@ def test_availability_tolerates_an_implicit_latest_tag() -> None:
 
 
 def test_availability_survives_a_models_field_of_the_wrong_type() -> None:
+    """Not a crash, and not an absence either.
+
+    This test used to assert `MODEL_ABSENT` here, which was the defect rather
+    than the contract: a `models` field that is not an array is a body RepoAtlas
+    could not read, and "the configured model is not installed" is a claim about
+    the server's state that such a body cannot support. The no-crash property it
+    was written for is unchanged; the classification is now truthful. The full
+    matrix lives in `test_ollama_tags_protocol.py`.
+    """
     with serving(lambda _p: (200, json.dumps({"models": "not-a-list"}), 0.0)) as url:
         probe = backend(url)
         assert not asyncio.run(probe.available())
-        assert probe.availability_category() is ModelFailure.MODEL_ABSENT
+        assert probe.availability_category() is ModelFailure.PROTOCOL
+        assert "is not installed" not in probe.availability_detail()
 
 
 # == 7. the reasoner: output problems, and repair =============================

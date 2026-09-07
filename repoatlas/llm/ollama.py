@@ -86,6 +86,74 @@ def _server_error_text(response: httpx.Response) -> str | None:
     return reported.strip()[:_MAX_SERVER_ERROR_CHARS]
 
 
+def _installed_names(body: dict[str, Any]) -> tuple[set[str], str | None]:
+    """Model names from an ``/api/tags`` body, or why the body is not one.
+
+    The second element is ``None`` only when the response is a *structurally
+    valid* model listing. That distinction is the whole point of this function:
+    "the configured model is not installed" is a conclusion about the server's
+    state, and it may only be drawn from a listing RepoAtlas actually
+    understood. Every shape it did not understand is a protocol failure, because
+    the honest thing to say about ``{"models": "x"}`` is that the answer was
+    unreadable — not that the model is missing from it.
+
+    The previous version reached the opposite conclusion by being helpful in
+    three places at once::
+
+        listed = body.get("models")                     # missing -> None
+        {str(m.get("name", ""))                         # absent name -> ""
+         for m in (listed if isinstance(listed, list) else [])   # wrong type -> []
+         if isinstance(m, dict)}                        # bad entry -> skipped
+
+    Each fallback is individually defensible and their sum is an empty set,
+    which is indistinguishable from a server with no models pulled. So a proxy
+    login page, a truncated body that still parsed, and a future Ollama that
+    renamed the field all arrived at the same advice: ``ollama pull <model>``.
+
+    **Strict about what is consumed, tolerant about everything else.** The only
+    field RepoAtlas reads is each entry's ``name``, so that is all that is
+    required to be well-formed; ``model``, ``size``, ``digest``, ``details``,
+    ``modified_at`` and any field a later server adds are ignored rather than
+    rejected (V1_SPEC §3). Validating fields nobody consumes would break on the
+    next Ollama release for no gain.
+
+    **A malformed entry fails the whole listing** rather than being skipped.
+    Skipping is how a partial answer becomes a confident one: drop the entry
+    that could not be read and the remaining set is reported as *the* installed
+    models, so a listing RepoAtlas half-understood produces a definite claim
+    about what the server does not have.
+
+    The reason string names types and positions only, never values — a
+    misbehaving server's body is not RepoAtlas's to print (V1_SPEC §17).
+    """
+    if "models" not in body:
+        return set(), "the object has no `models` key"
+    listed = body["models"]
+    if not isinstance(listed, list):
+        # Specifically a list. `"x"` is iterable, and iterating it would walk
+        # characters; a `dict` would walk keys. Both would "work" and both are
+        # wrong, so the type is checked rather than the ability to loop.
+        return set(), f"`models` is {_article(listed)}, not an array"
+
+    names: set[str] = set()
+    for index, entry in enumerate(listed):
+        where = f"`models[{index}]`"
+        if not isinstance(entry, dict):
+            return set(), f"{where} is {_article(entry)}, not an object"
+        if "name" not in entry:
+            return set(), f"{where} has no `name`"
+        name = entry["name"]
+        if not isinstance(name, str):
+            return set(), f"{where}.name is {_article(name)}, not a string"
+        if not name.strip():
+            # Not a version difference: `name` is the one field consumed, and an
+            # empty one identifies no model. Treating it as a real name would put
+            # `""` in the installed set and make the listing say something false.
+            return set(), f"{where}.name is empty"
+        names.add(name)
+    return names, None
+
+
 class OllamaBackend:
     """Talks to a local Ollama server over ``/api/chat``."""
 
@@ -421,12 +489,17 @@ class OllamaBackend:
                 f"is not an API object (got {type(body).__name__}).",
             )
 
-        listed = body.get("models")
-        installed = {
-            str(model.get("name", ""))
-            for model in (listed if isinstance(listed, list) else [])
-            if isinstance(model, dict)
-        }
+        installed, problem = _installed_names(body)
+        if problem is not None:
+            # Ordered deliberately: a body that is not a model listing cannot be
+            # searched for a model, so this precedes the lookup rather than
+            # falling through it with an empty set (ARCHITECTURE.md §11).
+            return self._probe_failed(
+                ModelFailure.PROTOCOL,
+                f"Ollama at {self._base_url} responded to /api/tags, but the body "
+                f"is not a model listing: {problem}.\n\n"
+                "Check that this address is an Ollama server.",
+            )
         if self._model_installed(installed):
             self._detail = ""
             return True
