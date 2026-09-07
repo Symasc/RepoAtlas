@@ -1364,7 +1364,7 @@ makes the whole word computed: `${BASE}/config.yaml` is not evidence about a fil
 | `RUN` exec form | `RUN ["python3", "app.py"]` → `EXECUTES python3`; `RUN ["$TOOL", …]` → `EXECUTES $TOOL`, because nothing expands it | — |
 | `FROM` | `FROM python:3.13` → `DEPENDS_ON pkg`; `FROM builder` → stage `REFERENCES` | `FROM $BASE`, `FROM image:${TAG}`, `FROM ${STAGE}` → stage symbol only, **no image** |
 | `COPY` / `ADD` | `COPY src/app.py /app/`; `COPY ["a b.txt", "/app/"]`; `COPY \$FOO /quux` → file `$FOO` | `COPY $SRC /app`, `COPY ${BASE}/x.yaml /app/`, `COPY ["$SRC", "/app/"]` → **nothing** |
-| `COPY --from` | the flag is removed before operands are read | `--from=$STAGE` names no stage and no image |
+| `COPY --from` | the *instruction* is still parsed and chunked | every source operand names a path in another filesystem, so **no file reference at all**; `--from=$STAGE` names no stage and no image either |
 | `CMD` / `ENTRYPOINT` | `ENTRYPOINT ["python3", "app.py"]`; `CMD echo "$MSG"` → `EXECUTES echo` | `ENTRYPOINT $RUNNER app.py` → **nothing** |
 | `HEALTHCHECK`, `ONBUILD`, `SHELL` | not modelled — no facts either way | not modelled; `$PROBE` cannot arrive through them |
 | `RUN <installer> install …` | `pip install requests` → `DEPENDS_ON requests` | `$PIP install x` claims nothing; `pip install $PKG requests` keeps `requests` only |
@@ -1379,6 +1379,66 @@ though the answer looks obvious. Doing it correctly needs rules for ARG scope, r
 defaults, stage boundaries, the automatic platform args and ENV interaction; a version that handled the easy case
 and guessed at the rest would fabricate an image exactly when one of them applied. "Target unknown" is the
 supportable answer, and the absence of a fact is preferable to a fabricated one.
+
+### Dockerfile namespaces: a path string is not a file identity
+
+Static proof has two halves, and the first version of it asked only one. `COPY` proves *what a source is called*. It
+does not, by itself, prove *where that name is resolved*. Docker's grammar is:
+
+```
+COPY [--from=<image|stage|context>] <src> ... <dest>
+```
+
+Without `--from`, sources are resolved in the **build context** — the tree RepoAtlas indexes — so a repository file
+may genuinely be the thing named. With `--from`, they are resolved in the root filesystem of another build stage,
+another image, or a named build context. RepoAtlas has none of those and cannot read them: determining a stage's
+contents means running the build, which §12 forbids outright.
+
+> **Invariant.** A path string is not sufficient to identify a repository file. The namespace the path is resolved
+> in must be proven too.
+
+> **Invariant.** `COPY --from` changes the namespace of *every* source operand of that instruction.
+
+The consequence, against a repository that happens to contain `assets/main.js`:
+
+```dockerfile
+COPY --from=builder assets/main.js /app/main.js
+```
+
+used to produce `sym:svc:Dockerfile:stage2:5 --REFERENCES(1.0)--> file:svc:assets/main.js`. A deterministic fact, at
+full confidence, that was untrue — the source names a file in the *builder stage*, and the repository file of the
+same name is a different file that happens to be spelled alike.
+
+**This one is worse than a fabricated target, and it is worth being precise about why.** The citation check
+verifies that cited evidence exists in the retrieved set; a fabricated `cmd:$TOOL` has no real counterpart and dies
+there. Here both endpoints are real, both line numbers are real, and the Dockerfile line genuinely says what it
+says. The lie is in the *relationship*, which endpoint verification has nothing to compare against. Grounding was
+not changed to catch it — false evidence is removed where it is made.
+
+**Not confidence, and not association.** `REFERENCES … confidence=0.5` would claim the same wrong thing more
+quietly; the relationship is not weak local evidence, it is the wrong namespace. Keeping it as associative "these
+strings match" evidence fails for the same reason: nobody asked RepoAtlas where a stage's artifacts came from, and
+answering it needs a real stage-lineage model, not a string comparison. V2 may build one; V1 says nothing.
+
+**Two values, not four.** `parsers/dockerwords.py` classifies a `COPY`/`ADD` into `BUILD_CONTEXT` or `FOREIGN`.
+Named stage, numeric stage, external image and named context differ in *how Docker resolves them*, and RepoAtlas
+resolves none of them — the fact it needs is the one they share. `--from=${STAGE}` collapses into the same answer
+because the stage is less knowable, not more. The question is asked once, of the flags `split_flags` already
+separated, so no handler greps a raw line for `--from`: a file legitimately named `from-cache.txt` must keep its
+reference, and a `--chown=1000 --from=builder` must not escape by position.
+
+**What is not suppressed is the instruction.** The Dockerfile line keeps its path, line number, raw text and chunk,
+so "where does `assets/main.js` get copied from" is still answerable — truthfully, from the file, instead of from an
+invented edge. Only the relationship is gone.
+
+Docker documents `--from` for `COPY` only. `ADD` shares the classifier anyway: if a Dockerfile writes it, refusing
+costs a reference RepoAtlas could not justify, while resolving it invents the same false fact.
+
+**The parser facts version carries the fix to existing indexes.** The Dockerfile that produced a false edge is
+byte-identical afterwards, so neither the hash nor the stat shortcut would notice anything. `DockerfileParser`
+went `3` → `4`, which changes the aggregate facts version, which makes an ordinary `repoatlas sync` reparse exactly
+the Dockerfiles and drop their stale edges. No reindex, no deleted database, and the sync after that is a no-op
+again (§9).
 
 **Two related conservatisms.** A here-document (`RUN <<EOF`) contributes nothing: the real command is in the body,
 which this parser does not read, and the introducer is a redirection operator — recording it produced `cmd:<<EOF`, a
