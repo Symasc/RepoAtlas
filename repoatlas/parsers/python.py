@@ -91,10 +91,42 @@ class _Visitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        # A relative import is recorded verbatim with its level; resolving it to a
-        # concrete module is the linker's job, not the parser's.
+        """``from x import y`` — and the form where ``y`` is the only module named.
+
+        A relative import is recorded verbatim with its level; resolving it to a
+        concrete module is the linker's job, not the parser's. What the parser
+        must not do is *lose* the module, and one form used to::
+
+            from . import helper      module=None  level=1  names=['helper']
+            from .. import app        module=None  level=2  names=['app']
+
+        ``ast`` puts nothing in ``module`` here, so recording ``node.module`` and
+        the level produced the bare prefix ``"."`` — which the linker dutifully
+        resolved to the package's ``__init__.py``, while ``helper`` survived only
+        as a string in ``meta``. ``pkg/sub/helper.py`` got no inbound import at
+        all, and "who imports helper?" answered nothing.
+
+        So when ``module`` is absent and the level is relative, each imported name
+        is *also* emitted as a candidate module ``"." * level + name`` — the same
+        spelling ``from .helper import X`` already produces, which is what lets
+        the two ways of writing one import produce one set of facts.
+
+        **Candidate, not claim.** The parser cannot see the filesystem, so it
+        cannot know whether ``helper`` is a submodule or a name that
+        ``__init__.py`` happens to define. It says only "this could name a module
+        here"; :meth:`ResolutionIndex.resolve_relative_submodule` decides, and
+        emits nothing when no such module exists. Unknown is a fine answer;
+        inventing ``CONSTANT.py`` is not.
+
+        The package reference itself is kept, because importing the package is
+        also what Python does. Its ``names`` are dropped in this form only: they
+        are no longer names *of* that module, they are the candidates above, and
+        leaving them would point a later ``helper.assist()`` at ``__init__.py``.
+        """
         module = node.module or ""
-        target = ("." * node.level) + module if node.level else module
+        prefix = "." * node.level
+        target = prefix + module
+        submodules = not module and bool(node.level)
         if target:
             self.references.append(
                 ParsedReference(
@@ -106,10 +138,36 @@ class _Visitor(ast.NodeVisitor):
                     source_symbol=self._current_symbol,
                     meta={
                         "level": str(node.level),
-                        "names": ",".join(a.name for a in node.names),
+                        **({} if submodules else {"names": ",".join(a.name for a in node.names)}),
                     },
                 )
             )
+        if submodules:
+            for alias in node.names:
+                # `from . import *` binds whatever the package exports. There is
+                # no module named `*`, and treating one as named would be the
+                # fabrication this whole change exists to avoid.
+                if alias.name == "*":
+                    continue
+                self.references.append(
+                    ParsedReference(
+                        edge_type=EdgeType.IMPORTS,
+                        target_kind=EntityType.MODULE,
+                        target_key=prefix + alias.name,
+                        line_start=node.lineno,
+                        line_end=node.end_lineno or node.lineno,
+                        source_symbol=self._current_symbol,
+                        meta={
+                            "level": str(node.level),
+                            # Read by the linker: resolve this only if `prefix`
+                            # really is a package. Without it, `from . import x`
+                            # in a file that is in no package at all would find
+                            # any `x.py` beside it.
+                            "package": prefix,
+                            **({"alias": alias.asname} if alias.asname else {}),
+                        },
+                    )
+                )
         self.generic_visit(node)
 
     # -- definitions ---------------------------------------------------------
@@ -268,7 +326,12 @@ class PythonParser:
     """Deterministic Python structure extraction."""
 
     name = "python-ast"
-    version = "2"  # 2: whole-file spans stop at EOF, and are absent for an empty file
+    # 2: whole-file spans stop at EOF, and are absent for an empty file.
+    # 3: `from . import helper` names the submodule it imports, instead of only
+    #    the package prefix. The bump is load-bearing: the Python file that lost
+    #    the edge is byte-identical afterwards, so only a facts-version change
+    #    makes an ordinary `sync` reparse it and produce the edge (V1_SPEC §12).
+    version = "3"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
