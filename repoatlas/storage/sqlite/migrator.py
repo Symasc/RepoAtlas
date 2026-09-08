@@ -77,7 +77,7 @@ from repoatlas.errors import (
     MigrationFailedError,
     UnrecognizedSchemaError,
 )
-from repoatlas.storage.sqlite.errors import is_index_condition
+from repoatlas.storage.sqlite.errors import is_contention, is_index_condition
 
 #: What a statement did to the schema, as far as the schema can tell.
 APPLIED = "applied"
@@ -498,7 +498,12 @@ def _apply_one(
         connection.execute(f"PRAGMA user_version = {migration.version}")
     except sqlite3.OperationalError as error:
         connection.rollback()
-        if "locked" in str(error) or "busy" in str(error):
+        # Contention is decided by SQLite's result code, not by looking for
+        # "locked" in the message. The text is not an interface — it is shared
+        # across the BUSY family and has been reworded between releases — and a
+        # substring test also matches failures that merely mention the word,
+        # which would report a defect as a transient wait.
+        if is_contention(error):
             raise _contention(migration, error) from error
         # A database that cannot be written at all did not fail *this migration*;
         # saying so would send the reader after a defect in a `.sql` file when
