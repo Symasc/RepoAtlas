@@ -274,7 +274,8 @@ without a transaction, on any SQLite file. One mechanism is used, not both.
 WAL` modifies the file header — measured — so a database RepoAtlas does not own has to be refused while the
 connection has still only read; refusing afterwards would mean the refusal itself had modified the file. Ordering
 in `open_database` is therefore: connect → `busy_timeout` → **ownership** → future-version → `journal_mode` →
-migrations.
+migrations → `schema_version`. That order is fixed by the ownership rule, not by convenience, and the journal
+transition cannot be hoisted in front of it to win a lock race (§9, "First open is a wait, not a crash").
 
 The classification is ordered so the cheapest and most conclusive evidence comes first, and the expensive evidence
 is gathered only when a write is imminent anyway:
@@ -2268,6 +2269,68 @@ implementation, 7 of 150 concurrent opens failed; on this one, 0 of 150.
 `PRAGMA busy_timeout = 10000` is set on every connection. It is contention *behaviour*, not the synchronization
 protocol — it covers WAL checkpoints and the migration race above, and nothing relies on it for correctness.
 
+#### First open is a wait, not a crash
+
+The timeout does not cover everything, and the exception is the one operation every first open performs. Measured on
+one database with `busy_timeout = 10000` set on both connections:
+
+| operation | competing lock | elapsed | outcome |
+|---|---|---|---|
+| `BEGIN IMMEDIATE` | RESERVED (a writer) | 10.016 s | `SQLITE_BUSY` |
+| `PRAGMA journal_mode = WAL` | SHARED (a reader) | 10.011 s | `SQLITE_BUSY` |
+| **`PRAGMA journal_mode = WAL`** | **RESERVED (a writer)** | **0.000 s** | **`SQLITE_BUSY`** |
+| `PRAGMA journal_mode = WAL` | RESERVED, already WAL | 0.000 s | ok |
+
+Row three is the whole problem. Changing the journal mode rewrites the file header, so SQLite takes its own read
+transaction and promotes it to a write — and **SQLite never invokes a busy handler for a read-to-write promotion**,
+because a process that blocks while holding a read lock is how two processes deadlock. The configured ten seconds
+are therefore never consulted. The promotion is *inside* the pragma; the Python connection is in autocommit
+throughout, which is why ending the ownership snapshot earlier does not help and why the pragma cannot simply be
+moved earlier (the ownership rule in §3 forbids that anyway).
+
+So several processes running their first command together — two terminals, a shell and an editor plugin, a cron run
+and a human — could each be refused instantly while one of them migrated. Measured before the fix, with the openers
+released by a shared deadline so they collide inside the same millisecond: **86 of 240** failed at six openers, with
+`sqlite3.OperationalError: database is locked` reaching the terminal as a traceback at exit 1.
+
+Two changes, both in `_ensure_wal`:
+
+**Ask before writing.** `PRAGMA journal_mode` — the query form — takes no lock beyond a shared one (0.11 ms against
+a held RESERVED lock, measured) and row four shows the transition is free once it has happened. A database already
+in WAL therefore stops at the read, so an ordinary `locate` or `status` performs no header write and never enters
+the race at all. Only the first open of a database in another mode contends.
+
+**Retry the promotion, and only the promotion.** It is idempotent, it writes nothing but the header's version bytes,
+and each attempt re-reads the mode first, so the loser of a race normally observes the winner's finished transition
+instead of repeating it. The wait is bounded by a deadline of `BUSY_TIMEOUT_MS` on a monotonic clock, with
+exponential backoff from 1 ms to 50 ms and uniform jitter so processes released by one commit do not collide again.
+Retrying anything larger would risk repeating side effects; the migrator already handles its own contention, with
+`BEGIN IMMEDIATE` under a busy handler that does work (row one).
+
+Only `SQLITE_BUSY` and `SQLITE_LOCKED` are retried, matched on SQLite's result codes rather than on the words
+`database is locked`. `SQLITE_READONLY`, `SQLITE_CANTOPEN`, `SQLITE_IOERR` and `SQLITE_FULL` reach the same
+`OperationalError` and none of them improves by waiting — a read-only index still refuses in 0.17 s with its own
+accurate message rather than hanging for ten seconds and then blaming a process that does not exist.
+
+`PRAGMA journal_mode = WAL` reports the mode it *ended in*, which is not always the one requested: WAL needs shared
+memory, and a filesystem that cannot provide it leaves the database in its previous mode and raises nothing. The
+result is checked, and a database that would not take WAL is refused rather than operated in a mode the rest of this
+document does not describe.
+
+When the wait does run out, the result is a product state: `MigrationContentionError` at exit 1, reused rather than
+duplicated because its meaning is already "another process held SQLite's write transaction past the busy timeout".
+It is deliberately **not** an `IndexUnavailableError` — exit 3 means "your index is unusable" and its documented
+remedy is to move the file aside, which is the wrong advice for a database that is merely busy.
+
+Measured after the fix: **0 failures in 2,440 concurrent first opens** across 6-, 12-, 24- and 32-way campaigns
+against freshly created databases, p50 33 ms and p95 69 ms at six openers. A lock held past the timeout produces the
+diagnostic at 10.2 s for every database shape — absent, zero-byte, empty, legacy, one migration behind, DELETE-mode
+and WAL — and the same command succeeds once it is released.
+
+**Lock ordering.** `open_workspace` opens the database and returns the object whose `writer_lock` a command may
+then take, so the acquisition order is structural: **database, then writer lock**, never the reverse. A deadlock
+needs two orders and only one exists.
+
 ### Concurrency invariants (all tested)
 
 1. **At most one RepoAtlas knowledge-base writer is active for a state database.**
@@ -2275,6 +2338,8 @@ protocol — it covers WAL checkpoints and the migration race above, and nothing
    graph.
 3. **A failed global-link rebuild cannot leave `status` claiming a graph state that was never successfully
    committed.**
+4. **Concurrent first opens converge or wait; they never crash.** Transient SQLite contention during
+   initialization is not database corruption, and never reaches the user as a traceback.
 
 `tests/adversarial/test_sync_atomicity.py` proves all three, using injected failures at four points of the swap and
 **real concurrent processes** — including `SIGTERM` and `SIGKILL` of a running writer — for the lock.
