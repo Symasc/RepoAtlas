@@ -529,7 +529,16 @@ class ReferenceLinker:
         flavor = _flavor(origin, meta)
         if flavor is None:
             return None
-        target = index.resolve_module(origin, claim.target_key, flavor)
+        package = meta.get("package")
+        if package is not None:
+            # A name the parser could only offer as a candidate: `helper` in
+            # `from . import helper`. It becomes an edge when a module of that
+            # name exists inside that package, and nothing otherwise.
+            target = index.resolve_relative_submodule(
+                origin, package, claim.target_key[len(package) :]
+            )
+        else:
+            target = index.resolve_module(origin, claim.target_key, flavor)
         return self._edge(claim, origin, target.file_entity_id) if target else None
 
     def _resolve_symbol(

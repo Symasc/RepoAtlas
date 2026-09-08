@@ -1468,11 +1468,54 @@ sync never touched.
 | symbol defined in the same file | resolved directly in the per-file pass |
 | symbol defined in another file | resolved **only through an import this file actually wrote** |
 | module specifier | resolved to a file: Python dotted and relative, TS/JS relative with index resolution, Ruby `require_relative` |
+| Python `from . import x` | `x` is a *candidate* module in the package the dots name; an edge only when that package and that module both exist |
 | script / file path | joined against the referencing file's directory, then matched to a managed repository — including paths that climb out of one repository into another |
 | Salt `include:` | dotted state path → `x/y.sls` or `x/y/init.sls` |
 | Salt requisite | state ID, unique within the repository |
 | `salt://` source | unique matching managed path, at reduced confidence |
 | `pillar[...]` key | the config key that defines it, searched only in files this one provably includes |
+
+#### `from . import helper` names a module
+
+Python writes one import two ways, and only one of them puts the module in `ImportFrom.module`:
+
+```
+from .helper import assist     module='helper'  level=1  names=['assist']
+from . import helper           module=None      level=1  names=['helper']
+```
+
+The second form used to be recorded as the bare prefix `"."`, which resolved to the package's
+`__init__.py` while `helper` survived only as a string in the reference's `meta`. The result was not a
+wrong edge but a **missing** one: `pkg/sub/helper.py` had no inbound `IMPORTS` at all, so "who depends
+on this?" did not name the file that imports it.
+
+Restoring a missing edge is the direction that invites fabrication, because the names after
+`from . import` are not all modules — constants, functions and classes defined in `__init__.py` appear
+in exactly the same position and correspond to no file. So the two halves are split across the layers
+that can each answer their own half:
+
+* the **parser** proposes `"." * level + name` as a *candidate* — the same spelling `from .helper import X`
+  already produces, which is what makes the two ways of writing one import produce one set of facts. It
+  cannot see the filesystem, so it never claims the name is a module;
+* the **resolution index** decides, in `resolve_relative_submodule`, and emits an edge only when a
+  module of that name exists in that package.
+
+The package reference is kept alongside it, because `from . import helper` really does execute
+`__init__.py`. Both edges are true.
+
+One condition applies here that does not apply to the written form: **the dots must themselves resolve
+to a package.** `from . import helper` in a file that is in no package raises `ImportError` at runtime,
+and without the check a `helper.py` sitting beside it would look like the answer; `from ... import x`
+written with more dots than there is package above it would likewise land wherever the climb ended. An
+import that *names* its module is resolved as written — the package question is the author's. Here
+RepoAtlas is inferring that a name denotes a module, and an inference whose premise is unchecked is a
+guess. A package is identified by `__init__.py`; namespace packages are not recognized here or anywhere
+else in this file.
+
+What is deliberately **not** resolved: `from . import CONSTANT` where only `__init__.py` defines
+`CONSTANT`, `from . import missing`, `from . import *` (there is no module named `*`), and the same
+name in another package or another repository. Unknown is an acceptable answer; a fabricated module is
+not.
 | declared package | interned `pkg:<ecosystem>:<name>`, plus a repository edge when exactly one managed repository provides that exact normalized name |
 
 Three rules hold across every row, and they are the trust rule in practice:

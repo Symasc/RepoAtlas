@@ -188,7 +188,12 @@ class ResolutionIndex:
         extensions = _EXTENSIONS[flavor]
         found = [f"{base}{extension}" for extension in extensions]
         if flavor == "python":
-            found.extend(f"{base}/{name}" for name in _PYTHON_PACKAGE_FILES)
+            # `base` is empty when the specifier resolves to the repository root,
+            # which is what a repository that *is* the package looks like. Joining
+            # unconditionally would ask for `/__init__.py`, an absolute path that
+            # can never match a repository-relative one, so the root package was
+            # invisible and `from . import helper` beside it resolved to nothing.
+            found.extend(f"{base}/{name}" if base else name for name in _PYTHON_PACKAGE_FILES)
         elif flavor == "node":
             found.extend(
                 f"{base}/{stem}{extension}"
@@ -233,6 +238,42 @@ class ResolutionIndex:
             bases.append(f"{ancestor}/{relative}")
             ancestor = ancestor.parent
         return self._first_existing(origin.repo_id, bases, "python")
+
+    def resolve_relative_submodule(
+        self, origin: FileRow, prefix: str, specifier: str
+    ) -> FileRow | None:
+        """``from . import helper`` → ``pkg/sub/helper.py``, but only inside a package.
+
+        The extra condition over :meth:`resolve_module` is ``prefix``: the dots
+        the import was written with must themselves resolve to a **package** —
+        an ``__init__.py`` — in this repository, before the name after them may
+        be read as a module in it.
+
+        That condition is doing real work, and it is the difference between
+        restoring a missing edge and inventing one. Two cases it decides:
+
+        * ``from . import helper`` in a file that is in no package at all. At
+          runtime that raises ``ImportError``; the module has no parent package
+          to be relative to. Without the check, a ``helper.py`` sitting beside it
+          would look like the answer.
+        * ``from ... import x`` written with more dots than there is package
+          above it. The prefix climbs out of the package and lands somewhere that
+          is not one, so the name resolves to nothing rather than to whatever
+          ``x.py`` happens to exist up there.
+
+        Note this is *not* applied to :meth:`resolve_module`. An import that names
+        its module — ``from .helper import X`` — is resolved as written; the
+        package question is the user's. Here RepoAtlas is inferring that a name
+        denotes a module, and an inference whose premise is unchecked is a guess.
+
+        A package is identified by ``__init__.py``, which is the convention used
+        everywhere else here; namespace packages are not recognized, and are not
+        recognized by this either.
+        """
+        package = self._resolve_python(origin, prefix)
+        if package is None or PurePosixPath(package.rel_path).name not in _PYTHON_PACKAGE_FILES:
+            return None
+        return self._resolve_python(origin, prefix + specifier)
 
     def _resolve_node(self, origin: FileRow, specifier: str) -> FileRow | None:
         if not specifier.startswith((".", "/")):

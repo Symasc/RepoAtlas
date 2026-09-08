@@ -785,6 +785,13 @@ Recognize at least: Python, TypeScript, JavaScript, Bash, Ruby, Salt SLS, Jinja,
 
 Parsed with the **stdlib `ast`** module (exact, zero dependencies, accurate line ranges).
 
+RepoAtlas resolves statically provable package-relative imports, including `from . import submodule`,
+when the corresponding module is present. Where no module can be proven — a name that only
+`__init__.py` defines, a submodule that does not exist, a relative level that climbs out of the
+package, or a file that is in no package at all — the import is recorded and left unresolved rather
+than pointed at a plausible file. This is not complete Python import semantics: dynamic imports,
+`__getattr__`, `sys.modules` manipulation and namespace packages are outside it.
+
 Extract at least:
 
 ```
