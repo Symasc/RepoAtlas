@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import random
 import sqlite3
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from repoatlas.errors import IndexSchemaError
-from repoatlas.storage.sqlite.errors import opening_errors, storage_errors
+from repoatlas.errors import (
+    IndexInaccessibleError,
+    IndexSchemaError,
+    MigrationContentionError,
+)
+from repoatlas.storage.sqlite.errors import is_contention, opening_errors, storage_errors
 from repoatlas.storage.sqlite.identity import Ownership, establish
 from repoatlas.storage.sqlite.migrator import (
     APPLICATION_ID,
@@ -28,6 +34,20 @@ SCHEMA_VERSION = 5
 #: a WAL checkpoint, and a second process opening the database and finding
 #: migrations to apply at the same moment.
 BUSY_TIMEOUT_MS = 10_000
+
+#: The journal mode the architecture assumes: readers and one writer concurrently,
+#: which is what lets `locate` run against a database a `sync` is writing
+#: (ARCHITECTURE.md §9). RepoAtlas does not operate a database in any other mode.
+WAL = "wal"
+
+#: Backoff bounds for the one operation `busy_timeout` cannot cover — see
+#: :func:`_ensure_wal`. The first retry is immediate enough to catch the common
+#: case (a transition that is over in under a millisecond) and the cap keeps a
+#: long wait from turning into a spin. Each delay is drawn uniformly from
+#: ``[0, delay]`` so that N processes released by the same commit do not all
+#: return at the same instant and collide again.
+_RETRY_MIN_S = 0.001
+_RETRY_MAX_S = 0.050
 
 
 class Database:
@@ -104,11 +124,19 @@ class Database:
 
         On a read-only database this raises, and truthfully — the command that got
         here was going to write regardless (ARCHITECTURE.md §3).
+
+        It is the last piece of *initialization* left after an open, and so it is
+        the last place a lock held by another process could reach the terminal as
+        a ``sqlite3`` traceback: an index written before the marker existed
+        already carries ``meta.schema_version``, so :func:`open_database` writes
+        nothing and the claim happens here instead, on the next command that
+        writes. :func:`_contention_reported` gives it the same diagnostic the
+        rest of the open path has.
         """
         if not self._unmarked:
             return
         self._unmarked = False
-        with storage_errors(self.path):
+        with _contention_reported(self.path), storage_errors(self.path):
             self.connection.execute("BEGIN IMMEDIATE")
             stamp_application_id(self.connection)
             self.connection.commit()
@@ -159,34 +187,221 @@ def open_database(path: Path) -> Database:
     database RepoAtlas does not own, and one written by a newer RepoAtlas, both
     have to be refused while the connection has still only read. Refusing
     afterwards would mean the refusal itself had modified the file.
+
+    **Several processes may do this at once, and that is expected to work.** Two
+    terminals running a first command is ordinary, so an opener that finds
+    another one mid-initialization waits for it rather than failing: see
+    :func:`_ensure_wal` for the one operation SQLite's ``busy_timeout`` does not
+    cover, and :func:`_contention_reported` for what happens when the wait runs
+    out. Nothing here takes the workspace writer lock — read commands open the
+    database too, and making them queue behind a running ``sync`` is the
+    behaviour ARCHITECTURE.md §9 exists to prevent.
     """
-    with opening_errors(path):
+    with _contention_reported(path), opening_errors(path):
         path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(path, isolation_level="DEFERRED")
         connection.row_factory = sqlite3.Row
         connection.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
         ownership = _establish_ownership(connection, path)
-        _refuse_future_schema(connection, path)
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA synchronous = NORMAL")
-        _apply_migrations(connection)
-        # Whether the marker still has to be written is asked of the database
-        # rather than inferred from `ownership`: a legacy index below the current
-        # version was marked by the migration that just ran, one already at the
-        # current version had no migration to ride along with, and reading the
-        # header is exact where reasoning about which case happened would not be.
-        unmarked = ownership is Ownership.LEGACY and application_id(connection) != APPLICATION_ID
+        with _closed_on_failure(connection):
+            _refuse_future_schema(connection, path)
+            _ensure_wal(connection, path)
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA synchronous = NORMAL")
+            _apply_migrations(connection)
+            # Whether the marker still has to be written is asked of the database
+            # rather than inferred from `ownership`: a legacy index below the
+            # current version was marked by the migration that just ran, one
+            # already at the current version had no migration to ride along with,
+            # and reading the header is exact where reasoning about which case
+            # happened would not be.
+            unmarked = (
+                ownership is Ownership.LEGACY and application_id(connection) != APPLICATION_ID
+            )
 
-    database = Database(connection, path, unmarked=unmarked)
-    # Written only when it actually changes. Stamping it unconditionally made
-    # *opening* the database a write, so `locate` and `status` competed for
-    # SQLite's write lock with a running sync and could fail with "database is
-    # locked" — readers must not need a writer's privileges (ARCHITECTURE.md §9).
-    if database.get_meta("schema_version") != str(SCHEMA_VERSION):
-        with database.transaction():
-            database.set_meta("schema_version", str(SCHEMA_VERSION))
+            database = Database(connection, path, unmarked=unmarked)
+            # Written only when it actually changes. Stamping it unconditionally
+            # made *opening* the database a write, so `locate` and `status`
+            # competed for SQLite's write lock with a running sync and could fail
+            # with "database is locked" — readers must not need a writer's
+            # privileges (ARCHITECTURE.md §9). The condition is why an ordinary
+            # open of a healthy index reaches none of this.
+            if database.get_meta("schema_version") != str(SCHEMA_VERSION):
+                with database.transaction():
+                    database.set_meta("schema_version", str(SCHEMA_VERSION))
     return database
+
+
+@contextmanager
+def _contention_reported(path: Path) -> Iterator[None]:
+    """Report a lock held past the timeout as a product state, not a traceback.
+
+    The boundary that makes "another process is busy with this database" a thing
+    RepoAtlas *says* rather than a ``sqlite3`` traceback. It covers opening only,
+    which is the phase where a second process is expected: two terminals running
+    a first command, an editor plugin and a shell, a wrapper script and a human.
+
+    Narrow in two directions, both deliberate:
+
+    * **Only contention.** :func:`is_contention` matches ``SQLITE_BUSY`` and
+      ``SQLITE_LOCKED`` on their result codes. Everything else — a read-only
+      file, a missing directory, a corrupt page, an I/O fault, a full disk —
+      passes straight through to :func:`opening_errors`, which has an accurate
+      thing to say about each. Catching ``OperationalError`` wholesale would
+      report all of them as "another process is initializing the database".
+    * **Only opening.** Contention outside this window is not this condition and
+      keeps its own meaning; ``classify`` still returns ``None`` for these codes,
+      so nothing anywhere reports a locked database as an *unusable* one.
+
+    Most of what could raise inside an open is already handled closer to the
+    failure — :func:`_ensure_wal` retries, and the migrator raises its own
+    :class:`MigrationContentionError` naming the migration. What is left is the
+    writes: the ``schema_version`` stamp on a database that has never carried
+    one, and the identity marker a pre-marker index is claimed with, which
+    :meth:`Database._claim` takes this same boundary for because it happens on
+    the first command that writes rather than at open. Both wait out the busy
+    timeout first, so reaching here means the other process has held the write
+    lock for the full interval.
+    """
+    try:
+        yield
+    except sqlite3.Error as error:
+        if not is_contention(error):
+            raise
+        raise _initialization_contention(path) from error
+
+
+@contextmanager
+def _closed_on_failure(connection: sqlite3.Connection) -> Iterator[None]:
+    """Close the connection if opening does not complete.
+
+    Every exit from :func:`open_database` other than a returned
+    :class:`Database` leaves no SQLite handle behind — the rule
+    :func:`_establish_ownership` already applied to the refusals, extended to the
+    rest of the sequence now that contention can end it too. A retried open that
+    kept its predecessor's handle would hold a read lock on the very file the
+    next attempt is waiting to write.
+    """
+    try:
+        yield
+    except BaseException:
+        connection.close()
+        raise
+
+
+def _ensure_wal(connection: sqlite3.Connection, path: Path) -> None:
+    """Put the database into WAL, waiting out another process that is doing it.
+
+    **The one operation ``busy_timeout`` does not protect.** Measured, on one
+    database with ``busy_timeout = 10000`` on both connections:
+
+    ===============================================  ==========  ==============
+    operation                                        elapsed     outcome
+    ===============================================  ==========  ==============
+    ``BEGIN IMMEDIATE`` vs a held RESERVED lock       10.016 s    SQLITE_BUSY
+    ``PRAGMA journal_mode=WAL`` vs a held SHARED      10.011 s    SQLITE_BUSY
+    ``PRAGMA journal_mode=WAL`` vs a held RESERVED     0.000 s    SQLITE_BUSY
+    ``PRAGMA journal_mode=WAL`` when already WAL       0.000 s    ok
+    ===============================================  ==========  ==============
+
+    The third row is the defect. Changing the journal mode has to rewrite the
+    file header, so SQLite takes its *own* read transaction and then promotes it
+    to a write — and SQLite never invokes a busy handler for a read-to-write
+    promotion, because a process already holding a read lock that blocks waiting
+    for a write lock is how two processes deadlock. So the pragma returns
+    ``SQLITE_BUSY`` immediately and the configured ten seconds are never
+    consulted. The promotion is inside the pragma; the Python connection is in
+    autocommit throughout, which is why ending the ownership snapshot earlier
+    would not have helped, and why the pragma cannot simply be moved.
+
+    Two things follow, and both are in the loop below.
+
+    **Ask before writing.** Reading ``PRAGMA journal_mode`` takes no lock beyond
+    a shared one — measured at 0.11 ms against a held RESERVED lock — and the
+    fourth row shows the transition is free once it has happened. So an ordinary
+    open of a healthy index now does a read instead of a header write, and never
+    joins the race at all. Only the *first* open of a database in any other mode
+    contends, which is the population the retry has to cover.
+
+    **Retry the promotion, and only the promotion.** This is the smallest
+    operation that can be repeated safely: it is idempotent, it writes nothing
+    but the header's version bytes, and a re-read at the top of each attempt
+    means the loser of the race usually observes the winner's finished transition
+    rather than repeating it. Bounded by the same deadline
+    (:data:`BUSY_TIMEOUT_MS`) SQLite would have applied itself, on a monotonic
+    clock, so a system clock change cannot extend or truncate the wait.
+
+    Everything that is not contention is re-raised for the storage classifier:
+    ``SQLITE_READONLY`` on a read-only index is instant and accurate today
+    (measured), and waiting ten seconds to say the same thing would be strictly
+    worse.
+    """
+    deadline = time.monotonic() + BUSY_TIMEOUT_MS / 1000
+    delay = _RETRY_MIN_S
+    while True:
+        if _journal_mode(connection) == WAL:
+            return
+        try:
+            row = connection.execute(f"PRAGMA journal_mode = {WAL}").fetchone()
+        except sqlite3.Error as error:
+            if not is_contention(error):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _initialization_contention(path) from error
+            # S311: spreading racing openers apart, not generating a secret.
+            time.sleep(min(random.uniform(0, delay), remaining))  # noqa: S311
+            delay = min(delay * 2, _RETRY_MAX_S)
+            continue
+        # The pragma reports the mode it *ended in*, which is not always the one
+        # asked for: WAL needs shared memory, and a filesystem that cannot provide
+        # it leaves the database in its previous mode with no error raised. The
+        # architecture assumes WAL, so a database that would not take it is
+        # refused rather than operated in a mode nothing above here expects.
+        reached = "" if row is None else str(row[0]).lower()
+        if reached != WAL:
+            raise _wal_unsupported(path, reached)
+        return
+
+
+def _wal_unsupported(path: Path, reached: str) -> IndexInaccessibleError:
+    return IndexInaccessibleError(
+        f"The RepoAtlas index at {path} cannot be placed in WAL mode.",
+        detail=(
+            f"SQLite left the database in {reached!r} journal mode instead. WAL "
+            "needs shared memory, which some network and virtual filesystems do "
+            "not provide.\n\n"
+            "RepoAtlas requires WAL and has not written to the database. Move the "
+            "index onto a local filesystem, or point REPOATLAS_DB at one."
+        ),
+    )
+
+
+def _initialization_contention(path: Path) -> MigrationContentionError:
+    """The bounded wait ran out. Transient, and says so.
+
+    :class:`MigrationContentionError` rather than a new class beside it: its
+    meaning is already "another process held SQLite's write transaction past the
+    busy timeout", which is exactly this, and the process being waited for is an
+    opener initializing or upgrading the same database. A second contention type
+    at the same exit code would be taxonomy without a distinction.
+    """
+    return MigrationContentionError(
+        "Timed out waiting for another process to finish initializing the database.",
+        detail=(
+            f"Another RepoAtlas process is preparing the index at {path} and held "
+            f"SQLite's write lock for longer than {BUSY_TIMEOUT_MS / 1000:.0f} "
+            "seconds.\n\n"
+            "Nothing has been changed. Wait for it to finish and run the command "
+            "again."
+        ),
+    )
+
+
+def _journal_mode(connection: sqlite3.Connection) -> str:
+    """The mode the database is in. A pure read; takes no write lock."""
+    row = connection.execute("PRAGMA journal_mode").fetchone()
+    return "" if row is None else str(row[0]).lower()
 
 
 def _refuse_future_schema(connection: sqlite3.Connection, path: Path) -> None:

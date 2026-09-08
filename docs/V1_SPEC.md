@@ -263,6 +263,14 @@ with nothing wrong with it. The message names the *path* and never the contents 
 `REPOATLAS_DB` pointing at the wrong file, and a diagnostic that helpfully listed the tables would disclose the
 schema of whatever that turned out to be.
 
+**A busy index is not an unusable one.** Transient SQLite contention while another process initializes or upgrades
+the same database is exit 1, not exit 3, and the distinction matters in the direction that costs data: exit 3's
+documented remedy is to move the index aside, which would destroy a healthy database because a second terminal
+happened to be running `init` at that moment. Several processes opening one index concurrently is ordinary and is
+expected to *converge* — one initializes, the others wait and observe the finished result — so a bounded wait is
+attempted before any error is reported at all. Only a lock held for longer than that bound is reported, and it says
+another process is busy and to run the command again. See ARCHITECTURE.md §9, "First open is a wait, not a crash".
+
 **Exit 3 is not a catch-all.** An unexpected exception — a `TypeError`, a bug in a parser, a SQLite result code
 RepoAtlas has not positively identified as an index condition — stays exit 1. Reporting a defect as "your index is
 corrupt" would invite the user to delete their index *and* hide the bug.

@@ -44,7 +44,13 @@ from repoatlas.errors import (
     IndexUnavailableError,
 )
 
-__all__ = ["classify", "is_index_condition", "opening_errors", "storage_errors"]
+__all__ = [
+    "classify",
+    "is_contention",
+    "is_index_condition",
+    "opening_errors",
+    "storage_errors",
+]
 
 #: Result codes whose meaning is "the bytes on disk are not a usable database".
 _CORRUPT = {
@@ -59,6 +65,14 @@ _INACCESSIBLE = {
     sqlite3.SQLITE_READONLY: "SQLITE_READONLY",
     sqlite3.SQLITE_PERM: "SQLITE_PERM",
 }
+
+#: Result codes whose meaning is "another connection holds a lock, try later".
+#: Deliberately *not* index conditions: nothing is wrong with the database, and
+#: :func:`classify` must keep returning ``None`` for them so contention can never
+#: be reported as an unusable index. ``SQLITE_LOCKED`` is included because a
+#: shared-cache or table-level conflict is the same transient thing from the
+#: caller's side; neither is a property of the bytes on disk.
+_CONTENTION = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
 
 #: ``errno`` values from the ``mkdir``/``stat`` work that precedes the connection.
 #: ``ENOSPC`` and ``EIO`` are absent on purpose: neither has been reproduced here,
@@ -173,6 +187,24 @@ def _classify_missing_object(error: sqlite3.Error, path: Path) -> IndexSchemaErr
     if bare not in schema_objects():
         return None
     return _missing_object(path, kind, name)
+
+
+def is_contention(error: BaseException) -> bool:
+    """Whether ``error`` is another connection holding a lock, and nothing worse.
+
+    The predicate that decides what may be retried, and it is narrow on purpose.
+    ``SQLITE_READONLY``, ``SQLITE_CANTOPEN``, ``SQLITE_IOERR`` and ``SQLITE_FULL``
+    all reach the same ``except sqlite3.OperationalError``, and none of them
+    improves by waiting: retrying a read-only file for ten seconds turns an
+    instant, accurate diagnostic into a hang that ends in the wrong message.
+
+    Matched on SQLite's own result codes rather than on ``"database is locked"``.
+    The text is not a stable interface — it is shared by ``SQLITE_BUSY`` and
+    ``SQLITE_BUSY_SNAPSHOT`` and has been reworded across SQLite releases —
+    whereas the primary code is documented and has carried through
+    ``sqlite_errorcode`` since Python 3.11.
+    """
+    return isinstance(error, sqlite3.Error) and _primary(error) in _CONTENTION
 
 
 def is_index_condition(error: BaseException) -> bool:
