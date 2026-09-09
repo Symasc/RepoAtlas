@@ -1,0 +1,7 @@
+{
+  "name": "@company/common",
+  "version": "2.1.4",
+  "dependencies": {
+    "left-pad": "^1.3.0"
+  }
+}

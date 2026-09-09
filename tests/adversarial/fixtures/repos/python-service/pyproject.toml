@@ -1,0 +1,9 @@
+[project]
+name = "python-service"
+version = "2.0.0"
+dependencies = [
+    "common-lib>=1.0",
+    "shared-utils>=3.0",
+    "requests==2.31.0",
+    "absent-from-managed-set>=9.9",
+]
