@@ -32,6 +32,7 @@ from repoatlas.models.evidence import (
     EvidenceTier,
     MatchClass,
 )
+from repoatlas.models.retrieval import RetrievalOutcome, SuppressionOutcome
 from repoatlas.models.telemetry import RetrievalTrace, StageTiming, Stopwatch
 from repoatlas.retrieval.query import analyze
 from repoatlas.retrieval.ranking import (
@@ -118,6 +119,23 @@ class Retriever:
         ``literal_phrase`` additionally searches the whole question verbatim,
         which is how ``debug`` finds an unquoted error string embedded in source
         (V1_SPEC §16).
+
+        The V1 entry point, unchanged. It is one call to :meth:`retrieve_detailed`
+        with everything an ``EvidenceSet`` cannot carry dropped on the floor.
+        """
+        return self.retrieve_detailed(question, context, literal_phrase=literal_phrase).evidence
+
+    def retrieve_detailed(
+        self, question: str, context: RepositoryContext, *, literal_phrase: bool = False
+    ) -> RetrievalOutcome:
+        """The funnel: one pass, and everything that pass decided.
+
+        The same work :meth:`retrieve` does, returning the suppression decision and
+        the exact entity hits that seeded graph expansion alongside the evidence.
+        Both were already computed here and both used to survive only as an English
+        sentence in a trace field, which is not something a caller can act on
+        without re-deriving it — either by parsing prose or by running the funnel a
+        second time. Neither is acceptable, so the funnel says what it decided.
         """
         stages: list[StageTiming] = []
         analysis = analyze(question)
@@ -188,17 +206,21 @@ class Retriever:
         incoming = sum(len(ranked) for ranked in ranked_lists)
 
         if not ranked_lists:
-            return EvidenceSet(
-                question=question,
-                scope=str(context.scope),
-                primary_repository=primary_name,
-                trace=RetrievalTrace(
-                    stages=tuple(stages),
-                    literal_terms=tuple(literal_terms),
-                    scoped_repositories=len(primary_ids),
-                    semantic_used=semantic_used,
-                    semantic_detail=semantic_detail,
+            return RetrievalOutcome(
+                evidence=EvidenceSet(
+                    question=question,
+                    scope=str(context.scope),
+                    primary_repository=primary_name,
+                    trace=RetrievalTrace(
+                        stages=tuple(stages),
+                        literal_terms=tuple(literal_terms),
+                        scoped_repositories=len(primary_ids),
+                        semantic_used=semantic_used,
+                        semantic_detail=semantic_detail,
+                    ),
                 ),
+                suppression=suppressed,
+                seed_entity_ids=tuple(entity_ids),
             )
 
         with Stopwatch("fuse", candidates_in=incoming) as watch:
@@ -238,7 +260,7 @@ class Retriever:
             watch.detail = f"{tokens} tokens" + (", truncated" if truncated else "")
         stages.append(_recorded(watch))
 
-        return EvidenceSet(
+        evidence = EvidenceSet(
             question=question,
             candidates=tuple(bounded),
             scope=str(context.scope),
@@ -274,6 +296,11 @@ class Retriever:
                 ),
                 token_estimate=tokens,
             ),
+        )
+        return RetrievalOutcome(
+            evidence=evidence,
+            suppression=suppressed,
+            seed_entity_ids=tuple(entity_ids),
         )
 
     # -- stages --------------------------------------------------------------
@@ -314,13 +341,13 @@ class Retriever:
         scopes: list[list[int] | None],
         stages: list[StageTiming],
         *,
-        suppressed: str | None = None,
+        suppressed: SuppressionOutcome | None = None,
     ) -> list[list[EvidenceCandidate]]:
         """FTS recall over chunk text. Recall, not proof, so it is associative."""
         lists: list[list[EvidenceCandidate]] = []
         with Stopwatch("lexical") as watch:
             if suppressed is not None:
-                watch.detail = suppressed
+                watch.detail = suppressed.message
                 scopes = []
             for scope in scopes:
                 hits = self._search.search_text(question, scope, self._limits.per_source)
@@ -348,7 +375,7 @@ class Retriever:
         scopes: list[list[int] | None],
         stages: list[StageTiming],
         *,
-        suppressed: str | None = None,
+        suppressed: SuppressionOutcome | None = None,
     ) -> tuple[list[EvidenceCandidate], list[int]]:
         """Entity lookup. An exact name match is a fact; a fuzzy one is a lead.
 
@@ -442,7 +469,7 @@ class Retriever:
                     )
             watch.candidates_out = len(candidates)
             watch.detail = (
-                suppressed
+                suppressed.message
                 if suppressed is not None
                 else f"{by_name} exact entity name, {len(seen_entities) - by_name} full-text"
             )
@@ -523,7 +550,7 @@ class Retriever:
         literal_terms: list[str],
         exact: list[EvidenceCandidate],
         proven_files: set[str] | None = None,
-    ) -> str | None:
+    ) -> SuppressionOutcome | None:
         """Whether every associative source would be answering a different question.
 
         When the question names literal terms — a quoted string, an environment
@@ -552,7 +579,12 @@ class Retriever:
         if proven_files and any(term in proven_files for term in literal_terms):
             return None
         named = ", ".join(literal_terms[:3])
-        return f"suppressed: none of the named terms exist ({named})"
+        return SuppressionOutcome(
+            terms=tuple(literal_terms),
+            # Produced here and read from here. The trace renders this sentence; it
+            # is never the source anything recovers the decision from.
+            message=f"suppressed: none of the named terms exist ({named})",
+        )
 
     def _stage_semantic(
         self,
@@ -560,12 +592,12 @@ class Retriever:
         repo_ids: list[int] | None,
         stages: list[StageTiming],
         *,
-        suppressed: str | None = None,
+        suppressed: SuppressionOutcome | None = None,
     ) -> tuple[list[EvidenceCandidate], bool, str]:
         """Vector neighbours. Always associative — a guess about what was meant."""
         with Stopwatch("semantic") as watch:
             if suppressed is not None:
-                candidates, used, detail = [], False, suppressed
+                candidates, used, detail = [], False, suppressed.message
             else:
                 candidates, used, detail = self._semantic_candidates(question, repo_ids)
             watch.candidates_out = len(candidates)
