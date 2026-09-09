@@ -1,0 +1,117 @@
+[project]
+name = "repoatlas"
+version = "0.1.0"
+description = "Local multi-repository engineering intelligence system"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+
+dependencies = [
+    "typer>=0.15",
+    "pydantic>=2.10",
+    "pyyaml>=6.0",
+    "httpx>=0.28",
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack>=0.7",
+    "numpy>=2.0",
+    "fastembed>=0.5",
+]
+
+[project.scripts]
+repoatlas = "repoatlas.cli.main:run"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
+    "pyright>=1.1.390",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["repoatlas"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["repoatlas", "tests"]
+# Fixture repositories are sample content, not project code, and some of it is
+# deliberately unparseable (invalid UTF-8, truncated YAML). A parse error is not
+# suppressible by a per-file ignore, so they are excluded outright.
+extend-exclude = ["tests/fixtures/repos", "tests/adversarial/fixtures/repos"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",      # pycodestyle / pyflakes
+    "I",                # isort
+    "UP",               # pyupgrade
+    "B",                # bugbear
+    "SIM",              # simplify
+    "RUF",              # ruff-specific
+    "PTH",              # prefer pathlib
+    "S",                # bandit (security; repositories are untrusted input)
+    "TID",              # tidy imports
+]
+ignore = [
+    "S101",   # assert — used extensively and legitimately in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S603", "S607"]          # tests invoke git deliberately
+"tests/fixtures/repos/*" = ["ALL"]    # fixture content is sample code, not project code
+# Confusable characters are this suite's subject, not a mistake in it: the
+# supplementary-plane round-trip case needs codepoints that look like ASCII.
+"tests/adversarial/test_unicode_exact_retrieval.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/adversarial/fixtures/repos/*" = ["ALL"]
+
+[tool.pyright]
+include = ["repoatlas", "tests"]
+exclude = ["tests/fixtures/repos", "tests/adversarial/fixtures/repos"]
+# Point Pyright at the project environment. Without this it looks for `python`
+# on PATH -- it ignores VIRTUAL_ENV entirely -- so a bare `pyright` run resolved
+# the *system* interpreter and reported 95 unresolved-import errors for
+# dependencies that are installed, while `uv run pyright` reported none purely
+# because `uv run` prepends `.venv/bin` to PATH. Two commands, two answers, and
+# the wrong one was the shorter to type.
+#
+# `venvPath` is resolved relative to this file, so the setting is relocatable
+# and contains no host path; naming the directory rather than an executable
+# keeps it correct on Windows, where the interpreter is `.venv\Scripts\python.exe`.
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.13"
+typeCheckingMode = "standard"
+reportMissingTypeStubs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers -m 'not slow and not scale'"
+markers = [
+    "slow: exercises a real model download or network access; deselected by default",
+    "adversarial: adversarial validation; runs by default, selectable with -m adversarial",
+    "scale: builds a large synthetic tree; deselected by default",
+]
+
+[tool.coverage.run]
+source = ["repoatlas"]
+# Branch coverage, not just statements: a `if not contained: skip` whose false
+# arm is never taken is exactly the kind of gap a security control cannot
+# afford, and statement coverage reports it as covered.
+branch = true
+
+[tool.coverage.report]
+# The gate. It lives here rather than in the workflow so that
+# `uv run pytest --cov` locally enforces precisely what CI enforces.
+fail_under = 80
+show_missing = true
+exclude_also = [
+    # Type-checking-only imports never execute at runtime.
+    "if TYPE_CHECKING:",
+    # Protocol and abstract declarations are signatures, not behaviour.
+    "^\\s*\\.\\.\\.$",
+    "raise NotImplementedError",
+]

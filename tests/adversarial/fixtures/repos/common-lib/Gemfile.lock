@@ -1,0 +1,12 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    rack (3.0.11)
+    rspec (3.12.2)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  rack (~> 3.0)
+  rspec (>= 3.12)
