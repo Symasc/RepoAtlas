@@ -19,11 +19,13 @@ from repoatlas.models.dependencies import (
     DependencyRole,
     DependencyScope,
 )
-from repoatlas.models.parsing import EdgeType, EntityType
+from repoatlas.models.parsing import EdgeDirection, EdgeType, EntityType
 from repoatlas.models.repository import FileState, IndexedFile, Repository, SyncStatus
 from repoatlas.storage.protocols import (
+    ChunkHit,
     EdgeRecord,
     EntityDescription,
+    EntityIdentity,
     EntityRecord,
     FileFacts,
     FileRow,
@@ -33,6 +35,32 @@ from repoatlas.storage.protocols import (
     UnresolvedRefRecord,
 )
 from repoatlas.storage.sqlite.database import Database
+
+#: Everything an :class:`EntityIdentity` needs, shared by both key lookups.
+#: ``LEFT JOIN`` throughout: an interned entity has no file and no repository row,
+#: and resolving its key must still work.
+_ENTITY_IDENTITY_SELECT = """
+    SELECT e.id, e.key, e.type, e.name, e.qualified_name, e.line_start,
+           e.line_end, e.signature, f.rel_path AS path, r.slug AS repository_slug
+    FROM entities e
+    LEFT JOIN files        f ON f.id = e.file_id
+    LEFT JOIN repositories r ON r.id = e.repo_id
+"""
+
+
+def _entity_identity(row: sqlite3.Row) -> EntityIdentity:
+    return EntityIdentity(
+        entity_id=row["id"],
+        key=row["key"],
+        type=EntityType(row["type"]),
+        name=row["name"],
+        qualified_name=row["qualified_name"],
+        repository_slug=row["repository_slug"],
+        path=row["path"],
+        line_start=row["line_start"],
+        line_end=row["line_end"],
+        signature=row["signature"],
+    )
 
 
 def _json_list(raw: str | None) -> tuple[str, ...]:
@@ -300,6 +328,33 @@ class SqliteFileStore:
             "SELECT id, rel_path, size, mtime_ns, content_hash, parser_version "
             "FROM files WHERE repo_id = ?",
             (repo_id,),
+        ).fetchall()
+        return {
+            row["rel_path"]: FileState(
+                file_id=row["id"],
+                size=row["size"],
+                mtime_ns=row["mtime_ns"],
+                content_hash=row["content_hash"],
+                parser_version=row["parser_version"],
+            )
+            for row in rows
+        }
+
+    def states_for(self, repo_id: int, rel_paths: Sequence[str]) -> dict[str, FileState]:
+        """:meth:`list_states` narrowed to the paths actually asked about.
+
+        A freshness question about a handful of files should not read a whole
+        repository's file table to answer it.
+        """
+        if not rel_paths:
+            return {}
+        placeholders = ",".join("?" * len(rel_paths))
+        rows = self._db.execute(
+            f"""
+            SELECT id, rel_path, size, mtime_ns, content_hash, parser_version
+            FROM files WHERE repo_id = ? AND rel_path IN ({placeholders})
+            """,  # noqa: S608 - placeholders are a generated count, values are bound
+            (repo_id, *rel_paths),
         ).fetchall()
         return {
             row["rel_path"]: FileState(
@@ -707,17 +762,30 @@ class SqliteKnowledgeStore:
         entity_ids: Sequence[int],
         edge_types: Sequence[EdgeType] | None = None,
         limit: int = 200,
+        direction: EdgeDirection = EdgeDirection.ANY,
     ) -> list[NeighborEdge]:
         """One hop out of ``entity_ids``, with both endpoints' repositories.
 
         The repository of each endpoint comes back with the edge so the caller can
         enforce the cross-repository traversal rule without a second query
-        (ARCHITECTURE.md §10 stage 4).
+        (ARCHITECTURE.md §10 stage 4). So does the file that asserted the edge, so
+        a caller can go on to supply those lines rather than only name them.
+
+        ``direction`` narrows which end the queried entity must sit on. ``ANY`` is
+        the neighbourhood question retrieval asks, and stays the default.
         """
         if not entity_ids:
             return []
         placeholders = ",".join("?" * len(entity_ids))
-        params: list[object] = [*entity_ids, *entity_ids]
+        if direction is EdgeDirection.OUT:
+            id_clause = f"e.src_id IN ({placeholders})"
+            params: list[object] = [*entity_ids]
+        elif direction is EdgeDirection.IN:
+            id_clause = f"e.dst_id IN ({placeholders})"
+            params = [*entity_ids]
+        else:
+            id_clause = f"(e.src_id IN ({placeholders}) OR e.dst_id IN ({placeholders}))"
+            params = [*entity_ids, *entity_ids]
         type_clause = ""
         if edge_types:
             type_placeholders = ",".join("?" * len(edge_types))
@@ -727,12 +795,13 @@ class SqliteKnowledgeStore:
 
         rows = self._db.execute(
             f"""
-            SELECT e.src_id, e.dst_id, e.type, e.confidence,
+            SELECT e.src_id, e.dst_id, e.type, e.confidence, e.file_id,
+                   e.line_start, e.line_end, e.parser,
                    src.repo_id AS src_repo_id, dst.repo_id AS dst_repo_id
             FROM edges e
             JOIN entities src ON src.id = e.src_id
             JOIN entities dst ON dst.id = e.dst_id
-            WHERE (e.src_id IN ({placeholders}) OR e.dst_id IN ({placeholders})){type_clause}
+            WHERE {id_clause}{type_clause}
             ORDER BY e.confidence DESC, e.id
             LIMIT ?
             """,  # noqa: S608 - placeholders are generated counts, values are bound
@@ -746,6 +815,10 @@ class SqliteKnowledgeStore:
                 confidence=row["confidence"],
                 src_repo_id=row["src_repo_id"],
                 dst_repo_id=row["dst_repo_id"],
+                file_id=row["file_id"],
+                line_start=row["line_start"],
+                line_end=row["line_end"],
+                parser=row["parser"],
             )
             for row in rows
         ]
@@ -782,6 +855,93 @@ class SqliteKnowledgeStore:
                 line_end=row["line_end"] or row["line_start"] or 1,
                 text=row["signature"] or "",
                 description=f"defines {row['name']}",
+            )
+            for row in rows
+        ]
+
+    def get_entities_by_key(self, keys: Sequence[str]) -> list[EntityIdentity]:
+        """Entities whose natural key is exactly one of ``keys``.
+
+        Exact only: no prefix synthesis, no name clause, no fuzzy fallback. A key
+        is an identity, and resolving one through a name search answers a
+        different question — ``find_entities_by_name`` matches a name *or* a
+        qualified name *or* a key, which is right for search and wrong for
+        identity.
+
+        Returns a list rather than a mapping because ``entities.key`` is unique
+        only for interned rows: ``idx_entities_global_key`` is partial
+        (``WHERE file_id IS NULL``). A key resolving to more than one row is an
+        ambiguity for the caller to report, never one for storage to settle by
+        picking.
+        """
+        if not keys:
+            return []
+        placeholders = ",".join("?" * len(keys))
+        rows = self._db.execute(
+            f"""
+            {_ENTITY_IDENTITY_SELECT}
+            WHERE e.key IN ({placeholders})
+            ORDER BY e.id
+            """,
+            tuple(keys),
+        ).fetchall()
+        return [_entity_identity(row) for row in rows]
+
+    def keys_for_entities(self, entity_ids: Sequence[int]) -> dict[int, EntityIdentity]:
+        """The natural key of each entity id, in one query.
+
+        The inverse of :meth:`get_entities_by_key`, and the reason a response can
+        carry entity handles without a lookup per item.
+        """
+        if not entity_ids:
+            return {}
+        placeholders = ",".join("?" * len(entity_ids))
+        rows = self._db.execute(
+            f"""
+            {_ENTITY_IDENTITY_SELECT}
+            WHERE e.id IN ({placeholders})
+            """,
+            tuple(entity_ids),
+        ).fetchall()
+        return {int(row["id"]): _entity_identity(row) for row in rows}
+
+    def chunks_for_file(self, file_id: int, line_start: int, line_end: int) -> list[ChunkHit]:
+        """Indexed chunks overlapping a line range of one file.
+
+        The text behind a span RepoAtlas already knows about — an edge's asserting
+        lines, say — so that provenance can be *supplied* as evidence rather than
+        offered as coordinates the caller has no way to verify.
+
+        ``score`` is 0.0 throughout: these chunks were addressed, not searched, so
+        there is no relevance to report and inventing one would be a claim.
+        """
+        rows = self._db.execute(
+            """
+            SELECT c.id AS chunk_id, c.file_id, c.repo_id, c.line_start, c.line_end,
+                   c.text, c.span_index, c.split_index, c.split_total,
+                   f.rel_path AS path, r.name AS repository, r.slug AS repository_slug
+            FROM chunks c
+            JOIN files        f ON f.id = c.file_id
+            JOIN repositories r ON r.id = c.repo_id
+            WHERE c.file_id = ? AND c.line_start <= ? AND c.line_end >= ?
+            ORDER BY c.line_start, c.span_index, c.split_index
+            """,
+            (file_id, line_end, line_start),
+        ).fetchall()
+        return [
+            ChunkHit(
+                chunk_id=row["chunk_id"],
+                file_id=row["file_id"],
+                repo_id=row["repo_id"],
+                repository=row["repository"],
+                repository_slug=row["repository_slug"] or "",
+                path=row["path"],
+                line_start=row["line_start"],
+                line_end=row["line_end"],
+                text=row["text"],
+                score=0.0,
+                split_index=row["split_index"],
+                split_total=row["split_total"],
             )
             for row in rows
         ]

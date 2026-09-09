@@ -1,5 +1,5 @@
+from repoatlas.grounding import INSUFFICIENT_EVIDENCE, GroundingReport, ground_answer
 from repoatlas.llm.factory import build_model
-from repoatlas.llm.grounding import INSUFFICIENT_EVIDENCE, GroundingReport, ground_answer
 from repoatlas.llm.null import NullBackend
 from repoatlas.llm.ollama import OllamaBackend
 from repoatlas.llm.protocol import (

@@ -14,12 +14,8 @@ from repoatlas.llm.protocol import ModelError, ReasoningModel
 from repoatlas.llm.reasoner import QueryIntent, Reasoner, ReasoningResult
 from repoatlas.models.context import RepositoryContext
 from repoatlas.models.evidence import EvidenceSet
-from repoatlas.retrieval.retriever import RetrievalLimits
+from repoatlas.retrieval.retriever import DIAGNOSTIC_LIMITS
 from repoatlas.services.workspace import Workspace
-
-#: A diagnosis benefits from more surrounding evidence than a direct lookup, so
-#: ``debug`` retrieves a wider set within the same token budget.
-_DEBUG_LIMITS = RetrievalLimits(per_source=40, final=18, token_budget=8000)
 
 
 def locate(workspace: Workspace, question: str, context: RepositoryContext) -> EvidenceSet:
@@ -34,7 +30,7 @@ def retrieve_for(
     if intent is QueryIntent.DEBUG:
         # Bias toward exact error strings: the whole phrase is searched
         # literally, which matches log and exception text embedded in source.
-        return workspace.retriever(limits=_DEBUG_LIMITS).retrieve(
+        return workspace.retriever(limits=DIAGNOSTIC_LIMITS).retrieve(
             question, context, literal_phrase=True
         )
     return workspace.retriever().retrieve(question, context)
