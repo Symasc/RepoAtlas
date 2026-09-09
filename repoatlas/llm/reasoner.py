@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from pydantic import ValidationError
 
-from repoatlas.llm.grounding import INSUFFICIENT_EVIDENCE, GroundingReport, ground_answer
+from repoatlas.grounding import INSUFFICIENT_EVIDENCE, GroundingReport, ground_answer
 from repoatlas.llm.prompts.loader import render
 from repoatlas.llm.protocol import Message, ModelResponse, ReasoningModel
 from repoatlas.models.evidence import EvidenceSet, RepoAtlasAnswer

@@ -59,6 +59,22 @@ class EdgeType(enum.StrEnum):
     GENERATES = "GENERATES"
 
 
+class EdgeDirection(enum.StrEnum):
+    """Which end of an edge the queried entity is required to sit on.
+
+    Edges are directed facts — ``a IMPORTS b`` is not ``b IMPORTS a`` — but a
+    neighbourhood query is often about either end. ``ANY`` is that query and stays
+    the default, so asking for a direction is a deliberate narrowing rather than
+    something a caller has to opt out of.
+    """
+
+    ANY = "any"
+    #: The queried entity is the edge's source: what it reaches.
+    OUT = "out"
+    #: The queried entity is the edge's target: what reaches it.
+    IN = "in"
+
+
 class Severity(enum.StrEnum):
     WARNING = "warning"
     ERROR = "error"

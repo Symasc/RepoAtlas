@@ -11,16 +11,26 @@ from repoatlas.graph.keys import (
 )
 from repoatlas.graph.linker import GLOBAL_PARSER, GlobalLinkResult, LinkResult, ReferenceLinker
 from repoatlas.graph.resolution import ResolutionIndex
+from repoatlas.graph.traversal import (
+    CROSS_REPOSITORY_EDGES,
+    EXPANSION_EDGES,
+    TraversalResult,
+    expand_from_seeds,
+)
 
 __all__ = [
+    "CROSS_REPOSITORY_EDGES",
+    "EXPANSION_EDGES",
     "GLOBAL_PARSER",
     "GlobalLinkResult",
     "LinkResult",
     "ReferenceLinker",
     "ResolutionIndex",
+    "TraversalResult",
     "command_key",
     "config_key",
     "env_key",
+    "expand_from_seeds",
     "file_key",
     "global_key",
     "module_key",

@@ -23,6 +23,7 @@ from dataclasses import dataclass, replace
 
 from repoatlas.config.settings import RetrievalSettings
 from repoatlas.embeddings.protocol import EmbeddingModel, EmbeddingUnavailable
+from repoatlas.graph.traversal import expand_from_seeds
 from repoatlas.models.context import ContextScope, RepositoryContext
 from repoatlas.models.evidence import (
     EvidenceCandidate,
@@ -31,7 +32,6 @@ from repoatlas.models.evidence import (
     EvidenceTier,
     MatchClass,
 )
-from repoatlas.models.parsing import EdgeType
 from repoatlas.models.telemetry import RetrievalTrace, StageTiming, Stopwatch
 from repoatlas.retrieval.query import analyze
 from repoatlas.retrieval.ranking import (
@@ -46,48 +46,6 @@ from repoatlas.storage.protocols import ChunkHit, FileHit, VectorHit
 from repoatlas.storage.sqlite.search import SqliteSearchIndex
 from repoatlas.storage.sqlite.stores import SqliteKnowledgeStore
 from repoatlas.storage.sqlite.vectors import SqliteVectorIndex
-
-#: Edge types graph expansion may traverse.
-#:
-#: These are *relationship* edges. ``DEFINES`` and ``CONTAINS`` are deliberately
-#: absent even though they are perfectly good facts: they are containment, so
-#: traversing them turns any file node into a fan-out over every symbol it
-#: declares, and two hops of that buries the relationship the question was about
-#: under an inventory of the neighbourhood.
-_EXPANSION_EDGES = (
-    EdgeType.READS,
-    EdgeType.WRITES,
-    EdgeType.EXPORTS,
-    EdgeType.CONFIGURES,
-    EdgeType.DEPENDS_ON,
-    EdgeType.IMPORTS,
-    EdgeType.REFERENCES,
-    EdgeType.EXECUTES,
-    EdgeType.SOURCES,
-    EdgeType.INCLUDES,
-    EdgeType.REQUIRES,
-    EdgeType.WATCHES,
-    EdgeType.MANAGES,
-    EdgeType.GENERATES,
-)
-
-#: Edge types a traversal may follow **out of one repository into another**.
-#:
-#: Every one of these is produced by the linker's global pass from an exact match
-#: — a resolved package name, a resolved path, a resolved import — so a
-#: cross-repository answer always has a structural reason (V1_SPEC §9). A `CALLS`
-#: or `DEFINES` edge is deliberately absent: those are meaningful within a
-#: repository but would let a traversal wander between repositories on nothing
-#: stronger than a shared symbol name.
-_CROSS_REPOSITORY_EDGES = frozenset(
-    {
-        EdgeType.DEPENDS_ON,
-        EdgeType.REFERENCES,
-        EdgeType.EXECUTES,
-        EdgeType.SOURCES,
-        EdgeType.IMPORTS,
-    }
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +79,15 @@ class RetrievalLimits:
     def widened(self, *, per_source: int, final: int, token_budget: int) -> RetrievalLimits:
         """The same biases with larger bounds, for ``debug`` (V1_SPEC §16)."""
         return replace(self, per_source=per_source, final=final, token_budget=token_budget)
+
+
+#: The widened bounds ``debug`` retrieves under (V1_SPEC §16).
+#:
+#: A diagnosis benefits from more surrounding evidence than a direct lookup, so
+#: ``debug`` retrieves a wider set within the same token budget. Named here rather
+#: than in the service that happens to use it first: it is a property of retrieval,
+#: and the caller chooses a documented profile instead of assembling raw limits.
+DIAGNOSTIC_LIMITS = RetrievalLimits(per_source=40, final=18, token_budget=8000)
 
 
 class Retriever:
@@ -652,50 +619,21 @@ class Retriever:
     def _expand(self, entity_ids: list[int]) -> tuple[list[EvidenceCandidate], int]:
         """Bounded traversal from matched entities (ARCHITECTURE.md §10 stage 4).
 
-        Bounded on three axes at once — hop count, fan-out per hop and total nodes
-        — because a popular hub such as ``env:SERVICE_HOST`` legitimately touches
-        every repository, and an unbounded walk from it would return the world.
-
-        Two hops is the useful minimum, not an arbitrary depth: an interned node
-        like an environment variable has no location of its own, so hop one reaches
-        the hub and hop two reaches the files on the other side of it. That is what
-        makes "where is SERVICE_HOST configured?" answerable from inside a service
-        that only reads it.
+        The walk itself is :func:`repoatlas.graph.traversal.expand_from_seeds`,
+        which owns the edge whitelist and the cross-repository rule. What remains
+        here is turning what it reached into candidates — and preserving the order
+        it reached them in, because that order is the proximity signal fusion reads.
         """
-        if not entity_ids:
-            return [], 0
-
-        frontier = entity_ids[: self._limits.graph_seeds]
-        visited: set[int] = set(frontier)
-        reached: list[int] = []
-        reason: dict[int, str] = {}
-
-        for hop in range(max(0, self._limits.graph_hops)):
-            if not frontier:
-                break
-            edges = self._knowledge.expand_neighbors(
-                frontier,
-                _EXPANSION_EDGES,
-                limit=self._limits.graph_fanout * max(1, len(frontier)),
-            )
-            next_frontier: list[int] = []
-            for edge in edges:
-                if edge.crosses_repositories and edge.type not in _CROSS_REPOSITORY_EDGES:
-                    continue
-                for neighbor in (edge.src_id, edge.dst_id):
-                    if neighbor in visited:
-                        continue
-                    visited.add(neighbor)
-                    next_frontier.append(neighbor)
-                    reached.append(neighbor)
-                    reason[neighbor] = f"{edge.type.value.lower()} (hop {hop + 1})"
-                if len(next_frontier) >= self._limits.graph_fanout:
-                    break
-            frontier = next_frontier
-
-        if not reached:
-            return [], len(visited)
-        return self._knowledge_candidates(reached, reason), len(visited)
+        walk = expand_from_seeds(
+            self._knowledge,
+            entity_ids,
+            hops=self._limits.graph_hops,
+            fanout=self._limits.graph_fanout,
+            seed_limit=self._limits.graph_seeds,
+        )
+        if not walk.reached:
+            return [], walk.visited
+        return self._knowledge_candidates(walk.reached, walk.reasons), walk.visited
 
     def _knowledge_candidates(
         self, entity_ids: list[int], reason: dict[int, str] | None = None
