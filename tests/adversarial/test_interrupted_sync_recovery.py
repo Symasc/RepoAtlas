@@ -34,7 +34,9 @@ monkeypatched exception cannot prove anything about ``SIGKILL``.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import selectors
 import signal
 import sqlite3
 import subprocess
@@ -60,6 +62,8 @@ from repoatlas.storage.sqlite.stores import (
 from tests.conftest import git, init_git_repository
 
 pytestmark = pytest.mark.adversarial
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: Edges the *run* owns rather than any single file. They are deleted and rebuilt
 #: wholesale by the global pass at the end of a run, so a crash mid-run legitimately
@@ -844,9 +848,217 @@ def test_a_healthy_unchanged_sync_still_reparses_nothing(crash_root: Path, tmp_p
 
 
 # -- real signals ------------------------------------------------------------
+#
+# These kill a real CLI process with a real OS signal, because a monkeypatched
+# exception cannot prove anything about ``SIGKILL``. What they used to get wrong
+# was *when*.
+#
+# The old harness slept 1.5 seconds and inferred an in-flight sync from
+# ``process.poll() is None``. That inference is unsound, and measurably so: a run
+# has a **completion boundary** partway through it, and the process stays alive
+# afterwards while it renders output, closes SQLite and tears down the
+# interpreter. Measured on this fixture — 500 files, the completion commit at
+# 2.70 s and process exit at 2.76 s — that shutdown interval is ~55 ms, about 2%
+# of the run. Aiming a fixed sleep into it produced a live PID over a repository
+# already marked ``ok`` in **3 of 12** trials, and the assertion that the index is
+# not current then fails while nothing is wrong with the product.
+#
+# A faster machine reaches the same place with the sleep left at 1.5 s. So the
+# repair is not a longer sleep or a retry; it is to stop inferring. The child now
+# *tells* the parent it has arrived at the boundary and waits there, and the
+# signal is sent only after that word arrives. Timing stops carrying meaning.
+
+
+#: The child's side of the protocol. One word per line on a dedicated pipe.
+STARTED = "STARTED"
+READY_TO_INTERRUPT = "READY_TO_INTERRUPT"
+COMPLETION_ENTERED = "COMPLETION_ENTERED"
+SHUTDOWN_BLOCKED = "SHUTDOWN_BLOCKED"
+FINISHED = "FINISHED"
+HARNESS_TIMEOUT = "HARNESS_TIMEOUT"
+
+#: What makes each awaited word unreachable if it arrives first. Stated per word
+#: rather than as one terminal list, because the two waits mean opposite things:
+#: reaching the completion boundary makes an interruption impossible, but it is
+#: the *precondition* for the shutdown control. Anything not listed aborts only on
+#: a child that gave up at the barrier.
+_UNREACHABLE_AFTER: dict[str, tuple[str, ...]] = {
+    "READY_TO_INTERRUPT": ("COMPLETION_ENTERED", "FINISHED", "HARNESS_TIMEOUT"),
+}
+_DEFAULT_UNREACHABLE: tuple[str, ...] = ("HARNESS_TIMEOUT",)
+
+#: How long the parent waits for a protocol word, and how long the child waits at
+#: the barrier before giving up. Generous, because they bound a hang rather than
+#: establish anything: correctness comes from the words, never from the clock.
+PROTOCOL_TIMEOUT_SECONDS = 180.0
+CHILD_HOLD_SECONDS = 240.0
+
+#: A test-only runner. It monkeypatches the boundary *in its own process* and then
+#: invokes the real console entry point, so the shipped package carries no test
+#: hook, no environment backdoor and no artificial delay (§6, §21).
+RUNNER_SOURCE = '''
+import atexit, os, sys, time
+
+_channel = int(os.environ["REPOATLAS_TEST_CHANNEL_FD"])
+_mode = os.environ["REPOATLAS_TEST_MODE"]
+
+
+def say(word):
+    os.write(_channel, (word + "\\n").encode())
+
+
+def hold(limit):
+    """Block until something kills us. Bounded, so an orphan cannot outlive CI."""
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        time.sleep(0.02)
+    return False
+
+
+say("STARTED")
+
+from repoatlas.storage.sqlite.stores import SqliteRepositoryStore
+
+original = SqliteRepositoryStore.mark_many_synced
+
+if _mode == "barrier":
+    # Immediately before the run's completion commit: every per-file transaction
+    # has landed, `commit_global` has run inside this transaction, and the
+    # repository is still `interrupted` because nothing has marked it otherwise.
+    # The original is deliberately never called, so a signal delivered here is an
+    # interruption by construction rather than by timing.
+    def wrapped(self, completions):
+        say("READY_TO_INTERRUPT")
+        if not hold(float(os.environ["REPOATLAS_TEST_HOLD"])):
+            say("HARNESS_TIMEOUT")
+            raise SystemExit(97)
+        return original(self, completions)
+
+elif _mode == "shutdown":
+    # The control: allowed *past* the boundary, then held during interpreter
+    # shutdown — the state the old harness could not tell from an interrupted one.
+    def wrapped(self, completions):
+        say("COMPLETION_ENTERED")
+        return original(self, completions)
+
+    @atexit.register
+    def _hold_during_shutdown():
+        say("SHUTDOWN_BLOCKED")
+        hold(float(os.environ["REPOATLAS_TEST_HOLD"]))
+
+else:
+    raise SystemExit(f"unknown mode {_mode}")
+
+SqliteRepositoryStore.mark_many_synced = wrapped
+
+from repoatlas.cli.main import run
+
+sys.argv = ["repoatlas", "init", sys.argv[1]]
+try:
+    run()
+except SystemExit:
+    pass
+say("FINISHED")
+'''
+
+
+class Protocol:
+    """The child's words, read from a pipe with a bounded wait.
+
+    A pipe rather than a file or a directory poll, for two reasons. It carries
+    *events* rather than state, so there is no "count the files" predicate that
+    could also be true after completion (§4). And the parent sees EOF the moment
+    the child dies, so a ``SIGKILL``ed child produces a clean end-of-stream
+    instead of a timeout.
+    """
+
+    def __init__(self) -> None:
+        self.read_fd, self.write_fd = os.pipe()
+        self._buffer = b""
+        self.seen: list[str] = []
+
+    def close_write(self) -> None:
+        """Drop the parent's copy, so the child holds the only writer."""
+        if self.write_fd >= 0:
+            os.close(self.write_fd)
+            self.write_fd = -1
+
+    def wait_for(self, expected: str, *, timeout: float = PROTOCOL_TIMEOUT_SECONDS) -> None:
+        """Block until ``expected`` arrives, or fail saying what arrived instead.
+
+        Deliberately not a retry loop over the whole trial. If the child reports
+        that it finished, the harness has failed to interrupt anything, and
+        saying so is the entire point of the protocol — a harness that quietly
+        tried again until the timing worked would be the old bug with extra
+        steps (§11).
+        """
+        deadline = time.monotonic() + timeout
+        selector = selectors.DefaultSelector()
+        selector.register(self.read_fd, selectors.EVENT_READ)
+        try:
+            while True:
+                # Judged from everything said so far, before waiting for more. A
+                # child that has passed the point of no return is usually silent
+                # afterwards, so a check that only ran on new input would report a
+                # timeout — the least informative version of the truth.
+                if expected in self.seen:
+                    return
+                for word in _UNREACHABLE_AFTER.get(expected, _DEFAULT_UNREACHABLE):
+                    if word in self.seen:
+                        raise AssertionError(
+                            f"the child reached {word} without reaching {expected}: "
+                            f"nothing was interrupted. Said: {self.seen}"
+                        )
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, (
+                    f"timed out after {timeout:.0f}s waiting for {expected}; "
+                    f"the child said {self.seen or 'nothing'}"
+                )
+                if not selector.select(min(remaining, 1.0)):
+                    continue
+                chunk = os.read(self.read_fd, 4096)
+                if not chunk:
+                    raise AssertionError(
+                        f"the child exited before saying {expected}; it said {self.seen}"
+                    )
+                self._buffer += chunk
+                *complete, self._buffer = self._buffer.split(b"\n")
+                self.seen.extend(word.decode() for word in complete if word)
+        finally:
+            selector.close()
+
+    def drain(self, *, timeout: float = 5.0) -> None:
+        """Collect whatever is left, up to end of stream."""
+        deadline = time.monotonic() + timeout
+        selector = selectors.DefaultSelector()
+        selector.register(self.read_fd, selectors.EVENT_READ)
+        try:
+            while time.monotonic() < deadline:
+                if not selector.select(0.1):
+                    continue
+                chunk = os.read(self.read_fd, 4096)
+                if not chunk:
+                    return
+                self._buffer += chunk
+                *complete, self._buffer = self._buffer.split(b"\n")
+                self.seen.extend(word.decode() for word in complete if word)
+        finally:
+            selector.close()
+
+    def close(self) -> None:
+        self.close_write()
+        os.close(self.read_fd)
 
 
 def _cli_env(home: Path, config: Path) -> dict[str, str]:
+    """A child environment that cannot reach the operator's real state.
+
+    Every XDG root is redirected as well as ``REPOATLAS_CONFIG``, because
+    ``config_path()`` and ``database_path()`` fall back to ``XDG_CONFIG_HOME`` and
+    ``XDG_DATA_HOME`` when no override is set — and a child that inherits one
+    default silently writes ``~/.config/repoatlas``. ``test_no_test_touches_real_repoatlas_state``
+    is the assertion; this is the thing it asserts about.
+    """
     return {
         **os.environ,
         "HOME": str(home),
@@ -856,21 +1068,88 @@ def _cli_env(home: Path, config: Path) -> dict[str, str]:
     }
 
 
-@pytest.fixture
-def cli_fixture(tmp_path: Path) -> Iterator[tuple[Path, Path, Path]]:
-    """A managed root large enough that a real sync can be interrupted mid-flight."""
-    root = tmp_path / "repos"
-    root.mkdir()
-    _build_tree(root, 500)
-    home = tmp_path / "home"
-    home.mkdir()
-    config = tmp_path / "config.yaml"
-    config.write_text(
-        f"repos:\n  root: {root}\n"
-        f"storage:\n  database: {tmp_path / 'state' / 'atlas.db'}\n"
-        f"embeddings:\n  provider: hashing\n  dim: 64\n"
-    )
-    yield root, home, config
+class Harness:
+    """One isolated workspace plus the machinery to interrupt a sync in it."""
+
+    def __init__(self, base: Path, file_count: int) -> None:
+        self.base = base
+        self.root = base / "repos"
+        self.root.mkdir(parents=True)
+        _build_tree(self.root, file_count)
+        self.home = base / "home"
+        (self.home / ".config").mkdir(parents=True)
+        (self.home / ".local" / "share").mkdir(parents=True)
+        self.database = base / "state" / "atlas.db"
+        self.config = base / "config.yaml"
+        self.config.write_text(
+            f"repos:\n  root: {self.root}\n"
+            f"storage:\n  database: {self.database}\n"
+            f"embeddings:\n  provider: hashing\n  dim: 64\n"
+        )
+        self.runner = base / "runner.py"
+        self.runner.write_text(RUNNER_SOURCE)
+
+    @property
+    def env(self) -> dict[str, str]:
+        return _cli_env(self.home, self.config)
+
+    def settings(self) -> Settings:
+        return Settings.model_validate(
+            {
+                "storage": {"database": str(self.database)},
+                "embeddings": {"provider": "hashing", "dim": 64},
+            }
+        )
+
+    @contextlib.contextmanager
+    def child(self, mode: str) -> Iterator[tuple[subprocess.Popen[bytes], Protocol]]:
+        """Start a real CLI ``init`` under the test runner, wired to a protocol pipe."""
+        protocol = Protocol()
+        environment = {
+            **self.env,
+            "PYTHONPATH": str(REPO_ROOT),
+            "REPOATLAS_TEST_CHANNEL_FD": str(protocol.write_fd),
+            "REPOATLAS_TEST_MODE": mode,
+            "REPOATLAS_TEST_HOLD": str(CHILD_HOLD_SECONDS),
+        }
+        process = subprocess.Popen(
+            [sys.executable, str(self.runner), str(self.root)],
+            cwd=str(self.root),
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            pass_fds=(protocol.write_fd,),
+        )
+        protocol.close_write()
+        try:
+            yield process, protocol
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=60)
+            protocol.close()
+
+    def repository_status(self) -> str | None:
+        """The persisted status, read by a separate connection as another process would."""
+        if not self.database.exists():
+            return None
+        connection = sqlite3.connect(self.database)
+        try:
+            row = connection.execute("SELECT last_sync_status FROM repositories").fetchone()
+            return None if row is None else str(row[0])
+        finally:
+            connection.close()
+
+    def index_state(self) -> str:
+        workspace = _open_at(self.settings(), self.root)
+        try:
+            report = status(workspace, workspace.resolver().resolve(self.root, command="status"))
+            return report.index_state
+        finally:
+            workspace.close()
+
+    def recover(self) -> subprocess.CompletedProcess[str]:
+        return _repoatlas(["sync"], self.env, self.root)
 
 
 def _repoatlas(args: Sequence[str], env: dict[str, str], cwd: Path):
@@ -884,46 +1163,162 @@ def _repoatlas(args: Sequence[str], env: dict[str, str], cwd: Path):
     )
 
 
+#: Two sizes. The small one finishes so fast that a 1.5-second sleep would land
+#: well past the end of it every time — which is exactly the case the old harness
+#: could not test at all, and the barrier handles identically (§19, §20).
+SIZES = {"tiny": 2, "realistic": 500}
+
+
+@pytest.fixture(params=sorted(SIZES), ids=sorted(SIZES))
+def harness(request: pytest.FixtureRequest, tmp_path: Path) -> Harness:
+    return Harness(tmp_path / request.param, SIZES[request.param])
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGKILL", "SIGINT"])
-def test_a_real_signal_during_a_real_sync_recovers_with_one_ordinary_sync(
-    signal_name: str, cli_fixture: tuple[Path, Path, Path], tmp_path: Path
+def test_a_real_signal_at_the_completion_boundary_recovers_with_one_ordinary_sync(
+    signal_name: str, harness: Harness, tmp_path: Path
 ) -> None:
-    """``SIGTERM`` is what a container runtime sends, and ``SIGKILL`` cannot be caught.
+    """A real process, a real signal, and a *proven* interruption.
 
-    Recovery therefore has to fall out of durable state rather than out of any
-    handler, which is what this asserts against real processes.
+    ``SIGTERM`` is what a container runtime sends and ``SIGKILL`` cannot be
+    caught, so recovery has to fall out of durable state rather than out of any
+    handler. ``SIGINT`` is the one whose old test produced the known false
+    failure, and it is now pinned by the same construction as the others.
+
+    Nothing here is timed. The child says it has reached the boundary; only then
+    is the signal sent.
     """
-    root, home, config = cli_fixture
-    env = _cli_env(home, config)
-    process = subprocess.Popen(
-        [sys.executable, "-m", "repoatlas.cli.main", "init", str(root)],
-        cwd=str(root),
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    time.sleep(1.5)
-    interrupted = process.poll() is None
-    if interrupted:
+    with harness.child("barrier") as (process, protocol):
+        protocol.wait_for(READY_TO_INTERRUPT)
+
+        # The boundary itself, asserted two independent ways (§13).
+        assert COMPLETION_ENTERED not in protocol.seen, protocol.seen
+        assert harness.repository_status() == SyncStatus.INTERRUPTED.value, (
+            "the run's completion marker committed before the signal was sent"
+        )
+        assert process.poll() is None, "the child died before it could be signalled"
+
         process.send_signal(getattr(signal, signal_name))
-    process.wait(timeout=120)
+        process.wait(timeout=120)
 
-    database = tmp_path / "state" / "atlas.db"
-    if not database.exists():
-        pytest.skip("the sync had not created the index before the signal arrived")
+    assert FINISHED not in protocol.seen, protocol.seen
+    assert harness.database.exists(), "the interrupted run left no database at all"
+    assert harness.index_state() != "current", harness.index_state()
 
-    observed = _settings(tmp_path, "state")
-    if interrupted:
-        workspace = _open_at(observed, root)
-        try:
-            report = status(workspace, workspace.resolver().resolve(root, command="status"))
-            assert report.index_state != "current", report.index_state
-        finally:
-            workspace.close()
-
-    assert _repoatlas(["sync"], env, root).returncode == 0
+    assert harness.recover().returncode == 0
+    assert harness.index_state() == "current"
 
     reference = _settings(tmp_path, "clean")
-    _index(reference, root, tmp_path, "clean")
-    assert_converged(observed, reference)
+    _index(reference, harness.root, tmp_path, "clean")
+    assert_converged(harness.settings(), reference)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGKILL"])
+def test_the_writer_lock_is_free_after_a_signal(signal_name: str, tmp_path: Path) -> None:
+    """§16: the lock is an ``flock`` held by an open file description.
+
+    The kernel drops it when the process dies, whatever killed it, so no stale
+    lock survives and no cleanup code has to run. Asserted by the next sync
+    simply succeeding — and by it not taking the lock timeout to do so.
+    """
+    harness = Harness(tmp_path / "lock", SIZES["tiny"])
+    with harness.child("barrier") as (process, protocol):
+        protocol.wait_for(READY_TO_INTERRUPT)
+        process.send_signal(getattr(signal, signal_name))
+        process.wait(timeout=120)
+
+    began = time.monotonic()
+    assert harness.recover().returncode == 0
+    assert time.monotonic() - began < 20, "the recovery sync queued behind a stale lock"
+
+
+# -- the control that proves the old inference was unsound -------------------
+
+
+@pytest.mark.slow
+def test_a_live_process_can_already_have_finished_syncing(tmp_path: Path) -> None:
+    """§22: ``poll() is None`` over a repository that is already ``current``.
+
+    The child is allowed *past* the completion boundary and then held during
+    interpreter shutdown — rendering, closing SQLite, tearing down. That state is
+    indistinguishable from an in-flight sync by process liveness alone, and it is
+    the state the old harness silently classified as "interrupted" whenever a
+    fixed sleep happened to land in it.
+
+    This is the regression guard for the test bug rather than for the product:
+    it fails if anyone reintroduces liveness as the proof of interruption.
+    """
+    harness = Harness(tmp_path / "control", SIZES["tiny"])
+    with harness.child("shutdown") as (process, protocol):
+        protocol.wait_for(SHUTDOWN_BLOCKED)
+
+        # The old harness's premise, and its conclusion, side by side.
+        assert process.poll() is None, "the child should still be alive in shutdown"
+        assert harness.repository_status() == SyncStatus.OK.value
+        assert harness.index_state() == "current"
+
+        # The new harness's rule reaches the opposite verdict from the same state,
+        # because it reads the child's words rather than its liveness.
+        assert COMPLETION_ENTERED in protocol.seen
+        assert READY_TO_INTERRUPT not in protocol.seen
+        process.kill()
+        process.wait(timeout=60)
+
+    # Killing a process whose work was already durable changes nothing.
+    assert harness.index_state() == "current"
+
+
+@pytest.mark.slow
+def test_the_harness_refuses_to_call_a_completed_run_an_interruption(tmp_path: Path) -> None:
+    """§11: if the child finishes first, that is a harness failure, said out loud.
+
+    The protocol wait raises rather than returning, so no trial can quietly
+    proceed to assert things about an interruption that never happened. Without
+    this, a barrier that stopped working would degrade back into the timing test
+    it replaced, and nothing would say so.
+    """
+    harness = Harness(tmp_path / "refuses", SIZES["tiny"])
+    with harness.child("shutdown") as (process, protocol):
+        protocol.wait_for(SHUTDOWN_BLOCKED)
+        with pytest.raises(AssertionError, match="without reaching READY_TO_INTERRUPT"):
+            protocol.wait_for(READY_TO_INTERRUPT, timeout=5.0)
+        process.kill()
+        process.wait(timeout=60)
+
+
+@pytest.mark.slow
+def test_the_protocol_wait_times_out_rather_than_hanging(tmp_path: Path) -> None:
+    """§12: a child that never arrives ends the test, not the CI job."""
+    harness = Harness(tmp_path / "timeout", SIZES["tiny"])
+    with harness.child("barrier") as (process, protocol):
+        protocol.wait_for(READY_TO_INTERRUPT)
+        with pytest.raises(AssertionError, match="timed out"):
+            protocol.wait_for(FINISHED, timeout=1.0)
+        process.kill()
+        process.wait(timeout=60)
+
+
+# -- isolation ---------------------------------------------------------------
+
+
+def test_the_signal_children_never_reach_real_repoatlas_state(tmp_path: Path) -> None:
+    """§23: every child path is under ``tmp_path``, checked rather than assumed.
+
+    The environment is asserted directly because the failure mode is silent: a
+    child that inherits one default writes the operator's ``~/.config/repoatlas``
+    and nothing in the trial notices.
+    """
+    harness = Harness(tmp_path / "isolation", SIZES["tiny"])
+    environment = harness.env
+    for key in ("HOME", "REPOATLAS_CONFIG", "XDG_CONFIG_HOME", "XDG_DATA_HOME"):
+        assert key in environment, key
+        assert str(tmp_path) in environment[key], (key, environment[key])
+    assert str(tmp_path) in str(harness.database)
+    assert str(tmp_path) in str(harness.root)
+
+    from repoatlas.config.settings import config_path, database_path
+
+    for path in (config_path(), database_path()):
+        assert "pytest" in str(path) or "tmp" in str(path) or not path.exists(), path
