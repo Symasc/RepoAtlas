@@ -1,0 +1,61 @@
+# RepoAtlas stack (V1_SPEC §18): the tool and a local reasoning model.
+#
+# Two invariants this file exists to enforce:
+#   1. Repositories are mounted **read-only**. V1 never writes to a repository,
+#      and the mount makes that a property of the deployment rather than a
+#      promise made by the code.
+#   2. RepoAtlas state lives in a **separate volume**, so the index, the config
+#      and the embedding cache are never written into the mounted tree.
+#
+# No SearXNG or other research infrastructure: that is V2 (V1_SPEC §22).
+
+services:
+  repoatlas:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: repoatlas:v1
+    depends_on:
+      - ollama
+    environment:
+      # Reach the sibling service by name rather than localhost.
+      REPOATLAS_LLM_BASE_URL: http://ollama:11434
+    volumes:
+      # The repositories under inspection. REPOS_DIR defaults to ./repos.
+      - type: bind
+        source: ${REPOS_DIR:-./repos}
+        target: /repos
+        read_only: true
+      # Index, config and model cache. Deliberately not a bind mount into the
+      # source tree.
+      - repoatlas-state:/state
+    working_dir: /repos
+    # Untrusted input, static analysis only (V1_SPEC §17): nothing here needs to
+    # gain privileges, and the only writable path is the state volume.
+    read_only: true
+    tmpfs:
+      # The only writable paths besides the state volume. /home is needed because
+      # ONNX Runtime wants a scratch directory on import; without it every command
+      # opens with a telemetry warning about a read-only home.
+      - /tmp
+      - /home/repoatlas
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # An interactive tool, not a daemon: `docker compose run --rm repoatlas ...`.
+    stdin_open: true
+    tty: true
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      # Loopback only. The model server is for this stack, not the network.
+      - "127.0.0.1:11434:11434"
+    restart: unless-stopped
+
+volumes:
+  repoatlas-state:
+  ollama-models:
