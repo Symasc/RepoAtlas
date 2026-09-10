@@ -225,19 +225,116 @@ def test_the_capability_layer_carries_no_transport_vocabulary() -> None:
     assert not offenders, offenders
 
 
-def test_the_capability_layer_does_not_reach_a_concrete_storage_backend() -> None:
-    """Session and ledger state compares values a caller gathered; it fetches none.
+#: Capability modules that hold no handle on anything. They receive values a
+#: caller gathered and compare them, which is what makes every rule in them
+#: testable without a database and stops "compare these" becoming "go and read
+#: the index" (V1_SPEC §12). ``service.py`` is deliberately not here: owning the
+#: workspace is its entire job.
+_PURE_CAPABILITY_MODULES = ("ledger.py", "session.py")
 
-    Keeping the ledger free of a database handle is what makes every revalidation
-    rule testable without one, and what stops "compare these values" quietly
-    becoming "go and read the index" (V1_SPEC §12).
+
+def test_the_pure_capability_modules_hold_no_database_handle() -> None:
+    """Ledger and session state never reach storage, by import or by name.
+
+    This is the narrowed form of a rule Slice B wrote against the whole package.
+    Slice B had no module that legitimately owned a workspace, so banning the name
+    everywhere cost nothing and documented the intent. Slice C introduces exactly
+    such a module, and a ban broad enough to catch it would have been satisfied by
+    the wrong fix — re-assembling stores inside the capability layer to avoid
+    naming ``Workspace`` — which is the duplication the rule exists to prevent.
+
+    So the guarantee is kept where it means something and dropped where it does
+    not. These two modules stay pure; ``service.py`` is allowed to own a workspace
+    and is forbidden a concrete backend by the package-wide test below.
+    """
+    offenders: list[str] = []
+    for name in _PURE_CAPABILITY_MODULES:
+        path = PACKAGE_ROOT / "capabilities" / name
+        source = path.read_text(encoding="utf-8")
+        for marker in ("Workspace", "Database", "sqlite3", "Sqlite", "storage.sqlite"):
+            if marker in source:
+                offenders.append(f"capabilities/{name} contains {marker!r}")
+        if "storage" in _imported_packages(path):
+            offenders.append(f"capabilities/{name} imports repoatlas.storage")
+    assert not offenders, offenders
+
+
+def test_no_capability_imports_a_concrete_storage_backend() -> None:
+    """The whole layer talks to protocols and services, never to a driver.
+
+    An import check rather than a text search, because ``service.py`` reaches
+    stores *through* the workspace and mentions neither SQL nor a driver — the
+    thing worth forbidding is acquiring one directly.
     """
     offenders: list[str] = []
     for path in sorted((PACKAGE_ROOT / "capabilities").rglob("*.py")):
-        source = path.read_text(encoding="utf-8")
-        for marker in ("storage.sqlite", "sqlite3", "SqliteFileStore", "Workspace"):
-            if marker in source:
-                offenders.append(f"capabilities/{path.name} contains {marker!r}")
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            modules = []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                modules = [node.module]
+            elif isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            for module in modules:
+                if module == "sqlite3" or module.startswith("repoatlas.storage.sqlite"):
+                    offenders.append(f"capabilities/{path.name} imports {module}")
+    assert not offenders, offenders
+
+
+def test_the_capability_layer_imports_no_transport_or_vendor_package() -> None:
+    """No client, protocol or vendor package is reachable from a capability.
+
+    Checked at the import level rather than by substring, so prose may discuss a
+    transport without the guard mistaking a sentence for a dependency. The
+    substring rule above still covers the domain vocabulary; this one covers the
+    thing that would actually couple the layer to a transport, which is importing
+    one.
+    """
+    banned = {
+        "mcp",
+        "fastmcp",
+        "anthropic",
+        "openai",
+        "claude",
+        "codex",
+        "copilot",
+        "jsonrpc",
+        "json_rpc",
+        "websockets",
+        "starlette",
+        "fastapi",
+    }
+    offenders: list[str] = []
+    for directory in ("capabilities", "models"):
+        for path in sorted((PACKAGE_ROOT / directory).rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                modules = []
+                if isinstance(node, ast.ImportFrom) and node.module:
+                    modules = [node.module]
+                elif isinstance(node, ast.Import):
+                    modules = [alias.name for alias in node.names]
+                for module in modules:
+                    if module.split(".")[0] in banned:
+                        offenders.append(f"{directory}/{path.name} imports {module}")
+    assert not offenders, offenders
+
+
+def test_the_capability_layer_names_no_protocol_message_type() -> None:
+    """Wire-message vocabulary never reaches the domain models.
+
+    These are not ordinary English: each one names a concrete message shape from a
+    specific transport, so a match is coupling rather than a coincidence of
+    wording.
+    """
+    banned = ("tool_call", "toolCall", "content_block", "contentBlock", "stdio")
+    offenders: list[str] = []
+    for directory in ("capabilities", "models"):
+        for path in sorted((PACKAGE_ROOT / directory).rglob("*.py")):
+            source = path.read_text(encoding="utf-8")
+            for marker in banned:
+                if marker in source:
+                    offenders.append(f"{directory}/{path.name} contains {marker!r}")
     assert not offenders, offenders
 
 
