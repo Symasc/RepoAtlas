@@ -14,7 +14,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict
 
 from repoatlas.models.dependencies import DependencyPackage, DependencyRecord
-from repoatlas.models.parsing import EdgeDirection, EdgeType, EntityType
+from repoatlas.models.parsing import EdgeDirection, EdgeType, EntityType, NeighborOrder
 from repoatlas.models.repository import FileState, IndexedFile, Repository
 
 
@@ -349,6 +349,7 @@ class KnowledgeStore(Protocol):
         edge_types: Sequence[EdgeType] | None,
         limit: int,
         direction: EdgeDirection = EdgeDirection.ANY,
+        order: NeighborOrder = NeighborOrder.CONFIDENCE,
     ) -> list[NeighborEdge]: ...
     def get_entities_by_key(self, keys: Sequence[str]) -> list[EntityIdentity]: ...
     def keys_for_entities(self, entity_ids: Sequence[int]) -> dict[int, EntityIdentity]: ...

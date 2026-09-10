@@ -14,6 +14,29 @@ from __future__ import annotations
 
 from repoatlas.models.parsing import EntityType
 
+#: The one key shape that embeds a source position.
+#:
+#: Only :func:`symbol_key` builds a key containing a line number, so only these
+#: keys stop resolving when a definition moves. Every other prefix names something
+#: interned by identity — a variable, a module, a package, a file — and survives a
+#: sync that moves things around inside it.
+POSITIONAL_KEY_PREFIX = "sym:"
+
+
+def is_positional(key: str) -> bool:
+    """Whether a key moves with the definition it names.
+
+    Decided here, beside the constructors that decide the format, rather than by
+    the entity's type — which does not answer the question. A ``function`` reached
+    as a file-scoped definition has a positional key; the same type interned
+    globally would not. What settles it is which constructor built the key.
+
+    Published because a caller holding a handle needs to know which ones are safe
+    to keep across a sync, rather than discovering it from a lookup that returns
+    nothing.
+    """
+    return key.startswith(POSITIONAL_KEY_PREFIX)
+
 
 def repository_key(repo_slug: str) -> str:
     return f"repo:{repo_slug}"

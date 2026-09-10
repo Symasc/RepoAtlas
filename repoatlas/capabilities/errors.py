@@ -209,6 +209,29 @@ class EntityNotInspectableError(RepoAtlasError):
         super().__init__(message, detail=detail)
 
 
+class InvalidRelationshipRequestError(RepoAtlasError):
+    """The request names something the deterministic graph policy does not traverse.
+
+    Refused rather than answered with an empty result. An edge type outside the
+    traversal policy — or a containment type without the flag that admits it —
+    would return nothing, and "no relationships of that kind" and "that kind is
+    not traversable" are different answers a caller acts on differently. Saying so
+    also names the remedy, which an empty tuple cannot.
+    """
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(
+        self,
+        message: str = "that relationship request names an untraversable edge type",
+        *,
+        detail: str | None = None,
+        edge_types: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message, detail=detail)
+        self.edge_types = edge_types
+
+
 class TargetOutOfScopeError(RepoAtlasError):
     """The target resolved, in a repository this call's context excludes.
 
@@ -330,6 +353,13 @@ def capability_error(exc: Exception) -> CapabilityError:
         )
     if isinstance(exc, EntityNotFoundError):
         return _from_repoatlas(exc, code="ENTITY_NOT_FOUND", category=ErrorCategory.NOT_FOUND)
+    if isinstance(exc, InvalidRelationshipRequestError):
+        return _from_repoatlas(
+            exc,
+            code="INVALID_RELATIONSHIP_REQUEST",
+            category=ErrorCategory.INVALID_REQUEST,
+            context={"edge_types": list(exc.edge_types)} if exc.edge_types else None,
+        )
     if isinstance(exc, TargetOutOfScopeError):
         return _from_repoatlas(exc, code="TARGET_OUT_OF_SCOPE", category=ErrorCategory.CONTEXT)
     if isinstance(exc, InvestigationRequiredError):
