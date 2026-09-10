@@ -47,7 +47,7 @@ from repoatlas.models.capability import (
     CapabilityContext,
     EvidenceBudget,
 )
-from repoatlas.models.capability_io import ContextView, EvidenceItem
+from repoatlas.models.capability_io import ContextView, EvidenceItem, LineRange
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
 from repoatlas.models.investigation import EvidenceId, EvidenceStatus, LedgerSummary
 
@@ -150,25 +150,6 @@ def _validate_path_shape(path: str) -> None:
         raise ValueError("path must not escape the repository with '..'")
     if "\x00" in path:
         raise ValueError("path must not contain a null byte")
-
-
-class LineRange(BaseModel):
-    """A closed, 1-based interval of source lines. Both ends inclusive."""
-
-    model_config = ConfigDict(frozen=True)
-
-    start: int = Field(ge=1)
-    end: int = Field(ge=1)
-
-    @model_validator(mode="after")
-    def _ordered(self) -> LineRange:
-        if self.end < self.start:
-            raise ValueError(f"line range ends before it starts: {self.start}-{self.end}")
-        return self
-
-    @property
-    def count(self) -> int:
-        return self.end - self.start + 1
 
 
 class InspectionSource(enum.StrEnum):
