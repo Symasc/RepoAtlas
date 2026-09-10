@@ -66,6 +66,16 @@ _FORBIDDEN: dict[str, set[str]] = {
     },
     # The CLI resolves context, calls a service and renders.
     "cli": {"storage", "sync", "indexing", "parsers", "graph", "discovery"},
+    # The capability layer is what an external agent talks to. It sits above
+    # services/ and may use everything below it, with three exceptions: it has no
+    # terminal (cli), it returns models rather than formatted text (rendering),
+    # and it is deterministic — a capability that could reach a model could
+    # manufacture evidence (llm).
+    "capabilities": {"cli", "rendering", "llm"},
+    # ...and the arrow only runs one way. A service reaching up into
+    # capabilities/ for one typed value would reverse the layering for a single
+    # import, which is exactly how it would happen.
+    "services": {"capabilities"},
 }
 
 
@@ -162,3 +172,54 @@ def test_only_gitstate_invokes_git() -> None:
         if "subprocess" in path.read_text(encoding="utf-8"):
             offenders.append(str(relative))
     assert not offenders, f"subprocess used outside gitstate: {offenders}"
+
+
+def test_services_never_import_the_capability_layer() -> None:
+    """The dependency arrow, asserted in the direction that is tempting to break.
+
+    Shared logic both layers need — freshness above all — belongs *below* both,
+    which is why the state machine is a top-level module rather than
+    ``capabilities/freshness.py`` (V1_SPEC §12).
+    """
+    offenders: list[str] = []
+    for package, path in _modules():
+        if package != "services":
+            continue
+        if "capabilities" in _imported_packages(path):
+            offenders.append(str(path.relative_to(PACKAGE_ROOT.parent)))
+    assert not offenders, f"services must not import capabilities: {offenders}"
+
+
+def test_the_capability_layer_never_infers_a_working_directory() -> None:
+    """A capability call's scope comes from the call, never from the process.
+
+    The server was started wherever its launcher happened to be, serves many
+    tasks and outlives all of them, so a working directory there is evidence about
+    nothing. Asserted as an absence because the failure is silent: inferring a
+    scope produces a confident answer about the wrong repository.
+    """
+    banned = ("Path.cwd(", "os.getcwd(", "os.curdir")
+    offenders: list[str] = []
+    for path in sorted((PACKAGE_ROOT / "capabilities").rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for marker in banned:
+            if marker in source:
+                offenders.append(f"{path.name} contains {marker!r}")
+    assert not offenders, offenders
+
+
+def test_the_capability_layer_carries_no_transport_vocabulary() -> None:
+    """MCP is a transport adapter, not the RepoAtlas domain API.
+
+    A protocol name reaching the domain models is how the next transport becomes
+    a rewrite rather than an adapter.
+    """
+    banned = ("mcp", "MCP", "json_rpc", "JSONRPC", "jsonrpc")
+    offenders: list[str] = []
+    for directory in ("capabilities", "models"):
+        for path in sorted((PACKAGE_ROOT / directory).rglob("*.py")):
+            source = path.read_text(encoding="utf-8")
+            for marker in banned:
+                if marker in source:
+                    offenders.append(f"{directory}/{path.name} contains {marker!r}")
+    assert not offenders, offenders
