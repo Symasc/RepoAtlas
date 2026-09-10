@@ -45,7 +45,9 @@ from __future__ import annotations
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from types import TracebackType
 
 from repoatlas.capabilities.budget import BudgetCeiling, ceiling_for
@@ -57,6 +59,8 @@ from repoatlas.capabilities.session import (
     SessionRegistry,
 )
 from repoatlas.config.settings import Settings
+from repoatlas.discovery.reconcile import RepositorySetPlan
+from repoatlas.freshness import index_freshness
 from repoatlas.models.capability import CapabilityScope, ContextResolution
 from repoatlas.models.capability_io import (
     IndexCounts,
@@ -66,13 +70,13 @@ from repoatlas.models.capability_io import (
     StatusRequest,
     StatusResponse,
 )
-from repoatlas.models.freshness import FreshnessDepth, FreshnessState, IndexFreshness
+from repoatlas.models.freshness import FreshnessDepth
 from repoatlas.models.investigation import DEFAULT_LEDGER_CAPACITY
 from repoatlas.models.repository import Repository
 from repoatlas.services.freshness_service import (
     current_facts_version,
-    index_freshness_for,
     repository_freshness_for,
+    repository_set_drift,
 )
 from repoatlas.services.workspace import Workspace, open_workspace
 
@@ -248,27 +252,37 @@ class CapabilityService:
         with self._operation():
             registered = self._workspace.repositories.list_all()
             resolution = resolve_context(request.context, registered)
+            facts = current_facts_version(self._workspace)
 
-            freshness = index_freshness_for(
-                self._workspace,
-                resolution.repositories,
-                depth=request.depth,
-                include_repository_set_drift=request.include_drift,
-            )
+            per_repository = [
+                repository_freshness_for(self._workspace, repo, depth=request.depth, facts=facts)
+                for repo in resolution.repositories
+            ]
+            # Walked at most once per call. The plan carries both the verdict and
+            # the particulars, so asking the aggregate for one and the collections
+            # for the other would mean two discovery walks disagreeing about the
+            # same root.
+            plan = repository_set_drift(self._workspace) if request.include_drift else None
+            drift = _drift_of(plan)
+
             return StatusResponse(
                 context=request.context,
                 scope=resolution.scope,
                 root_configured=self._workspace.root is not None,
                 counts=self._counts(resolution, registered),
-                freshness=freshness,
-                index_current=_index_current(freshness),
+                freshness=index_freshness(
+                    per_repository,
+                    depth=request.depth,
+                    repository_set_drifted=plan.drifted if plan is not None else None,
+                ),
                 last_sync=_last_sync(resolution.repositories),
-                # Always global when present. Drift is a claim about the managed
-                # root, and the root is not a property of any repository beneath
-                # it, so a repository-scoped request that asks for drift is asking
-                # a global question and is told so rather than left to assume the
-                # answer was narrowed.
-                drift_is_global=freshness.repository_set_drifted is not None,
+                drift_checked=drift.checked,
+                drift_detected=drift.detected,
+                new_repositories=drift.added,
+                missing_repositories=drift.missing,
+                relocated_repositories=drift.relocated,
+                conflicting_repositories=drift.conflicting,
+                unreadable_paths=drift.unreadable,
             )
 
     # -- internals ----------------------------------------------------------
@@ -354,23 +368,39 @@ def _duplicate_names(repositories: list[Repository]) -> frozenset[str]:
     return frozenset(duplicated)
 
 
-def _index_current(freshness: IndexFreshness) -> bool:
-    """Can RepoAtlas stand behind this index? Both halves, or neither.
+@dataclass(frozen=True, slots=True)
+class _Drift:
+    """The drift half of a status response, from one walk or from none."""
 
-    ``IndexFreshness.state`` answers only about the repositories in scope. Drift
-    is a claim about the managed root, and the two are separately true in exactly
-    the case this exists for: every registered repository current, and a
-    repository beneath the root that the index has never heard of. Reading the
-    aggregate alone would call that workspace current, which is the false
-    statement V1's status already refuses to make (V1_SPEC §12).
+    checked: bool = False
+    detected: bool = False
+    added: tuple[str, ...] = ()
+    missing: tuple[str, ...] = ()
+    relocated: tuple[str, ...] = ()
+    conflicting: tuple[str, ...] = ()
+    unreadable: tuple[Path, ...] = ()
 
-    Drift that was never checked leaves ``repository_set_drifted`` at ``None`` and
-    cannot make this False. Nothing looked, so nothing beyond the repositories
-    that *were* checked is being claimed.
+
+def _drift_of(plan: RepositorySetPlan | None) -> _Drift:
+    """Read one discovery plan, or record that none was made.
+
+    ``plan is None`` covers both "not requested" and "no managed root to walk".
+    Both leave ``checked`` False with every collection empty, which is the honest
+    reading: nothing looked, so nothing is being claimed either way. The
+    alternative — empty collections with no flag beside them — is indistinguishable
+    from a clean result and would be read as one.
     """
-    if freshness.state is not FreshnessState.CURRENT_CLEAN:
-        return False
-    return freshness.repository_set_drifted is not True
+    if plan is None:
+        return _Drift()
+    return _Drift(
+        checked=True,
+        detected=plan.drifted,
+        added=tuple(candidate.slug for candidate in plan.added),
+        missing=tuple(repo.slug or repo.name for repo in plan.missing),
+        relocated=tuple(move.repository.slug for move in plan.relocated),
+        conflicting=tuple(conflict.candidate.slug for conflict in plan.conflicts),
+        unreadable=tuple(plan.unreadable),
+    )
 
 
 def _last_sync(repositories: tuple[Repository, ...]) -> datetime | None:

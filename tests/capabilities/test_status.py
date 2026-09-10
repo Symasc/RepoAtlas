@@ -20,10 +20,11 @@ import pytest
 from repoatlas.capabilities.service import CapabilityService
 from repoatlas.gitstate.client import GitClient, GitRepositoryState
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
-from repoatlas.models.capability_io import RepositoriesRequest, StatusRequest
+from repoatlas.models.capability_io import RepositoriesRequest, StatusRequest, StatusResponse
 from repoatlas.models.freshness import (
     FreshnessDepth,
     FreshnessState,
+    IndexFreshness,
     RepositoryFreshness,
     WorktreeContentStatus,
 )
@@ -208,9 +209,11 @@ def test_an_older_build_is_a_stale_build(
     initialized: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Outdated files outrank a matching HEAD: the facts, not the commit, are old."""
-    from repoatlas.services import freshness_service
+    from repoatlas.capabilities import service as service_module
 
-    monkeypatch.setattr(freshness_service, "current_facts_version", lambda _ws: "schema:999")
+    # Patched where it is looked up: status resolves the facts version in its own
+    # namespace, so patching the defining module would not reach this call.
+    monkeypatch.setattr(service_module, "current_facts_version", lambda _ws: "schema:999")
     response = _service(initialized).status(StatusRequest(context=GLOBAL, include_drift=False))
     assert response.freshness.state is FreshnessState.STALE_BUILD
     assert all(r.outdated_files > 0 for r in response.freshness.repositories if r.outdated_files)
@@ -298,7 +301,7 @@ def test_repository_status_covers_only_the_selected_repository(initialized: Work
     assert response.counts.repositories == 1
 
 
-def test_drift_is_not_detected_unless_it_is_asked_for(
+def test_drift_is_not_evaluated_unless_it_is_asked_for(
     initialized: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A discovery walk is the only cost that grows with the tree, so it is opt-in."""
@@ -309,11 +312,60 @@ def test_drift_is_not_detected_unless_it_is_asked_for(
 
     monkeypatch.setattr(freshness_service, "plan_repository_set", forbidden)
     response = _service(initialized).status(StatusRequest(context=GLOBAL, include_drift=False))
+
+    assert response.drift_checked is False
+    assert response.drift_detected is False
     assert response.freshness.repository_set_drifted is None
-    assert response.drift_is_global is False
 
 
-def test_drift_is_detected_when_requested(initialized: Workspace, workspace_root: Path) -> None:
+def test_unevaluated_drift_is_not_a_finding_of_no_drift(
+    initialized: Workspace, workspace_root: Path
+) -> None:
+    """The correction, stated as directly as it can be.
+
+    A repository the index has never heard of is sitting beneath the managed root.
+    With ``include_drift=False`` every drift collection comes back empty — and that
+    emptiness means the walk did not happen, not that the root is clean. The flag
+    beside them is the only thing that can tell those apart, and without it a
+    caller reads the stronger claim. Same principle as ``STORED`` freshness
+    declining to report ``CURRENT``.
+    """
+    from tests.conftest import init_git_repository
+
+    newcomer = workspace_root / "late-arrival"
+    newcomer.mkdir()
+    (newcomer / "main.py").write_text("x = 1\n", encoding="utf-8")
+    init_git_repository(newcomer)
+
+    unchecked = _service(initialized).status(StatusRequest(context=GLOBAL, include_drift=False))
+    assert unchecked.drift_checked is False
+    assert unchecked.new_repositories == ()
+
+    checked = _service(initialized).status(StatusRequest(context=GLOBAL, include_drift=True))
+    assert checked.drift_checked is True
+    assert "late-arrival" in checked.new_repositories
+
+    # Identical empty-looking collections, opposite meanings. Only the flag separates them.
+    assert unchecked.new_repositories == () and checked.new_repositories != ()
+
+
+def test_evaluated_drift_with_nothing_found_is_a_finding(initialized: Workspace) -> None:
+    """``drift_checked=True`` with empty collections means evaluated and clean."""
+    response = _service(initialized).status(StatusRequest(context=GLOBAL, include_drift=True))
+
+    assert response.drift_checked is True
+    assert response.drift_detected is False
+    assert response.new_repositories == ()
+    assert response.missing_repositories == ()
+    assert response.relocated_repositories == ()
+    assert response.conflicting_repositories == ()
+    assert response.unreadable_paths == ()
+    assert response.freshness.repository_set_drifted is False
+
+
+def test_an_unregistered_repository_lands_in_the_new_collection(
+    initialized: Workspace, workspace_root: Path
+) -> None:
     from tests.conftest import init_git_repository
 
     newcomer = workspace_root / "late-arrival"
@@ -322,7 +374,61 @@ def test_drift_is_detected_when_requested(initialized: Workspace, workspace_root
     init_git_repository(newcomer)
 
     response = _service(initialized).status(StatusRequest(context=GLOBAL, include_drift=True))
+    assert response.drift_checked is True
+    assert response.drift_detected is True
+    assert response.new_repositories == ("late-arrival",)
     assert response.freshness.repository_set_drifted is True
+
+
+def test_a_removed_repository_lands_in_the_missing_collection(
+    initialized: Workspace, workspace_root: Path
+) -> None:
+    import shutil
+
+    shutil.rmtree(workspace_root / "scripts")
+
+    response = _service(initialized).status(StatusRequest(context=GLOBAL, include_drift=True))
+    assert response.drift_checked is True
+    assert response.drift_detected is True
+    assert "scripts" in response.missing_repositories
+
+
+def test_detected_drift_always_names_something(
+    initialized: Workspace, workspace_root: Path
+) -> None:
+    """``drift_detected`` and the collections cannot disagree.
+
+    The invariant that makes the collections trustworthy: if drift was found, at
+    least one collection says what it was. ``relocated_repositories`` is reported
+    for exactly this reason — a moved managed root counts as drift, and without it
+    this could be True with every collection empty.
+    """
+    from tests.conftest import init_git_repository
+
+    newcomer = workspace_root / "late-arrival"
+    newcomer.mkdir()
+    (newcomer / "main.py").write_text("x = 1\n", encoding="utf-8")
+    init_git_repository(newcomer)
+
+    response = _service(initialized).status(StatusRequest(context=GLOBAL, include_drift=True))
+    named = (
+        response.new_repositories
+        + response.missing_repositories
+        + response.relocated_repositories
+        + response.conflicting_repositories
+    )
+    assert response.drift_detected is bool(named)
+
+
+def test_drift_is_global_at_global_scope(initialized: Workspace, workspace_root: Path) -> None:
+    from tests.conftest import init_git_repository
+
+    newcomer = workspace_root / "late-arrival"
+    newcomer.mkdir()
+    (newcomer / "main.py").write_text("x = 1\n", encoding="utf-8")
+    init_git_repository(newcomer)
+
+    response = _service(initialized).status(StatusRequest(context=GLOBAL, include_drift=True))
     assert response.drift_is_global is True
 
 
@@ -352,69 +458,42 @@ def test_drift_at_repository_scope_is_the_managed_roots_drift_and_says_so(
     # The scope narrowed the per-repository answers...
     assert [r.repository_slug for r in response.freshness.repositories] == ["python-service"]
     # ...and did not narrow the drift, which is labelled global for that reason.
-    assert response.freshness.repository_set_drifted is True
+    assert response.drift_checked is True
+    assert response.new_repositories == ("late-arrival",)
     assert response.drift_is_global is True
 
 
-def test_drift_alone_makes_the_index_not_current(
+def test_drift_does_not_change_the_in_scope_freshness_aggregate(
     initialized: Workspace, workspace_root: Path
 ) -> None:
-    """Every registered repository current, and the workspace still not current.
+    """Two differently-scoped facts, reported separately and never merged.
 
-    This is the case the combined verdict exists for, and the reason it could not
-    be left to ``freshness.state``. That field aggregates the repositories in
-    scope and is *correct* to report ``CURRENT_CLEAN`` here — each of them is. The
-    workspace is not, because the managed root holds one the index has never heard
-    of, and V1's status has always called that stale (V1_SPEC §12).
+    Every registered repository is genuinely current, so the in-scope aggregate
+    says ``CURRENT_CLEAN`` and is right to. The managed root holds one the index
+    has never heard of, so drift is reported beside it. There is deliberately no
+    single boolean folding the two together: an agent reading one would not know
+    which it had.
     """
     from tests.conftest import init_git_repository
-
-    clean = _service(initialized).status(StatusRequest(context=GLOBAL, include_drift=True))
-    assert clean.freshness.state is FreshnessState.CURRENT_CLEAN
-    assert clean.index_current is True
 
     newcomer = workspace_root / "late-arrival"
     newcomer.mkdir()
     (newcomer / "main.py").write_text("x = 1\n", encoding="utf-8")
     init_git_repository(newcomer)
 
-    drifted = _service(initialized).status(StatusRequest(context=GLOBAL, include_drift=True))
-    # Every repository in scope is still current, and the per-repository
-    # aggregate says so truthfully...
-    assert all(r.state is FreshnessState.CURRENT_CLEAN for r in drifted.freshness.repositories)
-    assert drifted.freshness.state is FreshnessState.CURRENT_CLEAN
-    # ...and the index as a whole is not.
-    assert drifted.freshness.repository_set_drifted is True
-    assert drifted.index_current is False
+    response = _service(initialized).status(StatusRequest(context=GLOBAL, include_drift=True))
+
+    assert all(r.state is FreshnessState.CURRENT_CLEAN for r in response.freshness.repositories)
+    assert response.freshness.state is FreshnessState.CURRENT_CLEAN
+    assert response.drift_detected is True
 
 
-def test_unchecked_drift_cannot_make_the_index_not_current(initialized: Workspace) -> None:
-    """Nothing looked, so nothing beyond the checked repositories is claimed."""
-    response = _service(initialized).status(StatusRequest(context=GLOBAL, include_drift=False))
-    assert response.freshness.repository_set_drifted is None
-    assert response.index_current is True
-
-
-def test_a_stale_repository_makes_the_index_not_current(
-    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The other half of the conjunction."""
-    _register(workspace)
-    _fake_git(monkeypatch, head="b" * 40)
-    response = _service(workspace).status(StatusRequest(context=GLOBAL, include_drift=False))
-    assert response.freshness.state is FreshnessState.STALE_HEAD
-    assert response.index_current is False
-
-
-def test_a_dirty_tree_makes_the_index_not_current(
-    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Content equivalence was never established, so currency is not claimed."""
-    _register(workspace, indexed_dirty=True)
-    _fake_git(monkeypatch, dirty=True)
-    response = _service(workspace).status(StatusRequest(context=GLOBAL, include_drift=False))
-    assert response.freshness.state is FreshnessState.DIRTY
-    assert response.index_current is False
+def test_a_workspace_with_no_root_reports_drift_as_unevaluated(workspace: Workspace) -> None:
+    """There is nothing to have drifted from, which is not "nothing drifted"."""
+    response = _service(workspace).status(StatusRequest(context=GLOBAL, include_drift=True))
+    assert response.root_configured is False
+    assert response.drift_checked is False
+    assert response.drift_detected is False
 
 
 # ---------------------------------------------------------------------------
@@ -593,3 +672,60 @@ def test_no_evidence_id_is_allocated_by_a_read(initialized: Workspace) -> None:
 
     assert session.ledger.entries() == ()
     assert session.ledger.available == session.ledger.capacity
+
+
+# ---------------------------------------------------------------------------
+# Schema guards
+# ---------------------------------------------------------------------------
+
+
+def test_the_status_response_has_no_index_current_field() -> None:
+    """Removed deliberately, and kept removed.
+
+    It combined the in-scope freshness aggregate with repository-set drift, which
+    are differently scoped, and it treated unchecked drift as absent drift — so a
+    call that never walked the root could report the index current. Both halves are
+    now separate structured facts.
+    """
+    assert "index_current" not in StatusResponse.model_fields
+    response = StatusResponse(
+        context=GLOBAL,
+        scope=CapabilityScope.GLOBAL,
+        freshness=IndexFreshness(depth=FreshnessDepth.LIVE, state=FreshnessState.NOT_INDEXED),
+    )
+    assert "index_current" not in response.model_dump()
+    assert "index_current" not in response.model_dump_json()
+
+
+def test_no_status_boolean_turns_an_unchecked_fact_into_a_true_one() -> None:
+    """A guard on the shape, so the next aggregate boolean is a decision.
+
+    Every boolean on the response is enumerated here. Adding one fails this test
+    until somebody states what it claims and what was actually checked to support
+    it — which is the review step the removed field skipped.
+    """
+    booleans = {
+        name for name, field in StatusResponse.model_fields.items() if field.annotation is bool
+    }
+    assert booleans == {
+        # Whether a managed root is configured. Read from settings, always known.
+        "root_configured",
+        # Whether the root was walked on this call.
+        "drift_checked",
+        # A finding, meaningful only when drift_checked.
+        "drift_detected",
+        # A statement about what the drift collections describe, not a finding.
+        "drift_is_global",
+    }
+
+
+def test_every_drift_finding_is_false_when_nothing_was_checked(initialized: Workspace) -> None:
+    """The default posture is "not evaluated", never "evaluated and clean"."""
+    response = _service(initialized).status(StatusRequest(context=GLOBAL, include_drift=False))
+    assert response.drift_checked is False
+    assert response.drift_detected is False
+    assert response.new_repositories == ()
+    assert response.missing_repositories == ()
+    assert response.relocated_repositories == ()
+    assert response.conflicting_repositories == ()
+    assert response.unreadable_paths == ()
