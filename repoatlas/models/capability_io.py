@@ -179,37 +179,63 @@ class StatusResponse(BaseModel):
     #: that is out of date.
     root_configured: bool = False
     counts: IndexCounts = IndexCounts()
-    #: The typed verdict. Callers branch on :class:`~repoatlas.models.freshness.FreshnessState`
-    #: and on the individual dimensions — never on
+    #: The typed verdict for the repositories **in scope**. Callers branch on
+    #: :class:`~repoatlas.models.freshness.FreshnessState` and on the individual
+    #: dimensions — never on
     #: :attr:`~repoatlas.models.freshness.RepositoryFreshness.detail`, which carries
     #: V1's human sentence for continuity and is deliberately less precise than the
     #: model it is rendered from.
     #:
-    #: :attr:`~repoatlas.models.freshness.IndexFreshness.state` is the aggregate of
-    #: the **repositories in scope** and nothing else — it is the worst of them. It
-    #: does not fold in repository-set drift, which is a fact about the managed root
-    #: rather than about any repository beneath it. For the combined answer, read
-    #: :attr:`index_current`.
+    #: :attr:`~repoatlas.models.freshness.IndexFreshness.state` is the worst of the
+    #: repositories in scope and nothing else. It does not fold in repository-set
+    #: drift, which is a fact about the managed root rather than about any
+    #: repository beneath it, and there is deliberately **no** aggregate boolean
+    #: combining the two. Collapsing differently-scoped facts into one convenience
+    #: flag is how a caller ends up unable to tell which of them it is reading, and
+    #: how an unchecked fact becomes an asserted one.
     freshness: IndexFreshness
-    #: Whether RepoAtlas can stand behind this index for the requested scope.
-    #:
-    #: True requires **both** halves: every repository in scope is content-verified
-    #: current, and — when drift was checked — the managed root holds no repository
-    #: the index does not know about. Published as one field because the two halves
-    #: are separately true in the case that matters: every registered repository can
-    #: be perfectly current while the workspace is not, and a caller reading only the
-    #: per-repository aggregate would call that index current. V1's ``status`` makes
-    #: the same combination, which is why its overall verdict goes to ``stale`` on
-    #: drift alone (V1_SPEC §12).
-    #:
-    #: Drift that was **not** requested cannot make this False — nothing looked, so
-    #: nothing is claimed either way beyond the repositories that were checked.
-    index_current: bool = False
     #: Most recent successful sync across the scope.
     last_sync: datetime | None = None
-    #: True when :attr:`~repoatlas.models.freshness.IndexFreshness.repository_set_drifted`
-    #: describes the whole managed root rather than the requested scope — which it
-    #: always does when drift was requested. Stated as a field rather than left to
-    #: documentation, because a repository-scoped answer carrying a global fact is
-    #: precisely the thing a caller would otherwise misattribute.
-    drift_is_global: bool = False
+    #: Whether repository-set drift was **evaluated on this call**.
+    #:
+    #: The distinction this field exists to make, and the reason the collections
+    #: below cannot carry it alone:
+    #:
+    #: * ``False`` — nothing looked. Every drift collection is empty because the
+    #:   walk did not happen, which is **not** a finding of "no drift".
+    #: * ``True`` — the managed root was walked. Empty collections now mean
+    #:   evaluated and none found.
+    #:
+    #: Same principle as ``STORED`` freshness declining to report ``CURRENT``:
+    #: "checked and absent" and "not checked" are different claims, and a model
+    #: that cannot tell them apart will be read as the stronger one. Structural
+    #: rather than a sentence, because a caller has to branch on it.
+    drift_checked: bool = False
+    #: Whether any drift was found. Meaningful only when :attr:`drift_checked`.
+    drift_detected: bool = False
+    #: The drift collections describe the **whole managed root**, at every scope.
+    #:
+    #: The root is not a property of any repository beneath it, so a
+    #: repository-scoped request that asks for drift is asking a global question.
+    #: Per-repository freshness *is* narrowed by scope; these are not, and a
+    #: response carrying both says which is which rather than leaving a global fact
+    #: to be misattributed to the one repository that was asked about.
+    drift_is_global: bool = True
+
+    #: Discovered beneath the root and not registered. The next global ``sync``
+    #: registers and indexes them.
+    new_repositories: tuple[str, ...] = ()
+    #: Registered, and the directory is gone. The next global ``sync`` retires them.
+    missing_repositories: tuple[str, ...] = ()
+    #: Registered rows found again at a new path — a moved managed root. Reported
+    #: because they count as drift: without them, :attr:`drift_detected` could be
+    #: ``True`` with every other collection empty, which is the ambiguity this
+    #: whole group exists to remove.
+    relocated_repositories: tuple[str, ...] = ()
+    #: Identities claimed by both a registered repository that still exists and a
+    #: different one beneath the root. ``sync`` cannot register these without
+    #: merging two repositories, so it names them and leaves them alone.
+    conflicting_repositories: tuple[str, ...] = ()
+    #: Directories discovery was refused. "We found nothing there" and "we were not
+    #: allowed to look" are different claims (V1_SPEC §5).
+    unreadable_paths: tuple[Path, ...] = ()
