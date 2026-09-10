@@ -1161,6 +1161,8 @@ class SqliteDependencyStore:
                 scope=_dependency_scope(source_path),
                 source_path=source_path,
                 line=record.line_start,
+                line_end=record.line_end,
+                parser=record.parser,
             )
             key = (slug or repository, record.ecosystem, record.normalized_name)
             grouped.setdefault(key, []).append(observation)
