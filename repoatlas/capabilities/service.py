@@ -57,7 +57,27 @@ from repoatlas.capabilities.budget import (
     retrieval_limits_for,
 )
 from repoatlas.capabilities.context import resolve_context, to_repository_context
-from repoatlas.capabilities.errors import IndexInconsistencyError, ServiceClosedError
+from repoatlas.capabilities.errors import (
+    EntityAmbiguousError,
+    EntityNotFoundError,
+    EntityNotInspectableError,
+    EvidenceNotFoundError,
+    FileNotIndexedError,
+    IndexChangedError,
+    IndexInconsistencyError,
+    InvestigationRequiredError,
+    ServiceClosedError,
+    TargetOutOfScopeError,
+)
+from repoatlas.capabilities.inspection import (
+    WHOLE_FILE_END,
+    ShapedInspection,
+    clamp,
+    indexed_line_map,
+    pad,
+    shape_inspection,
+    worktree_line_map,
+)
 from repoatlas.capabilities.search import ShapedEvidence, ShapingResult, shape_candidates
 from repoatlas.capabilities.session import (
     DEFAULT_IDLE_TTL_SECONDS,
@@ -66,7 +86,9 @@ from repoatlas.capabilities.session import (
     SessionRegistry,
 )
 from repoatlas.config.settings import Settings
+from repoatlas.containment import RepositoryBoundary
 from repoatlas.discovery.reconcile import RepositorySetPlan
+from repoatlas.errors import ContextFailure, ContextResolutionError
 from repoatlas.freshness import index_freshness
 from repoatlas.indexing.chunking import chunk_hash
 from repoatlas.models.capability import AppliedBudget, CapabilityScope, ContextResolution
@@ -81,10 +103,22 @@ from repoatlas.models.capability_io import (
     StatusRequest,
     StatusResponse,
 )
+from repoatlas.models.evidence import EvidenceSource, EvidenceTier, MatchClass
 from repoatlas.models.freshness import FreshnessDepth
+from repoatlas.models.inspection import (
+    Coverage,
+    InspectedFile,
+    InspectionSource,
+    InspectRequest,
+    InspectResponse,
+    InspectTargetKind,
+    LineRange,
+)
 from repoatlas.models.investigation import (
     DEFAULT_LEDGER_CAPACITY,
     EvidenceRef,
+    EvidenceStatus,
+    IndexedEvidenceState,
     LedgerEntry,
     ProposedEvidence,
 )
@@ -98,12 +132,78 @@ from repoatlas.services.freshness_service import (
     repository_set_drift,
 )
 from repoatlas.services.workspace import Workspace, open_workspace
+from repoatlas.sync.engine import BINARY_SNIFF_BYTES
+from repoatlas.sync.scanner import hash_bytes
 
 #: Key prefix whose identities embed a source position, and therefore stop
 #: resolving when the definition moves. Every other prefix — ``env:``, ``module:``,
 #: ``pkg:``, ``file:``, ``repo:``, ``cmd:``, ``cfgkey:`` — names something interned
 #: by identity rather than by location, so those handles survive a sync.
 _POSITIONAL_KEY_PREFIX = "sym:"
+
+#: How many times an inspection re-reads a file whose indexed state moved
+#: underneath it. Small, because a second disagreement means a sync is actively
+#: running rather than that one landed at an unlucky moment, and retrying past
+#: that is waiting rather than reading.
+_SNAPSHOT_ATTEMPTS = 3
+
+
+@dataclass(frozen=True, slots=True)
+class _InspectTarget:
+    """One resolved inspection target: which file, which lines, why."""
+
+    repository: Repository
+    path: str
+    #: The range the target itself implies, before context lines. ``None`` means
+    #: the target names a file rather than a place in one.
+    base: LineRange | None
+    #: For an evidence target, that evidence's status after revalidation.
+    evidence_status: EvidenceStatus | None
+    match: MatchClass
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class _InspectedSource:
+    """The one source an inspection chose, and what it can prove."""
+
+    state: FileState
+    #: Source line number to that line's text. A line is present only if some
+    #: text demonstrably contained it.
+    available: dict[int, str]
+    line_count: int | None
+    source: InspectionSource
+    worktree_matches_index: bool | None
+    requested: LineRange | None
+
+
+def _snapshot_key(state: FileState) -> tuple[int, str, str]:
+    """What must not change between reading a file's text and its metadata."""
+    return (state.file_id, state.content_hash, state.parser_version)
+
+
+def _index_path(raw: str) -> str:
+    """A path in the spelling the index stores, or a refusal.
+
+    Normalizes separators and drops redundant segments so that ``./src/config.py``
+    finds the row ``src/config.py`` has. It resolves nothing and follows nothing:
+    a ``..`` segment is refused rather than collapsed, because collapsing it would
+    turn a path that climbs out of the repository into a plausible one inside it.
+    """
+    candidate = raw.replace("\\", "/").strip()
+    if candidate.startswith("/"):
+        raise FileNotIndexedError()
+    parts = [part for part in candidate.split("/") if part not in ("", ".")]
+    if not parts or any(part == ".." for part in parts):
+        raise FileNotIndexedError()
+    return "/".join(parts)
+
+
+def _whole_or_clamped(padded: LineRange | None, line_count: int) -> LineRange | None:
+    """The range to supply from a file whose true length is known."""
+    if padded is not None:
+        return clamp(padded, line_count)
+    return LineRange(start=1, end=line_count) if line_count >= 1 else None
 
 
 class CapabilityService:
@@ -383,6 +483,82 @@ class CapabilityService:
                 facts=facts,
             )
 
+    def inspect(self, request: InspectRequest) -> InspectResponse:
+        """Show source RepoAtlas already indexed, and record every line of it.
+
+        Progressive disclosure over trusted evidence, and deliberately **not** a
+        file reader. Every target names something the index already admitted, and
+        the admission gate is a ``files`` row: a path with no row is refused
+        before any repository is touched, whether it is a secret, an exclusion, a
+        file added since the last sync, an attempt to climb out of the repository
+        or nothing at all. They are one answer on purpose — telling them apart
+        would turn a containment boundary into a way to probe the filesystem.
+
+        Nothing is searched. Paths and entity keys resolve exactly, an evidence id
+        resolves inside the investigation that issued it, and no retrieval stage
+        runs, so there is no ranking here and nothing to rank.
+        """
+        with self._operation():
+            registered = self._workspace.repositories.list_all()
+            # Before any investigation exists, so a rejected context or a target
+            # that cannot be named leaves no session behind.
+            resolution = resolve_context(request.context, registered)
+            applied = apply_budget_policy(
+                request.budget, self._workspace.settings, ceiling=self._budget_ceiling
+            )
+
+            if (
+                request.target.kind is InspectTargetKind.EVIDENCE
+                and request.investigation_id is None
+            ):
+                # Raised before a session could be minted, because minting one and
+                # then failing to find E7 in it would report a fresh, empty ledger
+                # as though the id had been wrong.
+                raise InvestigationRequiredError()
+
+            existing = request.investigation_id is not None
+            session = (
+                self._sessions.get(request.investigation_id)
+                if request.investigation_id is not None
+                else self._sessions.create()
+            )
+
+            try:
+                target = self._resolve_inspect_target(request, resolution, registered, session)
+                source = self._inspect_source(target, request)
+                shaped = (
+                    shape_inspection(source.available, source.requested, applied)
+                    if source.requested is not None
+                    else ShapedInspection(
+                        segments=[], returned=(), budget_omitted=(), unavailable=()
+                    )
+                )
+                proposed = self._propose_segments(target, source, shaped)
+                # The single atomic point. A capacity refusal raises here having
+                # allocated nothing and strengthened nothing.
+                entries = session.ledger.record(proposed)
+            except BaseException:
+                # A session this call invented, which never got to hold anything,
+                # is not left behind as a ghost an agent could be handed the id of.
+                # One the caller already owned is untouched — including the
+                # revalidation an evidence target legitimately performed on it,
+                # which observed the index rather than changing the evidence.
+                if not existing and len(session.ledger) == 0:
+                    self._sessions.drop(session.id)
+                raise
+
+            return self._inspect_response(
+                request=request,
+                resolution=resolution,
+                session=session,
+                target=target,
+                source=source,
+                shaped=shaped,
+                entries=entries,
+                proposed=proposed,
+                applied=applied,
+            )
+
     # -- internals ----------------------------------------------------------
 
     @contextmanager
@@ -645,6 +821,429 @@ class CapabilityService:
             indexed_files=self._workspace.files.count(repo_ids),
             symbols=self._workspace.knowledge.count_entities(repo_ids),
             relationships=self._workspace.knowledge.count_edges(repo_ids),
+        )
+
+    # -- inspection internals -----------------------------------------------
+
+    def _resolve_inspect_target(
+        self,
+        request: InspectRequest,
+        resolution: ContextResolution,
+        registered: list[Repository],
+        session: InvestigationSession,
+    ) -> _InspectTarget:
+        """Turn one of the three target forms into a repository, a path and a range.
+
+        Each form resolves **exactly**. A path is looked up as itself, an entity
+        key as itself, and an evidence id inside the investigation that issued it.
+        None of them falls back to a search, because a fallback would answer about
+        something the caller did not name while looking exactly like the case
+        where it did.
+        """
+        target = request.target
+        in_scope = {repo.slug for repo in resolution.repositories}
+
+        if target.kind is InspectTargetKind.PATH:
+            assert target.path is not None
+            if resolution.scope is not CapabilityScope.REPOSITORY:
+                # A repository-relative path is ambiguous across a managed root by
+                # definition, and searching every repository for one would be a
+                # path search with a single winner picked by luck. V1's own
+                # vocabulary for "you named something that identifies more than
+                # one repository" applies unchanged.
+                raise ContextResolutionError(
+                    "a repository-relative path needs a repository scope",
+                    detail="Name the repository this path belongs to.",
+                    reason=ContextFailure.AMBIGUOUS,
+                    candidates=tuple(sorted(in_scope)),
+                )
+            repo = resolution.repositories[0]
+            return _InspectTarget(
+                repository=repo,
+                path=_index_path(target.path),
+                base=None,
+                evidence_status=None,
+                match=MatchClass.EXACT_PATH,
+                reason=f"inspected {repo.slug}/{_index_path(target.path)}",
+            )
+
+        if target.kind is InspectTargetKind.ENTITY:
+            assert target.entity_key is not None
+            return self._resolve_entity_target(target.entity_key, registered, in_scope)
+
+        assert target.evidence_id is not None
+        return self._resolve_evidence_target(target.evidence_id, session, registered, in_scope)
+
+    def _resolve_entity_target(
+        self, key: str, registered: list[Repository], in_scope: set[str]
+    ) -> _InspectTarget:
+        """One exact natural key, or a refusal.
+
+        The lookup is key-only. Resolving through a name search would answer with
+        whatever happens to share the name — which for a ``sym:`` key whose
+        definition has moved means confidently describing a different definition
+        than the one the caller held a handle to.
+        """
+        identities = self._workspace.knowledge.get_entities_by_key([key])
+        if not identities:
+            raise EntityNotFoundError()
+        if len(identities) > 1:
+            # The schema enforces key uniqueness only for interned entities, so
+            # this is possible rather than hypothetical. Returned, never decided.
+            raise EntityAmbiguousError(
+                candidates=tuple(
+                    sorted(
+                        f"{identity.repository_slug or ''}/{identity.path or ''}"
+                        for identity in identities
+                    )
+                )
+            )
+        identity = identities[0]
+        if identity.repository_slug is None or identity.path is None:
+            # Interned: an environment variable, a module name, a package. Real,
+            # referenced by files, defined in none of them.
+            raise EntityNotInspectableError()
+
+        repo = next((r for r in registered if r.slug == identity.repository_slug), None)
+        if repo is None:
+            raise FileNotIndexedError()
+        if repo.slug not in in_scope:
+            raise TargetOutOfScopeError()
+
+        base = (
+            LineRange(start=identity.line_start, end=identity.line_end)
+            if identity.line_start is not None
+            and identity.line_end is not None
+            and identity.line_end >= identity.line_start
+            else None
+        )
+        return _InspectTarget(
+            repository=repo,
+            path=_index_path(identity.path),
+            base=base,
+            evidence_status=None,
+            match=MatchClass.EXACT_NAME,
+            reason=f"inspected the source of {key}",
+        )
+
+    def _resolve_evidence_target(
+        self,
+        evidence_id: str,
+        session: InvestigationSession,
+        registered: list[Repository],
+        in_scope: set[str],
+    ) -> _InspectTarget:
+        """The coordinates one evidence id referred to, as they stand **now**.
+
+        An evidence id is not a handle on historical bytes. The ledger keeps a
+        digest and a reference, never text, so ``E7`` names a place and the bytes
+        that were once there — and inspecting it means inspecting what the index
+        holds at that place today. Revalidation happens first so the caller is
+        told which of those two it is getting.
+
+        A ``STALE`` or ``SUPERSEDED`` target is inspected rather than refused:
+        widening from coordinates that have moved on is a legitimate and common
+        thing to want. What must not happen is ``E7`` quietly coming to mean the
+        new bytes, so the current text is supplied under its own new ids and
+        ``E7`` keeps its identity, its digest and its status.
+        """
+        if session.ledger.get(evidence_id) is None:
+            raise EvidenceNotFoundError()
+
+        # Against a snapshot of every file the ledger refers to, not just this
+        # one: a partial snapshot would mark every other entry UNVERIFIED, which
+        # is a claim about evidence this call never looked at.
+        session.ledger.revalidate(self._ledger_snapshot(session, registered))
+        entry = session.ledger.get(evidence_id)
+        assert entry is not None
+
+        if entry.status is EvidenceStatus.INVALID:
+            # No file stands at those coordinates any more. There is deliberately
+            # no search for a moved or similarly named file: evidence is attributed
+            # to an identity and a path, and a different file is a different thing.
+            raise FileNotIndexedError()
+
+        repo = next((r for r in registered if r.slug == entry.ref.repository_slug), None)
+        if repo is None:
+            raise FileNotIndexedError()
+        if repo.slug not in in_scope:
+            raise TargetOutOfScopeError()
+
+        base = (
+            LineRange(start=entry.ref.line_start, end=entry.ref.line_end)
+            if entry.ref.line_start is not None and entry.ref.line_end is not None
+            else None
+        )
+        return _InspectTarget(
+            repository=repo,
+            path=entry.ref.path,
+            base=base,
+            evidence_status=entry.status,
+            match=MatchClass.EXACT_PATH,
+            reason=f"inspected indexed context around {evidence_id}",
+        )
+
+    def _ledger_snapshot(
+        self, session: InvestigationSession, registered: list[Repository]
+    ) -> dict[tuple[str, str], IndexedEvidenceState]:
+        """Current indexed state for every file this investigation cites."""
+        by_slug = {repo.slug: repo for repo in registered}
+        wanted: dict[str, set[str]] = {}
+        for entry in session.ledger.entries():
+            wanted.setdefault(entry.ref.repository_slug, set()).add(entry.ref.path)
+
+        snapshot: dict[tuple[str, str], IndexedEvidenceState] = {}
+        for slug, paths in wanted.items():
+            repo = by_slug.get(slug)
+            states: dict[str, FileState] = {}
+            if repo is not None and repo.id is not None:
+                states = self._workspace.files.states_for(repo.id, sorted(paths))
+            for path in paths:
+                state = states.get(path)
+                snapshot[(slug, path)] = IndexedEvidenceState(
+                    repository_slug=slug,
+                    path=path,
+                    exists=state is not None,
+                    content_hash=state.content_hash if state else "",
+                    parser_version=state.parser_version if state else "",
+                )
+        return snapshot
+
+    def _inspect_source(self, target: _InspectTarget, request: InspectRequest) -> _InspectedSource:
+        """Choose one source for this file, and prove the choice.
+
+        The order is fixed and each step is a gate rather than a preference:
+
+        1. the **indexed file row**. No row, no inspection — this is the admission
+           boundary, and it is consulted before any repository file is opened;
+        2. the **verified working tree**, only when the caller allowed it and only
+           when the bytes read hash equal to the indexed content hash. A mismatch
+           is not a reason to prefer live data; it is the end of that option, and
+           not one of those bytes is decoded, measured, previewed or described;
+        3. the **indexed chunks** — what RepoAtlas actually searched.
+
+        One source per inspection, never a blend. Splicing verified lines from the
+        working tree together with indexed lines from before the last edit would
+        return a file state that existed neither on disk nor in the index, with
+        every line of it looking equally trustworthy.
+        """
+        for _ in range(_SNAPSHOT_ATTEMPTS):
+            state = self._indexed_file(target.repository, target.path)
+            padded = pad(target.base, request.context_lines) if target.base else None
+            if request.explicit_range is not None:
+                padded = pad(request.explicit_range, request.context_lines)
+
+            worktree_text: str | None = None
+            matches: bool | None = None
+            if request.allow_worktree:
+                worktree_text, matches = self._verified_worktree_text(target, state)
+
+            if worktree_text is not None:
+                # Text and snapshot are coherent by construction rather than by
+                # timing: these exact bytes hashed to this exact row's content
+                # hash, and the parser version came from that same row read. A
+                # sync landing after this point makes the evidence stale, which is
+                # what revalidation is for — it cannot make it self-contradictory.
+                available = worktree_line_map(worktree_text)
+                line_count = len(available)
+                return _InspectedSource(
+                    state=state,
+                    available=available,
+                    line_count=line_count,
+                    source=InspectionSource.VERIFIED_WORKTREE,
+                    worktree_matches_index=matches,
+                    requested=_whole_or_clamped(padded, line_count),
+                )
+
+            chunks = self._workspace.knowledge.chunks_for_file(
+                state.file_id,
+                padded.start if padded else 1,
+                padded.end if padded else WHOLE_FILE_END,
+            )
+            confirm = self._indexed_file(target.repository, target.path)
+            if _snapshot_key(confirm) != _snapshot_key(state):
+                # Another process reindexed this file between the two reads, so
+                # the chunks in hand belong to one generation and the hash and
+                # parser version to another. Pairing them would produce evidence
+                # describing a snapshot that never existed — and it would
+                # revalidate cleanly, because its own hash would match. Read again.
+                continue
+
+            available = indexed_line_map(chunks)
+            return _InspectedSource(
+                state=state,
+                available=available,
+                # Chunks establish which lines exist, never how many the file has:
+                # a span with no text is not stored, and the last stored line is
+                # not the last line.
+                line_count=None,
+                source=InspectionSource.INDEXED_CHUNKS,
+                worktree_matches_index=matches,
+                requested=padded
+                if padded
+                else (LineRange(start=1, end=max(available)) if available else None),
+            )
+        raise IndexChangedError()
+
+    def _indexed_file(self, repo: Repository, path: str) -> FileState:
+        """The exact ``files`` row, or the one refusal every unindexed path gets."""
+        if repo.id is None:
+            raise FileNotIndexedError()
+        state = self._workspace.files.states_for(repo.id, [path]).get(path)
+        if state is None:
+            raise FileNotIndexedError()
+        return state
+
+    def _verified_worktree_text(
+        self, target: _InspectTarget, state: FileState
+    ) -> tuple[str | None, bool | None]:
+        """Working-tree text, only if it is provably the indexed bytes.
+
+        Returns the text and whether the comparison was made and passed. ``None``
+        for the flag means it was not made at all — the file could not be read
+        within the boundary, or was too large, or changed mid-read — which is a
+        different fact from a mismatch and is reported as one.
+
+        Read once through the containment boundary, hashed with the primitive that
+        produced ``files.content_hash``, and sliced from those same bytes. There is
+        no stat, no size comparison and no Git dirty flag anywhere in this path:
+        each of those is a hint about whether content changed, and a hint is not
+        the proof that lets live text be cited against an indexed snapshot. Reading
+        twice would be worse still, since the bytes returned would not be the bytes
+        that were hashed.
+        """
+        boundary = RepositoryBoundary(target.repository.path)
+        found = boundary.read_content(
+            target.path, max_bytes=self._workspace.settings.indexing.max_file_bytes
+        )
+        if not found.ok or found.data is None:
+            return (None, None)
+
+        raw = found.data
+        if hash_bytes(raw) != state.content_hash:
+            # The one branch that matters most. Nothing derived from these bytes
+            # leaves this method — not a line, not a count, not a length.
+            return (None, False)
+        if b"\x00" in raw[:BINARY_SNIFF_BYTES]:
+            # The identical predicate the indexer applied to these identical
+            # bytes, so the verdict is the same one: no text was stored for this
+            # file, and inventing line numbers for it here would contradict the
+            # index rather than extend it.
+            return (None, True)
+        try:
+            return (raw.decode("utf-8"), True)
+        except UnicodeDecodeError:
+            # Indexing reached the same conclusion about the same bytes and stored
+            # no facts. Inspect does not get its own decoder.
+            return (None, True)
+
+    def _propose_segments(
+        self, target: _InspectTarget, source: _InspectedSource, shaped: ShapedInspection
+    ) -> list[ProposedEvidence]:
+        """The exact batch the ledger will record, built from the returned text."""
+        return [
+            ProposedEvidence(
+                ref=EvidenceRef(
+                    repository_slug=target.repository.slug,
+                    path=target.path,
+                    line_start=segment.line_start,
+                    line_end=segment.line_end,
+                    # Over exactly the characters the caller receives, so a
+                    # truncated segment is recognisably a different supply from
+                    # the whole one.
+                    span_digest=chunk_hash(segment.text),
+                    file_content_hash=source.state.content_hash,
+                    # The version behind *this file's* stored facts, which is the
+                    # snapshot the text was taken from.
+                    indexed_facts_version=source.state.parser_version,
+                ),
+                repository_name=target.repository.name,
+                # Addressed, not guessed at. Inspection reads what the caller
+                # named; there is no similarity anywhere in this path.
+                tier=EvidenceTier.DETERMINISTIC,
+                match=target.match,
+                origin=EvidenceSource.INSPECT,
+                reason=target.reason,
+                text_length=len(segment.text),
+            )
+            for segment in shaped.segments
+        ]
+
+    def _inspect_response(
+        self,
+        *,
+        request: InspectRequest,
+        resolution: ContextResolution,
+        session: InvestigationSession,
+        target: _InspectTarget,
+        source: _InspectedSource,
+        shaped: ShapedInspection,
+        entries: tuple[LedgerEntry, ...],
+        proposed: list[ProposedEvidence],
+        applied: AppliedBudget,
+    ) -> InspectResponse:
+        """Assemble the response from **this** inspection and the new ids."""
+        segments = [
+            EvidenceItem(
+                id=entry.id,
+                # Source order, and nothing more. Inspection searched for nothing,
+                # so there is no relevance here for a rank to express.
+                rank=rank,
+                ref=item_ref,
+                repository_name=target.repository.name,
+                location=item_ref.location,
+                text=piece.text,
+                truncated=piece.truncated,
+                why=target.reason,
+                tier=EvidenceTier.DETERMINISTIC,
+                match=target.match,
+                status=entry.status,
+            )
+            for rank, (piece, entry, item_ref) in enumerate(
+                ((s, e, p.ref) for s, e, p in zip(shaped.segments, entries, proposed, strict=True)),
+                start=1,
+            )
+        ]
+
+        facts = current_facts_version(self._workspace)
+        freshness = index_freshness(
+            [
+                repository_freshness_for(self._workspace, repo, depth=request.depth, facts=facts)
+                for repo in resolution.repositories
+            ],
+            depth=request.depth,
+        )
+        return InspectResponse(
+            investigation_id=session.id,
+            context=ContextView(
+                context=request.context,
+                scope=resolution.scope,
+                repositories=tuple(sorted(repo.slug for repo in resolution.repositories)),
+                primary=resolution.primary.slug if resolution.primary else None,
+                reason=resolution.reason,
+            ),
+            target=request.target,
+            target_evidence_status=target.evidence_status,
+            file=InspectedFile(
+                repository_slug=target.repository.slug,
+                path=target.path,
+                size=source.state.size,
+                indexed_content_hash=source.state.content_hash,
+                indexed_facts_version=source.state.parser_version,
+                line_count=source.line_count,
+            ),
+            segments=tuple(segments),
+            coverage=Coverage(
+                requested=source.requested,
+                returned=shaped.returned,
+                unavailable=shaped.unavailable,
+                budget_omitted=shaped.budget_omitted,
+                source=source.source,
+                worktree_matches_index=source.worktree_matches_index,
+            ),
+            freshness=freshness,
+            budget=applied,
+            ledger=session.ledger.summary(),
         )
 
 
