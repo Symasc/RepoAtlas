@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from repoatlas.discovery.reconcile import plan_repository_set
+from repoatlas.discovery.reconcile import RepositorySetPlan, plan_repository_set
 from repoatlas.freshness import index_freshness, repository_freshness
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness, RepositoryFreshness
 from repoatlas.models.repository import Repository
@@ -70,6 +70,30 @@ def repository_freshness_for(
     return repository_freshness(repo, outdated_files=outdated, live=live)
 
 
+def repository_set_drift(workspace: Workspace) -> RepositorySetPlan | None:
+    """Re-derive what the managed root contains, against what is registered.
+
+    **Reads only.** Detection, never reconciliation: it says the registered set no
+    longer describes the root and names what changed, and ``sync`` is the only
+    thing that acts on it. Registering here would make "has anything changed?" a
+    mutating question (V1_SPEC §4).
+
+    ``None`` when no root is configured — there is nothing to have drifted from,
+    which is a different answer from "nothing drifted".
+
+    Costs a full discovery walk of the managed root, which is the only part of
+    freshness whose price grows with the tree rather than with the scope. That is
+    why it is a separate call from depth rather than a deeper setting of it.
+    """
+    if workspace.root is None:
+        return None
+    return plan_repository_set(
+        workspace.root,
+        workspace.settings.discovery,
+        workspace.repositories.list_all(),
+    )
+
+
 def index_freshness_for(
     workspace: Workspace,
     repositories: Sequence[Repository],
@@ -92,12 +116,9 @@ def index_freshness_for(
     ]
 
     drifted: bool | None = None
-    if include_repository_set_drift and workspace.root is not None:
-        plan = plan_repository_set(
-            workspace.root,
-            workspace.settings.discovery,
-            workspace.repositories.list_all(),
-        )
-        drifted = plan.drifted
+    if include_repository_set_drift:
+        plan = repository_set_drift(workspace)
+        if plan is not None:
+            drifted = plan.drifted
 
     return index_freshness(per_repo, depth=depth, repository_set_drifted=drifted)
