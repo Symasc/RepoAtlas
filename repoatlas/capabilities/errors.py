@@ -232,6 +232,67 @@ class InvalidRelationshipRequestError(RepoAtlasError):
         self.edge_types = edge_types
 
 
+class InvalidDependencyRequestError(RepoAtlasError):
+    """The dependency request is malformed in a way the model could not express."""
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(
+        self,
+        message: str = "that dependency request is malformed",
+        *,
+        detail: str | None = None,
+        field: str = "",
+    ) -> None:
+        super().__init__(message, detail=detail)
+        self.field = field
+
+
+class InvalidCursorError(RepoAtlasError):
+    """The continuation token is unreadable, or was made for another question.
+
+    Refused rather than reinterpreted. A cursor names a position in one ordered
+    filtered dataset; honouring it against a different one would slice a set it
+    never described, silently skipping some packages and repeating others. A page
+    that is quietly wrong is worse than a page that is refused, because nothing
+    about it looks wrong.
+    """
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(
+        self,
+        message: str = "that dependency cursor does not belong to this request",
+        *,
+        detail: str | None = (
+            "Cursors are issued by the server and are only valid for the request "
+            "that produced them. Start again without a cursor."
+        ),
+    ) -> None:
+        super().__init__(message, detail=detail)
+
+
+class StaleCursorError(RepoAtlasError):
+    """The index moved between two pages of one walk.
+
+    Distinct from an invalid cursor, and the distinction is what a caller acts on:
+    nothing was asked wrongly, the repositories simply changed underneath. The
+    alternative is to continue against a different inventory and return a result
+    assembled from two generations — which no single state of the index ever held,
+    and which would look exactly like a complete answer.
+    """
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(
+        self,
+        message: str = "the dependency inventory changed since that page was issued",
+        *,
+        detail: str | None = "Request the first page again to walk the current index.",
+    ) -> None:
+        super().__init__(message, detail=detail)
+
+
 class TargetOutOfScopeError(RepoAtlasError):
     """The target resolved, in a repository this call's context excludes.
 
@@ -360,6 +421,19 @@ def capability_error(exc: Exception) -> CapabilityError:
             category=ErrorCategory.INVALID_REQUEST,
             context={"edge_types": list(exc.edge_types)} if exc.edge_types else None,
         )
+    if isinstance(exc, InvalidDependencyRequestError):
+        return _from_repoatlas(
+            exc,
+            code="INVALID_DEPENDENCY_REQUEST",
+            category=ErrorCategory.INVALID_REQUEST,
+            context={"field": exc.field} if exc.field else None,
+        )
+    if isinstance(exc, InvalidCursorError):
+        return _from_repoatlas(exc, code="INVALID_CURSOR", category=ErrorCategory.INVALID_REQUEST)
+    if isinstance(exc, StaleCursorError):
+        # Not retryable: the identical call carries the identical stale token and
+        # fails identically. The remedy is a new walk, which the detail names.
+        return _from_repoatlas(exc, code="STALE_CURSOR", category=ErrorCategory.SESSION)
     if isinstance(exc, TargetOutOfScopeError):
         return _from_repoatlas(exc, code="TARGET_OUT_OF_SCOPE", category=ErrorCategory.CONTEXT)
     if isinstance(exc, InvestigationRequiredError):

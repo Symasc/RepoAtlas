@@ -299,12 +299,13 @@ def test_the_public_callable_surface_is_only_the_intended_operations() -> None:
         "search",
         "inspect",
         "relationships",
+        "dependencies",
     }
 
 
 def test_no_future_capability_exists_as_a_stub() -> None:
     """A stub is worse than an absence: a caller cannot tell it from an empty result."""
-    for name in ("dependencies", "verify_grounding", "sync"):
+    for name in ("verify_grounding", "sync"):
         assert not hasattr(CapabilityService, name), f"{name} exists before its slice"
 
 

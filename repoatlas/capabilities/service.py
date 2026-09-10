@@ -57,6 +57,22 @@ from repoatlas.capabilities.budget import (
     retrieval_limits_for,
 )
 from repoatlas.capabilities.context import resolve_context, to_repository_context
+from repoatlas.capabilities.dependencies import (
+    ProviderCandidate,
+    admitted_roles,
+    declares_package,
+    encode_cursor,
+    inventory_digest,
+    package_key,
+    page_limits_for,
+    provider_index,
+    provider_resolution,
+    request_digest,
+    resume,
+    selects,
+    store_slug,
+    validate_dependency_request,
+)
 from repoatlas.capabilities.errors import (
     EntityAmbiguousError,
     EntityNotFoundError,
@@ -118,6 +134,16 @@ from repoatlas.models.capability_io import (
     StatusRequest,
     StatusResponse,
 )
+from repoatlas.models.dependencies import DependencyObservation
+from repoatlas.models.dependency_inventory import (
+    AppliedPageLimits,
+    DependenciesRequest,
+    DependenciesResponse,
+    DependencyObservationView,
+    DependencyPackageView,
+    DependencyProvenance,
+    ProviderView,
+)
 from repoatlas.models.evidence import EvidenceSource, EvidenceTier, MatchClass
 from repoatlas.models.freshness import FreshnessDepth
 from repoatlas.models.inspection import (
@@ -167,6 +193,22 @@ from repoatlas.sync.scanner import hash_bytes
 #: running rather than that one landed at an unlucky moment, and retrying past
 #: that is waiting rather than reading.
 _SNAPSHOT_ATTEMPTS = 3
+
+
+@dataclass(frozen=True, slots=True)
+class _DependencyPage:
+    """One cut of the ordered dependency inventory, with what the cursor needs.
+
+    The two digests travel with the page because they describe the dataset it was
+    cut from: one says which question produced it, the other which inventory. A
+    continuation token assembled from anything else would be a promise the next
+    call could not check.
+    """
+
+    packages: list[DependencyPackageView]
+    has_more: bool
+    identity: str
+    inventory: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -704,6 +746,382 @@ class CapabilityService:
                 truncated=truncated,
                 limits=limits,
             )
+
+    def dependencies(self, request: DependenciesRequest) -> DependenciesResponse:
+        """What the index records about declared, resolved and provided packages.
+
+        A projection of what manifests and lockfiles say, and nothing more. Every
+        row here was parsed out of a file in the indexed snapshot; none of it was
+        resolved, installed or executed, and no registry was consulted. That is
+        why a package's observations are returned whole rather than reduced to a
+        version: two repositories declaring one package with two constraints are
+        making two true statements, and the single answer a caller might prefer
+        would be one nobody wrote.
+
+        Three things are deliberately kept apart. A **declaration** asks for a
+        version and a **resolution** records one a resolver once chose; neither is
+        evidence that anything is installed. A **provider candidate** is a
+        repository publishing a name, which is knowledge about names rather than
+        about what a build would pick — so when two repositories publish one name,
+        both are returned and neither is chosen. And an observation's
+        **provenance** is always available, while its **source text** is citable
+        only when the indexed snapshot could supply it.
+        """
+        with self._operation():
+            registered = self._workspace.repositories.list_all()
+            # Before any investigation exists, so a rejected context or a
+            # malformed request leaves no session behind.
+            resolution = resolve_context(request.context, registered)
+            validate_dependency_request(request)
+            limits = page_limits_for(request)
+
+            existing = request.investigation_id is not None
+            session = (
+                self._sessions.get(request.investigation_id)
+                if request.investigation_id is not None
+                else self._sessions.create()
+            )
+
+            try:
+                # The dependency rows, the provider rows behind them, the file
+                # states their provenance names and the chunks that quote it are
+                # one indexed snapshot or they are nothing. Read separately, a sync
+                # landing mid-call could pair a constraint from before it with a
+                # lockfile location from after, and the result would look exactly
+                # like a fact.
+                with self._workspace.database.read_snapshot():
+                    views, page, supplies = self._dependency_page(request, resolution, limits)
+                # The single atomic point. A capacity refusal raises here having
+                # allocated nothing and strengthened nothing.
+                entries = session.ledger.record([supply.proposed for supply in supplies])
+            except BaseException:
+                # A session this call invented, which never got to hold anything,
+                # is not left behind as a ghost an agent could be handed the id of.
+                # One the caller already owned is untouched.
+                if not existing and len(session.ledger) == 0:
+                    self._sessions.drop(session.id)
+                raise
+
+            return self._dependencies_response(
+                request=request,
+                resolution=resolution,
+                session=session,
+                views=views,
+                page=page,
+                supplies=supplies,
+                entries=entries,
+                limits=limits,
+            )
+
+    # -- dependencies internals ---------------------------------------------
+
+    def _dependency_page(
+        self,
+        request: DependenciesRequest,
+        resolution: ContextResolution,
+        limits: AppliedPageLimits,
+    ) -> tuple[list[DependencyPackageView], _DependencyPage, list[ProvenanceSupply]]:
+        """Build the whole ordered dataset, then cut one page out of it.
+
+        The whole dataset first, deliberately. ``has_more`` is then something
+        observed rather than inferred from a full page, the cursor's digest
+        describes the set it was actually cut from, and the page is a prefix of an
+        order settled before anything was fetched.
+
+        The inventory is read once and globally. Scope narrows what is *returned*;
+        it must not narrow what is *known*, because who publishes a package name is
+        a fact about the managed root and a provider set assembled from a filtered
+        view would report uniqueness the index never established.
+        """
+        stored = self._workspace.dependencies.list_packages(None)
+        providers = provider_index(stored) if request.include_providers else {}
+        in_scope = {repo.slug for repo in resolution.repositories}
+        roles = set(admitted_roles(request))
+
+        views: list[DependencyPackageView] = []
+        for package in stored:
+            slug = store_slug(package)
+            if slug not in in_scope or not selects(package, request):
+                continue
+            observations = [
+                self._dependency_observation(slug, observation)
+                for observation in package.observations
+                if observation.role in roles
+            ]
+            if not observations:
+                # Every stored fact about this package was filtered out, so the
+                # package is not in this answer at all. Returning it empty would
+                # claim RepoAtlas knows a package it was not asked about.
+                continue
+            candidates = providers.get((package.ecosystem, package.normalized_name), [])
+            views.append(
+                DependencyPackageView(
+                    repository_slug=slug,
+                    repository_name=package.repository,
+                    ecosystem=package.ecosystem,
+                    name=package.name,
+                    normalized_name=package.normalized_name,
+                    observations=tuple(observations),
+                    providers=tuple(self._provider_view(candidate) for candidate in candidates),
+                    provider_resolution=provider_resolution(
+                        package.ecosystem,
+                        slug,
+                        candidates,
+                        declares=declares_package(package),
+                    ),
+                )
+            )
+
+        identity = request_digest(request, sorted(in_scope))
+        inventory = inventory_digest(views)
+        start = resume(views, request.cursor, request=identity, inventory=inventory)
+        stop = start + limits.applied
+        page = views[start:stop]
+        supplies = self._dependency_supplies(page) if request.include_provenance else []
+        return (
+            views,
+            _DependencyPage(
+                packages=page,
+                has_more=stop < len(views),
+                identity=identity,
+                inventory=inventory,
+            ),
+            supplies,
+        )
+
+    @staticmethod
+    def _dependency_observation(
+        slug: str, observation: DependencyObservation
+    ) -> DependencyObservationView:
+        """One stored fact, with the provenance the row carries and no citation yet.
+
+        ``citable`` stays false here and is set only once text has actually been
+        supplied and recorded. Provenance metadata exists for every dependency row;
+        its presence is not a claim that anything is quotable.
+        """
+        return DependencyObservationView(
+            repository_slug=slug,
+            role=observation.role,
+            value=observation.value,
+            group=observation.group,
+            scope=observation.scope,
+            provenance=DependencyProvenance(
+                repository_slug=slug,
+                path=observation.source_path,
+                line_start=observation.line,
+                line_end=observation.line_end,
+                parser=observation.parser,
+                citable=False,
+            ),
+        )
+
+    @staticmethod
+    def _provider_view(candidate: ProviderCandidate) -> ProviderView:
+        """One publishing repository, located by its own manifest line.
+
+        The provenance is the *provision's*: the line in the provider's manifest
+        that publishes the name. Never the declaration that went looking for it —
+        those are two files making two statements, and citing one as proof of the
+        other is the exact confusion this field exists to prevent.
+        """
+        return ProviderView(
+            repository_slug=candidate.repository_slug,
+            repository_name=candidate.repository_name,
+            version=candidate.version,
+            provenance=DependencyProvenance(
+                repository_slug=candidate.repository_slug,
+                path=candidate.path,
+                line_start=candidate.line_start,
+                line_end=candidate.line_end,
+                parser=candidate.parser,
+                citable=False,
+            ),
+        )
+
+    def _dependency_supplies(self, page: Sequence[DependencyPackageView]) -> list[ProvenanceSupply]:
+        """Supply the manifest and lockfile lines this page's facts rest on.
+
+        One read per distinct stating file, over the whole file, because that
+        single query answers both questions at once: which of its lines the stored
+        chunks demonstrably contain, and under which snapshot they were parsed. It
+        runs only for the page, so the work follows the answer rather than the
+        inventory.
+
+        Reconstructed from **indexed** chunks and never from the working tree. The
+        dependency fact was parsed out of the indexed snapshot, so the line that
+        proves it is the line that snapshot holds; reading the manifest as it is
+        now could quote a constraint that replaced the one which produced the row.
+        """
+        wanted: dict[tuple[str, str], list[tuple[int, int]]] = {}
+        for package in page:
+            sources: list[DependencyProvenance] = [
+                observation.provenance for observation in package.observations
+            ]
+            sources += [provider.provenance for provider in package.providers]
+            for provenance in sources:
+                if not provenance.path:
+                    continue
+                spans = wanted.setdefault((provenance.repository_slug, provenance.path), [])
+                span = (provenance.line_start, provenance.line_end)
+                if span not in spans:
+                    spans.append(span)
+
+        by_slug = {repo.slug: repo for repo in self._workspace.repositories.list_all()}
+        supplies: list[ProvenanceSupply] = []
+        for slug, path in sorted(wanted):
+            repo = by_slug.get(slug)
+            if repo is None or repo.id is None:
+                continue
+            state = self._workspace.files.states_for(repo.id, [path]).get(path)
+            if state is None:
+                continue
+            chunks = self._workspace.knowledge.chunks_for_file(state.file_id, 1, WHOLE_FILE_END)
+            available = indexed_line_map(chunks) if chunks else {}
+            for line_start, line_end in sorted(wanted[(slug, path)]):
+                if line_end < line_start:
+                    continue
+                numbers = range(line_start, line_end + 1)
+                if any(number not in available for number in numbers):
+                    # The chunks do not cover the whole stating span. Quoting the
+                    # part they do cover would cite a narrower claim than the row
+                    # makes, and stitching across the gap would cite text nobody
+                    # was shown. The dependency fact stands; it is simply not
+                    # quotable.
+                    continue
+                text = LINE_SEPARATOR.join(available[number] for number in numbers)
+                supplies.append(
+                    ProvenanceSupply(
+                        proposed=ProposedEvidence(
+                            ref=EvidenceRef(
+                                repository_slug=slug,
+                                path=path,
+                                line_start=line_start,
+                                line_end=line_end,
+                                span_digest=chunk_hash(text),
+                                file_content_hash=state.content_hash,
+                                indexed_facts_version=state.parser_version,
+                            ),
+                            repository_name=repo.name,
+                            # A manifest line is a fact about the repository, read
+                            # from it. Nothing here was guessed at.
+                            tier=EvidenceTier.DETERMINISTIC,
+                            # The caller addressed a package identity and this is
+                            # the line naming it — which is what this class means.
+                            match=MatchClass.EXACT_NAME,
+                            origin=EvidenceSource.DEPENDENCY,
+                            reason=f"dependency source for {slug}/{path}:{line_start}-{line_end}",
+                            text_length=len(text),
+                        ),
+                        text=text,
+                    )
+                )
+        return supplies
+
+    def _dependencies_response(
+        self,
+        *,
+        request: DependenciesRequest,
+        resolution: ContextResolution,
+        session: InvestigationSession,
+        views: Sequence[DependencyPackageView],
+        page: _DependencyPage,
+        supplies: Sequence[ProvenanceSupply],
+        entries: tuple[LedgerEntry, ...],
+        limits: AppliedPageLimits,
+    ) -> DependenciesResponse:
+        """Bind the recorded evidence to the facts that rest on it, then answer."""
+        ids: dict[tuple[str, str, int, int], str] = {}
+        items: list[EvidenceItem] = []
+        for rank, (supply, entry) in enumerate(zip(supplies, entries, strict=True), start=1):
+            ref = supply.proposed.ref
+            assert ref.line_start is not None and ref.line_end is not None
+            ids[(ref.repository_slug, ref.path, ref.line_start, ref.line_end)] = entry.id
+            items.append(
+                EvidenceItem(
+                    id=entry.id,
+                    # Supply order, and nothing more. Dependencies searched for
+                    # nothing, so there is no relevance for a rank to express.
+                    rank=rank,
+                    ref=ref,
+                    repository_name=supply.proposed.repository_name,
+                    location=ref.location,
+                    text=supply.text,
+                    why=supply.proposed.reason,
+                    tier=supply.proposed.tier,
+                    match=supply.proposed.match,
+                    status=entry.status,
+                )
+            )
+
+        def bind(provenance: DependencyProvenance) -> tuple[DependencyProvenance, tuple[str, ...]]:
+            key = (
+                provenance.repository_slug,
+                provenance.path,
+                provenance.line_start,
+                provenance.line_end,
+            )
+            evidence_id = ids.get(key)
+            if evidence_id is None:
+                return (provenance, ())
+            return (provenance.model_copy(update={"citable": True}), (evidence_id,))
+
+        bound: list[DependencyPackageView] = []
+        for package in page.packages:
+            observations = []
+            for observation in package.observations:
+                provenance, evidence_ids = bind(observation.provenance)
+                observations.append(
+                    observation.model_copy(
+                        update={"provenance": provenance, "evidence_ids": evidence_ids}
+                    )
+                )
+            providers = []
+            for provider in package.providers:
+                provenance, evidence_ids = bind(provider.provenance)
+                providers.append(
+                    provider.model_copy(
+                        update={"provenance": provenance, "evidence_ids": evidence_ids}
+                    )
+                )
+            bound.append(
+                package.model_copy(
+                    update={"observations": tuple(observations), "providers": tuple(providers)}
+                )
+            )
+
+        facts = current_facts_version(self._workspace)
+        freshness = index_freshness(
+            [
+                repository_freshness_for(self._workspace, repo, depth=request.depth, facts=facts)
+                for repo in resolution.repositories
+            ],
+            depth=request.depth,
+        )
+        return DependenciesResponse(
+            investigation_id=session.id,
+            context=ContextView(
+                context=request.context,
+                scope=resolution.scope,
+                repositories=tuple(sorted(repo.slug for repo in resolution.repositories)),
+                primary=resolution.primary.slug if resolution.primary else None,
+                reason=resolution.reason,
+            ),
+            packages=tuple(bound),
+            evidence=tuple(items),
+            freshness=freshness,
+            next_cursor=(
+                encode_cursor(
+                    request=page.identity,
+                    inventory=page.inventory,
+                    after=package_key(page.packages[-1]),
+                )
+                if page.has_more and page.packages
+                else None
+            ),
+            has_more=page.has_more,
+            limits=limits,
+            ledger=session.ledger.summary(),
+        )
 
     # -- internals ----------------------------------------------------------
 
