@@ -19,7 +19,7 @@ from repoatlas.models.dependencies import (
     DependencyRole,
     DependencyScope,
 )
-from repoatlas.models.parsing import EdgeDirection, EdgeType, EntityType
+from repoatlas.models.parsing import EdgeDirection, EdgeType, EntityType, NeighborOrder
 from repoatlas.models.repository import FileState, IndexedFile, Repository, SyncStatus
 from repoatlas.storage.protocols import (
     ChunkHit,
@@ -763,6 +763,7 @@ class SqliteKnowledgeStore:
         edge_types: Sequence[EdgeType] | None = None,
         limit: int = 200,
         direction: EdgeDirection = EdgeDirection.ANY,
+        order: NeighborOrder = NeighborOrder.CONFIDENCE,
     ) -> list[NeighborEdge]:
         """One hop out of ``entity_ids``, with both endpoints' repositories.
 
@@ -773,6 +774,11 @@ class SqliteKnowledgeStore:
 
         ``direction`` narrows which end the queried entity must sit on. ``ANY`` is
         the neighbourhood question retrieval asks, and stays the default.
+
+        ``order`` decides which edges survive ``limit``. The default is the order
+        retrieval has always received; :attr:`~NeighborOrder.NATURAL` sorts on the
+        endpoints' own keys instead, for a caller whose answer *is* the cut rather
+        than a stage that is about to fuse everything anyway.
         """
         if not entity_ids:
             return []
@@ -792,6 +798,14 @@ class SqliteKnowledgeStore:
             type_clause = f" AND e.type IN ({type_placeholders})"
             params.extend(str(t) for t in edge_types)
         params.append(limit)
+        # Ordered on the endpoints' natural keys, or on the confidence the funnel
+        # reads as proximity. Which one is chosen decides which edges survive the
+        # limit, so it is the caller's decision rather than a detail.
+        order_clause = (
+            "e.type, src.key, dst.key, e.line_start, e.line_end, e.id"
+            if order is NeighborOrder.NATURAL
+            else "e.confidence DESC, e.id"
+        )
 
         rows = self._db.execute(
             f"""
@@ -802,7 +816,7 @@ class SqliteKnowledgeStore:
             JOIN entities src ON src.id = e.src_id
             JOIN entities dst ON dst.id = e.dst_id
             WHERE {id_clause}{type_clause}
-            ORDER BY e.confidence DESC, e.id
+            ORDER BY {order_clause}
             LIMIT ?
             """,  # noqa: S608 - placeholders are generated counts, values are bound
             tuple(params),

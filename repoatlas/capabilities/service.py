@@ -43,7 +43,7 @@ the wrong place.
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -69,14 +69,27 @@ from repoatlas.capabilities.errors import (
     ServiceClosedError,
     TargetOutOfScopeError,
 )
+from repoatlas.capabilities.evidence_shaping import LINE_SEPARATOR
+from repoatlas.capabilities.indexed_source import WHOLE_FILE_END, indexed_line_map
 from repoatlas.capabilities.inspection import (
-    WHOLE_FILE_END,
     ShapedInspection,
     clamp,
-    indexed_line_map,
     pad,
     shape_inspection,
     worktree_line_map,
+)
+from repoatlas.capabilities.relationships import (
+    EDGE_DIRECTIONS,
+    ProvenanceKey,
+    ProvenanceSupply,
+    admitted_edge_types,
+    distinct_provenance,
+    edge_order,
+    edge_provenance,
+    entity_ref,
+    graph_limits_for,
+    path_nodes,
+    provenance_key,
 )
 from repoatlas.capabilities.search import ShapedEvidence, ShapingResult, shape_candidates
 from repoatlas.capabilities.session import (
@@ -90,6 +103,8 @@ from repoatlas.containment import RepositoryBoundary
 from repoatlas.discovery.reconcile import RepositorySetPlan
 from repoatlas.errors import ContextFailure, ContextResolutionError
 from repoatlas.freshness import index_freshness
+from repoatlas.graph.keys import is_positional
+from repoatlas.graph.traversal import CROSS_REPOSITORY_EDGES, WalkResult, WalkStep, walk
 from repoatlas.indexing.chunking import chunk_hash
 from repoatlas.models.capability import AppliedBudget, CapabilityScope, ContextResolution
 from repoatlas.models.capability_io import (
@@ -122,6 +137,17 @@ from repoatlas.models.investigation import (
     LedgerEntry,
     ProposedEvidence,
 )
+from repoatlas.models.parsing import NeighborOrder
+from repoatlas.models.relationships import (
+    MAX_NEIGHBORS_CEILING,
+    AppliedGraphLimits,
+    EntityRef,
+    GraphEdge,
+    GraphPath,
+    RelationshipDirection,
+    RelationshipsRequest,
+    RelationshipsResponse,
+)
 from repoatlas.models.repository import FileState, Repository
 from repoatlas.models.retrieval import RetrievalOutcome
 from repoatlas.models.search import SearchMode, SearchRequest, SearchResponse
@@ -132,20 +158,29 @@ from repoatlas.services.freshness_service import (
     repository_set_drift,
 )
 from repoatlas.services.workspace import Workspace, open_workspace
+from repoatlas.storage.protocols import EntityIdentity
 from repoatlas.sync.engine import BINARY_SNIFF_BYTES
 from repoatlas.sync.scanner import hash_bytes
-
-#: Key prefix whose identities embed a source position, and therefore stop
-#: resolving when the definition moves. Every other prefix — ``env:``, ``module:``,
-#: ``pkg:``, ``file:``, ``repo:``, ``cmd:``, ``cfgkey:`` — names something interned
-#: by identity rather than by location, so those handles survive a sync.
-_POSITIONAL_KEY_PREFIX = "sym:"
 
 #: How many times an inspection re-reads a file whose indexed state moved
 #: underneath it. Small, because a second disagreement means a sync is actively
 #: running rather than that one landed at an unlucky moment, and retrying past
 #: that is waiting rather than reading.
 _SNAPSHOT_ATTEMPTS = 3
+
+
+@dataclass(frozen=True, slots=True)
+class _WalkedEdge:
+    """One public edge, with the walk step that produced it.
+
+    The step carries the storage row ids the edge may not: which file asserted it,
+    and which end the walk stood on. Keeping them side by side is what lets the
+    answer be ordered and cut on natural identity alone, and the storage lookups
+    happen afterwards for only the edges that survived.
+    """
+
+    step: WalkStep
+    edge: GraphEdge
 
 
 @dataclass(frozen=True, slots=True)
@@ -574,6 +609,102 @@ class CapabilityService:
                 applied=applied,
             )
 
+    def relationships(self, request: RelationshipsRequest) -> RelationshipsResponse:
+        """What RepoAtlas already knows is connected to one exact entity.
+
+        Deterministic throughout. The target resolves by natural key or not at
+        all, the walk follows the one bounded traversal policy the retrieval
+        funnel uses, and every edge returned was written by a parser or resolved
+        by the linker from an exact match. Nothing here is retrieved, scored or
+        ranked, which is why an edge carries the confidence its parser assigned
+        and no relevance this layer invented.
+
+        Two things are kept apart on purpose. An edge's **provenance** is a graph
+        fact — which file asserts it, at which lines — and is reported for every
+        edge that has one. Whether the **source text** at those coordinates could
+        be reconstructed and recorded is a separate question, and only a yes to it
+        puts evidence ids on the edge. An edge advertising a citation the ledger
+        cannot resolve is indistinguishable from a fabricated one.
+        """
+        with self._operation():
+            registered = self._workspace.repositories.list_all()
+            # Before any investigation exists, so a rejected context or an
+            # untraversable request leaves no session behind.
+            resolution = resolve_context(request.context, registered)
+            limits = graph_limits_for(request)
+            admitted = admitted_edge_types(request)
+
+            existing = request.investigation_id is not None
+            session = (
+                self._sessions.get(request.investigation_id)
+                if request.investigation_id is not None
+                else self._sessions.create()
+            )
+
+            try:
+                # The graph, the identities of its endpoints, the provenance
+                # coordinates and the chunks behind them are one indexed snapshot
+                # or they are nothing. Read separately, an external sync landing
+                # mid-call could pair an old edge with a new entity location, and
+                # the result would look exactly like a fact.
+                with self._workspace.database.read_snapshot():
+                    identity = self._resolve_graph_entity(request.target, resolution)
+                    target = entity_ref(identity)
+                    walked = walk(
+                        self._workspace.knowledge,
+                        [identity.entity_id],
+                        hops=limits.hops,
+                        # The server's own ceiling, never the caller's number. A
+                        # request for three neighbours must return the first three
+                        # of the fifty, not the three the store happened to reach
+                        # first — otherwise the answer to a narrow question is a
+                        # different neighbourhood rather than a shorter one.
+                        fanout=MAX_NEIGHBORS_CEILING,
+                        seed_limit=1,
+                        edge_types=admitted,
+                        direction=EDGE_DIRECTIONS[request.direction],
+                        crossing_edges=(
+                            CROSS_REPOSITORY_EDGES if request.cross_repository else frozenset()
+                        ),
+                        containment=request.include_containment,
+                        # The cut is the answer here, so it falls on the
+                        # repositories' own facts rather than on insertion order.
+                        order=NeighborOrder.NATURAL,
+                    )
+                    walked_edges = self._walked_edges(walked)
+                    # Ordered and cut before anything is fetched, so what comes
+                    # back never depends on how much was worth fetching.
+                    ordered = sorted(walked_edges, key=lambda w: edge_order(w.edge))
+                    # Either bound counts. The walk's own ceiling and the caller's
+                    # number cut for different reasons, and a caller asking
+                    # whether they saw everything is owed the same answer either
+                    # way.
+                    truncated = walked.bounded or len(ordered) > limits.max_neighbors
+                    kept = ordered[: limits.max_neighbors]
+                    located, supplies = self._supply_provenance(kept)
+                # The single atomic point. A capacity refusal raises here having
+                # allocated nothing and strengthened nothing.
+                entries = session.ledger.record([supply.proposed for supply in supplies])
+            except BaseException:
+                # A session this call invented, which never got to hold anything,
+                # is not left behind as a ghost an agent could be handed the id of.
+                # One the caller already owned is untouched.
+                if not existing and len(session.ledger) == 0:
+                    self._sessions.drop(session.id)
+                raise
+
+            return self._relationships_response(
+                request=request,
+                resolution=resolution,
+                session=session,
+                target=target,
+                located=located,
+                supplies=supplies,
+                entries=entries,
+                truncated=truncated,
+                limits=limits,
+            )
+
     # -- internals ----------------------------------------------------------
 
     @contextmanager
@@ -764,7 +895,7 @@ class CapabilityService:
                 EntityHandle(
                     key=identity.key,
                     type=identity.type,
-                    positional=identity.key.startswith(_POSITIONAL_KEY_PREFIX),
+                    positional=is_positional(identity.key),
                 )
             )
         return tuple(handles)
@@ -798,7 +929,7 @@ class CapabilityService:
             handles[id(item)] = EntityHandle(
                 key=identity.key,
                 type=identity.type,
-                positional=identity.key.startswith(_POSITIONAL_KEY_PREFIX),
+                positional=is_positional(identity.key),
             )
         return handles
 
@@ -1268,6 +1399,331 @@ class CapabilityService:
             ),
             freshness=freshness,
             budget=applied,
+            ledger=session.ledger.summary(),
+        )
+
+    # -- relationships internals --------------------------------------------
+
+    def _resolve_graph_entity(self, key: str, resolution: ContextResolution) -> EntityIdentity:
+        """One exact natural key, or a refusal.
+
+        The same exact read inspection uses, and for the same reason: a name
+        lookup would resolve to whatever happens to share a name, which for a
+        positional key whose definition has moved means confidently answering
+        about a different definition than the caller holds a handle to.
+        """
+        identities = self._workspace.knowledge.get_entities_by_key([key])
+        if not identities:
+            raise EntityNotFoundError()
+        in_scope = {repo.slug for repo in resolution.repositories}
+        # An interned entity belongs to no repository and is in every scope; a
+        # file-scoped one has to be in the scope that was asked for.
+        allowed = [
+            identity
+            for identity in identities
+            if identity.repository_slug is None or identity.repository_slug in in_scope
+        ]
+        if not allowed:
+            # Absent *from this context* rather than answered from outside it.
+            # Crossing the boundary silently would make the scope advisory, which
+            # is the one property that makes a scoped answer worth having.
+            raise EntityNotFoundError()
+        if len(allowed) > 1:
+            raise EntityAmbiguousError(
+                candidates=tuple(
+                    sorted(
+                        f"{identity.repository_slug or ''}/{identity.path or ''}"
+                        for identity in allowed
+                    )
+                )
+            )
+        return allowed[0]
+
+    def _walked_edges(self, walked: WalkResult) -> list[_WalkedEdge]:
+        """Turn walked steps into public edges, keeping the step beside each one.
+
+        Endpoint identities are resolved by row id in one query and rendered as
+        natural keys. A step whose endpoint does not resolve is dropped rather
+        than emitted with a placeholder: an edge whose ends cannot be named is not
+        a relationship a caller can act on, and inventing a name for one would be
+        the fabrication this capability exists to avoid.
+        """
+        wanted = {
+            entity_id for step in walked.steps for entity_id in (step.edge.src_id, step.edge.dst_id)
+        }
+        identities = self._workspace.knowledge.keys_for_entities(sorted(wanted)) if wanted else {}
+
+        walked_edges: list[_WalkedEdge] = []
+        for step in walked.steps:
+            source = identities.get(step.edge.src_id)
+            destination = identities.get(step.edge.dst_id)
+            if source is None or destination is None:
+                continue
+            walked_edges.append(
+                _WalkedEdge(
+                    step=step,
+                    edge=GraphEdge(
+                        # Stored orientation, untouched. Which end the walk came
+                        # from is a separate field; swapping these to express it
+                        # would rewrite what the repository says.
+                        source=entity_ref(source),
+                        target=entity_ref(destination),
+                        type=step.edge.type,
+                        hop=step.hop,
+                        traversal_direction=(
+                            RelationshipDirection.OUTGOING
+                            if step.outgoing
+                            else RelationshipDirection.INCOMING
+                        ),
+                        cross_repository=step.edge.crosses_repositories,
+                        confidence=step.edge.confidence,
+                        provenance=edge_provenance(step.edge),
+                    ),
+                )
+            )
+        return walked_edges
+
+    def _supply_provenance(
+        self, walked_edges: Sequence[_WalkedEdge]
+    ) -> tuple[list[_WalkedEdge], list[ProvenanceSupply]]:
+        """Name each edge's asserting file, and supply its lines where provable.
+
+        One read per distinct asserting file, over the whole file, because that
+        single query answers both questions at once: which path the row id names,
+        and which of its lines the stored chunks demonstrably contain. It runs
+        only for the edges that survived bounding, so the work follows the answer
+        rather than the neighbourhood.
+
+        Reconstructed from **indexed** chunks and never from the working tree. The
+        edge was produced by the indexed snapshot, so the lines that prove it are
+        the lines that snapshot holds; reading the file as it is now could supply
+        text that never asserted anything.
+        """
+        by_file: dict[int, tuple[str, str, dict[int, str]]] = {}
+        for walked_edge in walked_edges:
+            file_id = walked_edge.step.edge.file_id
+            if file_id is None or file_id in by_file:
+                continue
+            chunks = self._workspace.knowledge.chunks_for_file(file_id, 1, WHOLE_FILE_END)
+            if not chunks:
+                continue
+            by_file[file_id] = (
+                chunks[0].repository_slug,
+                chunks[0].path,
+                indexed_line_map(chunks),
+            )
+
+        located: list[_WalkedEdge] = []
+        for walked_edge in walked_edges:
+            file_id = walked_edge.step.edge.file_id
+            found = by_file.get(file_id) if file_id is not None else None
+            provenance = walked_edge.edge.provenance
+            if found is None or provenance is None:
+                located.append(walked_edge)
+                continue
+            slug, path, _ = found
+            located.append(
+                _WalkedEdge(
+                    step=walked_edge.step,
+                    edge=walked_edge.edge.model_copy(
+                        update={
+                            "provenance": provenance.model_copy(
+                                update={"repository_slug": slug, "path": path}
+                            )
+                        }
+                    ),
+                )
+            )
+
+        supplies: list[ProvenanceSupply] = []
+        for slug, path, line_start, line_end in distinct_provenance(
+            [walked_edge.edge for walked_edge in located]
+        ):
+            found = next(
+                (value for value in by_file.values() if value[0] == slug and value[1] == path),
+                None,
+            )
+            if found is None:
+                continue
+            available = found[2]
+            wanted = range(line_start, line_end + 1)
+            if any(number not in available for number in wanted):
+                # The chunks do not cover the whole asserting span. Returning the
+                # part they do cover would cite a narrower claim than the edge
+                # makes, and stitching across the gap would cite text nobody was
+                # shown. The edge stands; its provenance is simply not quotable.
+                continue
+            supply = self._provenance_supply(slug, path, line_start, line_end, available)
+            if supply is not None:
+                supplies.append(supply)
+        return (located, supplies)
+
+    def _provenance_supply(
+        self,
+        slug: str,
+        path: str,
+        line_start: int,
+        line_end: int,
+        available: dict[int, str],
+    ) -> ProvenanceSupply | None:
+        """One asserting span, prepared for the ledger with the text it hashed."""
+        repo = next((r for r in self._workspace.repositories.list_all() if r.slug == slug), None)
+        if repo is None or repo.id is None:
+            return None
+        state = self._workspace.files.states_for(repo.id, [path]).get(path)
+        if state is None:
+            return None
+        text = LINE_SEPARATOR.join(available[number] for number in range(line_start, line_end + 1))
+        return ProvenanceSupply(
+            proposed=ProposedEvidence(
+                ref=EvidenceRef(
+                    repository_slug=slug,
+                    path=path,
+                    line_start=line_start,
+                    line_end=line_end,
+                    span_digest=chunk_hash(text),
+                    file_content_hash=state.content_hash,
+                    indexed_facts_version=state.parser_version,
+                ),
+                repository_name=repo.name,
+                # An edge is a fact about the code and these are the lines that
+                # assert it. Nothing here was guessed at.
+                tier=EvidenceTier.DETERMINISTIC,
+                # Literally what this match class names: reached by a graph edge
+                # from something the query named.
+                match=MatchClass.RELATED,
+                origin=EvidenceSource.RELATIONSHIP,
+                reason=f"source provenance for {slug}/{path}:{line_start}-{line_end}",
+                text_length=len(text),
+            ),
+            text=text,
+        )
+
+    def _graph_paths(self, target: EntityRef, kept: Sequence[_WalkedEdge]) -> tuple[GraphPath, ...]:
+        """The chains by which second-hop relationships were reached.
+
+        A path is the route this walk took, never a shortest path — RepoAtlas
+        computes none and claims none. It exists because a hop-2 edge is otherwise
+        unexplained: the caller asked about one entity and is handed a
+        relationship between two others, and the chain is what connects them. A
+        first-hop edge is its own explanation and gets no path.
+        """
+        first_by_node: dict[int, GraphEdge] = {}
+        for walked_edge in kept:
+            if walked_edge.step.hop == 1:
+                first_by_node.setdefault(walked_edge.step.to_id, walked_edge.edge)
+
+        paths: list[GraphPath] = []
+        for walked_edge in kept:
+            if walked_edge.step.hop != 2:
+                continue
+            leading = first_by_node.get(walked_edge.step.from_id)
+            if leading is None:
+                # The edge that reached this node did not survive bounding, so the
+                # chain cannot be shown whole. Half a path is not a route.
+                continue
+            chain = (leading, walked_edge.edge)
+            paths.append(GraphPath(nodes=path_nodes(chain, target), edges=chain))
+        paths.sort(key=lambda path: tuple(edge_order(edge) for edge in path.edges))
+        return tuple(paths)
+
+    def _relationships_response(
+        self,
+        *,
+        request: RelationshipsRequest,
+        resolution: ContextResolution,
+        session: InvestigationSession,
+        target: EntityRef,
+        located: Sequence[_WalkedEdge],
+        supplies: Sequence[ProvenanceSupply],
+        entries: tuple[LedgerEntry, ...],
+        truncated: bool,
+        limits: AppliedGraphLimits,
+    ) -> RelationshipsResponse:
+        """Bind the recorded evidence to the edges that rest on it, then answer."""
+        ids: dict[ProvenanceKey, str] = {}
+        items: list[EvidenceItem] = []
+        for rank, (supply, entry) in enumerate(zip(supplies, entries, strict=True), start=1):
+            ref = supply.proposed.ref
+            assert ref.line_start is not None and ref.line_end is not None
+            ids[(ref.repository_slug, ref.path, ref.line_start, ref.line_end)] = entry.id
+            items.append(
+                EvidenceItem(
+                    id=entry.id,
+                    # Supply order, and nothing more. Relationships searched for
+                    # nothing, so there is no relevance for a rank to express.
+                    rank=rank,
+                    ref=ref,
+                    repository_name=supply.proposed.repository_name,
+                    location=ref.location,
+                    text=supply.text,
+                    why=supply.proposed.reason,
+                    tier=supply.proposed.tier,
+                    match=supply.proposed.match,
+                    status=entry.status,
+                )
+            )
+
+        bound_edges: list[GraphEdge] = []
+        for walked_edge in located:
+            edge = walked_edge.edge
+            key = provenance_key(edge.provenance)
+            evidence_id = ids.get(key) if key is not None else None
+            if evidence_id is None or edge.provenance is None:
+                bound_edges.append(edge)
+                continue
+            bound_edges.append(
+                edge.model_copy(
+                    update={
+                        "evidence_ids": (evidence_id,),
+                        "provenance": edge.provenance.model_copy(update={"citable": True}),
+                    }
+                )
+            )
+
+        by_order = {edge_order(edge): edge for edge in bound_edges}
+        paths = (
+            tuple(
+                path.model_copy(
+                    update={"edges": tuple(by_order.get(edge_order(e), e) for e in path.edges)}
+                )
+                for path in self._graph_paths(
+                    target,
+                    [
+                        _WalkedEdge(step=w.step, edge=by_order.get(edge_order(w.edge), w.edge))
+                        for w in located
+                    ],
+                )
+            )
+            if limits.hops > 1
+            else ()
+        )
+
+        facts = current_facts_version(self._workspace)
+        freshness = index_freshness(
+            [
+                repository_freshness_for(self._workspace, repo, depth=request.depth, facts=facts)
+                for repo in resolution.repositories
+            ],
+            depth=request.depth,
+        )
+        return RelationshipsResponse(
+            investigation_id=session.id,
+            context=ContextView(
+                context=request.context,
+                scope=resolution.scope,
+                repositories=tuple(sorted(repo.slug for repo in resolution.repositories)),
+                primary=resolution.primary.slug if resolution.primary else None,
+                reason=resolution.reason,
+            ),
+            target=target,
+            edges=tuple(bound_edges),
+            paths=paths,
+            evidence=tuple(items),
+            freshness=freshness,
+            truncated=truncated,
+            has_more=truncated,
+            limits=limits,
             ledger=session.ledger.summary(),
         )
 
