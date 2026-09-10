@@ -18,16 +18,16 @@ class EvidenceSource(enum.StrEnum):
     """How a piece of evidence was reached. Used by rank fusion and by --verbose.
 
     The first six are retrieval stages, and they are the only ones fusion ever
-    sees. :attr:`INSPECT` and :attr:`RELATIONSHIP` are not stages: they name
-    evidence that was *addressed* rather than searched for — the source of a file,
-    entity or span a caller named exactly, and the lines that assert a graph edge
-    reached from one.
+    sees. :attr:`INSPECT`, :attr:`RELATIONSHIP` and :attr:`DEPENDENCY` are not
+    stages: they name evidence that was *addressed* rather than searched for — the
+    source of a file, entity or span a caller named exactly, the lines that assert
+    a graph edge reached from one, and the manifest line stating a package fact.
 
     They share this enum rather than getting ones of their own because the ledger
     records a route for every piece of evidence it holds, and two vocabularies for
     "how did this arrive" would drift apart the first time one of them gained a
-    member. Nothing about fusion changes: neither capability produces candidates,
-    so neither member ever reaches a ranking.
+    member. Nothing about fusion changes: none of these capabilities produces
+    candidates, so none of these members ever reaches a ranking.
     """
 
     EXACT = "exact"
@@ -41,6 +41,10 @@ class EvidenceSource(enum.StrEnum):
     #: The source lines a deterministic graph edge is asserted by, supplied so the
     #: edge's provenance can be checked rather than only named. Never ranked.
     RELATIONSHIP = "relationship"
+    #: The manifest or lockfile line stating a dependency, supplied so a caller can
+    #: read what the file actually says rather than trust a parsed field. Never
+    #: ranked.
+    DEPENDENCY = "dependency"
 
 
 class EvidenceTier(enum.IntEnum):
