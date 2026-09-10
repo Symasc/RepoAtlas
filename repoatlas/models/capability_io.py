@@ -24,7 +24,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.evidence import EvidenceTier, MatchClass
@@ -347,3 +347,27 @@ class ContextView(BaseModel):
     primary: str | None = None
     #: Human-readable account of how the scope was decided. Never a discriminator.
     reason: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Source coordinates
+# ---------------------------------------------------------------------------
+
+
+class LineRange(BaseModel):
+    """A closed, 1-based interval of source lines. Both ends inclusive."""
+
+    model_config = ConfigDict(frozen=True)
+
+    start: int = Field(ge=1)
+    end: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> LineRange:
+        if self.end < self.start:
+            raise ValueError(f"line range ends before it starts: {self.start}-{self.end}")
+        return self
+
+    @property
+    def count(self) -> int:
+        return self.end - self.start + 1
