@@ -453,13 +453,28 @@ class CapabilityService:
             )
 
             try:
-                outcome = self._workspace.retriever(limits).retrieve_detailed(
-                    request.question,
-                    to_repository_context(resolution),
-                    literal_phrase=diagnostic,
-                )
-                shaped = shape_candidates(outcome.evidence.candidates, applied)
-                proposed = self._propose(shaped.items, registered, facts=facts)
+                # Retrieval and provenance read one generation of the index.
+                #
+                # The funnel reads chunk text; the reference built from it names
+                # the file's content hash and facts version. Those are separate
+                # reads, and outside a snapshot another process's sync can land
+                # between them — leaving text from before it paired with a hash
+                # from after. Such evidence is worse than wrong: it revalidates
+                # cleanly against its own hash while describing a state of the
+                # file that never existed. The service lock cannot help, because
+                # the other writer is in another process.
+                #
+                # One read view removes the window rather than detecting it, so
+                # there is nothing here to retry and no contention to report. The
+                # funnel still runs exactly once inside it.
+                with self._workspace.database.read_snapshot():
+                    outcome = self._workspace.retriever(limits).retrieve_detailed(
+                        request.question,
+                        to_repository_context(resolution),
+                        literal_phrase=diagnostic,
+                    )
+                    shaped = shape_candidates(outcome.evidence.candidates, applied)
+                    proposed = self._propose(shaped.items, registered)
                 # The single atomic point. A capacity refusal raises here having
                 # allocated nothing and strengthened nothing.
                 entries = session.ledger.record(proposed)
@@ -580,16 +595,26 @@ class CapabilityService:
             yield
 
     def _propose(
-        self, shaped: list[ShapedEvidence], registered: list[Repository], *, facts: str
+        self, shaped: list[ShapedEvidence], registered: list[Repository]
     ) -> list[ProposedEvidence]:
         """Turn shaped evidence into the exact batch the ledger will record.
 
-        Every reference carries the indexed snapshot it was taken from — the
-        file's content hash and the parser version behind its facts — because
-        that is what lets a later revalidation say whether the evidence still
-        describes what is there. Both are read from the **indexed** file row and
-        never from the working tree: the claim being recorded is about what
+        Every reference carries the indexed snapshot it was taken from — that
+        file's content hash and the facts version *that file was indexed under* —
+        because that is what lets a later revalidation say whether the evidence
+        still describes what is there. Both are read from the **indexed** file row
+        and never from the working tree: the claim being recorded is about what
         RepoAtlas searched, not about what happens to be on disk now.
+
+        The facts version is the file's own, not the running build's, and the
+        difference is a real one whenever the index is a build behind. A file
+        parsed under an older version supplied text that carries that version's
+        facts; stamping today's version on it would describe a snapshot that never
+        produced this evidence, and would then make it revalidate as stale against
+        the very row it came from. That the build has moved on is a separate,
+        already-reported fact, and freshness is where it belongs — encoding it by
+        misdescribing the evidence would put one fact in two places and make one
+        of them false.
         """
         by_slug = {repo.slug: repo for repo in registered}
         wanted: dict[int, set[str]] = {}
@@ -628,7 +653,7 @@ class CapabilityService:
                         # silently reuse an id bound to text nobody saw.
                         span_digest=chunk_hash(item.text),
                         file_content_hash=state.content_hash,
-                        indexed_facts_version=facts,
+                        indexed_facts_version=state.parser_version,
                     ),
                     repository_name=candidate.repository,
                     tier=candidate.tier,
