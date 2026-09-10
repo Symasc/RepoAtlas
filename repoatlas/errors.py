@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import enum
+
 
 class ExitCode:
     OK = 0
@@ -30,10 +32,52 @@ class RepoAtlasError(Exception):
         return self.message
 
 
+class ContextFailure(enum.StrEnum):
+    """Why a context could not be resolved, as a value rather than a sentence.
+
+    Four different situations reach :class:`ContextResolutionError`, and until now
+    the only thing separating them was the wording of ``message``. That is fine
+    for a terminal and unusable for a caller: recovering the situation would mean
+    matching on prose, and prose is exactly what a translation, a rewording or a
+    stray full stop is free to change.
+
+    The discriminator is set where the error is raised, by the code that already
+    knows which case it is in. No message is parsed anywhere.
+    """
+
+    #: A display name matched more than one managed repository. ``candidates``
+    #: carries their identities; RepoAtlas refuses rather than choosing.
+    AMBIGUOUS = "ambiguous"
+    #: The selector matched nothing managed.
+    UNKNOWN_REPOSITORY = "unknown_repository"
+    #: The working directory is inside a Git repository RepoAtlas does not manage.
+    UNMANAGED_REPOSITORY = "unmanaged_repository"
+    #: Nothing could be inferred from the working directory at all.
+    UNRESOLVED = "unresolved"
+
+
 class ContextResolutionError(RepoAtlasError):
-    """The command's repository context could not be determined (V1_SPEC §6)."""
+    """The command's repository context could not be determined (V1_SPEC §6).
+
+    ``reason`` and ``candidates`` are additive and default to the general case, so
+    every existing raise site, message, detail and exit code is unchanged.
+    """
 
     exit_code = ExitCode.CONTEXT
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        detail: str | None = None,
+        reason: ContextFailure = ContextFailure.UNRESOLVED,
+        candidates: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message, detail=detail)
+        self.reason = reason
+        #: Canonical identities of the repositories an ambiguous selector matched.
+        #: Empty for every other reason.
+        self.candidates = candidates
 
 
 class NotInitializedError(RepoAtlasError):
