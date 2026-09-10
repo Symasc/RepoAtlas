@@ -263,7 +263,7 @@ def test_no_synthetic_edge_joins_the_ends_of_a_path(initialized: Workspace) -> N
 def test_a_first_hop_edge_is_its_own_explanation(initialized: Workspace) -> None:
     """Paths exist to explain results the caller did not ask about directly."""
     response = _ask(initialized, APP, hops=2)
-    explained = {edge for path in response.paths for edge in path.edges}
+    explained = [edge for path in response.paths for edge in path.edges]
     assert all(edge.hop in {1, 2} for edge in explained)
     assert {path.edges[-1].hop for path in response.paths} == {2}
 
@@ -305,7 +305,7 @@ def test_containment_never_becomes_a_second_hop_route(initialized: Workspace) ->
     without = _ask(initialized, CONFIG, hops=2)
     with_containment = _ask(initialized, CONFIG, hops=2, include_containment=True)
 
-    relationships = {edge for edge in with_containment.edges if edge.type not in CONTAINMENT_EDGES}
+    relationships = [e for e in with_containment.edges if e.type not in CONTAINMENT_EDGES]
     assert {(e.source.key, str(e.type), e.target.key) for e in relationships} == _triples(without)
 
     reached = {edge.target.key for edge in with_containment.edges} | {

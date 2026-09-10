@@ -1,0 +1,266 @@
+# RepoAtlas deterministic dependency-capability evaluation set (V2 Slice G).
+#
+# GROUND TRUTH IS MANUAL. Every expectation below was written by reading the
+# manifests and lockfiles under tests/adversarial/fixtures/repos, not by asking
+# RepoAtlas what it returns. Line numbers are the lines of those files. Deriving
+# the expectations from the implementation would make this suite measure
+# self-consistency, which is the one thing a dependency evaluation must not do: a
+# capability that invented a version would invent the same version in its own
+# baseline.
+#
+# This is deliberately NOT part of the retrieval evaluation. Retrieval is scored
+# on recall over a ranked, partly associative result. A dependency answer is
+# exact: the correct result is a specific set of observations with specific
+# values, and an extra one is a statement about code that does not contain it.
+#
+# Fields
+#   id                  stable identifier, used in the report
+#   category            declaration | lock | multiplicity | scoping | ecosystem
+#                       | role | provider | provenance | zero-result | pagination
+#   context_repo        repository to ask from; `__root__` for global
+#   ecosystem           narrow to one ecosystem, or omitted
+#   name                exact package name, or omitted
+#   roles               observation kinds, or omitted for all three
+#   include_providers   default true
+#   expected            EXACTLY the package groups that must come back, each with
+#                       EXACTLY its observations as [role, value, path, line]
+#   expected_providers  per package: [repository slug, version, path, line]
+#   expected_resolution per package: none | unique | ambiguous | not_applicable
+#   forbidden_packages  "slug/ecosystem/name" that must not appear
+#   expected_evidence   citable spans that must be supplied, with exact text
+#   notes               why this is the ground truth
+
+cases:
+  # ------------------------------------------------------------ declaration ---
+  - id: declaration-exact-constraint
+    category: declaration
+    context_repo: __root__
+    ecosystem: pypi
+    name: requests
+    expected:
+      common-lib/pypi/requests:
+        - ["declared", ">=2.31", "pyproject.toml", 4]
+      python-service/pypi/requests:
+        - ["declared", "==2.31.0", "pyproject.toml", 7]
+        - ["resolved", "2.31.0", "uv.lock", 8]
+    expected_resolution:
+      common-lib/pypi/requests: none
+      python-service/pypi/requests: none
+    expected_evidence:
+      - location: "common-lib/pyproject.toml:4"
+        text: 'dependencies = ["requests>=2.31"]'
+    notes: >
+      common-lib/pyproject.toml line 4 asks for requests>=2.31 and has no
+      lockfile entry for it. python-service asks for ==2.31.0 on line 7 of its
+      pyproject and its uv.lock records 2.31.0 on line 8. Nobody in the managed
+      set publishes a package called requests, so the resolution is none rather
+      than not_applicable — the question arises and the answer is nobody.
+
+  # ------------------------------------------------------------------- lock ---
+  - id: lock-is-not-the-declaration
+    category: lock
+    context_repo: __root__
+    ecosystem: pypi
+    name: shared-utils
+    expected:
+      ambiguous-provider-a/pypi/shared-utils:
+        - ["provided", "3.2.1", "pyproject.toml", 2]
+      ambiguous-provider-b/pypi/shared-utils:
+        - ["provided", "3.5.0", "pyproject.toml", 2]
+      python-service/pypi/shared-utils:
+        - ["declared", ">=3.0", "pyproject.toml", 6]
+        - ["resolved", "3.2.1", "uv.lock", 12]
+    expected_resolution:
+      ambiguous-provider-a/pypi/shared-utils: not_applicable
+      ambiguous-provider-b/pypi/shared-utils: not_applicable
+      python-service/pypi/shared-utils: ambiguous
+    notes: >
+      The constraint >=3.0 and the locked 3.2.1 are two rows from two files, and
+      the lock matching provider-a's published version is a coincidence of the
+      fixture rather than a resolution: the linker draws no edge here at all
+      because two repositories publish the name. Neither provider group declares
+      shared-utils, so neither has a linker conclusion to report.
+
+  # ----------------------------------------------------------- multiplicity ---
+  - id: one-package-two-repositories
+    category: multiplicity
+    context_repo: __root__
+    ecosystem: gem
+    name: rack
+    include_providers: false
+    expected:
+      common-lib/gem/rack:
+        - ["declared", "~> 3.0", "Gemfile", 3]
+        - ["resolved", "3.0.11", "Gemfile.lock", 4]
+      ruby-tooling/gem/rack:
+        - ["declared", "~> 2.2", "Gemfile", 3]
+        - ["resolved", "2.2.8", "Gemfile.lock", 4]
+    expected_evidence:
+      - location: "common-lib/Gemfile:3"
+        text: "gem 'rack', '~> 3.0'"
+      - location: "ruby-tooling/Gemfile:3"
+        text: "gem 'rack', '~> 2.2'"
+    notes: >
+      Two repositories ask for incompatible major versions of one gem and each
+      locks what it asked for. There is no answer to "which version of rack" and
+      the honest response is all four observations. A merged view would have to
+      pick, and both picks would be wrong somewhere.
+
+  # --------------------------------------------------------------- scoping ---
+  - id: repository-scope-excludes-the-other
+    category: scoping
+    context_repo: ruby-tooling
+    ecosystem: gem
+    name: rack
+    include_providers: false
+    expected:
+      ruby-tooling/gem/rack:
+        - ["declared", "~> 2.2", "Gemfile", 3]
+        - ["resolved", "2.2.8", "Gemfile.lock", 4]
+    forbidden_packages:
+      - "common-lib/gem/rack"
+    notes: >
+      The same package existing elsewhere is not a reason to leave the scope. A
+      scoped answer is only worth having if the scope is not advisory.
+
+  # ------------------------------------------------------------- ecosystem ---
+  - id: same-name-different-ecosystems
+    category: ecosystem
+    context_repo: __root__
+    name: left-pad
+    include_providers: false
+    expected:
+      common-lib/npm/left-pad:
+        - ["declared", "^1.3.0", "package.json", 5]
+      ts-service/npm/left-pad:
+        - ["declared", "^1.3.0", "package.json", 6]
+        - ["resolved", "1.3.0", "package-lock.json", 8]
+    notes: >
+      Asked without an ecosystem, the name still resolves per ecosystem: nothing
+      in PyPI or RubyGems is called left-pad in this fixture, so only the npm
+      groups come back. Each remains keyed by its own repository.
+
+  # ------------------------------------------------------------------ role ---
+  - id: role-filter-selects-locks-only
+    category: role
+    context_repo: ts-service
+    ecosystem: npm
+    roles: ["resolved"]
+    include_providers: false
+    expected:
+      ts-service/npm/@company/common:
+        - ["resolved", "2.1.4", "package-lock.json", 5]
+      ts-service/npm/left-pad:
+        - ["resolved", "1.3.0", "package-lock.json", 8]
+      ts-service/npm/typescript:
+        - ["resolved", "5.4.5", "package-lock.json", 11]
+    forbidden_packages:
+      - "ts-service/npm/@company/ts-service"
+    notes: >
+      Only lockfile rows. @company/ts-service is the package ts-service itself
+      publishes and has no lockfile row, so it drops out entirely rather than
+      appearing with no observations. typescript is declared in the dev group,
+      which is the manifest's own grouping and not a fourth role — the filter is
+      on role and it keeps the dev package's lock.
+
+  # -------------------------------------------------------------- provider ---
+  - id: provider-ambiguity-preserved
+    category: provider
+    context_repo: python-service
+    ecosystem: pypi
+    name: shared-utils
+    expected:
+      python-service/pypi/shared-utils:
+        - ["declared", ">=3.0", "pyproject.toml", 6]
+        - ["resolved", "3.2.1", "uv.lock", 12]
+    expected_providers:
+      python-service/pypi/shared-utils:
+        - ["ambiguous-provider-a", "3.2.1", "pyproject.toml", 2]
+        - ["ambiguous-provider-b", "3.5.0", "pyproject.toml", 2]
+    expected_resolution:
+      python-service/pypi/shared-utils: ambiguous
+    notes: >
+      Both provider-a and provider-b publish shared-utils, so the linker resolves
+      the dependency to neither and creates no cross-repository edge. Both
+      candidates are returned. Choosing the one whose version matches the lock
+      would be the most plausible fabrication available here, and it is still a
+      fabrication: nothing in the index says the lock came from that repository.
+
+  - id: provider-unique-where-proven
+    category: provider
+    context_repo: python-service
+    ecosystem: pypi
+    name: common-lib
+    expected:
+      python-service/pypi/common-lib:
+        - ["declared", ">=1.0", "pyproject.toml", 5]
+        - ["resolved", "1.4.0", "uv.lock", 4]
+    expected_providers:
+      python-service/pypi/common-lib:
+        - ["common-lib", "1.4.0", "pyproject.toml", 2]
+    expected_resolution:
+      python-service/pypi/common-lib: unique
+    notes: >
+      Exactly one managed repository publishes common-lib, which is the one
+      condition under which V1 resolves a dependency to a repository. Asking from
+      python-service narrows the answer to one group; the provider set is still
+      computed over the whole root, so the uniqueness is the index's and not the
+      filter's.
+
+  - id: provider-none-for-an-external-package
+    category: provider
+    context_repo: ruby-tooling
+    ecosystem: gem
+    name: thor
+    expected:
+      ruby-tooling/gem/thor:
+        - ["declared", "1.2.0", "Gemfile", 4]
+        - ["resolved", "1.2.0", "Gemfile.lock", 5]
+    expected_providers:
+      ruby-tooling/gem/thor: []
+    expected_resolution:
+      ruby-tooling/gem/thor: none
+    notes: >
+      thor is a real gem and no managed repository publishes it. The declaration
+      pins an exact version and the lockfile agrees, which does not make either
+      of them a statement that thor is installed anywhere.
+
+  # ------------------------------------------------------------- provenance ---
+  - id: provenance-binds-the-declaring-line
+    category: provenance
+    context_repo: common-lib
+    ecosystem: npm
+    name: left-pad
+    include_providers: false
+    expected:
+      common-lib/npm/left-pad:
+        - ["declared", "^1.3.0", "package.json", 5]
+    expected_evidence:
+      - location: "common-lib/package.json:5"
+        text: '    "left-pad": "^1.3.0"'
+    notes: >
+      The stated line is quoted verbatim from the indexed snapshot, including its
+      indentation. common-lib has no package-lock.json, so this package has a
+      declaration and no resolution — an unpaired declaration is an honest state.
+
+  # ------------------------------------------------------------ zero-result ---
+  - id: zero-result-unknown-package
+    category: zero-result
+    context_repo: __root__
+    name: definitely-not-a-real-package
+    expected: {}
+    notes: >
+      A name matching nothing is a fact about the inventory, not a failure to
+      search it. Substring behaviour would make this case pass by accident, so
+      the name shares no prefix with anything in the fixture.
+
+  # -------------------------------------------------------------- pagination ---
+  - id: pagination-covers-the-whole-inventory
+    category: pagination
+    context_repo: __root__
+    include_providers: false
+    paginate: [1, 2, 3, 5, 17]
+    notes: >
+      Not an expectation about content but about the walk: every page size must
+      reproduce the single-page result exactly, with no duplicate and no
+      omission, over the whole managed root.
