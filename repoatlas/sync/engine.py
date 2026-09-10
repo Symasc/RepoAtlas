@@ -70,7 +70,10 @@ from repoatlas.sync.scanner import (
 )
 
 #: Bytes above which a file is recorded but never read (V1_SPEC §17 zip-bomb guard).
-_BINARY_SNIFF_BYTES = 8192
+#: How much of a file's head decides whether it is binary. Public because a
+#: reader that has proven its bytes identical to the indexed bytes must reach
+#: the same verdict the indexer reached, and a second constant would drift.
+BINARY_SNIFF_BYTES = 8192
 
 
 def _enumeration_diagnostics(reasons: list[str]) -> list[ParseDiagnostic]:
@@ -368,7 +371,7 @@ class SyncEngine:
         content_hash = hash_bytes(raw)
         size = len(raw)
         mtime_ns = scanned_file.mtime_ns
-        is_binary = b"\0" in raw[:_BINARY_SNIFF_BYTES]
+        is_binary = b"\0" in raw[:BINARY_SNIFF_BYTES]
 
         parser = None if is_binary else self._registry.for_path(Path(rel_path))
 
@@ -523,8 +526,8 @@ class SyncEngine:
 
         def observe(block: bytes) -> None:
             digest.update(block)
-            if len(prefix) < _BINARY_SNIFF_BYTES:
-                prefix.extend(block[: _BINARY_SNIFF_BYTES - len(prefix)])
+            if len(prefix) < BINARY_SNIFF_BYTES:
+                prefix.extend(block[: BINARY_SNIFF_BYTES - len(prefix)])
 
         if not boundary.read_into(rel_path, observe):
             # Vanished, refused, or rewritten mid-stream. Same answer as any other
