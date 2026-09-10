@@ -71,6 +71,9 @@ from repoatlas.freshness import index_freshness
 from repoatlas.indexing.chunking import chunk_hash
 from repoatlas.models.capability import AppliedBudget, CapabilityScope, ContextResolution
 from repoatlas.models.capability_io import (
+    ContextView,
+    EntityHandle,
+    EvidenceItem,
     IndexCounts,
     RepositoriesRequest,
     RepositoriesResponse,
@@ -87,14 +90,7 @@ from repoatlas.models.investigation import (
 )
 from repoatlas.models.repository import FileState, Repository
 from repoatlas.models.retrieval import RetrievalOutcome
-from repoatlas.models.search import (
-    ContextView,
-    EntityHandle,
-    EvidenceItem,
-    SearchMode,
-    SearchRequest,
-    SearchResponse,
-)
+from repoatlas.models.search import SearchMode, SearchRequest, SearchResponse
 from repoatlas.retrieval.retriever import DIAGNOSTIC_LIMITS
 from repoatlas.services.freshness_service import (
     current_facts_version,
