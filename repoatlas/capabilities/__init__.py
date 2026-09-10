@@ -17,7 +17,16 @@ stay usable with no terminal and no model attached:
     every capability is deterministic. A capability that could reach a model
     could manufacture evidence, which is the one thing RepoAtlas may never do.
 
-Slice A establishes vocabulary only: context resolution, the freshness view,
-error mapping and budget policy. There is deliberately no service object and no
-capability operation yet.
+The application boundary is :class:`CapabilityService`. It owns one workspace,
+one investigation registry and one lock for its whole life, and every operation
+goes through it. There is no module-level function that opens a database, because
+a second lifecycle is how two answers to "is this index usable?" get shipped.
+
+Capabilities appear here one slice at a time, and only when they are complete. An
+operation that exists as a stub is worse than one that does not exist: a caller
+cannot tell a stub from a capability that found nothing.
 """
+
+from repoatlas.capabilities.service import CapabilityService
+
+__all__ = ["CapabilityService"]

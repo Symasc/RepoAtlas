@@ -30,6 +30,7 @@ from __future__ import annotations
 from repoatlas.errors import (
     ContextFailure,
     ContextResolutionError,
+    ExitCode,
     IndexUnavailableError,
     MigrationContentionError,
     MigrationError,
@@ -39,6 +40,42 @@ from repoatlas.errors import (
     SyncInProgressError,
 )
 from repoatlas.models.capability import CapabilityError, ErrorCategory
+
+
+class ServiceClosedError(RepoAtlasError):
+    """A capability was called on a service that has been closed.
+
+    Defined here rather than in :mod:`repoatlas.errors` because it is a V2-only
+    condition: V1 opens a workspace per command and exits, so it has no state in
+    which a handle outlives what it points at.
+
+    It exists so that the failure is *one deterministic thing*. Without it a
+    closed service surfaces as whatever the underlying layer happens to raise —
+    an :class:`AttributeError`, a driver-level complaint about operating on a
+    closed database, or nothing at all if a call silently reads a stale handle.
+    None of those is classifiable at the boundary, and the last is the dangerous
+    one: it would answer.
+
+    Categorized :attr:`ErrorCategory.INTERNAL` rather than
+    :attr:`ErrorCategory.INVALID_REQUEST`, because nothing about the request is
+    wrong. The lifecycle around it is, and that belongs to whoever is hosting the
+    service rather than to whoever asked the question.
+    """
+
+    exit_code = ExitCode.RUNTIME
+
+    #: Defaulted rather than fixed, so the class keeps the signature every
+    #: :class:`RepoAtlasError` shares. ``ServiceClosedError()`` is the call site
+    #: that exists; accepting the base arguments is what lets the exhaustiveness
+    #: guard over the hierarchy construct this subclass like any other.
+    def __init__(
+        self,
+        message: str = "This RepoAtlas capability service has been closed.",
+        *,
+        detail: str | None = "Open a new service; a closed one is never reopened.",
+    ) -> None:
+        super().__init__(message, detail=detail)
+
 
 #: Which capability code and category each context failure becomes. A total map
 #: over :class:`ContextFailure`, so a new member fails the exhaustiveness test
@@ -60,6 +97,8 @@ def capability_error(exc: Exception) -> CapabilityError:
     """
     if isinstance(exc, ContextResolutionError):
         return _context_error(exc)
+    if isinstance(exc, ServiceClosedError):
+        return _from_repoatlas(exc, code="SERVICE_CLOSED", category=ErrorCategory.INTERNAL)
     if isinstance(exc, NotInitializedError):
         # The absence of an index rather than a broken one, but from the caller's
         # side both mean the same thing: there is nothing here to answer with.
