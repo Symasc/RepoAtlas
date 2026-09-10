@@ -18,15 +18,16 @@ class EvidenceSource(enum.StrEnum):
     """How a piece of evidence was reached. Used by rank fusion and by --verbose.
 
     The first six are retrieval stages, and they are the only ones fusion ever
-    sees. :attr:`INSPECT` is not a stage: it names evidence that was *addressed*
-    rather than searched for, which is how progressive inspection supplies source
-    text for a file, entity or span the caller already named exactly.
+    sees. :attr:`INSPECT` and :attr:`RELATIONSHIP` are not stages: they name
+    evidence that was *addressed* rather than searched for — the source of a file,
+    entity or span a caller named exactly, and the lines that assert a graph edge
+    reached from one.
 
-    It shares this enum rather than getting one of its own because the ledger
+    They share this enum rather than getting ones of their own because the ledger
     records a route for every piece of evidence it holds, and two vocabularies for
     "how did this arrive" would drift apart the first time one of them gained a
-    member. Nothing about fusion changes: inspection produces no candidates, so
-    this member never reaches a ranking.
+    member. Nothing about fusion changes: neither capability produces candidates,
+    so neither member ever reaches a ranking.
     """
 
     EXACT = "exact"
@@ -37,6 +38,9 @@ class EvidenceSource(enum.StrEnum):
     GRAPH = "graph"
     #: Addressed directly by the caller, not retrieved. Never ranked.
     INSPECT = "inspect"
+    #: The source lines a deterministic graph edge is asserted by, supplied so the
+    #: edge's provenance can be checked rather than only named. Never ranked.
+    RELATIONSHIP = "relationship"
 
 
 class EvidenceTier(enum.IntEnum):

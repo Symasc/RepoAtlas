@@ -75,6 +75,27 @@ class EdgeDirection(enum.StrEnum):
     IN = "in"
 
 
+class NeighborOrder(enum.StrEnum):
+    """Which order the store returns one hop's edges in.
+
+    It matters only because a bounded hop is a *cut*, and whatever comes back
+    first is what survives it.
+
+    ``CONFIDENCE`` is the retrieval order and stays the default: the funnel reads
+    traversal order as a proximity signal, so the strongest edges must arrive
+    first and ties fall to row id. That tiebreak is insertion order, which is fine
+    for a stage about to fuse everything anyway and wrong for an answer a caller
+    reads directly — two indexes built from the same repositories in a different
+    file order would cut different edges, and neither would be wrong.
+
+    ``NATURAL`` orders on facts about the repositories instead, so the same
+    question against the same repositories survives a rebuild unchanged.
+    """
+
+    CONFIDENCE = "confidence"
+    NATURAL = "natural"
+
+
 class Severity(enum.StrEnum):
     WARNING = "warning"
     ERROR = "error"
