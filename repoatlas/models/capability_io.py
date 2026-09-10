@@ -1,6 +1,6 @@
 """Request and response models for the capability operations (RepoAtlas V2).
 
-The wire vocabulary of the two read capabilities that exist so far. Everything
+The wire vocabulary the capability operations share. Everything
 here is transport-neutral: a tool-protocol adapter, an HTTP handler and a test
 see the same types, and none of them is why a field exists.
 
@@ -24,10 +24,13 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
+from repoatlas.models.evidence import EvidenceTier, MatchClass
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness, RepositoryFreshness
+from repoatlas.models.investigation import EvidenceId, EvidenceRef, EvidenceStatus
+from repoatlas.models.parsing import EntityType
 
 # ---------------------------------------------------------------------------
 # repositories
@@ -239,3 +242,108 @@ class StatusResponse(BaseModel):
     #: Directories discovery was refused. "We found nothing there" and "we were not
     #: allowed to look" are different claims (V1_SPEC §5).
     unreadable_paths: tuple[Path, ...] = ()
+
+
+# ---------------------------------------------------------------------------
+# Shared evidence vocabulary
+#
+# Every capability that hands an agent something it can cite speaks these three
+# types, so they live beneath all of them rather than inside whichever one was
+# written first. `search` reaches them by rank, `inspect` by name; the evidence
+# they produce is the same kind of thing and is recorded in the same ledger, and
+# a second EvidenceItem "for inspection" would be a second set of rules about
+# what a citation may claim.
+# ---------------------------------------------------------------------------
+
+
+class EntityHandle(BaseModel):
+    """A natural, reusable identity for an entity behind a piece of evidence.
+
+    The point of it is the next call: an agent that found ``env:SERVICE_HOST``
+    should be able to ask about its relationships without a second fuzzy lookup
+    that might resolve to something else. The key is exact and is what the graph
+    capability will accept verbatim.
+
+    Never a database id. A row id is allocation order, so a clean reindex of the
+    same tree produces different ones, and a handle stored across a reindex would
+    silently start naming a different entity — or nothing.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: The natural key, e.g. ``env:SERVICE_HOST``, ``module:src.config``,
+    #: ``sym:python-service:src/config.py:load_config:18``.
+    key: str
+    type: EntityType
+    #: Whether the key embeds a source position and therefore stops resolving when
+    #: the definition moves. ``sym:`` keys do; interned identities such as ``env:``
+    #: and ``module:`` do not. Published so a caller knows which handles are safe
+    #: to keep across a sync, rather than discovering it from a failed lookup.
+    positional: bool = False
+
+
+class EvidenceItem(BaseModel):
+    """One piece of evidence, as this search run found it.
+
+    ``text`` is exactly what the caller was shown, and ``ref.span_digest`` is a
+    digest of exactly these characters. ``ref``'s line range covers only complete
+    lines present in ``text``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: Ledger identity, valid inside this investigation only.
+    id: EvidenceId
+    #: 1-based position in **this** response, after budget shaping. Not a score,
+    #: not stable across queries, and never leaves gaps: if a candidate could not
+    #: fit, the ranks that follow are still consecutive because nothing follows.
+    rank: int = Field(gt=0)
+    ref: EvidenceRef
+    #: Display name of the repository. Not unique; ``ref.repository_slug`` is the
+    #: identity.
+    repository_name: str = ""
+    #: ``slug/path``, ``slug/path:line`` or ``slug/path:start-end``. Derived from
+    #: ``ref``, so it can never describe a wider span than was supplied.
+    location: str = ""
+    #: The supplied text. Empty for file-identity evidence, which claims the file
+    #: exists and nothing about any line.
+    text: str = ""
+    #: True when this candidate was shortened to fit the budget. More of *this*
+    #: source existed and was not returned.
+    truncated: bool = False
+
+    #: Why **this run** matched it, in the retriever's words. Diagnostic prose.
+    why: str = ""
+    #: Strength as established by **this run**. The ledger may hold something
+    #: stronger from an earlier query; that is the ledger's view, not this one's.
+    tier: EvidenceTier = EvidenceTier.DETERMINISTIC
+    match: MatchClass = MatchClass.EXACT_CONTENT
+
+    #: The entity behind an entity-backed result, when one resolves exactly.
+    #: ``None`` is a truthful answer and never a fabricated key.
+    entity: EntityHandle | None = None
+    #: Whether the ledger still stands behind this id. ``VALID`` at allocation;
+    #: an id re-supplied after a revalidation may carry something else.
+    status: EvidenceStatus = EvidenceStatus.VALID
+
+
+class ContextView(BaseModel):
+    """What the context resolved to, as identities rather than rows.
+
+    A transport-neutral projection of
+    :class:`~repoatlas.models.capability.ContextResolution`, which carries whole
+    ``Repository`` objects and therefore their database ids. The caller needs to
+    know *what was searched*; it must not receive a surrogate id to store.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    context: CapabilityContext
+    scope: CapabilityScope
+    #: Canonical identities of the repositories in scope, ordered by slug.
+    repositories: tuple[str, ...] = ()
+    #: The repository the question was asked "in", if any. Retrieval biases
+    #: towards it; it is not a wall, and evidence from elsewhere may still rank.
+    primary: str | None = None
+    #: Human-readable account of how the scope was decided. Never a discriminator.
+    reason: str = ""

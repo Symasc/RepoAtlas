@@ -4,6 +4,14 @@ Search is the first capability that hands an agent something it can cite, so two
 distinctions are built into these types rather than left to the code that fills
 them in.
 
+The evidence vocabulary these responses are built from —
+:class:`~repoatlas.models.capability_io.EvidenceItem`,
+:class:`~repoatlas.models.capability_io.EntityHandle` and
+:class:`~repoatlas.models.capability_io.ContextView` — is shared with every other
+capability that supplies citable bytes and lives beneath all of them. Two
+distinctions built into those types are what search depends on most, and both are
+recorded here because search is where they first bite.
+
 **This query, not this investigation.** An :class:`EvidenceItem` describes how
 *this* retrieval run reached this span. The ledger separately accumulates the
 strongest metadata any run has ever established for it, and the two legitimately
@@ -28,18 +36,13 @@ from __future__ import annotations
 
 import enum
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
-from repoatlas.models.capability import (
-    AppliedBudget,
-    CapabilityContext,
-    CapabilityScope,
-    EvidenceBudget,
-)
-from repoatlas.models.evidence import EvidenceTier, MatchClass, RetrievalTrace
+from repoatlas.models.capability import AppliedBudget, CapabilityContext, EvidenceBudget
+from repoatlas.models.capability_io import ContextView, EntityHandle, EvidenceItem
+from repoatlas.models.evidence import RetrievalTrace
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
-from repoatlas.models.investigation import EvidenceId, EvidenceRef, EvidenceStatus, LedgerSummary
-from repoatlas.models.parsing import EntityType
+from repoatlas.models.investigation import LedgerSummary
 from repoatlas.models.retrieval import SuppressionOutcome
 
 
@@ -57,77 +60,6 @@ class SearchMode(enum.StrEnum):
     #: verbatim, which is how an unquoted error string embedded in source is found
     #: (V1_SPEC §16).
     DIAGNOSTIC = "diagnostic"
-
-
-class EntityHandle(BaseModel):
-    """A natural, reusable identity for an entity behind a piece of evidence.
-
-    The point of it is the next call: an agent that found ``env:SERVICE_HOST``
-    should be able to ask about its relationships without a second fuzzy lookup
-    that might resolve to something else. The key is exact and is what the graph
-    capability will accept verbatim.
-
-    Never a database id. A row id is allocation order, so a clean reindex of the
-    same tree produces different ones, and a handle stored across a reindex would
-    silently start naming a different entity — or nothing.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    #: The natural key, e.g. ``env:SERVICE_HOST``, ``module:src.config``,
-    #: ``sym:python-service:src/config.py:load_config:18``.
-    key: str
-    type: EntityType
-    #: Whether the key embeds a source position and therefore stops resolving when
-    #: the definition moves. ``sym:`` keys do; interned identities such as ``env:``
-    #: and ``module:`` do not. Published so a caller knows which handles are safe
-    #: to keep across a sync, rather than discovering it from a failed lookup.
-    positional: bool = False
-
-
-class EvidenceItem(BaseModel):
-    """One piece of evidence, as this search run found it.
-
-    ``text`` is exactly what the caller was shown, and ``ref.span_digest`` is a
-    digest of exactly these characters. ``ref``'s line range covers only complete
-    lines present in ``text``.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    #: Ledger identity, valid inside this investigation only.
-    id: EvidenceId
-    #: 1-based position in **this** response, after budget shaping. Not a score,
-    #: not stable across queries, and never leaves gaps: if a candidate could not
-    #: fit, the ranks that follow are still consecutive because nothing follows.
-    rank: int = Field(gt=0)
-    ref: EvidenceRef
-    #: Display name of the repository. Not unique; ``ref.repository_slug`` is the
-    #: identity.
-    repository_name: str = ""
-    #: ``slug/path``, ``slug/path:line`` or ``slug/path:start-end``. Derived from
-    #: ``ref``, so it can never describe a wider span than was supplied.
-    location: str = ""
-    #: The supplied text. Empty for file-identity evidence, which claims the file
-    #: exists and nothing about any line.
-    text: str = ""
-    #: True when this candidate was shortened to fit the budget. More of *this*
-    #: source existed and was not returned.
-    truncated: bool = False
-
-    #: Why **this run** matched it, in the retriever's words. Diagnostic prose.
-    why: str = ""
-    #: Strength as established by **this run**. The ledger may hold something
-    #: stronger from an earlier query; that is the ledger's view, not this one's.
-    tier: EvidenceTier = EvidenceTier.DETERMINISTIC
-    match: MatchClass = MatchClass.EXACT_CONTENT
-
-    #: The entity behind an entity-backed result, when one resolves exactly.
-    #: ``None`` is a truthful answer and never a fabricated key.
-    entity: EntityHandle | None = None
-    #: Whether the ledger still stands behind this id. ``VALID`` at allocation;
-    #: an id re-supplied after a revalidation may carry something else.
-    status: EvidenceStatus = EvidenceStatus.VALID
 
 
 class SearchRequest(BaseModel):
@@ -157,28 +89,6 @@ class SearchRequest(BaseModel):
         if not value.strip():
             raise ValueError("question must not be empty")
         return value
-
-
-class ContextView(BaseModel):
-    """What the context resolved to, as identities rather than rows.
-
-    A transport-neutral projection of
-    :class:`~repoatlas.models.capability.ContextResolution`, which carries whole
-    ``Repository`` objects and therefore their database ids. The caller needs to
-    know *what was searched*; it must not receive a surrogate id to store.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    context: CapabilityContext
-    scope: CapabilityScope
-    #: Canonical identities of the repositories in scope, ordered by slug.
-    repositories: tuple[str, ...] = ()
-    #: The repository the question was asked "in", if any. Retrieval biases
-    #: towards it; it is not a wall, and evidence from elsewhere may still rank.
-    primary: str | None = None
-    #: Human-readable account of how the scope was decided. Never a discriminator.
-    reason: str = ""
 
 
 class SearchResponse(BaseModel):
