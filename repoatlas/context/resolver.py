@@ -7,9 +7,10 @@ else is an error — RepoAtlas never guesses a scope from proximity.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
-from repoatlas.errors import ContextResolutionError, NotInitializedError
+from repoatlas.errors import ContextFailure, ContextResolutionError, NotInitializedError
 from repoatlas.gitstate.client import git_toplevel
 from repoatlas.models.context import ContextScope, RepositoryContext
 from repoatlas.models.repository import Repository
@@ -22,6 +23,43 @@ directory is not the configured repository root.
 Specify a repository:
 
   repoatlas {command} {example}"""
+
+
+def match_repositories(selector: str, repositories: Sequence[Repository]) -> list[Repository]:
+    """Every managed repository a selector names. **The one matching rule.**
+
+    A selector is matched against two namespaces at once: repository **names**,
+    which may repeat, and repository **identities** — the slug, which is the path
+    within the managed root and cannot repeat. The union is returned rather than a
+    winner, because the count is the answer: one match resolves, several are an
+    ambiguity to report, none is unknown.
+
+    Checking identities first and stopping there would silently settle the
+    ambiguous case whenever a name collided with some *other* repository's
+    identity: with ``scripts`` and ``nested/scripts`` both managed, ``scripts``
+    matches one identity and two names, and taking the identity is exactly the
+    arbitrary choice V1_SPEC §6 forbids.
+
+    Free of the working directory, and free of the filesystem. That is what lets
+    the capability layer share it: a path selector has to be resolved against a
+    current directory to mean anything, so paths are the CLI's business and this
+    is the part both callers can agree on.
+    """
+    return [
+        repo
+        for repo in repositories
+        if repo.name == selector or (repo.slug and repo.slug == selector)
+    ]
+
+
+def ambiguity_candidates(matches: Sequence[Repository]) -> tuple[str, ...]:
+    """Canonical identities of an ambiguous match, in a stable order.
+
+    The identity rather than the display name: the display name is what was
+    ambiguous, so repeating it would not help anyone choose.
+    """
+    ordered = sorted(matches, key=lambda r: (r.slug, str(r.path)))
+    return tuple(repo.slug or str(repo.path) for repo in ordered)
 
 
 def _canonical(path: Path) -> Path:
@@ -86,6 +124,7 @@ class RepositoryContextResolver:
         if enclosing is not None:
             raise ContextResolutionError(
                 "This Git repository is not managed by RepoAtlas.",
+                reason=ContextFailure.UNMANAGED_REPOSITORY,
                 detail=(
                     f"Repository:\n  {enclosing}\n\n"
                     f"Configured RepoAtlas root:\n  {self._root}\n\n"
@@ -97,29 +136,20 @@ class RepositoryContextResolver:
         # Step 5 — nothing can be inferred. Ask rather than guess.
         raise ContextResolutionError(
             _UNRESOLVED_MESSAGE,
+            reason=ContextFailure.UNRESOLVED,
             detail=_UNRESOLVED_DETAIL.format(command=command, example=self._example_name()),
         )
 
     def _resolve_explicit(self, name: str, cwd: Path) -> RepositoryContext:
         """Explicit selection overrides cwd entirely and works from anywhere.
 
-        A selector is matched against two namespaces at once: repository **names**,
-        which may repeat, and repository **identities** (the path within the managed
-        root), which cannot. The union decides:
-
-        * exactly one repository matched either way — resolve to it;
-        * more than one — refuse and list them.
-
-        Checking identities first and stopping there would silently answer the
-        ambiguous case whenever the name collided with some *other* repository's
-        identity: with ``scripts`` and ``nested/scripts`` both managed, ``--repo
-        scripts`` matches one identity and two names, and picking the identity is
-        exactly the arbitrary choice V1_SPEC §6 forbids.
+        The name/slug matching itself is :func:`match_repositories`, shared with
+        the capability layer so that "which repository does this selector name?"
+        has one answer regardless of who asks. What stays here is the CLI's own
+        addition: a selector may also be a **path**, which only means something
+        relative to a working directory and is therefore not shareable.
         """
-        matched: list[Repository] = []
-        for repo in self._repositories:
-            if repo.name == name or (repo.slug and repo.slug == name):
-                matched.append(repo)
+        matched = match_repositories(name, self._repositories)
 
         if len(matched) == 1:
             repo = matched[0]
@@ -135,6 +165,8 @@ class RepositoryContextResolver:
         if len(matched) > 1:
             raise ContextResolutionError(
                 f"Repository name is ambiguous: {name}",
+                reason=ContextFailure.AMBIGUOUS,
+                candidates=ambiguity_candidates(matched),
                 detail=self._ambiguity_detail(matched),
             )
 
@@ -151,6 +183,7 @@ class RepositoryContextResolver:
 
         raise ContextResolutionError(
             f"Unknown repository: {name}",
+            reason=ContextFailure.UNKNOWN_REPOSITORY,
             detail=self._known_repositories_detail(),
         )
 
