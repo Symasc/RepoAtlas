@@ -1,56 +1,32 @@
-"""Shaping retrieved candidates into citable evidence (RepoAtlas V2).
+"""Fitting retrieved candidates into the granted budget (RepoAtlas V2).
 
 Retrieval decides *what* and in *what order*. This module decides how much of it
-fits and what may honestly be claimed about the part that does. It performs no
-ranking, no scoring and no selection by relevance — every decision here is about
-characters and lines.
+fits. It performs no ranking, no scoring and no selection by relevance — every
+decision here is about how many characters remain.
 
-The two rules it exists to enforce
-----------------------------------
+What may honestly be claimed about the part that fits is not decided here either:
+that question is identical for every capability that supplies citable bytes, and
+it is answered once in :mod:`repoatlas.capabilities.evidence_shaping`, below this
+module and below inspection. This module supplies the ranked order and the
+budget; that one supplies the line arithmetic.
 
-**A citable span covers only complete lines whose text was returned.** Grounding
-verifies a citation by intersecting it with the spans that were supplied
-(V1_SPEC §15), so a span wider than the text would authorize citing lines the
-agent never saw — a fabrication RepoAtlas would have licensed itself. Truncation
-therefore narrows the line range with the text, and evidence whose text cannot be
-mapped onto its source lines claims no line at all.
+The rule this module exists to enforce
+--------------------------------------
 
 **Budgeting narrows the ranked set; it never reorders it.** Output is a *prefix*
 of the trusted order, with at most the last item shortened. Skipping an oversized
 high-ranked candidate to fit two smaller ones behind it would be a second
 relevance algorithm wearing a budget's clothing, and it would quietly overturn the
 tier precedence that makes deterministic evidence trustworthy (V1_SPEC §14).
-
-How a candidate's text maps to its lines
-----------------------------------------
-Verified against the index rather than assumed. Every chunk in the store
-satisfies::
-
-    text == "\\n".join(source_lines[line_start - 1 : line_end])
-
-so ``text.split("\\n")`` yields exactly ``line_end - line_start + 1`` pieces and
-piece *k* is source line ``line_start + k``. Note ``split`` and not
-``splitlines``: a span ending in a blank line produces a trailing empty piece that
-``splitlines`` discards, which would make the count disagree with the span for a
-perfectly ordinary chunk.
-
-Candidates that do **not** satisfy it are real and are handled rather than
-special-cased away: an entity description carries a one-line signature against a
-multi-line declared span, and a piece of a split span begins mid-span. Neither
-proves which source lines its text covers, so neither gets a line claim. The check
-is arithmetic on the candidate itself, so it needs no metadata and cannot be
-fooled by a producer this module has not seen.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from repoatlas.capabilities.evidence_shaping import provable_span, supply
 from repoatlas.models.capability import AppliedBudget
 from repoatlas.models.evidence import EvidenceCandidate
-
-#: How a candidate's text was joined back together, and therefore how it splits.
-_LINE_SEPARATOR = "\n"
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,55 +73,11 @@ def _claim(
 def provable_line_span(candidate: EvidenceCandidate) -> tuple[int, int] | None:
     """The source lines this candidate's text demonstrably covers, or ``None``.
 
-    ``None`` is the honest answer in three situations, and each is a real producer
-    rather than a hypothetical:
-
-    * the candidate already claims no line — a filename match knows nothing about
-      any line, so it says nothing about one (V1_SPEC §11);
-    * the text is empty — an entity that was reached but has no stored signature
-      supplies no line, and arithmetic that "proves" an empty string covers line 1
-      would authorize citing a line nobody was shown;
-    * the piece count disagrees with the span — a split piece or a signature
-      preview, where which lines the text covers is simply not established.
-
-    A ``None`` here is not a discarded candidate. The evidence is still returned;
-    it is returned as a claim about the file rather than about lines.
+    The candidate-shaped spelling of
+    :func:`~repoatlas.capabilities.evidence_shaping.provable_span`, which holds the
+    reasoning and the three producers that legitimately prove nothing.
     """
-    if candidate.line_start is None or candidate.line_end is None:
-        return None
-    if not candidate.text:
-        return None
-    pieces = candidate.text.split(_LINE_SEPARATOR)
-    if len(pieces) != candidate.line_end - candidate.line_start + 1:
-        return None
-    return (candidate.line_start, candidate.line_end)
-
-
-def _prefix_lines(text: str, limit: int) -> tuple[str, int]:
-    """The longest whole-line prefix of ``text`` within ``limit`` characters.
-
-    Returns the prefix and how many lines it holds. A partial line is never
-    included: it would be text the caller can read attached to a line number that
-    promises the rest of it.
-    """
-    if limit <= 0:
-        return ("", 0)
-    if len(text) <= limit:
-        return (text, len(text.split(_LINE_SEPARATOR)))
-
-    pieces = text.split(_LINE_SEPARATOR)
-    kept: list[str] = []
-    used = 0
-    for piece in pieces:
-        # Every line after the first costs its separator too.
-        cost = len(piece) + (1 if kept else 0)
-        if used + cost > limit:
-            break
-        kept.append(piece)
-        used += cost
-    if not kept:
-        return ("", 0)
-    return (_LINE_SEPARATOR.join(kept), len(kept))
+    return provable_span(candidate.text, candidate.line_start, candidate.line_end)
 
 
 def shape_candidates(
@@ -181,8 +113,6 @@ def shape_candidates(
             break
         considered += 1
 
-        span = provable_line_span(candidate)
-
         if not candidate.text:
             # Costs no characters. Its line claim is whatever it could prove,
             # which for empty text is nothing.
@@ -197,9 +127,9 @@ def shape_candidates(
             continue
 
         allowance = min(budget.max_item_chars, remaining_total)
-        text, lines = _prefix_lines(candidate.text, allowance)
+        piece = supply(candidate.text, candidate.line_start, candidate.line_end, limit=allowance)
 
-        if not text:
+        if piece is None:
             # Not one complete line fits. Stopping is the honest end of the
             # response: returning the file identity instead would silently swap a
             # content answer for a weaker one, and skipping ahead to something
@@ -207,12 +137,10 @@ def shape_candidates(
             considered -= 1
             break
 
-        truncated = len(text) < len(candidate.text)
-        if span is None:
-            line_start = line_end = None
-        else:
-            line_start = span[0]
-            line_end = span[0] + lines - 1
+        text = piece.text
+        line_start = piece.line_start
+        line_end = piece.line_end
+        truncated = piece.truncated
 
         claim = _claim(candidate, text, line_start, line_end)
         if claim in supplied:
