@@ -223,3 +223,34 @@ def test_the_capability_layer_carries_no_transport_vocabulary() -> None:
                 if marker in source:
                     offenders.append(f"{directory}/{path.name} contains {marker!r}")
     assert not offenders, offenders
+
+
+def test_the_capability_layer_does_not_reach_a_concrete_storage_backend() -> None:
+    """Session and ledger state compares values a caller gathered; it fetches none.
+
+    Keeping the ledger free of a database handle is what makes every revalidation
+    rule testable without one, and what stops "compare these values" quietly
+    becoming "go and read the index" (V1_SPEC §12).
+    """
+    offenders: list[str] = []
+    for path in sorted((PACKAGE_ROOT / "capabilities").rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for marker in ("storage.sqlite", "sqlite3", "SqliteFileStore", "Workspace"):
+            if marker in source:
+                offenders.append(f"capabilities/{path.name} contains {marker!r}")
+    assert not offenders, offenders
+
+
+def test_nothing_outside_the_capability_layer_imports_it() -> None:
+    """V2 state is additive: no V1 module has acquired a dependency on it.
+
+    An AST walk rather than a text search, so a docstring that *names* a
+    capability class to cross-reference it is not mistaken for a dependency on one.
+    """
+    offenders: list[str] = []
+    for package, path in _modules():
+        if package == "capabilities":
+            continue
+        if "capabilities" in _imported_packages(path):
+            offenders.append(str(path.relative_to(PACKAGE_ROOT.parent)))
+    assert not offenders, f"capabilities/ is the top layer, imported by: {offenders}"
