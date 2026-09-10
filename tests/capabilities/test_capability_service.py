@@ -281,25 +281,22 @@ def test_the_call_lock_is_reentrant(initialized: Workspace) -> None:
 
 
 def test_the_public_callable_surface_is_only_the_intended_operations() -> None:
-    """Slice C ships four public methods. Future slices add theirs deliberately."""
+    """Every capability that exists is one somebody decided to ship.
+
+    Updated once per slice, deliberately: a capability appearing here without that
+    edit means one was added without the review that decides what it promises.
+    """
     public = {
         name
         for name in dir(CapabilityService)
         if not name.startswith("_") and callable(getattr(CapabilityService, name))
     }
-    assert public == {"open", "close", "repositories", "status"}
+    assert public == {"open", "close", "repositories", "status", "search"}
 
 
 def test_no_future_capability_exists_as_a_stub() -> None:
     """A stub is worse than an absence: a caller cannot tell it from an empty result."""
-    for name in (
-        "search",
-        "inspect",
-        "relationships",
-        "dependencies",
-        "verify_grounding",
-        "sync",
-    ):
+    for name in ("inspect", "relationships", "dependencies", "verify_grounding", "sync"):
         assert not hasattr(CapabilityService, name), f"{name} exists before its slice"
 
 
