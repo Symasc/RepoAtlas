@@ -1,57 +1,40 @@
-"""Reconstructing and budgeting inspectable source (RepoAtlas V2).
+"""Budgeting inspectable source into citable segments (RepoAtlas V2).
 
-Pure. It receives text that has already been proven — decoded bytes whose hash
-matched the index, or chunks the index holds — and decides which source lines can
-honestly be claimed, which cannot, and which fit. It opens nothing, reads nothing
-and has no handle on anything.
+Pure. It receives source lines that have already been proven — decoded bytes whose
+hash matched the index, or the line map
+:mod:`repoatlas.capabilities.indexed_source` reconstructed from stored chunks —
+and decides which of the requested lines fit, which could not be proven, and which
+were left out for budget. It opens nothing, reads nothing and has no handle on
+anything.
 
-Everything here is built on one representation: a **line map**, from source line
-number to that line's text. It is deliberately not a list of chunks or a list of
-intervals, and the reason is the defect it removes.
-
-Why a line map rather than merged intervals
--------------------------------------------
-Two indexed chunks with adjacent line metadata do not prove that every line
-between them was stored. A span whose text exceeded the chunk cap is cut into
-pieces that all carry the *span's* line range (ARCHITECTURE.md §6), so a piece
-other than a whole one begins or ends mid-line and covers fewer lines than it
-advertises. Merging by metadata would therefore produce one continuous citable
-interval across text that was never supplied — precisely the fabrication the
-supplied-span rule exists to prevent, arrived at by arithmetic instead of by
-invention.
-
-A line map cannot express that mistake. A line is present only if some chunk's
-text demonstrably contained it, so continuity is a consequence of what was stored
-rather than an inference about it, gaps are simply absent keys, and two chunks
-that overlap contribute one copy of the shared lines instead of two.
-
-Which chunks are allowed to contribute
---------------------------------------
-Only whole ones: ``split_total == 1`` **and** a piece count that matches the
-declared span. Either test alone is weaker than the pair. The count test alone
-would admit a cut piece that happened to land on the right number of lines; the
-``split_total`` test alone would admit an entity description whose one-line
-signature is stored against a multi-line declaration. What a rejected chunk costs
-is line-level citation for a span where it was never provable, and the range says
-so as :attr:`~repoatlas.models.inspection.Coverage.unavailable` rather than being
-filled in from inference.
+The reconstruction itself, and the reasoning about which chunks may contribute to
+it, lives in :mod:`repoatlas.capabilities.indexed_source` because inspection is
+not its only caller: an edge's asserting lines are reconstructed exactly the same
+way, and one wrong answer there would be a fabricated citation just as surely.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from repoatlas.capabilities.evidence_shaping import LINE_SEPARATOR, prefix_lines
+from repoatlas.capabilities.indexed_source import WHOLE_FILE_END, indexed_line_map, to_ranges
 from repoatlas.models.capability import AppliedBudget
-from repoatlas.models.inspection import LineRange
+from repoatlas.models.capability_io import LineRange
 from repoatlas.parsers.marks import split_lines
-from repoatlas.storage.protocols import ChunkHit
 
-#: Upper bound for "to the end of the file" when the end is not yet known. Larger
-#: than any line number a source file reaches, and finite so the query stays a
-#: bounded range rather than becoming an unfiltered table scan.
-WHOLE_FILE_END = 2_000_000_000
+__all__ = [
+    "WHOLE_FILE_END",
+    "InspectionSegment",
+    "ShapedInspection",
+    "clamp",
+    "indexed_line_map",
+    "pad",
+    "shape_inspection",
+    "to_ranges",
+    "worktree_line_map",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,45 +71,6 @@ def worktree_line_map(content: str) -> dict[int, str]:
     as a line ending and would number the whole file differently.
     """
     return {number: text for number, text in enumerate(split_lines(content), start=1)}
-
-
-def indexed_line_map(chunks: Iterable[ChunkHit]) -> dict[int, str]:
-    """Every source line the indexed chunks demonstrably contain.
-
-    Earlier chunks win a tie, which arises only where two chunks overlap — and
-    there they agree, because both were cut from one decoded file.
-    """
-    lines: dict[int, str] = {}
-    for chunk in chunks:
-        if not chunk.text:
-            continue
-        if chunk.split_total != 1:
-            # A piece of a cut span. Its text does not cover the range it carries.
-            continue
-        pieces = chunk.text.split(LINE_SEPARATOR)
-        if len(pieces) != chunk.line_end - chunk.line_start + 1:
-            # A preview, or a span whose text and range simply disagree.
-            continue
-        for offset, piece in enumerate(pieces):
-            lines.setdefault(chunk.line_start + offset, piece)
-    return lines
-
-
-def to_ranges(numbers: Iterable[int]) -> tuple[LineRange, ...]:
-    """Consecutive line numbers as closed intervals, ascending."""
-    ordered = sorted(set(numbers))
-    if not ordered:
-        return ()
-    ranges: list[LineRange] = []
-    start = previous = ordered[0]
-    for number in ordered[1:]:
-        if number == previous + 1:
-            previous = number
-            continue
-        ranges.append(LineRange(start=start, end=previous))
-        start = previous = number
-    ranges.append(LineRange(start=start, end=previous))
-    return tuple(ranges)
 
 
 def pad(base: LineRange, context_lines: int) -> LineRange:
