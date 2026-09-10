@@ -172,20 +172,27 @@ def apply_budget_policy(
     )
 
 
-def retrieval_limits_for(applied: AppliedBudget, settings: Settings) -> RetrievalLimits:
+def retrieval_limits_for(
+    applied: AppliedBudget, settings: Settings, *, base: RetrievalLimits | None = None
+) -> RetrievalLimits:
     """Internal retrieval bounds for a granted budget.
 
     The biases — hop count, fan-out, seeds, primary boost, semantic floor — come
     from configuration and are **not** derived from the budget, because they are
     not a quantity of evidence. Only the two caps a caller can move are set here.
 
+    ``base`` selects the profile the biases come from. It defaults to the
+    configured lookup profile; ``search`` passes :data:`DIAGNOSTIC_LIMITS` for a
+    diagnostic call, which is the same funnel with wider bounds rather than a
+    second retrieval path.
+
     ``token_budget`` is the character budget divided by :data:`CHARS_PER_TOKEN`,
     rounded **up**, so this bound never cuts below what the caller was granted.
     It is a pre-filter and not the final ceiling; see the module docstring.
     """
-    base = RetrievalLimits.from_settings(settings.retrieval)
-    return base.widened(
-        per_source=base.per_source,
+    profile = base or RetrievalLimits.from_settings(settings.retrieval)
+    return profile.widened(
+        per_source=profile.per_source,
         final=applied.max_items,
         token_budget=-(-applied.max_total_chars // CHARS_PER_TOKEN),
     )
