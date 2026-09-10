@@ -77,6 +77,29 @@ class ServiceClosedError(RepoAtlasError):
         super().__init__(message, detail=detail)
 
 
+class IndexInconsistencyError(RepoAtlasError):
+    """Retrieval returned a candidate the file table does not know about.
+
+    A defect, not a state a caller can act on, which is why it is reported rather
+    than smoothed over. Every candidate comes from a row the index holds, so a
+    missing file row means the search index and the file table disagree — and the
+    tempting repair is the dangerous one: recording the reference with an empty
+    content hash would produce evidence that revalidates as stale forever and
+    reads exactly like ordinary drift, hiding the inconsistency behind a plausible
+    answer.
+    """
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(
+        self,
+        message: str = "the search index and the file table disagree",
+        *,
+        detail: str | None = "Re-run `repoatlas sync --full` to rebuild the index.",
+    ) -> None:
+        super().__init__(message, detail=detail)
+
+
 #: Which capability code and category each context failure becomes. A total map
 #: over :class:`ContextFailure`, so a new member fails the exhaustiveness test
 #: rather than silently falling through to a generic code.
@@ -99,6 +122,8 @@ def capability_error(exc: Exception) -> CapabilityError:
         return _context_error(exc)
     if isinstance(exc, ServiceClosedError):
         return _from_repoatlas(exc, code="SERVICE_CLOSED", category=ErrorCategory.INTERNAL)
+    if isinstance(exc, IndexInconsistencyError):
+        return _from_repoatlas(exc, code="INDEX_INCONSISTENT", category=ErrorCategory.INTERNAL)
     if isinstance(exc, NotInitializedError):
         # The absence of an index rather than a broken one, but from the caller's
         # side both mean the same thing: there is nothing here to answer with.

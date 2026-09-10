@@ -50,18 +50,26 @@ from datetime import datetime
 from pathlib import Path
 from types import TracebackType
 
-from repoatlas.capabilities.budget import BudgetCeiling, ceiling_for
-from repoatlas.capabilities.context import resolve_context
-from repoatlas.capabilities.errors import ServiceClosedError
+from repoatlas.capabilities.budget import (
+    BudgetCeiling,
+    apply_budget_policy,
+    ceiling_for,
+    retrieval_limits_for,
+)
+from repoatlas.capabilities.context import resolve_context, to_repository_context
+from repoatlas.capabilities.errors import IndexInconsistencyError, ServiceClosedError
+from repoatlas.capabilities.search import ShapedEvidence, ShapingResult, shape_candidates
 from repoatlas.capabilities.session import (
     DEFAULT_IDLE_TTL_SECONDS,
     DEFAULT_MAX_SESSIONS,
+    InvestigationSession,
     SessionRegistry,
 )
 from repoatlas.config.settings import Settings
 from repoatlas.discovery.reconcile import RepositorySetPlan
 from repoatlas.freshness import index_freshness
-from repoatlas.models.capability import CapabilityScope, ContextResolution
+from repoatlas.indexing.chunking import chunk_hash
+from repoatlas.models.capability import AppliedBudget, CapabilityScope, ContextResolution
 from repoatlas.models.capability_io import (
     IndexCounts,
     RepositoriesRequest,
@@ -71,14 +79,35 @@ from repoatlas.models.capability_io import (
     StatusResponse,
 )
 from repoatlas.models.freshness import FreshnessDepth
-from repoatlas.models.investigation import DEFAULT_LEDGER_CAPACITY
-from repoatlas.models.repository import Repository
+from repoatlas.models.investigation import (
+    DEFAULT_LEDGER_CAPACITY,
+    EvidenceRef,
+    LedgerEntry,
+    ProposedEvidence,
+)
+from repoatlas.models.repository import FileState, Repository
+from repoatlas.models.retrieval import RetrievalOutcome
+from repoatlas.models.search import (
+    ContextView,
+    EntityHandle,
+    EvidenceItem,
+    SearchMode,
+    SearchRequest,
+    SearchResponse,
+)
+from repoatlas.retrieval.retriever import DIAGNOSTIC_LIMITS
 from repoatlas.services.freshness_service import (
     current_facts_version,
     repository_freshness_for,
     repository_set_drift,
 )
 from repoatlas.services.workspace import Workspace, open_workspace
+
+#: Key prefix whose identities embed a source position, and therefore stop
+#: resolving when the definition moves. Every other prefix — ``env:``, ``module:``,
+#: ``pkg:``, ``file:``, ``repo:``, ``cmd:``, ``cfgkey:`` — names something interned
+#: by identity rather than by location, so those handles survive a sync.
+_POSITIONAL_KEY_PREFIX = "sym:"
 
 
 class CapabilityService:
@@ -285,6 +314,79 @@ class CapabilityService:
                 unreadable_paths=drift.unreadable,
             )
 
+    def search(self, request: SearchRequest) -> SearchResponse:
+        """Find evidence for a question, and record every citable byte of it.
+
+        The whole of the deterministic funnel runs **once**, through
+        :meth:`~repoatlas.retrieval.retriever.Retriever.retrieve_detailed`. Nothing
+        about ranking, suppression, tier assignment or deduplication is reproduced
+        here: this is an adapter around one retrieval run, and a second opinion
+        about relevance formed at this layer would be a second retrieval system
+        that the trust guarantees were never written for.
+
+        What this layer adds is what a citation needs and retrieval does not
+        provide: exact character bounds, line claims narrowed to the text actually
+        supplied, and an atomic ledger record made **before** the response exists.
+        The order matters. Evidence returned but not recorded is evidence
+        verification cannot see, which is indistinguishable from a fabrication.
+        """
+        with self._operation():
+            registered = self._workspace.repositories.list_all()
+            # Before any investigation exists, so a rejected context leaves no
+            # session behind.
+            resolution = resolve_context(request.context, registered)
+
+            # Derived from the parser and dependency registries, so it is one
+            # value for the whole call and cannot differ between two repositories.
+            facts = current_facts_version(self._workspace)
+            applied = apply_budget_policy(
+                request.budget, self._workspace.settings, ceiling=self._budget_ceiling
+            )
+            diagnostic = request.mode is SearchMode.DIAGNOSTIC
+            limits = retrieval_limits_for(
+                applied,
+                self._workspace.settings,
+                base=DIAGNOSTIC_LIMITS if diagnostic else None,
+            )
+
+            existing = request.investigation_id is not None
+            session = (
+                self._sessions.get(request.investigation_id)
+                if request.investigation_id is not None
+                else self._sessions.create()
+            )
+
+            try:
+                outcome = self._workspace.retriever(limits).retrieve_detailed(
+                    request.question,
+                    to_repository_context(resolution),
+                    literal_phrase=diagnostic,
+                )
+                shaped = shape_candidates(outcome.evidence.candidates, applied)
+                proposed = self._propose(shaped.items, registered, facts=facts)
+                # The single atomic point. A capacity refusal raises here having
+                # allocated nothing and strengthened nothing.
+                entries = session.ledger.record(proposed)
+            except BaseException:
+                # A session this call invented, which never got to hold anything,
+                # is not left behind as a ghost an agent could be handed the id of.
+                # One the caller already owned is untouched.
+                if not existing and len(session.ledger) == 0:
+                    self._sessions.drop(session.id)
+                raise
+
+            return self._search_response(
+                request=request,
+                resolution=resolution,
+                session=session,
+                shaped=shaped,
+                entries=entries,
+                proposed=proposed,
+                outcome=outcome,
+                applied=applied,
+                facts=facts,
+            )
+
     # -- internals ----------------------------------------------------------
 
     @contextmanager
@@ -304,6 +406,204 @@ class CapabilityService:
             if self._closed:
                 raise ServiceClosedError()
             yield
+
+    def _propose(
+        self, shaped: list[ShapedEvidence], registered: list[Repository], *, facts: str
+    ) -> list[ProposedEvidence]:
+        """Turn shaped evidence into the exact batch the ledger will record.
+
+        Every reference carries the indexed snapshot it was taken from — the
+        file's content hash and the parser version behind its facts — because
+        that is what lets a later revalidation say whether the evidence still
+        describes what is there. Both are read from the **indexed** file row and
+        never from the working tree: the claim being recorded is about what
+        RepoAtlas searched, not about what happens to be on disk now.
+        """
+        by_slug = {repo.slug: repo for repo in registered}
+        wanted: dict[int, set[str]] = {}
+        for item in shaped:
+            repo = by_slug.get(item.candidate.repository_slug)
+            if repo is not None and repo.id is not None:
+                wanted.setdefault(repo.id, set()).add(item.candidate.path)
+
+        states: dict[tuple[str, str], FileState] = {}
+        for repo_id, paths in wanted.items():
+            slug = next(slug for slug, repo in by_slug.items() if repo.id == repo_id)
+            for path, state in self._workspace.files.states_for(repo_id, sorted(paths)).items():
+                states[(slug, path)] = state
+
+        proposed: list[ProposedEvidence] = []
+        for item in shaped:
+            candidate = item.candidate
+            state = states.get((candidate.repository_slug, candidate.path))
+            if state is None:
+                # Retrieval only ever returns rows the index holds, so a candidate
+                # with no file row means the search index and the file table
+                # disagree. Reported rather than papered over with empty strings:
+                # a reference carrying a blank hash would revalidate as stale
+                # forever and look like ordinary drift.
+                raise IndexInconsistencyError(f"{candidate.repository_slug}/{candidate.path}")
+            proposed.append(
+                ProposedEvidence(
+                    ref=EvidenceRef(
+                        repository_slug=candidate.repository_slug,
+                        path=candidate.path,
+                        line_start=item.line_start,
+                        line_end=item.line_end,
+                        # Over exactly the characters the caller receives. Not the
+                        # untruncated candidate: the digest has to identify what
+                        # was supplied, or re-supplying a shorter prefix would
+                        # silently reuse an id bound to text nobody saw.
+                        span_digest=chunk_hash(item.text),
+                        file_content_hash=state.content_hash,
+                        indexed_facts_version=facts,
+                    ),
+                    repository_name=candidate.repository,
+                    tier=candidate.tier,
+                    match=candidate.match,
+                    origin=candidate.source,
+                    reason=candidate.description,
+                    text_length=len(item.text),
+                )
+            )
+        return proposed
+
+    def _search_response(
+        self,
+        *,
+        request: SearchRequest,
+        resolution: ContextResolution,
+        session: InvestigationSession,
+        shaped: ShapingResult,
+        entries: tuple[LedgerEntry, ...],
+        proposed: list[ProposedEvidence],
+        outcome: RetrievalOutcome,
+        applied: AppliedBudget,
+        facts: str,
+    ) -> SearchResponse:
+        """Assemble the response from **this run's** candidates and the new ids.
+
+        Built from the shaped candidates, with only the identity and status taken
+        from the ledger entries. Serializing the entries themselves would report
+        the strongest metadata the investigation has ever accumulated for a span
+        as though this query had established it — true of the ledger, false of the
+        search.
+        """
+        handles = self._entity_handles(shaped.items)
+        incomplete = shaped.truncated or outcome.evidence.truncated
+        items = [
+            EvidenceItem(
+                id=entry.id,
+                rank=rank,
+                ref=item_ref,
+                repository_name=shaped_item.candidate.repository,
+                location=item_ref.location,
+                text=shaped_item.text,
+                truncated=shaped_item.truncated,
+                why=shaped_item.candidate.description,
+                tier=shaped_item.candidate.tier,
+                match=shaped_item.candidate.match,
+                entity=handles.get(id(shaped_item)),
+                status=entry.status,
+            )
+            for rank, (shaped_item, entry, item_ref) in enumerate(
+                ((s, e, p.ref) for s, e, p in zip(shaped.items, entries, proposed, strict=True)),
+                start=1,
+            )
+        ]
+
+        freshness = index_freshness(
+            [
+                repository_freshness_for(self._workspace, repo, depth=request.depth, facts=facts)
+                for repo in resolution.repositories
+            ],
+            depth=request.depth,
+        )
+        return SearchResponse(
+            investigation_id=session.id,
+            question=request.question,
+            context=ContextView(
+                context=request.context,
+                scope=resolution.scope,
+                repositories=tuple(sorted(repo.slug for repo in resolution.repositories)),
+                primary=resolution.primary.slug if resolution.primary else None,
+                reason=resolution.reason,
+            ),
+            evidence=tuple(items),
+            freshness=freshness,
+            budget=applied,
+            truncated=incomplete,
+            has_more=incomplete,
+            suppressed=outcome.suppression,
+            entities=self._seed_handles(outcome.seed_entity_ids),
+            trace=outcome.evidence.trace if request.include_trace else None,
+            ledger=session.ledger.summary(),
+        )
+
+    def _seed_handles(self, seed_entity_ids: tuple[int, ...]) -> tuple[EntityHandle, ...]:
+        """Natural handles for the exact-name hits that seeded graph expansion.
+
+        These are the ``search`` → ``relationships`` handoff, and the reason they
+        are published separately from evidence is that the best of them are never
+        evidence: an interned identity has no file and no line, so the retriever
+        admits it as a seed and produces no candidate for it. Returning it here
+        gives the caller the hub it actually wants to traverse from, without
+        RepoAtlas inventing a citation for something no file supplies.
+
+        Order follows the retriever's own seed order, which is the order the
+        question mentioned them in.
+        """
+        if not seed_entity_ids:
+            return ()
+        identities = self._workspace.knowledge.keys_for_entities(sorted(set(seed_entity_ids)))
+        handles: list[EntityHandle] = []
+        seen: set[str] = set()
+        for entity_id in seed_entity_ids:
+            identity = identities.get(entity_id)
+            if identity is None or not identity.key or identity.key in seen:
+                continue
+            seen.add(identity.key)
+            handles.append(
+                EntityHandle(
+                    key=identity.key,
+                    type=identity.type,
+                    positional=identity.key.startswith(_POSITIONAL_KEY_PREFIX),
+                )
+            )
+        return tuple(handles)
+
+    def _entity_handles(self, shaped: list[ShapedEvidence]) -> dict[int, EntityHandle]:
+        """Resolve entity-backed evidence to natural keys, in one query.
+
+        Exact resolution by row id through the Slice 0 identity read — never a
+        lookup by name. A name search here would be a second, fuzzier answer to a
+        question the retriever already answered exactly, and it could hand back a
+        different entity that merely shares a name.
+
+        An id that does not resolve yields no handle. The evidence still stands:
+        failing to name the entity behind a span is not a reason to withhold the
+        span, and inventing a plausible key would be worse than saying nothing.
+        """
+        wanted = {
+            item.candidate.entity_id for item in shaped if item.candidate.entity_id is not None
+        }
+        if not wanted:
+            return {}
+        identities = self._workspace.knowledge.keys_for_entities(sorted(wanted))
+        handles: dict[int, EntityHandle] = {}
+        for item in shaped:
+            entity_id = item.candidate.entity_id
+            if entity_id is None:
+                continue
+            identity = identities.get(entity_id)
+            if identity is None or not identity.key:
+                continue
+            handles[id(item)] = EntityHandle(
+                key=identity.key,
+                type=identity.type,
+                positional=identity.key.startswith(_POSITIONAL_KEY_PREFIX),
+            )
+        return handles
 
     def _repository_view(
         self,
