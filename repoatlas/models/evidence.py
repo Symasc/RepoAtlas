@@ -15,7 +15,19 @@ from repoatlas.models.telemetry import RetrievalTrace
 
 
 class EvidenceSource(enum.StrEnum):
-    """Which retriever produced a candidate. Used by rank fusion and by --verbose."""
+    """How a piece of evidence was reached. Used by rank fusion and by --verbose.
+
+    The first six are retrieval stages, and they are the only ones fusion ever
+    sees. :attr:`INSPECT` is not a stage: it names evidence that was *addressed*
+    rather than searched for, which is how progressive inspection supplies source
+    text for a file, entity or span the caller already named exactly.
+
+    It shares this enum rather than getting one of its own because the ledger
+    records a route for every piece of evidence it holds, and two vocabularies for
+    "how did this arrive" would drift apart the first time one of them gained a
+    member. Nothing about fusion changes: inspection produces no candidates, so
+    this member never reaches a ranking.
+    """
 
     EXACT = "exact"
     FILE = "file"
@@ -23,6 +35,8 @@ class EvidenceSource(enum.StrEnum):
     SYMBOL = "symbol"
     SEMANTIC = "semantic"
     GRAPH = "graph"
+    #: Addressed directly by the caller, not retrieved. Never ranked.
+    INSPECT = "inspect"
 
 
 class EvidenceTier(enum.IntEnum):

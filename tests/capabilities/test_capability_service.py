@@ -291,12 +291,12 @@ def test_the_public_callable_surface_is_only_the_intended_operations() -> None:
         for name in dir(CapabilityService)
         if not name.startswith("_") and callable(getattr(CapabilityService, name))
     }
-    assert public == {"open", "close", "repositories", "status", "search"}
+    assert public == {"open", "close", "repositories", "status", "search", "inspect"}
 
 
 def test_no_future_capability_exists_as_a_stub() -> None:
     """A stub is worse than an absence: a caller cannot tell it from an empty result."""
-    for name in ("inspect", "relationships", "dependencies", "verify_grounding", "sync"):
+    for name in ("relationships", "dependencies", "verify_grounding", "sync"):
         assert not hasattr(CapabilityService, name), f"{name} exists before its slice"
 
 

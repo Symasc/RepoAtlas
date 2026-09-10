@@ -16,7 +16,7 @@ operator to rebuild a healthy database hides the defect and costs them the index
 
 from __future__ import annotations
 
-from repoatlas.capabilities.errors import capability_error
+from repoatlas.capabilities.errors import IndexChangedError, capability_error
 from repoatlas.errors import (
     ContextFailure,
     ContextResolutionError,
@@ -174,15 +174,20 @@ def test_an_identity_conflict_is_an_invalid_request() -> None:
 
 
 def test_only_genuine_contention_is_retryable() -> None:
-    """Retryable means the identical call could succeed with nothing else changed."""
+    """Retryable means the identical call could succeed with nothing else changed.
+
+    Three conditions qualify, and all three are one process waiting on another:
+    two writers meeting, and a reader whose file was reindexed underneath it. Each
+    ends when the other finishes, with nothing for the caller to change.
+    """
     retryable = {
         cls for cls in _subclasses(RepoAtlasError) if capability_error(_instance(cls)).retryable
     }
-    assert retryable == {SyncInProgressError, MigrationContentionError}
+    assert retryable == {SyncInProgressError, MigrationContentionError, IndexChangedError}
 
 
 def test_contention_is_categorised_as_contention() -> None:
-    for cls in (SyncInProgressError, MigrationContentionError):
+    for cls in (SyncInProgressError, MigrationContentionError, IndexChangedError):
         mapped = capability_error(_instance(cls))
         assert mapped.category is ErrorCategory.CONTENTION, cls
         assert mapped.retryable is True, cls
