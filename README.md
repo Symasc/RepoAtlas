@@ -131,6 +131,23 @@ Dockerfile    detected and indexed for text search; no structural parsing yet
 Every file above is discovered, hashed, chunked and lexically searchable today. Only Python currently yields
 symbols and relationships.
 
+## Agents
+
+RepoAtlas serves its capabilities to an agent over the Model Context Protocol on stdio:
+
+```bash
+repoatlas mcp
+```
+
+Eight tools, all deterministic and local: `repositories`, `status`, `search`, `inspect`, `relationships`,
+`dependencies`, `verify_grounding` and `sync`. No model runs behind them and no resource or prompt is exposed, so
+repository source is reachable only through the evidence path that records what it supplies. The agent is the
+reasoner; RepoAtlas supplies evidence and checks citations against it.
+
+How an agent should use that surface is one document,
+[`skills/repoatlas-investigation/SKILL.md`](skills/repoatlas-investigation/SKILL.md), which is vendor-neutral and
+ships with the installed package. Setup is in [`docs/agent-integration.md`](docs/agent-integration.md).
+
 ## Docker
 
 ```bash
