@@ -46,7 +46,7 @@ import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
@@ -114,6 +114,15 @@ from repoatlas.capabilities.session import (
     InvestigationSession,
     SessionRegistry,
 )
+from repoatlas.capabilities.verification import (
+    CitationOutcome,
+    projected_answer,
+    resolve_citation,
+    sanitized_answer,
+    supplied_set,
+    validate_grounding_request,
+    verdict_for,
+)
 from repoatlas.config.settings import Settings
 from repoatlas.containment import RepositoryBoundary
 from repoatlas.discovery.reconcile import RepositorySetPlan
@@ -121,6 +130,7 @@ from repoatlas.errors import ContextFailure, ContextResolutionError
 from repoatlas.freshness import index_freshness
 from repoatlas.graph.keys import is_positional
 from repoatlas.graph.traversal import CROSS_REPOSITORY_EDGES, WalkResult, WalkStep, walk
+from repoatlas.grounding import GroundingReport, ground_answer
 from repoatlas.indexing.chunking import chunk_hash
 from repoatlas.models.capability import AppliedBudget, CapabilityScope, ContextResolution
 from repoatlas.models.capability_io import (
@@ -145,7 +155,7 @@ from repoatlas.models.dependency_inventory import (
     ProviderView,
 )
 from repoatlas.models.evidence import EvidenceSource, EvidenceTier, MatchClass
-from repoatlas.models.freshness import FreshnessDepth
+from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
 from repoatlas.models.inspection import (
     Coverage,
     InspectedFile,
@@ -159,6 +169,7 @@ from repoatlas.models.investigation import (
     DEFAULT_LEDGER_CAPACITY,
     EvidenceRef,
     EvidenceStatus,
+    EvidenceTransition,
     IndexedEvidenceState,
     LedgerEntry,
     ProposedEvidence,
@@ -177,6 +188,15 @@ from repoatlas.models.relationships import (
 from repoatlas.models.repository import FileState, Repository
 from repoatlas.models.retrieval import RetrievalOutcome
 from repoatlas.models.search import SearchMode, SearchRequest, SearchResponse
+from repoatlas.models.verification import (
+    AgentAnswer,
+    CitationVerdict,
+    EvidenceStatusView,
+    GroundingFinding,
+    GroundingFindingCode,
+    VerifyGroundingRequest,
+    VerifyGroundingResponse,
+)
 from repoatlas.retrieval.retriever import DIAGNOSTIC_LIMITS
 from repoatlas.services.freshness_service import (
     current_facts_version,
@@ -812,6 +832,213 @@ class CapabilityService:
                 entries=entries,
                 limits=limits,
             )
+
+    def verify_grounding(self, request: VerifyGroundingRequest) -> VerifyGroundingResponse:
+        """Check an answer's citations against the evidence this investigation supplied.
+
+        What a ``GROUNDED`` verdict means, stated so it cannot be read as more:
+        every citation names evidence issued in **this** investigation, sits inside
+        the span supplied under that id, agrees with that evidence's repository and
+        path, and rests on evidence that still corresponds to the indexed snapshot
+        this call read. What it does not mean is that the cited lines support the
+        sentence, that the sentence is true, or that the investigation was complete.
+        RepoAtlas consults no model here and the ledger retains no source text, so
+        entailment is not weakly established — it is not established at all.
+
+        A citation that fails is a **finding**, not an error. Naming a fabricated
+        evidence id is the question the caller asked this capability to answer, and
+        answering it is more useful than refusing the call: an answer holding one
+        real citation and one invented one comes back partially grounded, with both
+        named.
+
+        The only state this touches is the standing of evidence that already
+        exists. No id is allocated, no metadata strengthened, no repository fact
+        written, and nothing is retrieved, inspected, traversed or read from a
+        working tree.
+        """
+        with self._operation():
+            validate_grounding_request(request)
+            # Before the ledger is consulted, and never created: an evidence id
+            # means nothing without the investigation that issued it, and
+            # inventing an empty one to look in would report every citation as
+            # fabricated while implying the caller's ids were wrong.
+            session = self._sessions.get(request.investigation_id)
+            registered = self._workspace.repositories.list_all()
+            facts = current_facts_version(self._workspace)
+
+            # One generation for the whole verdict. An external sync committing
+            # mid-call must land entirely before these reads or entirely after
+            # them; a verdict assembled from two generations would describe an
+            # index that never existed, and would look exactly like a verdict.
+            with self._workspace.database.read_snapshot():
+                # Every file the ledger names, not only the cited ones. The
+                # ledger revalidates as a whole, and a snapshot covering less
+                # would mark every uncited entry UNVERIFIED — damaging session
+                # state that this call was never asked about.
+                snapshot = self._ledger_snapshot(session, registered)
+                transitions = session.ledger.revalidate(snapshot)
+                freshness = index_freshness(
+                    [
+                        repository_freshness_for(
+                            self._workspace, repo, depth=FreshnessDepth.STORED, facts=facts
+                        )
+                        for repo in registered
+                    ],
+                    depth=FreshnessDepth.STORED,
+                )
+
+            checked_at = datetime.now(UTC)
+            outcomes = self._resolve_citations(request.answer, session)
+            report = ground_answer(
+                projected_answer(request.answer, outcomes=outcomes),
+                supplied_set(
+                    admitted={
+                        outcome.evidence_id: entry
+                        for outcome in outcomes.values()
+                        if outcome.admitted
+                        and (entry := session.ledger.get(outcome.evidence_id)) is not None
+                    },
+                    others=session.ledger.entries(),
+                ),
+            )
+            return self._grounding_response(
+                request=request,
+                session=session,
+                outcomes=outcomes,
+                report=report,
+                transitions=transitions,
+                freshness=freshness,
+                checked_at=checked_at,
+            )
+
+    # -- verification internals ---------------------------------------------
+
+    @staticmethod
+    def _resolve_citations(
+        answer: AgentAnswer, session: InvestigationSession
+    ) -> dict[tuple[int, int], CitationOutcome]:
+        """Decide every citation, each against only the entry it names.
+
+        The lookup goes through this investigation's ledger and no other. There is
+        no id-to-evidence path that skips the investigation, which is what makes
+        ``E1`` in one investigation and ``E1`` in another different facts rather
+        than a collision to resolve.
+        """
+        outcomes: dict[tuple[int, int], CitationOutcome] = {}
+        for claim_index, claim in enumerate(answer.claims):
+            for citation_index, citation in enumerate(claim.citations):
+                outcomes[(claim_index, citation_index)] = resolve_citation(
+                    claim_index=claim_index,
+                    citation_index=citation_index,
+                    citation=citation,
+                    entry=session.ledger.get(citation.evidence_id),
+                    claimed_confidence=claim.claimed_confidence,
+                )
+        return outcomes
+
+    def _grounding_response(
+        self,
+        *,
+        request: VerifyGroundingRequest,
+        session: InvestigationSession,
+        outcomes: dict[tuple[int, int], CitationOutcome],
+        report: GroundingReport,
+        transitions: tuple[EvidenceTransition, ...],
+        freshness: IndexFreshness,
+        checked_at: datetime,
+    ) -> VerifyGroundingResponse:
+        """Assemble the verdict, what it rests on, and what it leaves unsaid."""
+        answer = request.answer
+        findings: list[GroundingFinding] = []
+        citations: list[CitationVerdict] = []
+        for key in sorted(outcomes):
+            outcome = outcomes[key]
+            citations.append(
+                CitationVerdict(
+                    claim_index=outcome.claim_index,
+                    citation_index=outcome.citation_index,
+                    evidence_id=outcome.evidence_id,
+                    grounded=outcome.grounded,
+                    status=outcome.status,
+                    submitted_range=outcome.submitted,
+                    verified_range=outcome.verified,
+                    location=outcome.location,
+                    code=outcome.code,
+                )
+            )
+            if outcome.code is not None:
+                findings.append(
+                    GroundingFinding(
+                        code=outcome.code,
+                        evidence_id=outcome.evidence_id,
+                        claim_index=outcome.claim_index,
+                        citation_index=outcome.citation_index,
+                        status=outcome.status,
+                        detail=outcome.detail,
+                    )
+                )
+
+        for claim_index, claim in enumerate(answer.claims):
+            if not claim.citations:
+                findings.append(
+                    GroundingFinding(
+                        code=GroundingFindingCode.MISSING_CITATION,
+                        claim_index=claim_index,
+                        detail="a claim with no citation has no provenance to check",
+                    )
+                )
+
+        # Everything V1 removed that was not a claim: the summary, an unknown, or
+        # the next check, each because it named a repository object nobody
+        # supplied. Counted rather than quoted — repeating the fabricated path
+        # here would put it back on screen under RepoAtlas's own heading, which is
+        # worse than where it started.
+        prose_removals = max(0, len(report.unsupported) - report.demoted_findings)
+        findings.extend(
+            GroundingFinding(
+                code=GroundingFindingCode.PROSE_REFERENCE_NOT_SUPPLIED,
+                detail=(
+                    "free text named a repository, file or line this investigation never supplied"
+                ),
+            )
+            for _ in range(prose_removals)
+        )
+
+        statuses: list[EvidenceStatusView] = []
+        seen: set[str] = set()
+        for key in sorted(outcomes):
+            evidence_id = outcomes[key].evidence_id
+            if evidence_id in seen:
+                continue
+            seen.add(evidence_id)
+            entry = session.ledger.get(evidence_id)
+            statuses.append(
+                EvidenceStatusView(
+                    evidence_id=evidence_id,
+                    status=entry.status if entry else None,
+                    location=entry.ref.location if entry else "",
+                    origins=entry.origins if entry else (),
+                    superseded_by=entry.superseded_by if entry else None,
+                )
+            )
+
+        return VerifyGroundingResponse(
+            investigation_id=session.id,
+            verdict=verdict_for(submitted=answer, outcomes=outcomes, report=report),
+            original_answer=answer,
+            sanitized_answer=sanitized_answer(answer, report, outcomes=outcomes),
+            findings=tuple(findings),
+            citations=tuple(citations),
+            evidence_statuses=tuple(statuses),
+            dropped_claims=report.demoted_findings,
+            dropped_citations=sum(1 for outcome in outcomes.values() if not outcome.admitted),
+            clamped_citations=sum(
+                1 for outcome in outcomes.values() if outcome.admitted and not outcome.grounded
+            ),
+            ledger=session.ledger.summary(transitions),
+            freshness=freshness,
+            checked_at=checked_at,
+        )
 
     # -- dependencies internals ---------------------------------------------
 

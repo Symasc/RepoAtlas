@@ -248,6 +248,29 @@ class InvalidDependencyRequestError(RepoAtlasError):
         self.field = field
 
 
+class InvalidGroundingRequestError(RepoAtlasError):
+    """The verification request is malformed in a way that leaves nothing to check.
+
+    Deliberately narrow. A citation naming an evidence id this investigation never
+    issued is **not** this error — it is the question the caller asked, and it
+    comes back as a finding inside a successful verdict so that one answer holding
+    a real citation and a fabricated one is reported as partially grounded rather
+    than as a failed call. What is refused here is a request with no answer in it.
+    """
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(
+        self,
+        message: str = "that verification request is malformed",
+        *,
+        detail: str | None = None,
+        field: str = "",
+    ) -> None:
+        super().__init__(message, detail=detail)
+        self.field = field
+
+
 class InvalidCursorError(RepoAtlasError):
     """The continuation token is unreadable, or was made for another question.
 
@@ -425,6 +448,13 @@ def capability_error(exc: Exception) -> CapabilityError:
         return _from_repoatlas(
             exc,
             code="INVALID_DEPENDENCY_REQUEST",
+            category=ErrorCategory.INVALID_REQUEST,
+            context={"field": exc.field} if exc.field else None,
+        )
+    if isinstance(exc, InvalidGroundingRequestError):
+        return _from_repoatlas(
+            exc,
+            code="INVALID_GROUNDING_REQUEST",
             category=ErrorCategory.INVALID_REQUEST,
             context={"field": exc.field} if exc.field else None,
         )
