@@ -4,7 +4,7 @@ V1's exceptions are untouched. Their messages, details and exit codes are a
 shipped contract that scripts depend on, and nothing here changes any of them —
 this is a translation at the boundary, not a replacement.
 
-Two rules decide the whole table.
+Three rules decide the whole table.
 
 **An unrecognized failure is a bug, not an index problem.** Classifying stray
 exceptions as :attr:`ErrorCategory.INDEX` would tell an operator to rebuild a
@@ -17,6 +17,14 @@ which refuses to be a catch-all for the same reason.
 shapes of :class:`~repoatlas.errors.ContextResolutionError` — the discriminator is
 :class:`~repoatlas.errors.ContextFailure`, set by the code that raises and already
 knows which case it is in.
+
+**No unrecognized message is ever repeated.** Every condition RepoAtlas models
+carries wording it wrote for a caller to act on, and that wording crosses intact.
+What falls through has been positively identified as unidentifiable, and its text
+belongs to whoever raised it — commonly an ``OSError`` holding the absolute path
+it failed on, which is host layout the caller had no other way to learn. So
+:func:`_internal_error` answers with fixed text instead, and takes no exception
+through which any other could arrive.
 
 The capability vocabulary is also deliberately narrower than V1's. ``ask`` and
 ``debug`` are V1 commands with a model behind them; every capability is
@@ -572,8 +580,9 @@ def capability_error(exc: Exception) -> CapabilityError:
     if isinstance(exc, RepoAtlasError):
         # A RepoAtlas failure with no specific mapping. Reported as internal
         # rather than guessed at: a wrong category sends the caller to fix
-        # something that is not broken.
-        return _from_repoatlas(exc, code="INTERNAL_ERROR", category=ErrorCategory.INTERNAL)
+        # something that is not broken. Its own wording is not carried across —
+        # see :func:`_internal_error` for why nothing reaching this code is.
+        return _internal_error()
 
     # The two session conditions. Neither derives from RepoAtlasError, because
     # neither is a V1 condition: V1 has no investigations and no ledger. They are
@@ -607,12 +616,60 @@ def capability_error(exc: Exception) -> CapabilityError:
             },
         )
 
+    return _internal_error()
+
+
+#: What an unrecognized failure says, and the whole of what it says.
+#:
+#: Fixed text rather than the exception's own, because at this point in the
+#: dispatch the exception has been *positively identified as unidentifiable*.
+#: Everything RepoAtlas models has a code above; whatever arrives here is a
+#: defect, and a defect's exception text is not a contract: it is written by
+#: whoever raised it, which may be RepoAtlas, the standard library, SQLite or a
+#: third-party package that has never heard of this envelope.
+#:
+#: That text routinely carries things the envelope must not. An ``OSError``
+#: interpolates the absolute path it failed on. A decoding failure quotes the
+#: bytes that failed, which are repository content. A driver error can quote SQL.
+#: A misconfiguration can name a home directory, a database file or a token. None
+#: of it helps the caller — ``INTERNAL_ERROR`` already tells them the one thing
+#: they can act on, which is that this is not theirs to fix — and all of it
+#: crosses to whoever is holding the other end of the transport.
+#:
+#: Scrubbing the text instead was considered and rejected: it would mean deciding
+#: which substrings of an arbitrary string are safe, getting Windows paths, UNC
+#: paths, connection strings and quoted source right, and getting them right
+#: forever. Not reporting untrusted text at all has no such failure mode.
+INTERNAL_ERROR_MESSAGE = "an unexpected internal error occurred"
+
+INTERNAL_ERROR_DETAIL = (
+    "An unrecognized failure, which is a defect in RepoAtlas rather than a "
+    "state of the request or the index. The underlying exception is deliberately "
+    "not reported: its text is not part of any contract and can carry host paths, "
+    "repository content or configuration."
+)
+
+
+def _internal_error() -> CapabilityError:
+    """The single envelope every unrecognized failure produces.
+
+    Takes no exception, which is the point — there is no parameter through which
+    untrusted text could reach the wire, so this cannot regress by someone later
+    adding "just the class name" or "just the first line" to it.
+
+    One shape for one code. ``INTERNAL_ERROR`` means the same thing however it was
+    reached, so two callers comparing notes see the same envelope rather than
+    inferring from a difference in wording that they hit different bugs.
+    """
     return CapabilityError(
         code="INTERNAL_ERROR",
         category=ErrorCategory.INTERNAL,
-        message=str(exc) or exc.__class__.__name__,
+        message=INTERNAL_ERROR_MESSAGE,
+        detail=INTERNAL_ERROR_DETAIL,
+        # A defect repeats. Nothing about waiting changes it.
         retryable=False,
         exit_code=1,
+        context={},
     )
 
 
