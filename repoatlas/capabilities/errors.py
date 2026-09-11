@@ -271,6 +271,48 @@ class InvalidGroundingRequestError(RepoAtlasError):
         self.field = field
 
 
+class SyncFailedError(RepoAtlasError):
+    """A sync failed after it had begun changing the index.
+
+    Not an untouched index, and this error must never read as one. V1 commits
+    each file's facts as they are produced and marks a repository current only
+    when the whole run's graph rebuild commits, so a run that fails part-way has
+    already moved the index: some files hold new facts, every repository in the
+    run is recorded unfinished, and the previous complete graph is still in place.
+
+    ``cause`` is the mapped code of what actually went wrong. ``revalidation`` is
+    what re-checking live investigations against the index *as the failure left
+    it* did, so a caller holding evidence learns its standing without another
+    call. Both are optional only so the error keeps the constructor every
+    ``RepoAtlasError`` accepts; the service always supplies them, and an absent
+    one is left out of the envelope rather than reported as empty. Nothing is
+    rolled back — a plain sync is the whole recovery path, and it redoes the
+    unfinished work rather than trusting it.
+    """
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(
+        self,
+        message: str = "the sync failed after it had begun changing the index",
+        *,
+        detail: str | None = (
+            "Nothing was rolled back: files indexed before the failure keep their new "
+            "facts, the repositories in the run are recorded unfinished, and the "
+            "previous complete graph is still in place. Run sync again; it redoes the "
+            "unfinished work rather than trusting it."
+        ),
+        cause: str | None = None,
+        revalidation: dict[str, object] | None = None,
+        exit_code: int | None = None,
+    ) -> None:
+        super().__init__(message, detail=detail)
+        self.cause = cause
+        self.revalidation = revalidation
+        if exit_code is not None:
+            self.exit_code = exit_code
+
+
 class InvalidCursorError(RepoAtlasError):
     """The continuation token is unreadable, or was made for another question.
 
@@ -450,6 +492,20 @@ def capability_error(exc: Exception) -> CapabilityError:
             code="INVALID_DEPENDENCY_REQUEST",
             category=ErrorCategory.INVALID_REQUEST,
             context={"field": exc.field} if exc.field else None,
+        )
+    if isinstance(exc, SyncFailedError):
+        # Not retryable by default: a deterministic failure repeats identically.
+        # The context says the index may have moved, which is the fact a caller
+        # holding evidence has to act on.
+        return _from_repoatlas(
+            exc,
+            code="SYNC_FAILED",
+            category=ErrorCategory.INTERNAL,
+            context={
+                "index_may_have_changed": True,
+                **({"cause": exc.cause} if exc.cause is not None else {}),
+                **({"revalidation": exc.revalidation} if exc.revalidation is not None else {}),
+            },
         )
     if isinstance(exc, InvalidGroundingRequestError):
         return _from_repoatlas(
