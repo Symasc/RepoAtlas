@@ -735,6 +735,11 @@ class Retriever:
             tier=tier,
             match=match,
             description=description,
+            # Whether this text is a whole chunk or one piece of a cut span
+            # decides whether anything may be cited by line. It is a fact the
+            # store already established, so it travels rather than being
+            # re-derived downstream from the shape of the text.
+            split_total=hit.split_total,
         )
 
     @staticmethod
@@ -751,6 +756,7 @@ class Retriever:
             tier=EvidenceTier.ASSOCIATIVE,
             match=MatchClass.SIMILAR,
             description="semantically similar",
+            split_total=hit.split_total,
         )
 
 

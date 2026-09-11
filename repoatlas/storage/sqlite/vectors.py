@@ -146,7 +146,8 @@ class SqliteVectorIndex:
 
         sql = """
             SELECT c.id AS chunk_id, c.file_id, c.repo_id, c.line_start, c.line_end,
-                   c.text, f.rel_path AS path, r.name AS repository, r.slug AS repository_slug,
+                   c.text, c.split_index, c.split_total,
+                   f.rel_path AS path, r.name AS repository, r.slug AS repository_slug,
                    e.vector AS vector
             FROM embeddings e
             JOIN chunks       c ON c.content_hash = e.content_hash
@@ -200,6 +201,8 @@ class SqliteVectorIndex:
                     line_end=row["line_end"],
                     text=row["text"],
                     score=score,
+                    split_index=row["split_index"],
+                    split_total=row["split_total"],
                 )
             )
         return hits

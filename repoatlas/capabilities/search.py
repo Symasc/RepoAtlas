@@ -75,9 +75,14 @@ def provable_line_span(candidate: EvidenceCandidate) -> tuple[int, int] | None:
 
     The candidate-shaped spelling of
     :func:`~repoatlas.capabilities.evidence_shaping.provable_span`, which holds the
-    reasoning and the three producers that legitimately prove nothing.
+    reasoning and the four producers that legitimately prove nothing.
     """
-    return provable_span(candidate.text, candidate.line_start, candidate.line_end)
+    return provable_span(
+        candidate.text,
+        candidate.line_start,
+        candidate.line_end,
+        split_total=candidate.split_total,
+    )
 
 
 def shape_candidates(
@@ -127,7 +132,13 @@ def shape_candidates(
             continue
 
         allowance = min(budget.max_item_chars, remaining_total)
-        piece = supply(candidate.text, candidate.line_start, candidate.line_end, limit=allowance)
+        piece = supply(
+            candidate.text,
+            candidate.line_start,
+            candidate.line_end,
+            limit=allowance,
+            split_total=candidate.split_total,
+        )
 
         if piece is None:
             # Not one complete line fits. Stopping is the honest end of the
