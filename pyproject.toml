@@ -40,6 +40,14 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["repoatlas"]
 
+# The canonical agent skill lives at the repository root, where it is
+# vendor-neutral and discoverable, and it is mapped into the installed package so
+# that `pip install repoatlas` ships it too. Mapped rather than copied: two
+# manually maintained copies of behavioural guidance is exactly how the guidance
+# comes to disagree with itself. The sdist picks the directory up as source.
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "repoatlas/skills"
+
 [tool.ruff]
 line-length = 100
 target-version = "py313"
