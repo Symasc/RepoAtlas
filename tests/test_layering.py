@@ -71,11 +71,34 @@ _FORBIDDEN: dict[str, set[str]] = {
     # terminal (cli), it returns models rather than formatted text (rendering),
     # and it is deterministic — a capability that could reach a model could
     # manufacture evidence (llm).
-    "capabilities": {"cli", "rendering", "llm"},
+    "capabilities": {"cli", "rendering", "llm", "mcp"},
     # ...and the arrow only runs one way. A service reaching up into
     # capabilities/ for one typed value would reverse the layering for a single
     # import, which is exactly how it would happen.
-    "services": {"capabilities"},
+    "services": {"capabilities", "mcp"},
+    # The transport adapter is the top of the stack and the narrowest layer in
+    # it. It may name the capability service, the V2 models it passes through and
+    # the public error envelope; everything else on this list is a piece of
+    # RepoAtlas it would have to *reimplement* to use. A transport that reached a
+    # store, a retriever or a lock directly would be a second RepoAtlas with a
+    # second set of answers, reachable only over a protocol.
+    "mcp": {
+        "storage",
+        "retrieval",
+        "graph",
+        "sync",
+        "indexing",
+        "services",
+        "discovery",
+        "context",
+        "gitstate",
+        "parsers",
+        "dependencies",
+        "embeddings",
+        "llm",
+        "rendering",
+        "cli",
+    },
 }
 
 
@@ -338,6 +361,15 @@ def test_the_capability_layer_names_no_protocol_message_type() -> None:
     assert not offenders, offenders
 
 
+#: The one package above ``capabilities`` and the only package allowed to reach
+#: it. Slice J adds a transport, so "nothing imports the capability layer" stops
+#: being the right rule: the whole purpose of an adapter is to import it. What
+#: survives is the rule that actually mattered — *V1* has acquired no dependency
+#: on V2 — and it is asserted by naming the single exception rather than by
+#: loosening the walk.
+_TRANSPORTS = {"mcp"}
+
+
 def test_nothing_outside_the_capability_layer_imports_it() -> None:
     """V2 state is additive: no V1 module has acquired a dependency on it.
 
@@ -346,8 +378,83 @@ def test_nothing_outside_the_capability_layer_imports_it() -> None:
     """
     offenders: list[str] = []
     for package, path in _modules():
-        if package == "capabilities":
+        if package == "capabilities" or package in _TRANSPORTS:
             continue
         if "capabilities" in _imported_packages(path):
             offenders.append(str(path.relative_to(PACKAGE_ROOT.parent)))
-    assert not offenders, f"capabilities/ is the top layer, imported by: {offenders}"
+    assert not offenders, f"capabilities/ is imported only by a transport, not by: {offenders}"
+
+
+def test_only_the_cli_reaches_the_transport_adapter() -> None:
+    """Nothing below the transport imports it, and the CLI only registers it.
+
+    The asymmetric half of the arrow ``mcp -> capabilities``. A capability or a
+    service importing the adapter back would make a protocol type reachable from
+    the domain, and the next transport would then be a rewrite rather than a
+    second adapter. The CLI is the one legitimate importer, because a command has
+    to exist for a launcher to start.
+    """
+    offenders: list[str] = []
+    for package, path in _modules():
+        if package in _TRANSPORTS or package == "cli":
+            continue
+        if "mcp" in _imported_packages(path):
+            offenders.append(str(path.relative_to(PACKAGE_ROOT.parent)))
+    assert not offenders, f"repoatlas.mcp is a transport, imported by: {offenders}"
+
+
+def test_the_transport_adapter_holds_no_repository_intelligence() -> None:
+    """The adapter names no engine, no store, no lock and no evidence machinery.
+
+    A text guard beside the import guard above, because the failure it catches is
+    not a new import but a new *name*: an adapter that grew a ledger lookup, a
+    hash comparison or a writer lock would be reproducing a capability contract
+    rather than carrying it, and the tell is that the vocabulary appears at all.
+
+    ``EvidenceLedger`` and ``SessionRegistry`` are on the list even though the
+    service exposes a registry, because reaching one from a transport is how an
+    investigation would come to mean "this connection" (V2 Slice B).
+    """
+    banned = (
+        "Retriever",
+        "RepositoryBoundary",
+        "GitClient",
+        "SyncEngine",
+        "ReferenceLinker",
+        "SqliteKnowledgeStore",
+        "SqliteFileStore",
+        "SqliteRepositoryStore",
+        "sqlite3",
+        "EvidenceLedger",
+        "SessionRegistry",
+        "writer_lock",
+        "ground_answer",
+        "expand_neighbors",
+        "open_workspace",
+        "Workspace",
+    )
+    offenders: list[str] = []
+    for path in sorted((PACKAGE_ROOT / "mcp").rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for marker in banned:
+            if marker in source:
+                offenders.append(f"mcp/{path.name} contains {marker!r}")
+    assert not offenders, offenders
+
+
+def test_the_transport_adapter_infers_no_working_directory() -> None:
+    """§13: scope arrives in the request, even over a protocol that offers roots.
+
+    The MCP protocol lets a client advertise workspace roots, and reading one here
+    would be the single most natural way to reintroduce the ambient default the
+    capability layer spent a slice removing --- with the added property that the
+    scope would then depend on which transport the caller used.
+    """
+    banned = ("Path.cwd(", "os.getcwd(", "os.curdir", "list_roots", "ListRoots")
+    offenders: list[str] = []
+    for path in sorted((PACKAGE_ROOT / "mcp").rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for marker in banned:
+            if marker in source:
+                offenders.append(f"mcp/{path.name} contains {marker!r}")
+    assert not offenders, offenders

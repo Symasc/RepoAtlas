@@ -239,6 +239,34 @@ def debug(
     _reasoning_command(question, repo, QueryIntent.DEBUG, no_llm, json_output, verbose)
 
 
+@app.command()
+def mcp() -> None:
+    """Serve the RepoAtlas capabilities to an agent over MCP on stdio.
+
+    Runs until the transport ends; there is no daemon, no socket and no pidfile.
+
+    Nothing is inferred from where this command was started. It opens the
+    configured index and serves it, and every tool call states its own repository
+    scope --- which is the point, since a tool launcher starts this process in
+    whatever directory it happens to be in, and that directory is evidence about
+    nothing.
+
+    Deliberately silent. On this transport stdout is the protocol, so a startup
+    banner here would be a framing error rather than a courtesy, and there is no
+    ``--json`` for the same reason: the output is already JSON-RPC.
+
+    The import is local because it is the only path that pulls in the MCP SDK.
+    Keeping it out of module scope is what lets ``repoatlas ask`` and the rest go
+    on starting without loading a protocol library they never use.
+    """
+    from repoatlas.mcp.server import serve
+
+    try:
+        serve()
+    except RepoAtlasError as exc:
+        _fail(exc)
+
+
 def _reasoning_command(
     question: str,
     repo: str | None,
