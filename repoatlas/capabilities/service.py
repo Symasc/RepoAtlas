@@ -83,7 +83,9 @@ from repoatlas.capabilities.errors import (
     IndexInconsistencyError,
     InvestigationRequiredError,
     ServiceClosedError,
+    SyncFailedError,
     TargetOutOfScopeError,
+    capability_error,
 )
 from repoatlas.capabilities.evidence_shaping import LINE_SEPARATOR
 from repoatlas.capabilities.indexed_source import WHOLE_FILE_END, indexed_line_map
@@ -114,6 +116,14 @@ from repoatlas.capabilities.session import (
     InvestigationSession,
     SessionRegistry,
 )
+from repoatlas.capabilities.sync import (
+    attribute_reports,
+    relative_unreadable,
+    repository_view,
+    revalidation_failed,
+    revalidation_summary,
+    sync_status,
+)
 from repoatlas.capabilities.verification import (
     CitationOutcome,
     projected_answer,
@@ -126,7 +136,12 @@ from repoatlas.capabilities.verification import (
 from repoatlas.config.settings import Settings
 from repoatlas.containment import RepositoryBoundary
 from repoatlas.discovery.reconcile import RepositorySetPlan
-from repoatlas.errors import ContextFailure, ContextResolutionError
+from repoatlas.errors import (
+    ContextFailure,
+    ContextResolutionError,
+    NotInitializedError,
+    SyncInProgressError,
+)
 from repoatlas.freshness import index_freshness
 from repoatlas.graph.keys import is_positional
 from repoatlas.graph.traversal import CROSS_REPOSITORY_EDGES, WalkResult, WalkStep, walk
@@ -185,9 +200,11 @@ from repoatlas.models.relationships import (
     RelationshipsRequest,
     RelationshipsResponse,
 )
+from repoatlas.models.reports import SyncReport
 from repoatlas.models.repository import FileState, Repository
 from repoatlas.models.retrieval import RetrievalOutcome
 from repoatlas.models.search import SearchMode, SearchRequest, SearchResponse
+from repoatlas.models.sync import EvidenceRevalidationSummary, SyncRequest, SyncResponse
 from repoatlas.models.verification import (
     AgentAnswer,
     CitationVerdict,
@@ -198,6 +215,7 @@ from repoatlas.models.verification import (
     VerifyGroundingResponse,
 )
 from repoatlas.retrieval.retriever import DIAGNOSTIC_LIMITS
+from repoatlas.services import sync_service
 from repoatlas.services.freshness_service import (
     current_facts_version,
     repository_freshness_for,
@@ -2370,6 +2388,188 @@ class CapabilityService:
             has_more=truncated,
             limits=limits,
             ledger=session.ledger.summary(),
+        )
+
+    # -- sync: the one mutation ---------------------------------------------
+
+    def sync(self, request: SyncRequest) -> SyncResponse:
+        """Bring the index in line with the local working trees. The one mutation.
+
+        V1's sync, called once and projected. Repository-set reconciliation, file
+        admission, parsing, linking, the writer lock and the run's transaction
+        boundary all belong to :func:`repoatlas.services.sync_service.sync`, and
+        none of them is restated here: a capability that re-derived which files
+        belong to which repository would be a second interpretation of the one
+        question the index most needs to answer consistently.
+
+        Sync observes. It does not pull, fetch, check out, reset or clean, and it
+        runs nothing a repository contains. A dirty working tree is indexed as it
+        stands.
+
+        Selection is the explicit context. There is no working-directory inference
+        and no implicit ``init``: with no configured root this refuses before
+        anything can write.
+
+        After the index changes, every live investigation's evidence is re-checked
+        against it, so no ledger goes on claiming validity against the snapshot
+        that was replaced. That housekeeping never counts as activity inside any
+        investigation and never creates one. If it fails, the sync still happened,
+        and the response says both.
+
+        A run that fails part-way is not an untouched index. V1 commits each
+        file's facts as they are produced, so the re-check runs against the index
+        as the failure left it, and only then is the failure raised.
+        """
+        with self._operation():
+            root = self._workspace.root
+            # No index, no sync — checked before anything can write. Handed an
+            # empty repository set, V1 would still commit its global link pass and
+            # report success for a workspace that has no root.
+            if root is None:
+                raise NotInitializedError()
+            registered = self._workspace.repositories.list_all()
+            resolution = resolve_context(request.context, registered)
+            repository_context = to_repository_context(resolution)
+            # V1's own rule for whether this run reconciles the repository set,
+            # asked of V1 rather than restated: a second copy of it is how the
+            # capability and the CLI would come to disagree about scope.
+            covers_root = sync_service._covers_root(repository_context, root)
+
+            try:
+                report = sync_service.sync(self._workspace, repository_context, full=request.full)
+            except SyncInProgressError:
+                # The writer lock was never acquired, so nothing changed and there
+                # is nothing to re-check. The other writer finishing is the remedy.
+                raise
+            except Exception as exc:
+                # The lock was held and the run had begun. The index may already
+                # differ from the one every live ledger was checked against, so the
+                # hint moves and the ledgers are re-checked against the index as the
+                # failure left it — then the failure is reported, never rolled back.
+                self._generation += 1
+                revalidation = self._revalidate_live_investigations()
+                raise SyncFailedError(
+                    cause=capability_error(exc).code,
+                    revalidation=revalidation.model_dump(mode="json"),
+                    exit_code=getattr(exc, "exit_code", None),
+                ) from exc
+
+            # The mutation committed. The hint moves once, and only after it.
+            self._generation += 1
+            completed_at = datetime.now(UTC)
+            revalidation = self._revalidate_live_investigations()
+            return self._sync_response(
+                request=request,
+                resolution=resolution,
+                report=report,
+                covers_root=covers_root,
+                revalidation=revalidation,
+                completed_at=completed_at,
+            )
+
+    # -- sync internals -----------------------------------------------------
+
+    def _revalidate_live_investigations(self) -> EvidenceRevalidationSummary:
+        """Re-check every live investigation's evidence against the index now.
+
+        Housekeeping, not use. Sessions are reached through
+        :meth:`SessionRegistry.live_sessions`, which writes no clock and changes no
+        order, so a sync cannot keep an abandoned investigation alive or reorder
+        which one is evicted next. Expired investigations are discarded first
+        rather than revived by being looked at.
+
+        One read snapshot for every ledger, so all of them describe the same index.
+        A failure here is reported rather than raised: the index change it follows
+        has already happened, and verification revalidates before it grounds
+        anything, so a missed eager refresh can never become an accepted citation.
+        """
+        sessions = self._sessions.live_sessions()
+        try:
+            with self._workspace.database.read_snapshot():
+                registered = self._workspace.repositories.list_all()
+                snapshots = [
+                    (session, self._ledger_snapshot(session, registered)) for session in sessions
+                ]
+        except Exception as exc:
+            return revalidation_failed(
+                "live investigations could not be re-checked after the index changed "
+                f"({capability_error(exc).code}); their evidence is revalidated before "
+                "any verification"
+            )
+
+        results = []
+        for session, snapshot in snapshots:
+            transitions = session.ledger.revalidate(snapshot)
+            # An optimisation hint and never evidence validity. Verification
+            # compares real file state whatever this says.
+            session.validated_generation = self._generation
+            results.append((transitions, session.ledger.summary()))
+        return revalidation_summary(results)
+
+    def _sync_response(
+        self,
+        *,
+        request: SyncRequest,
+        resolution: ContextResolution,
+        report: SyncReport,
+        covers_root: bool,
+        revalidation: EvidenceRevalidationSummary,
+        completed_at: datetime,
+    ) -> SyncResponse:
+        """Project V1's report. Every count is V1's; only identity and paths change."""
+        registered = self._workspace.repositories.list_all()
+        # The engine's own input, in its own order: the registry when the run
+        # covered the managed root, the resolved repository when it did not.
+        # Matching against the whole registry in the second case would attribute a
+        # report to the first repository sharing its display name.
+        candidates = registered if covers_root else list(resolution.repositories)
+        slugs = attribute_reports(report.repositories, candidates)
+        views = tuple(
+            repository_view(entry, slug)
+            for entry, slug in zip(report.repositories, slugs, strict=True)
+        )
+
+        in_scope = {repo.id for repo in resolution.repositories}
+        after = registered if covers_root else [r for r in registered if r.id in in_scope]
+        facts = current_facts_version(self._workspace)
+        freshness = index_freshness(
+            [
+                repository_freshness_for(self._workspace, repo, depth=request.depth, facts=facts)
+                for repo in after
+            ],
+            depth=request.depth,
+        )
+
+        return SyncResponse(
+            context=ContextView(
+                context=request.context,
+                scope=resolution.scope,
+                repositories=tuple(sorted(repo.slug for repo in resolution.repositories)),
+                primary=resolution.primary.slug if resolution.primary else None,
+                reason=resolution.reason,
+            ),
+            status=sync_status(report),
+            full=request.full,
+            repositories=views,
+            repositories_added=report.repositories_added,
+            repositories_unavailable=tuple(
+                view.repository_slug
+                for view in views
+                if view.enumeration_failed and view.repository_slug is not None
+            ),
+            unreadable_paths=relative_unreadable(report.unreadable_paths, self._workspace.root),
+            files_indexed=report.files_indexed,
+            symbols=report.symbols,
+            relationships=report.relationships,
+            dependencies=report.dependencies,
+            linked_references=report.linked_references,
+            unresolved_references=report.unresolved_references,
+            cross_repository_edges=report.cross_repository_edges,
+            embedded_chunks=report.embedded_chunks,
+            pending_embeddings=report.pending_embeddings,
+            evidence_revalidation=revalidation,
+            freshness=freshness,
+            completed_at=completed_at,
         )
 
 

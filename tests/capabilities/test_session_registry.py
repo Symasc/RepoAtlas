@@ -13,6 +13,7 @@ because there is no way to look up evidence without naming an investigation firs
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
@@ -91,11 +92,16 @@ def test_ids_are_opaque_rather_than_sequential() -> None:
 
 
 def test_there_is_no_way_to_supply_an_id_and_have_it_created() -> None:
-    """A typo must not become a silently empty ledger."""
+    """A typo must not become a silently empty ledger.
+
+    ``live_sessions`` joined the surface for sync's housekeeping (Slice I). It takes
+    nothing, so it cannot be handed an id to create; it only reads what is live.
+    """
     registry = SessionRegistry()
     public = {name for name in dir(registry) if not name.startswith("_")}
     assert "acquire" not in public
-    assert public == {"cleanup_expired", "create", "drop", "get", "max_sessions"}
+    assert public == {"cleanup_expired", "create", "drop", "get", "live_sessions", "max_sessions"}
+    assert not inspect.signature(registry.live_sessions).parameters
 
 
 def test_a_new_investigation_starts_with_an_empty_ledger() -> None:
