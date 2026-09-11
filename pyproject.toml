@@ -15,6 +15,11 @@ dependencies = [
     "tree-sitter-language-pack>=0.7",
     "numpy>=2.0",
     "fastembed>=0.5",
+    # The official Model Context Protocol SDK, for the stdio transport adapter
+    # only. Pinned below 2.0: that line replaces `httpx` with a second HTTP
+    # client (`httpx2`) alongside the one RepoAtlas already uses, and adds an
+    # OpenTelemetry dependency, neither of which a local stdio adapter needs.
+    "mcp>=1.30,<2",
 ]
 
 [project.scripts]

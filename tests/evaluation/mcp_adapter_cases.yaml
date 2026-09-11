@@ -1,0 +1,175 @@
+# RepoAtlas MCP adapter evaluation set (V2 Slice J, §38).
+#
+# GROUND TRUTH IS MANUAL. Every expectation was written by reasoning about the
+# capability contracts and the adapter's own rules, never by running the server
+# and recording what came back. An adapter corpus derived from its own output
+# would measure self-consistency, and an adapter that had dropped evidence ids
+# would then agree with itself about having none.
+#
+# This is an ADAPTER evaluation, not a second repository-intelligence corpus. It
+# does not re-measure retrieval, ranking, traversal, dependency resolution or
+# grounding; those have corpora of their own and the adapter is proved to return
+# their answers unchanged by the parity suite. What is measured here is the
+# contract a client sees: the inventory, the schemas, whether a call mints an
+# investigation, which top-level fields it must carry, and which refusals keep
+# which codes.
+#
+# No model is consulted and nothing is embedded.
+#
+# Fields
+#   id            stable identifier
+#   tool          the protocol tool name
+#   arguments     exactly what a client would send
+#   expect
+#     fields         top-level keys the result must carry
+#     non_empty      keys that must not be empty against the prepared ecosystem
+#     investigation  minted | continued | none
+#     notes          why this is the ground truth
+
+capabilities:
+  - id: repositories
+    tool: repoatlas_repositories
+    arguments: {context: {scope: global}}
+    expect:
+      fields: [context, scope, repositories, depth]
+      non_empty: [repositories]
+      investigation: none
+    notes: >-
+      A registry listing. The prepared ecosystem is initialized, so it names
+      repositories; it supplies no evidence, so it opens no investigation.
+
+  - id: status
+    tool: repoatlas_status
+    arguments: {context: {scope: global}}
+    expect:
+      fields: [context, scope, freshness, counts, root_configured, drift_checked]
+      non_empty: [freshness]
+      investigation: none
+    notes: >-
+      Freshness is reported for a configured root. Nothing is supplied, so no
+      ledger is involved.
+
+  - id: search
+    tool: repoatlas_search
+    arguments:
+      context: {scope: global}
+      question: Where is SERVICE_HOST configured?
+    expect:
+      fields: [investigation_id, question, context, evidence, freshness, budget, ledger]
+      non_empty: [evidence, ledger]
+      investigation: minted
+    notes: >-
+      The ecosystem was built around this question, so evidence comes back, and
+      every item is ledgered before the response exists. No id was supplied, so
+      one is minted.
+
+  - id: inspect
+    tool: repoatlas_inspect
+    arguments:
+      context: {scope: repository, repository: python-service}
+      target: {path: src/config.py}
+      line_start: 1
+      line_end: 6
+    expect:
+      fields: [investigation_id, context, file, segments, coverage, ledger]
+      non_empty: [segments]
+      investigation: minted
+    notes: >-
+      An indexed path with an explicit range returns source for that range and
+      records it. Inspection supplies evidence, so it mints an investigation too.
+
+  - id: relationships
+    tool: repoatlas_relationships
+    arguments: {context: {scope: global}, target: "env:SERVICE_HOST"}
+    expect:
+      fields: [investigation_id, context, target, edges, limits, ledger]
+      non_empty: [edges]
+      investigation: minted
+    notes: >-
+      SERVICE_HOST is the hub the fixture ecosystem is built around: a Python
+      reader, a Salt state and a shell script all touch it, so the walk is not
+      empty.
+
+  - id: dependencies
+    tool: repoatlas_dependencies
+    arguments: {context: {scope: global}, limit: 3}
+    expect:
+      fields: [investigation_id, context, packages, evidence, limits, ledger]
+      non_empty: [packages]
+      investigation: minted
+    notes: >-
+      Every repository in the ecosystem declares dependencies, and a limit of 3
+      is smaller than the inventory, so a page comes back full.
+
+  - id: verify_grounding
+    tool: repoatlas_verify_grounding
+    arguments: {}          # filled in from the search that precedes it
+    expect:
+      fields: [investigation_id, verdict, guarantee, sanitized_answer, citations, findings, ledger]
+      non_empty: [guarantee]
+      investigation: continued
+    notes: >-
+      Verification is defined against an existing ledger, so it continues the
+      investigation it is given and never mints one.
+
+  - id: sync
+    tool: repoatlas_sync
+    arguments: {context: {scope: global}}
+    expect:
+      fields: [context, status, repositories, evidence_revalidation, freshness, completed_at]
+      non_empty: [repositories]
+      investigation: none
+    notes: >-
+      The one mutation. It reports every repository it visited and never opens an
+      investigation: syncing is not evidence.
+
+# Refusals. Each names a condition a client has to be able to branch on.
+errors:
+  - id: unknown-repository
+    tool: repoatlas_repositories
+    arguments: {context: {scope: repository, repository: no-such-repository}}
+    expect: {code: REPOSITORY_NOT_FOUND, category: not_found, retryable: false}
+    notes: The scope was well formed; the thing it named is absent.
+
+  - id: unknown-entity
+    tool: repoatlas_relationships
+    arguments: {context: {scope: global}, target: "env:NOT_A_REAL_ENTITY"}
+    expect: {code: ENTITY_NOT_FOUND, category: not_found, retryable: false}
+    notes: An exact key that resolves to nothing is refused, never approximated.
+
+  - id: unknown-investigation
+    tool: repoatlas_search
+    arguments:
+      context: {scope: global}
+      question: anything
+      investigation_id: an-id-this-server-never-issued
+    expect: {code: UNKNOWN_INVESTIGATION, category: session, retryable: false}
+    notes: >-
+      Refused rather than created. A silently empty ledger would report every
+      citation into it as fabricated.
+
+  - id: malformed-argument
+    tool: repoatlas_relationships
+    arguments: {context: {scope: global}, target: x, hops: 99}
+    expect: {code: INVALID_REQUEST, category: invalid_request, retryable: false}
+    notes: >-
+      The request model is the validation authority, so its bound is the one that
+      refuses, and the refusal names the field.
+
+  - id: excluded-file
+    tool: repoatlas_inspect
+    arguments:
+      context: {scope: repository, repository: python-service}
+      target: {path: .env}
+    expect: {code: FILE_NOT_INDEXED, category: not_found, retryable: false}
+    notes: >-
+      The admission policy is the capability's and the transport does not widen
+      it. A secret file has no indexed row, so there is nothing to read.
+
+  - id: unknown-tool
+    tool: repoatlas_ask
+    arguments: {question: why}
+    expect: {code: UNKNOWN_TOOL, category: invalid_request, retryable: false}
+    notes: >-
+      Reasoning is the agent's job. The tool does not exist, and the refusal says
+      what does.
