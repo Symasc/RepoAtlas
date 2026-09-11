@@ -301,13 +301,19 @@ def test_the_public_callable_surface_is_only_the_intended_operations() -> None:
         "relationships",
         "dependencies",
         "verify_grounding",
+        "sync",
     }
 
 
 def test_no_future_capability_exists_as_a_stub() -> None:
-    """A stub is worse than an absence: a caller cannot tell it from an empty result."""
-    for name in ("sync",):
-        assert not hasattr(CapabilityService, name), f"{name} exists before its slice"
+    """A stub is worse than an absence: a caller cannot tell it from an empty result.
+
+    ``init`` is named because it must never become a capability at all. It creates
+    configuration and chooses a root, and a caller on the far side of a transport
+    has no business doing either.
+    """
+    for name in ("init", "initialize"):
+        assert not hasattr(CapabilityService, name), f"{name} must not be a capability"
 
 
 def test_the_service_captures_no_working_directory(initialized: Workspace) -> None:
@@ -318,8 +324,8 @@ def test_the_service_captures_no_working_directory(initialized: Workspace) -> No
 
 
 def test_the_generation_counter_is_a_stable_in_process_hint(initialized: Workspace) -> None:
-    """No mutating capability exists yet, so it cannot move — and it never proves
-    anything about freshness even when it does."""
+    """Read capabilities never move it — and it never proves anything about
+    freshness even when sync does."""
     service = _service(initialized)
     before = service.generation
     service.repositories(RepositoriesRequest(context=GLOBAL))

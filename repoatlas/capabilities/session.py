@@ -183,6 +183,26 @@ class SessionRegistry:
             del self._sessions[investigation_id]
         return tuple(expired)
 
+    def live_sessions(self) -> tuple[InvestigationSession, ...]:
+        """Every live investigation, reached without using any of them.
+
+        For service housekeeping that must visit every ledger — re-checking
+        evidence after this service changed the index — and must not count as
+        activity inside any of them. :meth:`get` touches and promotes, which is
+        right for a caller resuming its own investigation and wrong here: walking
+        every session through it would reset every idle clock and reorder the LRU,
+        so each sync would keep abandoned investigations alive indefinitely.
+
+        Expired investigations are discarded first, exactly as :meth:`get` would
+        discard them, so housekeeping cannot resurrect one by looking at it. No
+        clock is written into any session and the order is left as it was.
+
+        Returns the sessions themselves, not their evidence. There is still no
+        lookup that reaches evidence without going through an investigation.
+        """
+        self.cleanup_expired()
+        return tuple(self._sessions.values())
+
     def _evict_over_capacity(self) -> tuple[str, ...]:
         """Evict least-recently-used investigations down to the bound.
 
