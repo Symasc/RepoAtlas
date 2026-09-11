@@ -16,7 +16,12 @@ operator to rebuild a healthy database hides the defect and costs them the index
 
 from __future__ import annotations
 
-from repoatlas.capabilities.errors import IndexChangedError, capability_error
+from repoatlas.capabilities.errors import (
+    INTERNAL_ERROR_DETAIL,
+    INTERNAL_ERROR_MESSAGE,
+    IndexChangedError,
+    capability_error,
+)
 from repoatlas.errors import (
     ContextFailure,
     ContextResolutionError,
@@ -205,8 +210,38 @@ def test_an_unexpected_exception_is_internal_and_never_an_index_verdict() -> Non
 
 
 def test_an_exception_with_no_message_still_produces_one() -> None:
+    """An empty exception still yields a usable envelope.
+
+    It used to fall back to the class name, which is the one piece of the
+    exception that always exists. That was a leak with better manners than the
+    others: ``RuntimeError`` says little, but the same line handed back
+    ``FileNotFoundError``'s absolute path whenever there was a message to use.
+    The envelope no longer depends on the exception having said anything.
+    """
     mapped = capability_error(RuntimeError())
-    assert mapped.message == "RuntimeError"
+    assert mapped.message == INTERNAL_ERROR_MESSAGE
+    assert mapped.detail == INTERNAL_ERROR_DETAIL
+    assert "RuntimeError" not in mapped.model_dump_json()
+
+
+def test_every_unrecognized_failure_produces_the_same_envelope() -> None:
+    """One code, one shape.
+
+    Two callers comparing notes must not be able to infer from a difference in
+    wording that they hit different bugs --- and an envelope that varied with the
+    exception would be carrying exception text again by another name.
+    """
+    envelopes = {
+        capability_error(exc).model_dump_json()
+        for exc in (
+            RuntimeError(),
+            RuntimeError("something unforeseen"),
+            ValueError("/home/someone/.config/repoatlas/config.yaml"),
+            FileNotFoundError(2, "No such file or directory", "/host/secret.py"),
+            RepoAtlasError("a RepoAtlas failure nobody mapped", detail="d"),
+        )
+    }
+    assert len(envelopes) == 1
 
 
 # -- vocabulary -------------------------------------------------------------------------
