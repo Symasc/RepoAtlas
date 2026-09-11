@@ -166,6 +166,13 @@ class VectorHit(BaseModel):
     line_end: int
     text: str
     score: float
+    #: The same cut provenance :class:`ChunkHit` carries, and for the same
+    #: reason. A vector hit is a chunk like any other, so a piece of a cut span
+    #: can be reached semantically exactly as it can be reached lexically; a
+    #: caller that must prove line coverage needs to see that on both routes or
+    #: the weaker one becomes the way around the rule.
+    split_index: int = 0
+    split_total: int = 1
 
 
 class EntityHit(BaseModel):
