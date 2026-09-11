@@ -1205,6 +1205,11 @@ READERS = {
     "repoatlas/storage/sqlite/migrator.py": "migration SQL shipped inside the package",
     "repoatlas/llm/prompts/loader.py": "prompt templates shipped inside the package",
     "repoatlas/sync/lock.py": "RepoAtlas's own writer-lock file",
+    # Opens no path at all: it wraps an already-open descriptor (the process's own
+    # stdout) so the MCP protocol can write to it, and reads from it never. It is
+    # listed because the sweep below cannot tell a descriptor from a path, and
+    # because `CapabilityService.open` reads as `.open` to a name-based check.
+    "repoatlas/mcp/server.py": "wraps the process's own stdout descriptor; writes only",
 }
 
 
@@ -1227,7 +1232,13 @@ def test_no_module_reads_a_file_without_being_on_the_audit_list() -> None:
             rendered = ast.unparse(node.func)
             reads = rendered.endswith((".read_bytes", ".read_text", "os.read", ".read"))
             opens = rendered.endswith(".open") and "boundary" not in rendered
-            if reads or opens:
+            # A bare `open(...)` renders as exactly "open" and so ends with
+            # neither, which left the most ordinary way to read a file the one
+            # way past this sweep. Named here with the descriptor-level calls for
+            # the same reason: the check is only worth having if the obvious
+            # spelling is the one it catches.
+            bare = rendered in {"open", "os.open", "os.fdopen"}
+            if reads or opens or bare:
                 found.append(rendered)
         if found and rel not in READERS:
             offenders[rel] = sorted(set(found))
