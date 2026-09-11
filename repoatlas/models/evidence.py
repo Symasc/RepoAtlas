@@ -163,6 +163,31 @@ class EvidenceCandidate(BaseModel):
     match: MatchClass = MatchClass.EXACT_CONTENT
     description: str = ""
     entity_id: int | None = None
+    #: How many pieces the source span this text came from was cut into, or
+    #: ``None`` when this candidate did not come from a stored chunk at all.
+    #:
+    #: Three states, because there are three honest answers and collapsing any
+    #: two of them licenses a false citation:
+    #:
+    #: * ``1`` --- a whole chunk. Its text covers the span it carries, so a line
+    #:   claim is provable;
+    #: * ``> 1`` --- one piece of a span the character cap cut
+    #:   (ARCHITECTURE.md §6). Every piece carries the *span's* line range, so a
+    #:   piece other than a whole one begins or ends mid-line and covers fewer
+    #:   lines than it advertises;
+    #: * ``None`` --- no chunk was involved. An entity signature, a filename
+    #:   match, a ledger reference. Nothing was cut because nothing was chunked,
+    #:   and saying ``1`` here would assert a completeness no chunker vouched
+    #:   for.
+    #:
+    #: Excluded from serialization: this is provenance the shaper needs, not a
+    #: field any caller reads, and V1's ``locate --json`` predates it.
+    #:
+    #: ``split_index`` is deliberately *not* carried. Knowing which piece this is
+    #: could in principle license a narrower claim for the head piece, but that
+    #: proof depends on exactly where the cap fell and is not established here —
+    #: and an unprovable line claim is the defect this field exists to prevent.
+    split_total: int | None = Field(default=None, exclude=True)
 
     @property
     def is_file_level(self) -> bool:

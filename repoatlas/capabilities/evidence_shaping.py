@@ -68,11 +68,15 @@ class SuppliedText:
 
 
 def provable_span(
-    text: str, line_start: int | None, line_end: int | None
+    text: str,
+    line_start: int | None,
+    line_end: int | None,
+    *,
+    split_total: int | None = None,
 ) -> tuple[int, int] | None:
     """The source lines ``text`` demonstrably covers, or ``None``.
 
-    ``None`` is the honest answer in three situations, and each is a real producer
+    ``None`` is the honest answer in four situations, and each is a real producer
     rather than a hypothetical:
 
     * no line is claimed to begin with — a filename match knows nothing about any
@@ -80,15 +84,40 @@ def provable_span(
     * the text is empty — an entity that was reached but has no stored signature
       supplies no line, and arithmetic that "proves" an empty string covers line 1
       would authorize citing a line nobody was shown;
-    * the piece count disagrees with the span — a split piece or a signature
-      preview, where which lines the text covers is simply not established.
+    * ``split_total`` says the span was cut — this is one piece of it, and every
+      piece carries the whole span's line range (ARCHITECTURE.md §6);
+    * the piece count disagrees with the span — a signature preview, or a span
+      whose text and range simply disagree.
 
     A ``None`` here is not a discarded source. The text is still supplied; it is
     supplied as a claim about the file rather than about lines.
+
+    Why the cut test cannot be left to the count
+    --------------------------------------------
+    The count test looks like it subsumes the cut test and does not. A one-line
+    span cut into pieces gives every piece a one-line range *and* a piece count of
+    one whenever that piece holds no newline — which is always, for the minified
+    bundles and generated one-liners that reach the cap. The arithmetic agrees
+    with itself and the text still covers a fraction of the line it names. A
+    two-line span cut just after its first newline does the same with two.
+
+    So the two tests answer different questions — *was anything cut?* and *does
+    what is here line up with what is claimed?* — and only the pair is safe.
+    :func:`~repoatlas.capabilities.indexed_source.indexed_line_map` has always
+    applied both; this is the same rule, stated once, for the capabilities that
+    reach source through retrieval rather than through the file.
+
+    ``split_total`` is ``None`` for text that never came from a chunk — an entity
+    signature, a ledger reference — where there is no cut to ask about and the
+    count test is the whole answer, exactly as before.
     """
     if line_start is None or line_end is None:
         return None
     if not text:
+        return None
+    if split_total is not None and split_total != 1:
+        # A piece of a cut span. Its text does not cover the range it carries,
+        # and no arithmetic on the piece can recover which lines it does cover.
         return None
     pieces = text.split(LINE_SEPARATOR)
     if len(pieces) != line_end - line_start + 1:
@@ -124,7 +153,12 @@ def prefix_lines(text: str, limit: int) -> tuple[str, int]:
 
 
 def supply(
-    text: str, line_start: int | None, line_end: int | None, *, limit: int
+    text: str,
+    line_start: int | None,
+    line_end: int | None,
+    *,
+    limit: int,
+    split_total: int | None = None,
 ) -> SuppliedText | None:
     """What may be handed over from ``text`` within ``limit`` characters.
 
@@ -137,7 +171,7 @@ def supply(
     first 23 fit, the claim is 10-32 — never 10-80, which would let a citation
     reach lines that were cut.
     """
-    span = provable_span(text, line_start, line_end)
+    span = provable_span(text, line_start, line_end, split_total=split_total)
     kept, lines = prefix_lines(text, limit)
     if not kept:
         return None
