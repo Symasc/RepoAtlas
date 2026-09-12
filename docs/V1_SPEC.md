@@ -1,5 +1,12 @@
 # RepoAtlas — V1 Specification
 
+> **V2 note.** RepoAtlas no longer contains an embedded reasoning model. `repoatlas ask`, `repoatlas debug`, the
+> `--no-llm` flag, exit code 4, the `llm` configuration section and the `repoatlas/llm/` package were removed
+> deliberately: external agents own reasoning, and RepoAtlas owns deterministic repository intelligence, evidence,
+> provenance and grounding verification. The requirements below describe V1 **as shipped** and are kept as the
+> record of it. For the product as it is now, see [`ARCHITECTURE.md` §11](ARCHITECTURE.md#11-answer-grounding-enforcement)
+> and the [README](../README.md).
+
 **Status:** canonical. This document is the source of truth for V1 scope, requirements and progress.
 Do not restate these requirements in conversation; reference sections instead (e.g. "see §6 Directory-aware
 behavior"). If a requirement changes, **update this file first**, then implement.

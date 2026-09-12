@@ -1,7 +1,7 @@
 """The parser contract (ARCHITECTURE.md §4, V1_SPEC §7).
 
 A ``LanguageParser`` is a **pure function of (path, content)**. It performs no I/O,
-touches neither storage nor the LLM, and never executes what it reads. It emits
+touches no storage, and never executes what it reads. It emits
 *unresolved* references carrying raw target keys; the linker resolves them later.
 
 This module defines the contract. Concrete parsers are separate modules registered
