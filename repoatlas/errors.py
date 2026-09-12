@@ -3,6 +3,13 @@
 from __future__ import annotations
 
 import enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Annotation only. This module sits under everything and is imported by
+    # almost every entry point, so it stays free of runtime imports it does not
+    # need (the import-weight rule RCA-02 established).
+    from pathlib import Path
 
 
 class ExitCode:
@@ -112,9 +119,58 @@ class SyncInProgressError(RepoAtlasError):
     An operational condition, not a bug: two syncs overlapped. It is raised
     rather than waited out forever so a wedged writer is reported instead of
     hanging the second one silently.
+
+    Who holds the lock is **host-local diagnostic state**, and it is carried on
+    :attr:`owner` and :attr:`lock_path` rather than folded into :attr:`detail`.
+    The two are read by different audiences. An operator at a terminal is on the
+    machine the lock file sits on, so a pid, a hostname and an absolute path are
+    exactly what lets them find the other writer; :meth:`render` gives them that.
+    A V2 capability caller is an external agent that cannot act on any of it,
+    and ``detail`` is what crosses to one (FINAL audit, F-01) --- so ``detail``
+    says only what to do about the contention, and the coordinates stay here.
+
+    This is the split the privacy corrections already use elsewhere: the raw fact
+    lives in the subsystem that observed it, and the public projection takes only
+    what the caller can act on.
     """
 
     exit_code = ExitCode.SYNC_LOCKED
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        detail: str | None = None,
+        owner: str | None = None,
+        lock_path: Path | None = None,
+    ) -> None:
+        super().__init__(message, detail=detail)
+        #: The incumbent's diagnostic line, exactly as the lock file records it
+        #: (``pid=… host=… since=…``). Never parsed here: the format belongs to
+        #: :func:`repoatlas.sync.lock._record_owner`, and a second reading of it
+        #: is a second thing to keep in step. Empty when the line is unreadable.
+        self.owner = owner
+        #: The lock file this contention is about. A host path.
+        self.lock_path = lock_path
+
+    def render(self) -> str:
+        """The operator-facing form: the public text plus the local coordinates.
+
+        Overridden rather than pushed into ``detail`` because ``render`` is the
+        CLI's projection and nothing else calls it --- the capability layer reads
+        ``message`` and ``detail`` directly. Putting the coordinates here is what
+        keeps the terminal output unchanged while the capability envelope loses
+        them.
+        """
+        rendered = super().render()
+        # Both lines or neither, as before: an unreadable owner line means the
+        # incumbent is mid-rewrite, and naming the file without saying who holds
+        # it tells an operator nothing they could not already see.
+        if self.owner:
+            rendered += f"\n\nLock holder: {self.owner}"
+            if self.lock_path is not None:
+                rendered += f"\nLock file:   {self.lock_path}"
+        return rendered
 
 
 class IndexUnavailableError(RepoAtlasError):
