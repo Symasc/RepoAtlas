@@ -90,6 +90,26 @@ class RetrievalLimits:
 #: and the caller chooses a documented profile instead of assembling raw limits.
 DIAGNOSTIC_LIMITS = RetrievalLimits(per_source=40, final=18, token_budget=8000)
 
+#: What the trace says when the embedding backend could not answer.
+#:
+#: Fixed text, authored here, and deliberately not derived from the exception.
+#: :class:`~repoatlas.embeddings.protocol.EmbeddingUnavailable` carries whatever
+#: the backend raised — a loader's ``OSError`` naming a model cache directory, an
+#: ``ImportError`` naming a shared object, an HTTP body, a filesystem path — and a
+#: stage detail is a **public field of a successful response**, reaching the agent
+#: through ``search(include_trace=True)`` and V1's ``locate --json``. Repeating
+#: third-party text there discloses host layout that the caller asked nothing
+#: about and can act on in no way.
+#:
+#: It says what RepoAtlas could not do rather than what a backend complained
+#: about, so it stays true when the backend is replaced (V1_SPEC §3 makes that a
+#: configuration change). It is also distinct from every other semantic detail —
+#: "embeddings not configured", "no vectors stored for ...", "empty query vector"
+#: and "<model>: n hit(s)" — so the reason the stage produced nothing is still
+#: legible, and a failure is never mistaken for a stage that ran and matched
+#: nothing.
+SEMANTIC_UNAVAILABLE = "semantic retrieval unavailable"
+
 
 class Retriever:
     """Builds bounded evidence sets from deterministic signals, ranked by tier."""
@@ -608,6 +628,14 @@ class Retriever:
     def _semantic_candidates(
         self, question: str, repo_ids: list[int] | None
     ) -> tuple[list[EvidenceCandidate], bool, str]:
+        """Vector neighbours, whether the stage ran, and what the trace should say.
+
+        Every string returned here is written here, and that is the rule rather
+        than an accident of the current branches: the third element is published
+        verbatim as a public stage detail. It may describe RepoAtlas state —
+        configuration, stored vector counts, hit counts, the configured model id —
+        and it may never repeat text RepoAtlas did not author.
+        """
         if self._vectors is None or self._embeddings is None:
             return [], False, "embeddings not configured"
 
@@ -619,9 +647,16 @@ class Retriever:
 
         try:
             vector = self._embeddings.embed_query(question)
-        except EmbeddingUnavailable as exc:
+        except EmbeddingUnavailable:
             # Never fatal: the deterministic stages are the mandatory ones.
-            return [], False, str(exc)
+            #
+            # The exception is deliberately not bound. Its text belongs to
+            # whoever raised it — a backend, a loader, a transport — and this
+            # value is published. Not naming it is what keeps the two apart:
+            # there is no variable here through which backend text could reach a
+            # trace, so the guarantee cannot erode later into "just the class
+            # name" or "just the first line".
+            return [], False, SEMANTIC_UNAVAILABLE
         if not vector:
             return [], False, "empty query vector"
 
