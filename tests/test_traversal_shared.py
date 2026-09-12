@@ -21,7 +21,7 @@ from repoatlas.graph.traversal import (
 )
 from repoatlas.models.parsing import EdgeType
 from repoatlas.retrieval import retriever as retriever_module
-from repoatlas.services.query_service import locate
+from repoatlas.services.retrieval_service import locate
 from repoatlas.services.workspace import Workspace
 
 

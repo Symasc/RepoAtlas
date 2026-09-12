@@ -31,7 +31,7 @@ from repoatlas.config.settings import IndexingSettings, Settings
 from repoatlas.indexing.chunking import chunk_content
 from repoatlas.models.evidence import EvidenceSet, EvidenceSource, EvidenceTier
 from repoatlas.services.init_service import initialize
-from repoatlas.services.query_service import locate
+from repoatlas.services.retrieval_service import locate
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace
 from tests.conftest import init_git_repository

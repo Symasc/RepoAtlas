@@ -836,7 +836,7 @@ def test_a_deep_marker_is_retrievable_after_a_sync(workspace_root: Path, tmp_pat
 
     workspace = open_at(settings, workspace_root)
     try:
-        from repoatlas.services.query_service import locate
+        from repoatlas.services.retrieval_service import locate
 
         context = workspace.resolver().resolve(workspace_root, command="locate")
         evidence = locate(workspace, "DEEP_UNIQUE_SYMBOL_918273", context)

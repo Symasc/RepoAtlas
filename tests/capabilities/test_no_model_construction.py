@@ -230,7 +230,7 @@ def test_v1_locate_builds_no_model(initialized: Workspace, no_model: None) -> No
     would only reveal itself as a model process somebody did not ask for.
     """
     from repoatlas.models.context import ContextScope, RepositoryContext
-    from repoatlas.services.query_service import locate
+    from repoatlas.services.retrieval_service import locate
 
     context = RepositoryContext(
         scope=ContextScope.GLOBAL,
@@ -242,10 +242,12 @@ def test_v1_locate_builds_no_model(initialized: Workspace, no_model: None) -> No
     assert evidence.candidates
 
 
-def test_v1_retrieve_for_builds_no_model(initialized: Workspace, no_model: None) -> None:
-    """The same for the retrieval half ``ask`` and ``debug`` call before reasoning."""
+def test_the_diagnostic_retrieval_mode_builds_no_model(
+    initialized: Workspace, no_model: None
+) -> None:
+    """The same for the widened mode, which retrieves more and still models nothing."""
     from repoatlas.models.context import ContextScope, RepositoryContext
-    from repoatlas.services.query_service import QueryIntent, retrieve_for
+    from repoatlas.services.retrieval_service import locate_diagnostic
 
     context = RepositoryContext(
         scope=ContextScope.GLOBAL,
@@ -253,7 +255,7 @@ def test_v1_retrieve_for_builds_no_model(initialized: Workspace, no_model: None)
         primary=None,
         reason="global",
     )
-    evidence = retrieve_for(initialized, "SERVICE_HOST", context, QueryIntent.ASK)
+    evidence = locate_diagnostic(initialized, "SERVICE_HOST", context)
     assert evidence.candidates
 
 

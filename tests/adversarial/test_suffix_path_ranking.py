@@ -53,7 +53,7 @@ from repoatlas.models.evidence import (
 )
 from repoatlas.retrieval.ranking import apply_budget, enforce_precedence, fuse
 from repoatlas.services.init_service import initialize
-from repoatlas.services.query_service import QueryIntent, locate, retrieve_for
+from repoatlas.services.retrieval_service import locate, locate_diagnostic
 from repoatlas.services.workspace import Workspace, open_workspace
 from tests.conftest import init_git_repository
 
@@ -646,9 +646,7 @@ def test_locate_leads_with_the_suffix_matches(workspace: Workspace, root: Path) 
 
 
 def test_debug_keeps_the_anchor_through_a_widened_funnel(workspace: Workspace, root: Path) -> None:
-    evidence = retrieve_for(
-        workspace, SUFFIX, context_at(workspace, root, "svc"), intent=QueryIntent.DEBUG
-    )
+    evidence = locate_diagnostic(workspace, SUFFIX, context_at(workspace, root, "svc"))
     anchored = {
         f"{c.repository}/{c.path}"
         for c in evidence.candidates
