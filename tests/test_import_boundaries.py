@@ -20,15 +20,23 @@ stronger than the static guard and complementary to it --- the static guard keep
 catching the direct edges, which a subprocess probe would never attribute to the
 right file.
 
-Two rules, and the second is as load-bearing as the first:
+The rule, stated once: **importing anything in RepoAtlas loads no reasoning
+stack.** Every entry point is in the list --- the capability layer, the
+transport, the CLI, the services package and each deterministic service --- and
+every one of them must come back with nothing.
 
-* **the deterministic path pays nothing for the legacy one** --- importing the
-  capability layer, the transport, the services package or any deterministic
-  service loads no ``repoatlas.llm``;
-* **the legacy path still works when it is asked for** --- ``query_service`` and
-  the names that reach it load exactly what they always did. This correction
-  moves the cost onto whoever incurs it; it does not remove the subsystem, which
-  is a later, separate change.
+That rule used to have a second half. RCA-02 moved the cost of the legacy stack
+onto whoever incurred it rather than removing it, so this file also asserted that
+``query_service`` still loaded the nine ``repoatlas.llm`` modules it always had.
+The subsystem is now deleted, and the invariant is stronger for it: there is no
+legacy stack to load and no module that would load one. The negative half lives
+in :mod:`tests.test_no_embedded_reasoner`, which asserts that the package is
+gone rather than merely unreferenced; what stays here is the transitive-cost
+question, asked of the imports a user actually performs.
+
+The CLI is now in the list it used to be excluded from. It was the one caller
+that legitimately wanted the reasoner, which is why a correction that stopped
+loading it would have been a bug rather than a decoupling. It wants nothing now.
 
 ``repoatlas.grounding`` is deterministic and is **never** forbidden here. It was
 moved out of ``llm/`` by Slice 0 precisely because it is not model code, and a
@@ -45,7 +53,8 @@ from typing import TypedDict
 
 import pytest
 
-#: Anything under here is V1's embedded reasoning stack.
+#: Anything under here was V1's embedded reasoning stack. The package is deleted;
+#: the prefix stays as the thing that must never come back.
 LEGACY_PREFIX = "repoatlas.llm"
 
 #: Deterministic, and explicitly allowed. Named as a constant so the intent is
@@ -57,7 +66,10 @@ class Imported(TypedDict):
     """What a fresh interpreter had loaded after one import statement."""
 
     legacy: list[str]
-    query_service: bool
+    #: Loaded RepoAtlas modules whose *name* suggests a model, whatever they are
+    #: called. Wider than the prefix above, so a stack rebuilt under another
+    #: spelling is caught too.
+    suspicious: list[str]
     grounding: bool
     repoatlas_total: int
 
@@ -81,7 +93,12 @@ def _loaded(statement: str) -> Imported:
                 "legacy": sorted(
                     name for name in sys.modules if name.startswith({LEGACY_PREFIX!r})
                 ),
-                "query_service": "repoatlas.services.query_service" in sys.modules,
+                "suspicious": sorted(
+                    name
+                    for name in sys.modules
+                    if name.startswith("repoatlas")
+                    and ("llm" in name.lower() or "reason" in name.lower())
+                ),
                 "grounding": {DETERMINISTIC_GROUNDING!r} in sys.modules,
                 "repoatlas_total": len(
                     [name for name in sys.modules if name.startswith("repoatlas")]
@@ -118,6 +135,9 @@ DETERMINISTIC_IMPORTS = [
     pytest.param("import repoatlas.services.init_service", id="init-service"),
     pytest.param("import repoatlas.services.workspace", id="workspace"),
     pytest.param("import repoatlas.grounding", id="grounding"),
+    # Previously excluded: it was the one caller that wanted the reasoning stack.
+    pytest.param("import repoatlas.cli.main", id="v1-cli"),
+    pytest.param("import repoatlas.services.retrieval_service", id="retrieval-service-module"),
 ]
 
 
@@ -129,15 +149,16 @@ def test_no_deterministic_import_loads_the_legacy_reasoning_stack(statement: str
 
 
 @pytest.mark.parametrize("statement", DETERMINISTIC_IMPORTS)
-def test_no_deterministic_import_loads_the_legacy_query_service(statement: str) -> None:
-    """``query_service`` is the door to the legacy stack, so it is barred too.
+def test_no_import_loads_a_module_whose_name_suggests_a_model(statement: str) -> None:
+    """Wider than the prefix rule above, and deliberately so.
 
-    Asserted separately from the ``repoatlas.llm`` rule: an implementation that
-    imported ``query_service`` but happened to defer its own model imports would
-    satisfy the rule above while leaving the seam exactly where it was.
+    ``query_service`` used to be named here as the door to the legacy stack. The
+    door is gone, so what is asserted instead is that nothing has quietly been
+    rebuilt under another spelling: no loaded RepoAtlas module has ``llm`` or
+    ``reason`` in its name.
     """
     loaded = _loaded(statement)
-    assert loaded["query_service"] is False, statement
+    assert loaded["suspicious"] == [], statement
 
 
 def test_the_services_package_is_genuinely_empty_to_enter() -> None:
@@ -166,46 +187,37 @@ def test_deterministic_grounding_is_available_and_never_forbidden() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The legacy path still works when it is asked for
+# There is no legacy path left to ask for
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     "statement",
     [
-        pytest.param("import repoatlas.services.query_service", id="module"),
-        pytest.param("from repoatlas.services import query_service", id="from-package"),
-        pytest.param("import repoatlas.services as s; s.reason", id="lazy-attribute"),
+        pytest.param("import repoatlas.llm", id="package"),
+        pytest.param("import repoatlas.llm.reasoner", id="reasoner"),
+        pytest.param("import repoatlas.llm.grounding", id="grounding-shim"),
+        pytest.param("import repoatlas.services.query_service", id="query-service"),
+        pytest.param("from repoatlas.services import query_service", id="query-service-attr"),
         pytest.param("from repoatlas.services import reason", id="lazy-from-import"),
-        pytest.param("import repoatlas.cli.main", id="v1-cli"),
     ],
 )
-def test_asking_for_legacy_reasoning_still_loads_it(statement: str) -> None:
-    """CASE 6. The cost moved onto whoever incurs it; it did not disappear.
+def test_asking_for_legacy_reasoning_finds_nothing(statement: str) -> None:
+    """The rule RCA-02 could not make, now that the subsystem is deleted.
 
-    The V1 CLI is in this list deliberately. It is the caller that legitimately
-    wants the reasoning stack, and a correction that quietly stopped loading it
-    would have broken ``ask`` rather than decoupled anything.
+    RCA-02 deferred the cost of the reasoning stack and asserted, here, that it
+    still arrived for whoever asked. Nobody can ask: the modules do not exist and
+    the deferred lookup does not know the names. A shim that answered any of
+    these would be advertising support for a removed feature.
     """
-    loaded = _loaded(statement)
-    assert loaded["legacy"], f"{statement} loaded no legacy modules"
-    assert "repoatlas.llm.reasoner" in loaded["legacy"]
-
-
-def test_the_legacy_stack_is_the_same_shape_it_always_was() -> None:
-    """Nothing was removed, hidden or split. Only its arrival time moved."""
-    loaded = _loaded("import repoatlas.services.query_service")
-    assert set(loaded["legacy"]) == {
-        "repoatlas.llm",
-        "repoatlas.llm.factory",
-        "repoatlas.llm.null",
-        "repoatlas.llm.ollama",
-        "repoatlas.llm.prompts",
-        "repoatlas.llm.prompts.loader",
-        "repoatlas.llm.protocol",
-        "repoatlas.llm.reasoner",
-        "repoatlas.llm.scripted",
-    }
+    result = subprocess.run(
+        [sys.executable, "-c", statement],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0, f"{statement} succeeded"
+    assert "ModuleNotFoundError" in result.stderr or "ImportError" in result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +235,6 @@ def test_every_re_exported_name_is_the_real_object() -> None:
     import repoatlas.services as services
     from repoatlas.services import (
         init_service,
-        query_service,
         retrieval_service,
         status_service,
         sync_service,
@@ -238,10 +249,15 @@ def test_every_re_exported_name_is_the_real_object() -> None:
     assert services.sync is sync_service.sync
     assert services.locate is retrieval_service.locate
     assert services.locate_diagnostic is retrieval_service.locate_diagnostic
-    assert services.reason is query_service.reason
 
 
-def test_the_exported_names_are_exactly_what_v1_exported() -> None:
+def test_the_exported_names_are_the_deterministic_ones() -> None:
+    """V1's list, minus the two the reasoner took with it.
+
+    ``reason`` is gone because the function is. ``retrieve_for`` is gone because
+    its intent parameter belonged to the reasoner; the retrieval it performed is
+    still here, under a name that does not.
+    """
     import repoatlas.services as services
 
     assert sorted(services.__all__) == [
@@ -251,7 +267,6 @@ def test_the_exported_names_are_exactly_what_v1_exported() -> None:
         "locate",
         "locate_diagnostic",
         "open_workspace",
-        "reason",
         "status",
         "sync",
     ]
@@ -276,7 +291,7 @@ def test_resolving_a_name_twice_returns_one_object() -> None:
     import repoatlas.services as services
 
     assert services.sync is services.sync
-    assert services.reason is services.reason
+    assert services.locate is services.locate
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +308,6 @@ def test_resolving_a_name_twice_returns_one_object() -> None:
         "repoatlas.services.status_service",
         "repoatlas.services.init_service",
         "repoatlas.services.freshness_service",
-        "repoatlas.services.query_service",
         "repoatlas.services.retrieval_service",
         "repoatlas.capabilities.service",
         "repoatlas.mcp.server",

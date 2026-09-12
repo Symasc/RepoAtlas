@@ -747,7 +747,6 @@ def cli_root(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Path, d
         "HOME": str(state),
         "REPOATLAS_CONFIG": str(state / "config.yaml"),
         "REPOATLAS_DB": str(state / "atlas.db"),
-        "REPOATLAS_LLM_BASE_URL": "http://127.0.0.1:1",
     }
     subprocess.run(
         [str(CLI), "init", str(root)],
@@ -806,9 +805,7 @@ def test_debug_keeps_the_path_anchor_with_supporting_evidence(
     cli_root: tuple[Path, dict[str, str]],
 ) -> None:
     """``debug`` widens the funnel and searches the phrase literally; the anchor holds."""
-    done = run_cli(
-        cli_root, "svc", "debug", f"why does {TARGET} fail to read DATABASE_URL?", "--no-llm"
-    )
+    done = run_cli(cli_root, "svc", "locate", f"why does {TARGET} fail to read DATABASE_URL?")
     assert done.returncode == ExitCode.OK, done.stderr
 
     lines = [line for line in done.stdout.splitlines() if "svc/" in line]

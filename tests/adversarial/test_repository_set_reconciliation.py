@@ -379,7 +379,6 @@ def _cli_env(state: Path) -> dict[str, str]:
         "HOME": str(state),
         "REPOATLAS_CONFIG": str(state / "config.yaml"),
         "REPOATLAS_DB": str(state / "atlas.db"),
-        "REPOATLAS_LLM_BASE_URL": "http://127.0.0.1:1",
     }
 
 

@@ -35,11 +35,47 @@ def dockerfile() -> str:
     return DOCKERFILE.read_text(encoding="utf-8")
 
 
-# -- the two services §18 names ---------------------------------------------
+# -- the one service §18 names ----------------------------------------------
 
 
-def test_both_required_services_are_defined(compose: dict) -> None:
-    assert set(compose["services"]) == {"repoatlas", "ollama"}
+def test_the_stack_is_one_deterministic_service(compose: dict) -> None:
+    """RepoAtlas runs no model, so the stack has nothing to run beside it.
+
+    §18 originally named two services, the second a local reasoning model. There
+    is no embedded reasoner; an agent connects over ``repoatlas mcp`` from
+    outside the stack. A model container here would be a prerequisite the product
+    does not have.
+    """
+    assert set(compose["services"]) == {"repoatlas"}
+
+
+def test_no_service_depends_on_anything(compose: dict) -> None:
+    """A leftover ``depends_on`` would make the stack refuse to start."""
+    for name, service in compose["services"].items():
+        assert "depends_on" not in service, name
+
+
+def test_no_volume_or_port_is_declared_for_a_model_server(compose: dict) -> None:
+    """Dead volumes and published ports outlive the service that needed them."""
+    assert set(compose.get("volumes") or {}) == {"repoatlas-state"}
+    for name, service in compose["services"].items():
+        assert not service.get("ports"), name
+
+
+def test_the_deployment_configures_no_model_endpoint(compose: dict) -> None:
+    """Nothing in the environment names a provider, a host or a port.
+
+    ``REPOATLAS_LLM_BASE_URL`` was the only variable here, and the settings
+    loader no longer reads it. Leaving it set would describe a dependency the
+    product does not have to whoever reads the file next.
+    """
+    text = COMPOSE.read_text(encoding="utf-8").lower()
+    for marker in ("ollama", "repoatlas_llm", "11434", "/api/chat"):
+        assert marker not in text, marker
+
+    for name, service in compose["services"].items():
+        for key in service.get("environment") or {}:
+            assert "LLM" not in key.upper(), f"{name}: {key}"
 
 
 def test_no_research_infrastructure_is_present(compose: dict) -> None:
@@ -128,29 +164,6 @@ def test_git_is_the_only_external_binary_installed(dockerfile: str) -> None:
     install = next(line for line in dockerfile.splitlines() if "apt-get install" in line)
     packages = install.split("-y", 1)[1].split("&&")[0].replace("\\", "").split()
     assert packages == ["git"]
-
-
-def test_the_model_server_is_not_published_to_the_network(compose: dict) -> None:
-    for published in compose["services"]["ollama"]["ports"]:
-        assert str(published).startswith("127.0.0.1:")
-
-
-def test_the_reasoning_endpoint_points_at_the_sibling_service(compose: dict) -> None:
-    """``localhost`` is the container itself; the model lives next door."""
-    environment = compose["services"]["repoatlas"]["environment"]
-    assert environment["REPOATLAS_LLM_BASE_URL"] == "http://ollama:11434"
-
-
-def test_the_documented_override_is_the_one_the_code_reads(
-    monkeypatch: pytest.MonkeyPatch, compose: dict, tmp_path: Path
-) -> None:
-    """The compose file and the settings loader must agree, or the deployment
-    silently talks to nothing."""
-    from repoatlas.config.settings import load_settings
-
-    name, value = next(iter(compose["services"]["repoatlas"]["environment"].items()))
-    monkeypatch.setenv(name, value)
-    assert load_settings(tmp_path / "absent.yaml").llm.base_url == value
 
 
 def test_the_build_context_excludes_state_and_tests() -> None:

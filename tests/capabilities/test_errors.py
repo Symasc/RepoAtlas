@@ -36,7 +36,6 @@ from repoatlas.errors import (
     MigrationError,
     MigrationFailedError,
     NotInitializedError,
-    ReasoningModelUnavailableError,
     RepoAtlasError,
     RepositoryRootConflictError,
     SyncInProgressError,
@@ -75,7 +74,6 @@ def test_the_hierarchy_covers_the_classes_this_suite_was_written_against() -> No
         RepoAtlasError,
         ContextResolutionError,
         NotInitializedError,
-        ReasoningModelUnavailableError,
         SyncInProgressError,
         IndexUnavailableError,
         IndexCorruptError,
@@ -265,12 +263,22 @@ def test_no_model_or_provider_vocabulary_reaches_the_capability_error_model() ->
     assert not offenders, offenders
 
 
-def test_an_unreachable_reasoning_model_is_never_a_capability_condition() -> None:
-    """A capability that reached a model would be a bug, so it maps as one.
+def test_an_unrecognized_failure_is_internal_and_names_nothing() -> None:
+    """The mapping table's default, and the limit on what it may say.
 
-    Nothing in the envelope names a provider, a protocol or a model.
+    V1's unreachable-reasoning-model error was this test's original subject: the
+    one :class:`RepoAtlasError` the capability layer had no business holding an
+    opinion about, where mapping it anywhere but ``INTERNAL`` would have
+    published a model condition on a deterministic contract. That class is gone
+    with the reasoner. The rule it exercised is not, and it is the more general
+    one --- an error the table does not recognize is a defect in RepoAtlas, and
+    the envelope it produces carries no vendor, protocol or provider vocabulary.
     """
-    mapped = capability_error(ReasoningModelUnavailableError("no model", detail="none reachable"))
+
+    class UnmappedFailure(RepoAtlasError):
+        """Deliberately absent from the mapping table."""
+
+    mapped = capability_error(UnmappedFailure("no model", detail="none reachable"))
     assert mapped.category is ErrorCategory.INTERNAL
     serialized = mapped.model_dump_json()
     for marker in ("ollama", "Ollama", "ModelFailure"):
@@ -288,7 +296,6 @@ def test_v1_rendering_and_exit_codes_are_unchanged() -> None:
 
     assert NotInitializedError().exit_code == ExitCode.NOT_INITIALIZED
     assert SyncInProgressError("busy").exit_code == ExitCode.SYNC_LOCKED
-    assert ReasoningModelUnavailableError("x").exit_code == ExitCode.LLM_UNAVAILABLE
     assert IndexCorruptError("x").exit_code == ExitCode.NOT_INITIALIZED
     assert MigrationFailedError("x").exit_code == ExitCode.RUNTIME
     assert UnrecognizedSchemaError("x").exit_code == ExitCode.NOT_INITIALIZED
