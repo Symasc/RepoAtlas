@@ -97,7 +97,7 @@ def repository_view(report: RepositorySyncReport, slug: str | None) -> Repositor
         rehash_reason=report.rehash_reason,
         enumeration_failed=report.enumeration_failed,
         diagnostics=tuple(
-            SyncDiagnostic(severity=d.severity, message=d.message, line=d.line)
+            SyncDiagnostic(severity=d.severity, message=d.message, line=d.line, path=d.path)
             for d in report.diagnostics
         ),
     )

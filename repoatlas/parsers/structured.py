@@ -149,7 +149,10 @@ class StructuredParser:
                 diagnostics=(
                     ParseDiagnostic(
                         severity=Severity.WARNING,
-                        message=f"{language} parse failed: {getattr(exc, 'problem', exc)}",
+                        # PyYAML renders the offending source line into `str(exc)`
+                        # and `exc.problem` is its own wording; the mark is read
+                        # for a line number and nothing else.
+                        message=f"{language} parse failed",
                         line=failed_at,
                     ),
                 ),

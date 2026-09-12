@@ -274,7 +274,16 @@ class SyncEngine:
 
         for scanned_file in [*plan.new, *plan.changed]:
             outcome = self._index_file(repo, scanned_file.rel_path, scanned_file, boundary)
-            diagnostics.extend(outcome.diagnostics)
+            # Stamped here, from the path this sync admitted, because this is the
+            # only place that knows it: a parser is handed content and a name it
+            # cannot vouch for, and a library that mentions a filename in its
+            # error is naming whatever it was given --- on some paths an absolute
+            # one. A diagnostic that says *which file* is worth far more than one
+            # that quotes a parser, and this is where the trustworthy answer is.
+            diagnostics.extend(
+                diagnostic.model_copy(update={"path": scanned_file.rel_path})
+                for diagnostic in outcome.diagnostics
+            )
             symbols_total += outcome.symbols
             edges_total += outcome.edges
             dependencies_total += outcome.dependencies
