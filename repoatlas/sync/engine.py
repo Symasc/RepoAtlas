@@ -48,7 +48,13 @@ from repoatlas.graph.keys import file_key, repository_key, symbol_key
 from repoatlas.graph.linker import GlobalLinkResult, ReferenceLinker
 from repoatlas.indexing.chunking import chunk_content
 from repoatlas.models.dependencies import DependencyRecord, DependencyReport
-from repoatlas.models.parsing import EntityType, ParsedFile, ParseDiagnostic, Severity
+from repoatlas.models.parsing import (
+    ENUMERATION_INCOMPLETE,
+    EntityType,
+    ParsedFile,
+    ParseDiagnostic,
+    Severity,
+)
 from repoatlas.models.reports import RepositorySyncReport, SyncReport
 from repoatlas.models.repository import IndexedFile, Repository, repository_slug
 from repoatlas.parsers.registry import ParserRegistry
@@ -76,8 +82,8 @@ from repoatlas.sync.scanner import (
 BINARY_SNIFF_BYTES = 8192
 
 
-def _enumeration_diagnostics(reasons: list[str]) -> list[ParseDiagnostic]:
-    """Say that enumeration was incomplete, and why, without saying too much.
+def _enumeration_diagnostics(warning_count: int) -> list[ParseDiagnostic]:
+    """Say that enumeration was incomplete, without repeating what git said.
 
     ``git ls-files`` reports a directory it could not open as a *warning* and still
     exits 0, so the listing comes back short and successful-looking. Those warnings
@@ -85,31 +91,27 @@ def _enumeration_diagnostics(reasons: list[str]) -> list[ParseDiagnostic]:
     look" are different claims here, and a sync that reported the second as the
     first would claim a completeness it never established (ARCHITECTURE.md §6).
 
-    Git names the directory relative to the repository, so the message is already
-    the useful form and carries no host-absolute path back to whoever can write to
-    the tree (ARCHITECTURE.md §12).
+    That fact is worth reporting. The sentences git wrote to say it are not.
 
-    Only the first few are listed. The message exists so that a successful sync
-    cannot be read as a complete one; a thousand refused directories would bury
-    that, and the count carries the same fact.
+    This takes a **count, not the warnings**, and the difference is the whole
+    point: a projection that never receives the untrusted strings cannot publish
+    them by a later edit. Earlier, this function was handed git's stderr lines and
+    interpolated them, on the reasoning that git names a refused directory
+    relative to the repository. That reasoning was wrong in the case that matters.
+    Git names whatever it was pointed at, and ``.git/config`` --- repository
+    state, not RepoAtlas's --- is part of what points it: a repo-local
+    ``core.excludesFile`` naming an unreadable absolute path put that path,
+    verbatim, on a public sync response, host directories and all. Anyone who can
+    write to a tree could choose the contents of a RepoAtlas diagnostic.
+
+    Nothing useful is lost with the text. The count decides only whether the
+    repository has something to say; which directory could not be read is already
+    reported by :attr:`SyncResponse.unreadable_paths`, which comes from
+    RepoAtlas's own walk and is projected relative to the managed root.
     """
-    if not reasons:
+    if warning_count <= 0:
         return []
-    shown = reasons[:5]
-    listed = "; ".join(shown)
-    if len(reasons) > len(shown):
-        listed = f"{listed}; ..."
-    count = len(reasons)
-    return [
-        ParseDiagnostic(
-            severity=Severity.WARNING,
-            message=(
-                f"enumeration incomplete: git could not read {count} "
-                f"director{'y' if count == 1 else 'ies'} ({listed}); files "
-                f"beneath {'it' if count == 1 else 'them'} are not indexed"
-            ),
-        )
-    ]
+    return [ParseDiagnostic(severity=Severity.WARNING, message=ENUMERATION_INCOMPLETE)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,7 +257,7 @@ class SyncEngine:
         # Deletion first: a file's facts must never outlive the file.
         self._files.delete_many(plan.deleted_file_ids)
 
-        diagnostics: list[ParseDiagnostic] = _enumeration_diagnostics(incomplete)
+        diagnostics: list[ParseDiagnostic] = _enumeration_diagnostics(len(incomplete))
         symbols_total = 0
         edges_total = 0
         dependencies_total = 0
