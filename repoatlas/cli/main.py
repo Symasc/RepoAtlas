@@ -195,7 +195,7 @@ def locate(
     json_output: _JsonOption = False,
     verbose: _VerboseOption = False,
 ) -> None:
-    """Find where something is implemented or configured. Requires no LLM."""
+    """Find where something is implemented or configured."""
     workspace = _open()
     try:
         context = _resolve(workspace, repo, "locate", verbose)
