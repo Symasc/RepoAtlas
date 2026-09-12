@@ -138,9 +138,6 @@ def server_environment(state: Path, **overrides: str) -> dict[str, str]:
         "HOME": str(state / "home"),
         "REPOATLAS_CONFIG": str(state / "config.yaml"),
         "REPOATLAS_DB": str(state / "state" / "atlas.db"),
-        # No reasoning model and no embedding download: every assertion in these
-        # tests is about deterministic behaviour.
-        "REPOATLAS_LLM_BASE_URL": "http://127.0.0.1:1",
     }
     environment.update(overrides)
     (state / "home").mkdir(exist_ok=True)

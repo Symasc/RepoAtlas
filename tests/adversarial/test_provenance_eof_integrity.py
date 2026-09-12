@@ -24,8 +24,8 @@ from pathlib import Path
 
 import pytest
 from repoatlas.config.settings import Settings
+from repoatlas.grounding import ground_answer
 from repoatlas.indexing.chunking import chunk_content
-from repoatlas.llm.grounding import ground_answer
 from repoatlas.models.evidence import Evidence, Hypothesis, RepoAtlasAnswer
 from repoatlas.parsers.marks import line_count, whole_file_span
 from repoatlas.parsers.registry import ParserRegistry

@@ -1,4 +1,10 @@
-# RepoAtlas stack (V1_SPEC §18): the tool and a local reasoning model.
+# RepoAtlas deployment (V1_SPEC §18).
+#
+# One service. RepoAtlas is a deterministic index and an MCP server: it reads
+# repositories, writes an index and answers an agent. It runs no model of its
+# own, so there is no model container to depend on, no endpoint to configure and
+# nothing to pull before the stack works. An agent that reasons over this lives
+# outside the stack and connects over `repoatlas mcp`.
 #
 # Two invariants this file exists to enforce:
 #   1. Repositories are mounted **read-only**. V1 never writes to a repository,
@@ -15,19 +21,14 @@ services:
       context: .
       dockerfile: Dockerfile
     image: repoatlas:v1
-    depends_on:
-      - ollama
-    environment:
-      # Reach the sibling service by name rather than localhost.
-      REPOATLAS_LLM_BASE_URL: http://ollama:11434
     volumes:
       # The repositories under inspection. REPOS_DIR defaults to ./repos.
       - type: bind
         source: ${REPOS_DIR:-./repos}
         target: /repos
         read_only: true
-      # Index, config and model cache. Deliberately not a bind mount into the
-      # source tree.
+      # Index, config and embedding-model cache. Deliberately not a bind mount
+      # into the source tree.
       - repoatlas-state:/state
     working_dir: /repos
     # Untrusted input, static analysis only (V1_SPEC §17): nothing here needs to
@@ -47,15 +48,5 @@ services:
     stdin_open: true
     tty: true
 
-  ollama:
-    image: ollama/ollama:latest
-    volumes:
-      - ollama-models:/root/.ollama
-    ports:
-      # Loopback only. The model server is for this stack, not the network.
-      - "127.0.0.1:11434:11434"
-    restart: unless-stopped
-
 volumes:
   repoatlas-state:
-  ollama-models:

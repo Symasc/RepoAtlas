@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 from repoatlas.config.settings import Settings
 from repoatlas.errors import ContextResolutionError
-from repoatlas.llm.grounding import ground_answer
+from repoatlas.grounding import ground_answer
 from repoatlas.models.context import ContextScope
 from repoatlas.models.evidence import (
     Evidence,
@@ -458,24 +458,7 @@ def test_a_name_only_citation_still_works_when_the_display_name_is_unique() -> N
     assert len(report.answer.hypotheses) == 1
 
 
-# --- 6. serialization and rendering -------------------------------------------
-
-
-def test_evidence_serialization_distinguishes_two_sources() -> None:
-    from repoatlas.llm.reasoner import format_evidence
-
-    both = EvidenceSet(
-        question="q",
-        candidates=(
-            *supplied("teamA/common").candidates,
-            *supplied("teamB/common").candidates,
-        ),
-    )
-
-    serialized = format_evidence(both)
-
-    assert "teamA/common" in serialized
-    assert "teamB/common" in serialized
+# --- 6. rendering -------------------------------------------------------------
 
 
 def test_evidence_rendering_disambiguates_colliding_repositories() -> None:

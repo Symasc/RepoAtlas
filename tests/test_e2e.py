@@ -59,9 +59,6 @@ def repoatlas(tmp_path: Path) -> Iterator[object]:
         "HOME": str(state),
         "REPOATLAS_CONFIG": str(state / "config.yaml"),
         "REPOATLAS_DB": str(state / "atlas.db"),
-        # No reasoning model and no embedding download: every assertion below is
-        # about deterministic behavior (V1_SPEC §4).
-        "REPOATLAS_LLM_BASE_URL": "http://127.0.0.1:1",
     }
 
     def run(cwd: Path, *args: str) -> Result:
@@ -179,13 +176,18 @@ def test_every_deterministic_command_works_with_no_model_at_all(
         assert result.exit_code == ExitCode.OK, result
 
 
-def test_asking_without_a_model_exits_four_rather_than_guessing(
-    repoatlas, workspace_root: Path
-) -> None:
+def test_the_installed_command_offers_no_reasoning_command(repoatlas, workspace_root: Path) -> None:
+    """End to end, through the real console script: ``ask`` is not a command.
+
+    The environment this runs in sets no model variable and reaches no server,
+    which is the point --- every other assertion in this file passes in exactly
+    that environment, so the product has no model prerequisite left.
+    """
     run = repoatlas
     assert run(workspace_root, "init", str(workspace_root)).exit_code == ExitCode.OK
     result = run(workspace_root, "ask", "why does the service fail to start")
-    assert result.exit_code == ExitCode.LLM_UNAVAILABLE, result
+    assert result.exit_code != ExitCode.OK, result
+    assert result.exit_code != ExitCode.LLM_UNAVAILABLE, result
 
 
 def test_commands_before_init_exit_three(repoatlas, tmp_path: Path) -> None:
