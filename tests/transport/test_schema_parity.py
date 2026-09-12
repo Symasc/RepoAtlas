@@ -175,3 +175,48 @@ def test_the_exactly_one_target_rule_is_still_enforced_behind_the_schema(service
     assert error["code"] == "INVALID_REQUEST"
     assert error["category"] == "invalid_request"
     assert any("target" in item["field"] for item in error["context"]["fields"])
+
+
+# ---------------------------------------------------------------------------
+# RC audit, RCA-07: the tool list stays derived, and stays input-only
+# ---------------------------------------------------------------------------
+
+
+def test_no_tool_advertises_an_output_schema(service: Any) -> None:
+    """Recorded as a decision, and pinned so it stays one.
+
+    Output schemas are omitted deliberately: the eight response models come to
+    several times the size of the inputs, every byte of it lands in the tool list
+    an agent reads before asking anything, and the SDK skips output validation for
+    a handler that returns a result object directly --- which this one must, to
+    carry a structured error. So declaring them would spend a large part of a
+    caller's context advertising a contract nothing enforces.
+
+    Adding them later is a legitimate decision for somebody to take deliberately.
+    This exists so it cannot happen by accident, on the way to something else.
+    """
+
+    async def body(session: ClientSession) -> list[Any]:
+        listed = await session.list_tools()
+        return [tool.model_dump() for tool in listed.tools]
+
+    advertised_tools = over_protocol(service, body)
+
+    assert len(advertised_tools) == len(TOOLS)
+    for tool in advertised_tools:
+        assert tool.get("outputSchema") is None, tool["name"]
+
+
+def test_no_schema_is_written_by_hand_anywhere_in_the_transport() -> None:
+    """The size of the tool list is the price of a derived contract, not of prose.
+
+    Any future attempt to shrink it has one tempting shape --- a trimmed copy of a
+    schema, kept by hand --- and that is the one shape that reintroduces silent
+    drift between what is advertised and what is accepted.
+    """
+    from pathlib import Path
+
+    for module in (Path("repoatlas/mcp/server.py"), Path("repoatlas/mcp/tools.py")):
+        source = module.read_text(encoding="utf-8")
+        for forbidden in ('"properties"', "'properties'", "outputSchema=", '"$defs"'):
+            assert forbidden not in source, f"{module}: {forbidden}"

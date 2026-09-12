@@ -292,6 +292,16 @@ Scope is always explicit. RepoAtlas will not work out which repository you mean
 from a working directory, and there is no default: the server may have been
 started anywhere, and that directory says nothing about your question.
 
+Host paths are private by default. `repositories` returns `host_path: null`
+unless you pass `include_host_paths: true`, which is an explicit request for the
+absolute paths of the repositories on the machine running RepoAtlas. Those
+describe an operator's disk layout rather than the code, they are meaningless to
+anything running elsewhere, and they are the field most likely to end up in a
+shared transcript. Ask for them only when the task genuinely needs on-disk
+locations, such as configuring another tool or reporting an operator problem.
+They are not a way to read a repository: `inspect` and `search` are, and only
+their results are ledgered and citable.
+
 ## Errors
 
 Read the structured fields: `code`, `category`, `retryable`, `detail`. Branch on
@@ -347,6 +357,7 @@ citations, and the next check worth making.
 - Do not fabricate an evidence id, or cite one from another investigation.
 - Do not fabricate or reshape an entity key; use exactly what was returned.
 - Do not infer a repository from a working directory.
+- Do not request host paths for ordinary work, or use one to read a file.
 - Do not treat graph metadata as a textual citation.
 - Do not call a declared constraint or a lock entry an installed version.
 - Do not read `grounded` as true.
