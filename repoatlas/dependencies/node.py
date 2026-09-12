@@ -21,7 +21,12 @@ from repoatlas.models.dependencies import (
     ProvidedPackage,
     ResolvedDependency,
 )
-from repoatlas.models.parsing import ParseDiagnostic, Severity
+from repoatlas.models.parsing import (
+    INVALID_JSON,
+    INVALID_YAML,
+    ParseDiagnostic,
+    Severity,
+)
 from repoatlas.parsers.marks import line_at, split_lines
 
 _DEPENDENCY_GROUPS = {
@@ -79,7 +84,7 @@ class PackageJsonParser:
                 diagnostics=(
                     ParseDiagnostic(
                         severity=Severity.WARNING,
-                        message=f"invalid JSON: {exc.msg}",
+                        message=INVALID_JSON,
                         line=exc.lineno,
                     ),
                 ),
@@ -151,7 +156,7 @@ class PackageLockParser:
                 diagnostics=(
                     ParseDiagnostic(
                         severity=Severity.WARNING,
-                        message=f"invalid JSON: {exc.msg}",
+                        message=INVALID_JSON,
                         line=exc.lineno,
                     ),
                 ),
@@ -214,13 +219,13 @@ class PnpmLockParser:
     def parse(self, path: Path, content: str) -> DependencyReport:
         try:
             document = yaml.safe_load(content)
-        except yaml.YAMLError as exc:
+        except yaml.YAMLError:
+            # `str(exc)` on a marked PyYAML error renders a snippet of the source
+            # it failed on, so the exception is not bound at all.
             return DependencyReport(
                 ecosystem=self.ecosystem,
                 kind="lockfile",
-                diagnostics=(
-                    ParseDiagnostic(severity=Severity.WARNING, message=f"invalid YAML: {exc}"),
-                ),
+                diagnostics=(ParseDiagnostic(severity=Severity.WARNING, message=INVALID_YAML),),
             )
         if not isinstance(document, dict):
             return DependencyReport(ecosystem=self.ecosystem, kind="lockfile")
