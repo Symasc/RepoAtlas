@@ -807,4 +807,4 @@ def test_no_llm_never_constructs_or_contacts_a_backend(monkeypatch: pytest.Monke
     # The early return is structural, not incidental: `services.reason` — the
     # only caller that builds a backend — appears after it.
     assert body.index("if no_llm:") < body.index("services.reason")
-    assert "services.retrieve_for" in body
+    assert "services.locate" in body

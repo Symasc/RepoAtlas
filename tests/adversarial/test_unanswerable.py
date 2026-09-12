@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from repoatlas.models.evidence import EvidenceSet
-from repoatlas.services.query_service import QueryIntent, locate, retrieve_for
+from repoatlas.services.retrieval_service import locate, locate_diagnostic
 from repoatlas.services.workspace import Workspace
 
 pytestmark = pytest.mark.adversarial
@@ -30,7 +30,7 @@ def _locate(workspace: Workspace, root: Path, repo: str, question: str) -> Evide
 
 def _debug(workspace: Workspace, root: Path, repo: str, question: str) -> EvidenceSet:
     context = workspace.resolver().resolve(root / repo)
-    return retrieve_for(workspace, question, context, QueryIntent.DEBUG)
+    return locate_diagnostic(workspace, question, context)
 
 
 # -- literals that exist nowhere ---------------------------------------------

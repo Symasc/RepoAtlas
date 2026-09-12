@@ -41,7 +41,7 @@ from repoatlas.models.evidence import (
 )
 from repoatlas.retrieval.ranking import fuse
 from repoatlas.services.init_service import initialize
-from repoatlas.services.query_service import QueryIntent, locate, retrieve_for
+from repoatlas.services.retrieval_service import locate
 from repoatlas.services.workspace import Workspace, open_workspace
 from tests.conftest import init_git_repository
 
@@ -519,11 +519,8 @@ def test_a_path_inside_a_natural_language_question_still_anchors_it(
     workspace: Workspace, root: Path
 ) -> None:
     """The path anchors the evidence set; the rest of the question is still asked."""
-    evidence = retrieve_for(
-        workspace,
-        "why does src/config.py read DATABASE_URL?",
-        context_at(workspace, root, "svc"),
-        QueryIntent.ASK,
+    evidence = locate(
+        workspace, "why does src/config.py read DATABASE_URL?", context_at(workspace, root, "svc")
     )
     returned = ranked(evidence)
 
@@ -535,11 +532,10 @@ def test_a_path_inside_a_natural_language_question_still_anchors_it(
 
 def test_symbols_inside_the_named_file_stay_ranked(workspace: Workspace, root: Path) -> None:
     """The anchor is the file, so what is inside it is not demoted (brief §23)."""
-    evidence = retrieve_for(
+    evidence = locate(
         workspace,
         "what does build_config in src/config.py return?",
         context_at(workspace, root, "svc"),
-        QueryIntent.ASK,
     )
     returned = ranked(evidence)
 

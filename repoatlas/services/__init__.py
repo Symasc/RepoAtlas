@@ -33,13 +33,14 @@ whoever actually asked for a legacy name.
 What this is not
 ----------------
 Not a service locator, and not lazy loading as a strategy. It is nine fixed names
-bound to five fixed modules, spelled out in a dict, with no dynamic construction
+bound to six fixed modules, spelled out in a dict, with no dynamic construction
 and no registry to register with. Submodule imports do not go through it at all:
 ``from repoatlas.services import sync_service`` resolves as a submodule by the
 import machinery, so it never reaches this function.
 
-It is also transitional. The dedicated legacy-LLM removal deletes
-``query_service``'s reasoning half, and when it does, three of these entries go
+It is also transitional. Deterministic retrieval has since moved to
+``retrieval_service``, which is why two of these names resolve there; when the
+reasoning half of ``query_service`` goes, the last entry pointing at it goes
 with it.
 """
 
@@ -55,10 +56,10 @@ _EXPORTS: dict[str, str] = {
     "Workspace": "workspace",
     "initialize": "init_service",
     "list_repositories": "status_service",
-    "locate": "query_service",
+    "locate": "retrieval_service",
+    "locate_diagnostic": "retrieval_service",
     "open_workspace": "workspace",
     "reason": "query_service",
-    "retrieve_for": "query_service",
     "status": "status_service",
     "sync": "sync_service",
 }
@@ -68,9 +69,9 @@ __all__ = [
     "initialize",
     "list_repositories",
     "locate",
+    "locate_diagnostic",
     "open_workspace",
     "reason",
-    "retrieve_for",
     "status",
     "sync",
 ]
@@ -79,7 +80,8 @@ if TYPE_CHECKING:
     # For a reader and for a type checker only. At runtime these names arrive
     # through `__getattr__`, so nothing here is imported when the package is.
     from repoatlas.services.init_service import initialize
-    from repoatlas.services.query_service import locate, reason, retrieve_for
+    from repoatlas.services.query_service import reason
+    from repoatlas.services.retrieval_service import locate, locate_diagnostic
     from repoatlas.services.status_service import list_repositories, status
     from repoatlas.services.sync_service import sync
     from repoatlas.services.workspace import Workspace, open_workspace

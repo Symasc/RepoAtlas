@@ -282,7 +282,11 @@ def _reasoning_command(
         if no_llm:
             # Evidence-only mode: skip reasoning entirely rather than narrate
             # around a model that was not consulted (V1_SPEC §4).
-            evidence = services.retrieve_for(workspace, question, context, intent)
+            evidence = (
+                services.locate_diagnostic(workspace, question, context)
+                if intent is QueryIntent.DEBUG
+                else services.locate(workspace, question, context)
+            )
             _emit(evidence, render_evidence(evidence), json_output)
             workspace.close()
             return

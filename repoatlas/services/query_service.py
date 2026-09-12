@@ -1,7 +1,9 @@
-"""Query commands: ``locate``, ``ask`` and ``debug`` (V1_SPEC §16).
+"""V1's reasoning commands: ``ask`` and ``debug`` (V1_SPEC §16).
 
-``locate`` stops at the evidence set, which is why it needs no reasoning model.
-``ask`` and ``debug`` add exactly one step: reasoning over that same evidence.
+Both add exactly one step to deterministic retrieval: reasoning over the evidence
+set that :mod:`repoatlas.services.retrieval_service` produced. The retrieval half
+used to live here too, which is why a deterministic caller had to import a module
+that reaches an HTTP client; it now has its own home and this module calls it.
 """
 
 from __future__ import annotations
@@ -14,26 +16,8 @@ from repoatlas.llm.protocol import ModelError, ReasoningModel
 from repoatlas.llm.reasoner import QueryIntent, Reasoner, ReasoningResult
 from repoatlas.models.context import RepositoryContext
 from repoatlas.models.evidence import EvidenceSet
-from repoatlas.retrieval.retriever import DIAGNOSTIC_LIMITS
+from repoatlas.services.retrieval_service import locate, locate_diagnostic
 from repoatlas.services.workspace import Workspace
-
-
-def locate(workspace: Workspace, question: str, context: RepositoryContext) -> EvidenceSet:
-    """Retrieve file-backed evidence for a question. No LLM involved."""
-    return workspace.retriever().retrieve(question, context)
-
-
-def retrieve_for(
-    workspace: Workspace, question: str, context: RepositoryContext, intent: QueryIntent
-) -> EvidenceSet:
-    """Retrieve with the bias appropriate to the command (V1_SPEC §16)."""
-    if intent is QueryIntent.DEBUG:
-        # Bias toward exact error strings: the whole phrase is searched
-        # literally, which matches log and exception text embedded in source.
-        return workspace.retriever(limits=DIAGNOSTIC_LIMITS).retrieve(
-            question, context, literal_phrase=True
-        )
-    return workspace.retriever().retrieve(question, context)
 
 
 def reason(
@@ -58,7 +42,11 @@ def reason(
             'Evidence-only mode needs no model:\n\n  repoatlas locate "<question>"',
         )
 
-    evidence = retrieve_for(workspace, question, context, intent)
+    evidence = (
+        locate_diagnostic(workspace, question, context)
+        if intent is QueryIntent.DEBUG
+        else locate(workspace, question, context)
+    )
 
     try:
         result = asyncio.run(Reasoner(backend).reason(question, evidence, intent))

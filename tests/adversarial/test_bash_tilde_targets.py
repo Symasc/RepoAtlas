@@ -51,7 +51,7 @@ from repoatlas.config.settings import Settings
 from repoatlas.models.parsing import EdgeType, ParsedFile
 from repoatlas.parsers.bash import BashParser
 from repoatlas.services.init_service import initialize
-from repoatlas.services.query_service import locate
+from repoatlas.services.retrieval_service import locate
 from repoatlas.services.workspace import Workspace, open_workspace
 from tests.conftest import init_git_repository
 

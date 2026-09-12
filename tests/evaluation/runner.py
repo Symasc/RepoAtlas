@@ -25,7 +25,7 @@ from typing import Any
 
 import yaml
 from repoatlas.models.evidence import EvidenceSet, EvidenceTier, MatchClass
-from repoatlas.services.query_service import QueryIntent, locate, retrieve_for
+from repoatlas.services.retrieval_service import locate, locate_diagnostic
 from repoatlas.services.workspace import Workspace
 
 CASES_PATH = Path(__file__).parent / "retrieval_cases.yaml"
@@ -122,17 +122,21 @@ def load_cases(path: Path = CASES_PATH) -> list[Case]:
 
 
 def _retrieve(workspace: Workspace, case: Case, context) -> EvidenceSet:
-    """Retrieve exactly the way the named command would.
+    """Retrieve the way the case's ``command`` label says to.
 
-    ``locate`` has no intent of its own — it renders the evidence set directly —
-    while ``debug`` widens the funnel and searches the whole question literally so
-    an unquoted error string matches. Evaluating through the same entry points the
-    CLI uses keeps the metric about the product rather than about a helper.
+    The label names a *retrieval mode*, not a command: ``debug`` widens the funnel
+    and searches the whole question literally so an unquoted error string matches,
+    and everything else takes the configured bounds. Those are the two modes
+    :mod:`repoatlas.services.retrieval_service` exposes, and the two the capability
+    layer reaches through ``SearchMode``, so the metric stays about the product.
+
+    The labels outlived the V1 commands they were named after. They are left as
+    written because the corpus *is* the measurement: relabelling a column of it
+    would make every recorded baseline incomparable in order to prove nothing.
     """
-    if case.command == "locate":
-        return locate(workspace, case.query, context)
-    intent = QueryIntent.DEBUG if case.command == "debug" else QueryIntent.ASK
-    return retrieve_for(workspace, case.query, context, intent)
+    if case.command == "debug":
+        return locate_diagnostic(workspace, case.query, context)
+    return locate(workspace, case.query, context)
 
 
 def run_case(workspace: Workspace, root: Path, case: Case) -> Outcome:
