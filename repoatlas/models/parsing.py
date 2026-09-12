@@ -127,6 +127,32 @@ INVALID_YAML = "invalid YAML"
 INVALID_TOML = "invalid TOML"
 INVALID_CFG = "invalid cfg"
 
+#: Safe wording for an enumeration that git could not complete.
+#:
+#: The same rule as above, applied to the other source of arbitrary text on this
+#: model: a child process. ``git ls-files`` reports a directory it could not open
+#: as a *warning* on stderr and still exits 0, so those lines are the only
+#: evidence that a short listing is not a complete one --- and they are free-form
+#: prose, not a protocol. Git writes them about whatever it was pointed at, and
+#: part of what points it is ``.git/config``, which belongs to the repository
+#: rather than to RepoAtlas. A repository can therefore choose what git says: a
+#: repo-local ``core.excludesFile`` naming an unreadable absolute path was
+#: measured putting that path, verbatim, on a public sync response.
+#:
+#: Git's *stdout* here is the opposite case and is parsed as what it is --- a
+#: NUL-delimited list of repository-relative paths, a defined machine format that
+#: enumeration depends on. The distinction is contract, not origin: stdout has
+#: one, stderr does not.
+#:
+#: The fact worth reporting survives in full, because it was never the text: a
+#: successful sync must not be readable as a complete one. Which directory could
+#: not be read is reported separately, in ``SyncResponse.unreadable_paths``, from
+#: RepoAtlas's own walk rather than from anything git said.
+ENUMERATION_INCOMPLETE = (
+    "enumeration incomplete: git could not read part of this repository, "
+    "so files beneath it are not indexed"
+)
+
 
 class ParseDiagnostic(BaseModel):
     """A parse problem. Never aborts a sync (V1_SPEC §7).
