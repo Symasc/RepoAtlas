@@ -334,8 +334,9 @@ def test_case_6_a_v1_config_carrying_llm_keys_still_loads(tmp_path: Path) -> Non
     An existing user has a config file this build no longer understands every key
     of. Refusing to start over a setting that now controls nothing would cost
     them their workspace to protect them from nothing, so the obsolete keys are
-    ignored --- which is what Pydantic's default already does, asserted here
-    because it is a decision rather than an accident.
+    ignored. The model states that policy explicitly rather than inheriting it
+    from Pydantic's default; ``tests/test_config_compatibility.py`` holds the
+    declaration in place (FINAL audit, F-02).
 
     Newly written configuration does not contain them (CASE 5), so the tolerance
     is one-way and the keys disappear the first time anything saves.

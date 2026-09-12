@@ -37,19 +37,24 @@ Dependencies flow in one direction only:
 ```
                  cli/
                   │
-                  ▼
-             services/            (one module per command; orchestration only)
+                  ├──────────────► mcp/           (stdio transport adapter; cli/ is its only caller)
+                  │                 │
+                  │                 ▼
+                  │           capabilities/       (what an external agent talks to)
+                  │                 │
+                  ▼                 │
+             services/ ◄────────────┘             (one module per command; orchestration only)
                   │
-      ┌───────────┼────────────┬─────────────┬───────────┐
-      ▼           ▼            ▼             ▼           ▼
-  context/    discovery/    sync/       retrieval/     llm/
-      │           │            │             │           │
-      └───────────┴────┬───────┴─────────────┘           │
-                       ▼                                 │
-        parsers/  dependencies/  graph/  indexing/       │
-                       │                                 │
-                       ▼                                 │
-                   storage/  ◄─────────────(never)───────┘
+      ┌───────────┼────────────┬─────────────┐
+      ▼           ▼            ▼             ▼
+  context/    discovery/    sync/       retrieval/
+      │           │            │             │
+      └───────────┴────┬───────┴─────────────┘
+                       ▼
+        parsers/  dependencies/  graph/  indexing/
+                       │
+                       ▼
+                   storage/
                        │
                        ▼
                    models/            (Pydantic; depends on nothing internal)
@@ -57,9 +62,10 @@ Dependencies flow in one direction only:
 
 ### Hard rules (invariants, enforced by a layering test)
 
-1. **Parsers never touch storage and never touch the LLM.** A parser is a pure function of `(path, content)`.
-2. **The LLM layer never touches storage.** It receives an already-built, bounded `EvidenceSet` and returns a
-   validated answer object. It knows nothing about SQLite, FTS or embeddings.
+1. **Parsers never touch storage.** A parser is a pure function of `(path, content)`.
+2. **The capability layer returns models, never text, and reaches no terminal and no transport.** It sits above
+   `services/` and may use everything below it, but it imports neither `cli/` nor `rendering/` nor `mcp/`, and
+   `services/` never imports it back. It talks to protocols and services and never acquires a storage driver.
 3. **The CLI contains no indexing logic.** Each command: resolve context → call one service → render.
 4. **No god object.** There is no `RepoAtlasAgent`. Orchestration lives in small per-command services.
 5. **`models/` imports nothing from other RepoAtlas packages**, so it can be imported anywhere without cycles.
@@ -2290,9 +2296,9 @@ usually only needs a moment. Uncontended acquisition costs ~0.16 ms.
 
 #### Readers
 
-Read commands take **no** lock. WAL gives them a committed snapshot, so `locate`, `status`, `repos` and `ask` run
-unimpeded during a sync — measured at 0.2 ms median while swaps commit in a loop, and a reader sampling the graph
-throughout never observed a partial one.
+Read commands take **no** lock. WAL gives them a committed snapshot, so `locate`, `status`, `repos` and every read
+an agent makes over MCP run unimpeded during a sync — measured at 0.2 ms median while swaps commit in a loop, and a
+reader sampling the graph throughout never observed a partial one.
 
 Two things had to change for that to be true. Opening the database used to stamp `schema_version` unconditionally,
 which made *opening* a write: a reader could then fail with `database is locked` against a running sync. It is now
@@ -2677,11 +2683,11 @@ carries the strongest claim about the span regardless of which stage happened to
 
 #### Navigation and supporting context are different intents
 
-`locate src/config.py` is navigation, and the named file leads. `ask "why does src/config.py call X?"` is a
+`locate src/config.py` is navigation, and the named file leads. `"why does src/config.py call X?"` is a
 question that *contains* a path: the path anchors the evidence set — the named file and its spans come first — and
 the rest of the question is still asked, so the evidence about `X` is retrieved and returned alongside. Neither
-command hard-filters on the anchor, and `debug` widens the funnel exactly as it did before. A query is not turned
-into pure navigation by containing a path.
+kind of request hard-filters on the anchor, and `search` at `SearchMode.DIAGNOSTIC` widens the funnel exactly as it
+did before. A query is not turned into pure navigation by containing a path.
 
 #### What an exact path is not
 
@@ -3405,7 +3411,7 @@ Test layers:
 | Context resolver | Table-driven over the full case matrix in V1_SPEC §19, including ten-deep paths, spaces, symlinks, nested repos and the unmanaged repo |
 | Sync | Scenario-driven: mutate the temp fixture, sync, assert both §9 invariants |
 | Retrieval | Fixed questions with expected evidence paths; asserts primary-repo bias and cross-repo traversal |
-| LLM | `ScriptedBackend` only. Covers valid output, invalid output, repair, missing evidence, fabricated citations, unknown answers, citation rendering |
+| Grounding | `ground_answer` and `verify_grounding` directly — resolvable and fabricated citations, missing evidence, sub-range narrowing, unknown answers, and the drop-and-demote logic of §11. No model is involved, and `tests/test_no_embedded_reasoner.py` asserts none can be |
 | Layering | AST walk over the import graph asserting §1 |
 | E2E | The V1_SPEC §21 success scenario, driven through the **installed console script as a subprocess** — real `argv`, real working directory, real exit status. Exit codes and directory-derived context are what §21 promises, and in-process invocation simulates both |
 | Stale-index stress | Branch switches, deletions, renames, cross-repository moves, content swaps, dirty and staged trees, dependency edits. Each ends by comparing a fact snapshot against a from-scratch index of the same tree — invariant 2 of §9, asserted once per failure mode |
