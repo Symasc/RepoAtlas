@@ -8,6 +8,8 @@ citation verification will validate model output against ``EvidenceSet``.
 from __future__ import annotations
 
 import enum
+from collections.abc import Mapping
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -124,6 +126,108 @@ class MatchClass(enum.IntEnum):
     SIMILAR = 7
 
 
+#: What each tier means to a client reading the number.
+#:
+#: Both of these enums serialize as **bare integers** --- they are
+#: :class:`enum.IntEnum`, so ``tier`` is ``0`` on the wire and not
+#: ``"deterministic"`` --- and an integer with no published key is a value a
+#: caller can order but cannot interpret. The prose above says what the ordering
+#: is *for*; these say which number is which, which is the half a machine needs.
+#:
+#: Kept as a mapping keyed by the member rather than written into the docstring
+#: by hand, so the numbers a client reads are the numbers the enum actually has.
+#: :func:`value_legend` derives the published sentence from ``member.value``, and
+#: a test fails if a member is missing, extra, or renumbered.
+TIER_MEANINGS: dict[EvidenceTier, str] = {
+    EvidenceTier.DETERMINISTIC: (
+        "a fact about the code, established by exact lookup --- a path, a symbol "
+        "or entity name, literal content, or a parsed relationship"
+    ),
+    EvidenceTier.ASSOCIATIVE: (
+        "recall rather than an exact match --- an embedding neighbour, or "
+        "word-overlap from the full-text index --- which is a guess about what "
+        "the question meant and never outranks a deterministic result"
+    ),
+}
+
+#: What each match class means to a client reading the number.
+#:
+#: Read off the member documentation above, which is the contract the retrieval
+#: stages implement. A match class says *how the query named this candidate*; it
+#: is not a score, a confidence, or a claim that the statement is true of the
+#: lines. See :class:`MatchClass` for why it is separate from the tier.
+MATCH_MEANINGS: dict[MatchClass, str] = {
+    MatchClass.EXACT_PATH: "the query spelled this file's whole repository-relative path",
+    MatchClass.EXACT_SUBPATH: (
+        "a trailing sub-path matched on segment boundaries, which may name several files"
+    ),
+    MatchClass.EXACT_BASENAME: "the file's basename, which says what it is called and not where",
+    MatchClass.EXACT_NAME: "an entity whose name, qualified name or key the query spelled exactly",
+    MatchClass.EXACT_CONTENT: "the query's literal text occurs in this span, verified by substring",
+    MatchClass.RELATED: "reached by a graph edge from something the query named",
+    MatchClass.LEXICAL: (
+        "word-overlap recall, from the full-text index or from an entity name the "
+        "query did not spell exactly"
+    ),
+    MatchClass.SIMILAR: "an embedding neighbour",
+}
+
+
+def value_legend[Member: enum.IntEnum](meanings: Mapping[Member, str]) -> str:
+    """The published number-to-name key, built from the members themselves.
+
+    The point of generating it is that there is then no second place holding the
+    numbers. A renumbered member changes this sentence automatically; a member
+    added without a meaning raises here rather than shipping an integer with no
+    published interpretation.
+    """
+    return "; ".join(
+        f"{member.value} = {member.name.lower()} ({meanings[member]})"
+        for member in sorted(meanings)
+    )
+
+
+# Appended rather than written inline, for the reason above: Pydantic publishes a
+# model's enum docstring as the JSON Schema ``description`` for that ``$def``, so
+# this one generated sentence is what reaches every client that inspects the
+# contract, whichever way it came to be looking at it.
+EvidenceTier.__doc__ = (
+    f"{EvidenceTier.__doc__}\n\n"
+    f"Serialized as an integer. Values, strongest first: {value_legend(TIER_MEANINGS)}."
+)
+MatchClass.__doc__ = (
+    f"{MatchClass.__doc__}\n\n"
+    f"Serialized as an integer. Values, most specific first: {value_legend(MATCH_MEANINGS)}."
+)
+
+#: The two fields, annotated once so the description cannot drift between the four
+#: models that carry them. The numeric key deliberately lives in the enum
+#: description instead of being repeated here.
+TierField = Annotated[
+    EvidenceTier,
+    Field(
+        description=(
+            "Precedence class: whether this is a fact about the code or an "
+            "embedding neighbour. Lower wins unconditionally, and scores are only "
+            "compared within a tier. Distinct from `match`. See the EvidenceTier "
+            "definition for the meaning of each value."
+        )
+    ),
+]
+MatchField = Annotated[
+    MatchClass,
+    Field(
+        description=(
+            "How precisely the query named this candidate, from a whole path down "
+            "to an embedding neighbour. Lower is more specific. Distinct from "
+            "`tier`: two candidates can share a tier and still have been asked "
+            "for in different ways. See the MatchClass definition for the meaning "
+            "of each value."
+        )
+    ),
+]
+
+
 class EvidenceCandidate(BaseModel):
     """One retrieved piece of a real repository, with the provenance that proves it.
 
@@ -156,11 +260,11 @@ class EvidenceCandidate(BaseModel):
     text: str = ""
     score: float = 0.0
     source: EvidenceSource = EvidenceSource.EXACT
-    tier: EvidenceTier = EvidenceTier.DETERMINISTIC
+    tier: TierField = EvidenceTier.DETERMINISTIC
     #: How precisely the query identified this candidate. Retained through fusion
     #: and deduplication — a span merged from several stages keeps the strongest
     #: class any of them claimed, exactly as it keeps its strongest tier.
-    match: MatchClass = MatchClass.EXACT_CONTENT
+    match: MatchField = MatchClass.EXACT_CONTENT
     description: str = ""
     entity_id: int | None = None
     #: How many pieces the source span this text came from was cut into, or

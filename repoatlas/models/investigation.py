@@ -30,7 +30,13 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
-from repoatlas.models.evidence import EvidenceSource, EvidenceTier, MatchClass
+from repoatlas.models.evidence import (
+    EvidenceSource,
+    EvidenceTier,
+    MatchClass,
+    MatchField,
+    TierField,
+)
 
 #: An evidence identifier, valid **only** inside the investigation that issued it.
 #:
@@ -154,8 +160,8 @@ class ProposedEvidence(BaseModel):
     #: people. Recorded rather than looked up later, because a display name can be
     #: renamed and the record is of what the caller was actually shown.
     repository_name: str = ""
-    tier: EvidenceTier = EvidenceTier.DETERMINISTIC
-    match: MatchClass = MatchClass.EXACT_CONTENT
+    tier: TierField = EvidenceTier.DETERMINISTIC
+    match: MatchField = MatchClass.EXACT_CONTENT
     #: Which retrieval route found it. V1's vocabulary, reused rather than
     #: reinvented: two enums for "which stage produced this" would drift.
     origin: EvidenceSource = EvidenceSource.EXACT
@@ -185,8 +191,8 @@ class LedgerEntry(BaseModel):
     id: EvidenceId
     ref: EvidenceRef
     repository_name: str = ""
-    tier: EvidenceTier = EvidenceTier.DETERMINISTIC
-    match: MatchClass = MatchClass.EXACT_CONTENT
+    tier: TierField = EvidenceTier.DETERMINISTIC
+    match: MatchField = MatchClass.EXACT_CONTENT
     #: Every route that has found this evidence, sorted and unique. Accumulated
     #: rather than overwritten: a span reached both exactly and semantically was
     #: reached both ways, and first discovery is not more true than the second.

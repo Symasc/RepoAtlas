@@ -27,7 +27,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
-from repoatlas.models.evidence import EvidenceTier, MatchClass
+from repoatlas.models.evidence import EvidenceTier, MatchClass, MatchField, TierField
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness, RepositoryFreshness
 from repoatlas.models.investigation import EvidenceId, EvidenceRef, EvidenceStatus
 from repoatlas.models.parsing import EntityType
@@ -55,7 +55,28 @@ class RepositoriesRequest(BaseModel):
     #: machine layout rather than a fact about the code, it is useless to any
     #: process that is not on this host, and it is the field most likely to end up
     #: pasted into a shared transcript. Asked for, never volunteered.
-    include_host_paths: bool = False
+    #:
+    #: The description is published rather than left as a source comment because
+    #: this is the one field on the public surface whose *purpose* is disclosure,
+    #: and a caller deciding whether to set it is exactly who needs to know that
+    #: (RC audit, RCA-06). Everything RepoAtlas discloses by accident is a defect;
+    #: this is the one thing it discloses on request, and the two must not be
+    #: confused for each other.
+    include_host_paths: bool = Field(
+        default=False,
+        description=(
+            "Disclose each repository's absolute path on this machine. Host paths "
+            "are private by default: setting this to true is an explicit request "
+            "for local filesystem coordinates, which describe the operator's "
+            "machine rather than the code and are meaningless to any process "
+            "elsewhere. Use `repository_slug` for repository identity in normal "
+            "work, and every other capability accepts it. Ask for host paths only "
+            "when the task genuinely needs on-disk locations, such as operator, "
+            "debugging or integration work outside RepoAtlas. A host path is not a "
+            "way to read a repository: use inspect and search, whose results are "
+            "ledgered and citable."
+        ),
+    )
     #: ``STORED`` costs one indexed read per repository. ``LIVE`` adds a git
     #: invocation per repository, which is why listing does not do it by default:
     #: a caller that just wants to know what exists should not pay for a git
@@ -102,7 +123,14 @@ class RepositoryView(BaseModel):
     last_indexed_at: datetime | None = None
     freshness: RepositoryFreshness
     #: Present only when the request asked for it.
-    host_path: Path | None = None
+    host_path: Path | None = Field(
+        default=None,
+        description=(
+            "Absolute path on the machine running RepoAtlas. Populated only when "
+            "the request set `include_host_paths`; `null` otherwise. Identity for "
+            "every other capability is `repository_slug`, not this."
+        ),
+    )
 
 
 class RepositoriesResponse(BaseModel):
@@ -316,8 +344,8 @@ class EvidenceItem(BaseModel):
     why: str = ""
     #: Strength as established by **this run**. The ledger may hold something
     #: stronger from an earlier query; that is the ledger's view, not this one's.
-    tier: EvidenceTier = EvidenceTier.DETERMINISTIC
-    match: MatchClass = MatchClass.EXACT_CONTENT
+    tier: TierField = EvidenceTier.DETERMINISTIC
+    match: MatchField = MatchClass.EXACT_CONTENT
 
     #: The entity behind an entity-backed result, when one resolves exactly.
     #: ``None`` is a truthful answer and never a fabricated key.

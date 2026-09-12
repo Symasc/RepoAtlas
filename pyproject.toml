@@ -48,6 +48,38 @@ packages = ["repoatlas"]
 [tool.hatch.build.targets.wheel.force-include]
 "skills" = "repoatlas/skills"
 
+# The adversarial suite proves that a file named like a private key is never read,
+# and the only honest way to prove it is with files named like private keys. Those
+# fixtures are fake --- each carries a sentinel where a secret would be --- and
+# they belong in the checkout, where they do their job.
+#
+# They do not belong in a published artifact. A source distribution is scanned,
+# mirrored and unpacked by tooling that reads a filename before it reads a
+# sentinel, so shipping `id_rsa` and `secret.pem` means shipping a permanent false
+# positive to everyone downstream, plus the small chance that someone believes it.
+# The wheel never carried them; only the sdist did, because hatchling includes the
+# tree by default (RC audit, RCA-04).
+#
+# Excluded by shape rather than by listing today's files, so a new fixture of the
+# same kind is excluded when it is added rather than when someone remembers. The
+# checkout is untouched: this is artifact hygiene, and weakening the adversarial
+# coverage to quiet a scanner would trade a real guarantee for a cosmetic one.
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "tests/**/fixtures/**/.env",
+  "tests/**/fixtures/**/.env.*",
+  "tests/**/fixtures/**/id_rsa",
+  "tests/**/fixtures/**/id_dsa",
+  "tests/**/fixtures/**/id_ecdsa",
+  "tests/**/fixtures/**/id_ed25519",
+  "tests/**/fixtures/**/*.pem",
+  "tests/**/fixtures/**/*.key",
+  "tests/**/fixtures/**/*.p12",
+  "tests/**/fixtures/**/*.pfx",
+  "tests/**/fixtures/**/.netrc",
+  "tests/**/fixtures/**/.pgpass",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py313"
