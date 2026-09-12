@@ -40,6 +40,23 @@ MCP-specific configuration file, database or root setting.
 Nothing is inferred from the directory the client happens to launch the server in.
 Every tool call states its own repository scope.
 
+### What `tools/list` costs
+
+The eight tool input schemas are advertised in full and are derived directly from
+the V2 Pydantic request models, so the schema a client validates against is the
+one the capability actually accepts. That costs roughly 28 KB of context at
+handshake as currently measured, which is the price of a contract a client can
+check rather than one it has to guess.
+
+Output schemas are deliberately omitted. Under the current MCP SDK they would add
+roughly another 124 KB to the same handshake without buying SDK-side validation
+of the result path RepoAtlas uses, so the agent would pay for the whole response
+contract at startup and get no checking for it. Both figures are what this
+version measures, not a guarantee; the decision is the tradeoff, not the number.
+
+There is no hand-maintained copy of any schema to drift from the models, and a
+test asserts that what the transport advertises is exactly `model_json_schema()`.
+
 ## 3. Load the skill
 
 Give the agent the canonical skill. It is vendor-neutral and lives at the
