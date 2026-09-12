@@ -1,8 +1,8 @@
 """The retrieval funnel (ARCHITECTURE.md §10).
 
-Turns a question plus a ``RepositoryContext`` into a bounded ``EvidenceSet``. No
-LLM is involved at any stage — this is the layer that makes the trust rule
-affordable, and it is why ``locate`` works with no model installed.
+Turns a question plus a ``RepositoryContext`` into a bounded ``EvidenceSet``. Every
+stage is deterministic — this is the layer that makes the trust rule affordable,
+and it is the whole of what RepoAtlas contributes to an answer.
 
 The funnel's governing rule is V1_SPEC §14: **vector search must not replace exact
 search.** Semantic retrieval is one more source feeding fusion, and every

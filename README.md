@@ -6,10 +6,14 @@ evidence.
 
 **Trust model**
 
-> Repository evidence is authoritative. The LLM reasons over evidence but is never a source of repository facts.
+> Repository evidence is authoritative. An agent reasons over that evidence; it is never a source of repository
+> facts, and RepoAtlas checks every citation it makes against what was actually supplied.
 
 Facts come from deterministic parsing. Where evidence is insufficient, RepoAtlas says so rather than inventing an
-answer. See [docs/V1_SPEC.md](docs/V1_SPEC.md) for the specification and
+answer. RepoAtlas runs no reasoning model of its own: reasoning belongs to whichever agent is driving it, and what
+RepoAtlas guarantees is the evidence, the provenance and the verification.
+
+See [docs/V1_SPEC.md](docs/V1_SPEC.md) for the specification and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
 
 ## Status
@@ -19,7 +23,7 @@ validated; see the checklist in [docs/V1_SPEC.md §23](docs/V1_SPEC.md#23-implem
 
 | Working now | Not yet |
 |---|---|
-| `init`, `sync`, `status`, `repos`, `locate`, `ask`, `debug` | `watch` (optional) |
+| `init`, `sync`, `status`, `repos`, `locate`, `mcp` | `watch` (optional) |
 | Python, TypeScript/JavaScript, Bash, Ruby, Salt, Jinja, YAML/JSON, Dockerfile | — |
 | Dependency detection across pypi, npm and gem — declared *and* resolved versions | — |
 | Cross-file imports and cross-repository relationships | — |
@@ -44,9 +48,9 @@ repoatlas sync --embed
 Until then semantic retrieval is off and everything else is unaffected. Re-embedding is incremental at chunk
 granularity: text that survives a reparse byte-for-byte is never embedded twice.
 
-`init`, `sync`, `status`, `repos` and `locate` need no LLM at all. `ask` and `debug` need a local reasoning
-model; without one they exit 4 and name the command that works. `--no-llm` gives either of them evidence-only
-output.
+No command needs a reasoning model, because there is none to need. The embedding model above is a different
+thing: it turns text into vectors for semantic recall, it generates nothing, and semantic retrieval is optional
+anyway.
 
 ## Install
 
@@ -68,13 +72,11 @@ Then, from anywhere inside a managed repository, at any depth:
 repoatlas sync                  # sync this repository only
 repoatlas status                # this repository's index state
 repoatlas locate "Where is SERVICE_HOST configured?"
-repoatlas ask "How is the service configured?"
-repoatlas debug "SERVICE_HOST is empty at startup"
 ```
 
-`locate` returns evidence. `ask` answers a question from that evidence. `debug` separates what RepoAtlas found
-(`FACTS`, with file and line provenance) from what the model inferred (`HYPOTHESES`, with confidence), plus what
-remains unknown and the next check worth making.
+`locate` returns evidence: files, line ranges and the text at them, ranked with deterministic results ahead of
+associative ones. It answers *where*, and stops there. Answering *why* is an agent's job, over the same evidence
+— see [Agents](#agents).
 
 From the configured root, commands are global:
 
@@ -90,27 +92,24 @@ From anywhere else, RepoAtlas refuses to guess and asks for an explicit reposito
 repoatlas sync service-a        # works from any directory
 ```
 
-Options: `--json` on every command, `--verbose` to print the resolved context and grounding report, `--full` to
-force a rehash, `--no-llm` for evidence-only `ask`/`debug`.
+Options: `--json` on every command, `--verbose` to print the resolved context and per-stage retrieval
+instrumentation, `--full` to force a rehash.
 
-## Reasoning model
+## Reasoning
 
-Configured in `~/.config/repoatlas/config.yaml`, and replaceable:
+RepoAtlas does not reason. It has no model, no provider setting and no endpoint to configure, and there is
+nothing to install before it works. Earlier versions ran a local model behind `ask` and `debug`; those commands
+and their configuration are gone, and the capability they stood for now belongs to the agent on the other end of
+[`repoatlas mcp`](#agents).
 
-```yaml
-llm:
-  provider: ollama          # or "none" to disable reasoning entirely
-  model: gpt-oss:20b
-  base_url: http://localhost:11434
-```
+What did not move is the part that made them trustworthy. **An answer's citations are verified against the
+evidence that was actually supplied.** A citation naming a file, repository or line range that was never supplied
+is deleted, and a claim left without support is dropped — regardless of how confident the answer claimed to be.
+That check is deterministic, it is enforced in code rather than by prompt wording, and an agent reaches it through
+the `verify_grounding` tool.
 
-Set up Ollama with `ollama pull gpt-oss:20b`. RepoAtlas checks the server is reachable *and* the model is pulled
-before running a query.
-
-**The model reasons about evidence; it never supplies it.** Every citation in a model answer is verified against
-the evidence that was actually retrieved. A citation naming a file, repository, or line range that was never
-supplied is deleted, and a finding left without support is downgraded to an unknown — regardless of how confident
-the model claimed to be. This is enforced in code, not by prompt wording. `--verbose` reports what was dropped.
+It verifies **grounding**, not truth: it establishes that a claim points at evidence RepoAtlas really supplied,
+never that the claim is true of that evidence. Every verdict says so in a machine-readable `guarantee` field.
 
 ## Language support
 
@@ -159,22 +158,23 @@ REPOS_DIR=/path/to/your/repos docker compose run --rm \
 
 Repositories are mounted **read-only** and the index lives on a separate named volume, so RepoAtlas cannot write
 into the tree it is reading — enforced by the mount rather than promised by the code. The container runs as a
-non-root user with a read-only root filesystem and all capabilities dropped. `ollama` runs alongside on loopback;
-pull a model into it (`docker compose exec ollama ollama pull gpt-oss:20b`) before using `ask` or `debug`.
+non-root user with a read-only root filesystem and all capabilities dropped.
+
+One service, because RepoAtlas needs nothing beside it.
 
 ## Security
 
 Repositories are untrusted input and are **never executed**: no shell scripts, no Python imports, no Ruby, no
 Salt rendering, no npm lifecycle scripts, no Docker builds. Git is invoked only through a hardened read-only
 wrapper with hooks disabled. Secret files (`.env`, `*.pem`, `*.key`, `id_rsa`, `id_ed25519`) are excluded before
-any content is read — asserted separately at every stage that content could otherwise reach, including the model
-prompt and `--verbose` output.
+any content is read — asserted separately at every stage that content could otherwise reach: files, chunks, the
+text index, embeddings, retrieved evidence, the MCP responses built from it, and `--verbose` output.
 
 ## Development
 
 ```bash
-uv run pytest          # 635 tests
-uv run pytest -m slow  # 10 more; downloads the embedding model once
+uv run pytest          # the default suite
+uv run pytest -m slow  # more; downloads the embedding model once
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright

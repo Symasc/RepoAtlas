@@ -107,8 +107,15 @@ inside the investigation that issued them.
 
 ## 6. No model, no network
 
-The MCP server runs no model and makes no network request. Retrieval, traversal,
-dependency reads and grounding verification are all deterministic and local, and
-a full session including a sync completes with outbound networking unavailable.
-`repoatlas ask` and `repoatlas debug` do consult a model, but they are CLI
-commands and are not exposed as tools: over MCP the agent is the reasoner.
+RepoAtlas runs no model and makes no network request --- over MCP or anywhere
+else. Retrieval, traversal, dependency reads and grounding verification are all
+deterministic and local, and a full session including a sync completes with
+outbound networking unavailable.
+
+There is nothing to install first and nothing to configure. Earlier versions ran
+a local reasoning model behind the `ask` and `debug` CLI commands; those commands,
+that model and its configuration are gone. The agent is the reasoner, which was
+always true over MCP and is now true everywhere.
+
+An installed HTTP library is not network use: the MCP SDK brings one
+transitively, and on stdio nothing opens a connection.
