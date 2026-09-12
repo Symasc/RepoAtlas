@@ -10,15 +10,19 @@ dependencies = [
     "typer>=0.15",
     "pydantic>=2.10",
     "pyyaml>=6.0",
-    "httpx>=0.28",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.7",
     "numpy>=2.0",
     "fastembed>=0.5",
     # The official Model Context Protocol SDK, for the stdio transport adapter
-    # only. Pinned below 2.0: that line replaces `httpx` with a second HTTP
-    # client (`httpx2`) alongside the one RepoAtlas already uses, and adds an
-    # OpenTelemetry dependency, neither of which a local stdio adapter needs.
+    # only. Pinned below 2.0: that line swaps `httpx` for a second HTTP client
+    # (`httpx2`) and adds an OpenTelemetry dependency, neither of which a local
+    # stdio adapter needs.
+    #
+    # RepoAtlas itself declares no HTTP client. It had one --- `httpx`, for the
+    # embedded reasoner's model server --- and nothing first-party imports one
+    # now. The SDK still installs `httpx` transitively, and an installed HTTP
+    # library is not network use: on stdio nothing opens a connection.
     "mcp>=1.30,<2",
 ]
 

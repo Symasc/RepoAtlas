@@ -853,17 +853,11 @@ def test_no_oversized_text_is_ever_offered_to_the_embedding_backend(
         space.close()
 
 
-def test_no_oversized_content_reaches_the_model_prompt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_no_oversized_content_reaches_retrieved_evidence(tmp_path: Path) -> None:
     """§23. The question names the marker directly, which is as hard as a user can
     push retrieval at it. Knowing the *path* exists is permitted by the current
-    model; carrying the file's bytes into the evidence block is not."""
-    import json
-
-    from repoatlas.llm.reasoner import QueryIntent
-    from repoatlas.llm.scripted import ScriptedBackend
-    from repoatlas.services.query_service import reason
+    model; carrying the file's bytes into the evidence is not."""
+    from repoatlas.services.retrieval_service import locate
 
     root = tmp_path / "repos"
     repo = _repo(root)
@@ -871,25 +865,12 @@ def test_no_oversized_content_reaches_the_model_prompt(
     (repo / "big.py").write_bytes(f"HUGE = '{MARKER}_PROMPT'\n".encode() + b"#" * (CAP * 2))
     _commit(repo)
 
-    backend = ScriptedBackend(
-        [json.dumps({"summary": "Not indexed.", "hypotheses": [], "unknowns": ["value"]})] * 4
-    )
-    del monkeypatch
-
     space = _indexed(tmp_path, root)
     try:
         context = space.resolver().resolve(root / "svc")
-        reason(
-            space,
-            f"What is {MARKER}_PROMPT in big.py?",
-            context,
-            QueryIntent.ASK,
-            model=backend,
-        )
-        prompt = "\n".join(m.content for call in backend.calls for m in call)
-        assert backend.calls, "the model must actually have been called"
-        # Once, as the user's own question. Never as retrieved evidence.
-        assert prompt.count(f"{MARKER}_PROMPT") == 1
+        evidence = locate(space, f"What is {MARKER}_PROMPT in big.py?", context)
+        supplied = "\n".join(candidate.text for candidate in evidence.candidates)
+        assert f"{MARKER}_PROMPT" not in supplied
     finally:
         space.close()
 

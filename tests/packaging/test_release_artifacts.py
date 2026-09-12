@@ -266,3 +266,98 @@ def test_a_wheel_can_still_be_built_from_the_source_distribution(
     assert INSTALLED_SKILL in rebuilt
     assert "repoatlas/__init__.py" in rebuilt
     assert credential_shaped(rebuilt) == []
+
+
+# ---------------------------------------------------------------------------
+# The embedded reasoner is not in either artifact (legacy local-LLM removal)
+# ---------------------------------------------------------------------------
+
+#: Paths and names the deleted subsystem would occupy if any of it shipped.
+REASONER_ARTIFACTS = (
+    "repoatlas/llm/",
+    "repoatlas/services/query_service.py",
+    "llm/prompts/",
+    "/ask.md",
+    "/debug.md",
+    "/repair.md",
+    "/system.md",
+)
+
+
+@requires_uv
+@pytest.mark.parametrize("fragment", REASONER_ARTIFACTS)
+def test_no_reasoning_module_or_prompt_ships_in_either_artifact(built: Path, fragment: str) -> None:
+    """CASE 14's static half. A deleted package can still ship.
+
+    Removal is a source change; packaging is a separate one, and a
+    ``force-include`` or a stale build directory is exactly how a module nobody
+    can import goes on being published.
+    """
+    for name in wheel_names(built) + sdist_names(built):
+        assert fragment not in name, f"{fragment} in {name}"
+
+
+@requires_uv
+def test_the_installed_product_runs_with_no_model_server_or_variable(
+    built: Path, tmp_path: Path
+) -> None:
+    """CASE 14. Install the wheel into a clean environment and use it.
+
+    The environment is built rather than inherited, so nothing from the developer
+    machine reaches the subprocess: no ``REPOATLAS_LLM_BASE_URL``, no model
+    server, no config file, no index. That is the state a new user is in, and the
+    thing being asserted is that it is now a *working* state --- the product no
+    longer has a prerequisite to install.
+
+    ``REPOATLAS_LLM_BASE_URL`` is set anyway, to a URL that would be obvious if
+    anything read it. It must change nothing.
+    """
+    venv = tmp_path / "venv"
+    subprocess.run(["uv", "venv", str(venv)], check=True, capture_output=True, text=True)
+    wheel = next(built.glob("*.whl"))
+    subprocess.run(
+        ["uv", "pip", "install", "--python", str(venv / "bin" / "python"), str(wheel)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    environment = {
+        "PATH": f"{venv / 'bin'}:/usr/bin:/bin",
+        "HOME": str(tmp_path / "home"),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "REPOATLAS_LLM_BASE_URL": "http://sentinel.invalid:99999",
+    }
+    (tmp_path / "home").mkdir()
+
+    help_text = subprocess.run(
+        [str(venv / "bin" / "repoatlas"), "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    ).stdout
+    for gone in (" ask ", " debug ", "--no-llm"):
+        assert gone not in help_text, gone
+    for kept in ("init", "sync", "status", "repos", "locate", "mcp"):
+        assert kept in help_text, kept
+
+    # The package is importable and carries no reasoner, from site-packages
+    # rather than from the checkout.
+    probe = subprocess.run(
+        [
+            str(venv / "bin" / "python"),
+            "-c",
+            "import importlib, repoatlas.capabilities.service, repoatlas.grounding;"
+            "\nimport repoatlas.mcp.tools as t;"
+            "\nprint(len(t.TOOLS));"
+            "\ntry:\n importlib.import_module('repoatlas.llm')\n print('LEAKED')"
+            "\nexcept ModuleNotFoundError:\n print('absent')",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    ).stdout.split()
+    assert probe == ["8", "absent"], probe

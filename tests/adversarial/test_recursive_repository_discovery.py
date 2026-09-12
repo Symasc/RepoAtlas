@@ -541,7 +541,6 @@ class Workspace:
             "HOME": str(self.base),
             "REPOATLAS_CONFIG": str(self.base / "config.yaml"),
             "REPOATLAS_DB": str(self.base / "atlas.db"),
-            "REPOATLAS_LLM_BASE_URL": "http://127.0.0.1:1",
         }
 
     def run(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:

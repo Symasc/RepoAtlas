@@ -31,6 +31,7 @@ So RepoAtlas fails closed. The properties asserted here are:
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -396,29 +397,24 @@ def test_the_canary_reaches_no_representation_at_all(f2_root: Path, tmp_path: Pa
         workspace.close()
 
 
-def test_the_canary_never_reaches_a_model_prompt(f2_root: Path, tmp_path: Path) -> None:
-    """The end of the path: filesystem → DB → retrieval → model context (§35)."""
-    from repoatlas.llm.reasoner import QueryIntent
-    from repoatlas.llm.scripted import ScriptedBackend
-    from repoatlas.services.query_service import reason
+def test_the_canary_never_reaches_retrieved_evidence(f2_root: Path, tmp_path: Path) -> None:
+    """The end of the path: filesystem → DB → retrieval → what a caller gets (§35)."""
+    from repoatlas.services.retrieval_service import locate
 
     settings = _settings(tmp_path)
     workspace = _open(settings, f2_root, enumerable=False)
     try:
         initialize(workspace, f2_root, config_path=tmp_path / "c.yaml")
-        backend = ScriptedBackend(
-            [
-                '{"summary": "INSUFFICIENT EVIDENCE", "hypotheses": [], '
-                '"unknowns": [], "next_check": null}'
-            ]
-        )
         question = f"where is {CANARY} configured?"
-        context = workspace.resolver().resolve(f2_root, command="ask")
-        reason(workspace, question, context, QueryIntent.ASK, model=backend)
-        serialized = "\n".join(message.content for call in backend.calls for message in call)
-        # The user typed the sentinel, so a prompt legitimately repeats it as the
-        # question. What must never appear is the ignored *file* it came from.
-        assert serialized.count(CANARY) == serialized.count(question)
+        context = workspace.resolver().resolve(f2_root, command="locate")
+        evidence = locate(workspace, question, context)
+        # The user typed the sentinel, so the payload legitimately echoes it back
+        # --- in the question and in the retrieval trace, which records what was
+        # searched for. What must never appear is the ignored *file* it came from,
+        # so the candidates are what is checked rather than the whole payload.
+        assert CANARY in evidence.question
+        serialized = json.dumps([c.model_dump(mode="json") for c in evidence.candidates])
+        assert CANARY not in serialized
         assert NOTE not in serialized
         assert "deploy.conf" not in serialized
         assert "notes.md" not in serialized

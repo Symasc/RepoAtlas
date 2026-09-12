@@ -305,7 +305,7 @@ def test_the_command_takes_no_json_flag_and_needs_no_arguments() -> None:
     assert not inspect.signature(mcp).parameters
 
 
-@pytest.mark.parametrize("flag", ["--json", "--repo", "--verbose", "--no-llm"])
+@pytest.mark.parametrize("flag", ["--json", "--repo", "--verbose"])
 def test_the_command_borrows_no_v1_option(flag: str) -> None:
     """The output is already JSON-RPC, and the scope is already in every call."""
     from repoatlas.cli.main import mcp
@@ -332,5 +332,4 @@ def test_the_server_environment_carries_no_host_configuration(tmp_path: Path) ->
         "HOME",
         "REPOATLAS_CONFIG",
         "REPOATLAS_DB",
-        "REPOATLAS_LLM_BASE_URL",
     }

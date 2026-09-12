@@ -143,8 +143,9 @@ class EmbeddingSettings(BaseModel):
     enabled: bool = True
     #: Whether a sync may fetch a missing model. Off by default: an index run must
     #: not silently stall on a download, so fetching is an explicit act
-    #: (``repoatlas sync --embed``), mirroring how a missing Ollama model is
-    #: reported rather than pulled (V1_SPEC §3).
+    #: (``repoatlas sync --embed``). A missing model is reported rather than
+    #: pulled, and semantic retrieval is off until somebody asks for it
+    #: (V1_SPEC §3).
     allow_download: bool = False
 
 
@@ -171,17 +172,6 @@ class RetrievalSettings(BaseModel):
     semantic_floor: float = 0.25
 
 
-class LLMSettings(BaseModel):
-    """Backend selection is configuration-driven; nothing is hardcoded to Ollama."""
-
-    model_config = ConfigDict(frozen=True)
-
-    provider: str = "ollama"
-    model: str = "gpt-oss:20b"
-    base_url: str = "http://localhost:11434"
-    timeout_seconds: float = 120.0
-
-
 class OutputSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -204,7 +194,6 @@ class Settings(BaseModel):
     embeddings: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
-    llm: LLMSettings = Field(default_factory=LLMSettings)
     output: OutputSettings = Field(default_factory=OutputSettings)
     grounding: GroundingSettings = Field(default_factory=GroundingSettings)
 
@@ -216,17 +205,18 @@ class Settings(BaseModel):
 def _env_overrides(settings: Settings) -> Settings:
     """Apply the few settings a container must be able to set without a file.
 
-    Deliberately narrow. Configuration lives in YAML; these exist because the
-    values differ between running on a workstation and running as a compose
-    service (V1_SPEC §18), where the reasoning model is a sibling container
-    rather than ``localhost``. ``REPOATLAS_CONFIG`` and ``REPOATLAS_DB`` are
-    handled at path resolution for the same reason.
+    Deliberately narrow. Configuration lives in YAML; this exists because the
+    value differs between running on a workstation and running as a compose
+    service (V1_SPEC §18). ``REPOATLAS_CONFIG`` and ``REPOATLAS_DB`` are handled
+    at path resolution for the same reason.
+
+    There used to be a second one. ``REPOATLAS_LLM_BASE_URL`` pointed the
+    embedded reasoner at a sibling model container instead of ``localhost``;
+    there is no embedded reasoner and no variable. Deleted rather than left
+    reading into nothing, so that setting it is visibly a no-op rather than
+    quietly one.
     """
     updates: dict[str, Any] = {}
-
-    base_url = os.environ.get("REPOATLAS_LLM_BASE_URL")
-    if base_url:
-        updates["llm"] = settings.llm.model_copy(update={"base_url": base_url})
 
     # A container orchestrator decides how long an overlapping sync may wait, and
     # it has no config file to edit. Ignored if unparseable rather than fatal: a

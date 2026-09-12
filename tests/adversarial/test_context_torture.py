@@ -315,7 +315,7 @@ def cli(tmp_path: Path, adversarial_root: Path, monkeypatch: pytest.MonkeyPatch)
 
 @pytest.mark.parametrize(
     "command",
-    [("sync",), ("status",), ("locate", "SERVICE_HOST"), ("ask", "x"), ("debug", "x")],
+    [("sync",), ("status",), ("locate", "SERVICE_HOST")],
 )
 def test_no_command_broadens_scope_from_an_unresolvable_directory(
     cli, tmp_path: Path, command: tuple[str, ...]
