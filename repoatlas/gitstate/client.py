@@ -87,11 +87,22 @@ _READ_CHUNK_BYTES = 1 << 20
 @dataclass(frozen=True, slots=True)
 class GitResult:
     ok: bool
+    #: Git's stdout. A **defined machine format** for every subcommand called
+    #: here --- NUL-delimited paths, index records, a SHA --- and it is parsed as
+    #: such. That it came from a subprocess is not what would make it unsafe;
+    #: having no contract is, and this half has one.
     stdout: str
     #: Git's own stderr on a successful command. Almost always empty; it is kept
     #: because `ls-files` reports a directory it could not open as a *warning* and
     #: still exits 0, so the only evidence that enumeration was incomplete is
     #: here (ARCHITECTURE.md §6).
+    #:
+    #: **Untrusted, and internal.** This half has no contract: it is free-form
+    #: prose whose subject is whatever git was pointed at, and a repository helps
+    #: decide what that is --- `.git/config` is repository state. A repo-local
+    #: `core.excludesFile` naming an unreadable absolute path makes git write that
+    #: path here. Useful for debugging and for tests; never for a public
+    #: diagnostic. See :data:`~repoatlas.models.parsing.ENUMERATION_INCOMPLETE`.
     stderr: str = ""
 
 
@@ -99,7 +110,12 @@ class GitResult:
 class FileListing:
     """What git enumerated, and what it admits it could not look at."""
 
+    #: Repository-relative, from git's NUL-delimited stdout.
     paths: list[str]
+    #: Git's stderr lines, verbatim and untrusted. Their *existence* is the fact
+    #: that matters --- enumeration was incomplete --- and that is all a public
+    #: diagnostic is allowed to take from them. Kept whole for debugging and for
+    #: the tests that assert which directory git refused.
     warnings: tuple[str, ...] = ()
 
 

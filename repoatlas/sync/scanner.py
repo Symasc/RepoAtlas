@@ -188,9 +188,13 @@ def scan_repository(
         # Git reports a directory it could not open as a warning and still exits
         # 0, so a short listing looks like a complete one. Passing the warnings up
         # keeps "a successful sync is not necessarily a complete one" true on the
-        # path that now always runs (ARCHITECTURE.md §6). Git's own wording is
-        # kept: it names the directory relative to the repository and says why,
-        # which is exactly what the diagnostic needs and nothing more.
+        # path that now always runs (ARCHITECTURE.md §6).
+        #
+        # Git's own wording is kept *here*, and goes no further. It once reached
+        # the public diagnostic on the reasoning that git names a refused
+        # directory relative to the repository; it also names an absolute
+        # `core.excludesFile` the repository itself configured. The sync layer
+        # takes the count and writes its own sentence.
         incomplete.extend(listing.warnings)
 
     results: list[ScannedFile] = []
