@@ -101,14 +101,56 @@ class Severity(enum.StrEnum):
     ERROR = "error"
 
 
+#: Safe wording for the failures a third-party exception used to describe.
+#:
+#: A parse problem is reported to whoever asked for the sync, and a sync response
+#: is a public machine surface. What produced the failure is a parser, a grammar
+#: loader or a configuration library, and the text those raise is theirs: PyYAML
+#: renders the offending source line into its message, ``configparser`` quotes the
+#: line verbatim, ``SyntaxError.msg`` quotes the token it tripped on, and a
+#: grammar loader names the shared object it could not open. None of that is a
+#: contract, all of it is attacker- or host-influenced, and repeating it turns a
+#: diagnostic into a second way to read the repository and the machine under it.
+#:
+#: So RepoAtlas writes the message and takes nothing from the exception but a line
+#: number. The categories below are the distinctions RepoAtlas already drew, kept
+#: because "the grammar is missing" and "this file is not valid TOML" call for
+#: different actions; what is gone is the library's commentary underneath them.
+#: They are constants rather than literals at each site because the same failure
+#: is reported from several parsers, and wording that drifts between them is
+#: wording a caller cannot match on.
+GRAMMAR_UNAVAILABLE = "parser grammar unavailable"
+SYNTAX_ERROR = "syntax error"
+PARSE_FAILED = "parse failed"
+INVALID_JSON = "invalid JSON"
+INVALID_YAML = "invalid YAML"
+INVALID_TOML = "invalid TOML"
+INVALID_CFG = "invalid cfg"
+
+
 class ParseDiagnostic(BaseModel):
-    """A parse problem. Never aborts a sync (V1_SPEC §7)."""
+    """A parse problem. Never aborts a sync (V1_SPEC §7).
+
+    ``message`` is always written by RepoAtlas. It may describe *what* could not
+    be understood and, through ``line`` and ``path``, *where* --- and it never
+    repeats text a parser, grammar loader or configuration library produced. See
+    the constants above for why that is a rule rather than a habit.
+
+    ``path`` is the repository-relative path the sync **admitted**, stamped on by
+    the engine that already knows it. It is deliberately not taken from an
+    exception: a library that happens to mention a filename is naming whatever it
+    was handed, which on some paths is an absolute host path, and a coordinate is
+    only trustworthy when it comes from the identity RepoAtlas itself resolved.
+    ``None`` means the diagnostic is about the repository rather than about one
+    file --- enumeration being incomplete, say.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     severity: Severity
     message: str
     line: int | None = None
+    path: str | None = None
 
 
 class ParsedSymbol(BaseModel):

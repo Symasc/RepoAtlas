@@ -26,7 +26,13 @@ from repoatlas.models.dependencies import (
     ProvidedPackage,
     ResolvedDependency,
 )
-from repoatlas.models.parsing import ParseDiagnostic, Severity
+from repoatlas.models.parsing import (
+    INVALID_CFG,
+    INVALID_TOML,
+    PARSE_FAILED,
+    ParseDiagnostic,
+    Severity,
+)
 from repoatlas.parsers.marks import line_at, split_lines
 
 _REQUIREMENTS = re.compile(r"^requirements.*\.txt$")
@@ -66,13 +72,11 @@ class PyProjectParser:
     def parse(self, path: Path, content: str) -> DependencyReport:
         try:
             document = tomllib.loads(content)
-        except tomllib.TOMLDecodeError as exc:
+        except tomllib.TOMLDecodeError:
             return DependencyReport(
                 ecosystem=self.ecosystem,
                 kind="manifest",
-                diagnostics=(
-                    ParseDiagnostic(severity=Severity.WARNING, message=f"invalid TOML: {exc}"),
-                ),
+                diagnostics=(ParseDiagnostic(severity=Severity.WARNING, message=INVALID_TOML),),
             )
 
         declared: list[DeclaredDependency] = []
@@ -241,13 +245,11 @@ class SetupPyParser:
     def parse(self, path: Path, content: str) -> DependencyReport:
         try:
             tree = ast.parse(content, filename=path.name)
-        except (SyntaxError, ValueError) as exc:
+        except (SyntaxError, ValueError):
             return DependencyReport(
                 ecosystem=self.ecosystem,
                 kind="manifest",
-                diagnostics=(
-                    ParseDiagnostic(severity=Severity.WARNING, message=f"parse failed: {exc}"),
-                ),
+                diagnostics=(ParseDiagnostic(severity=Severity.WARNING, message=PARSE_FAILED),),
             )
 
         declared: list[DeclaredDependency] = []
@@ -362,13 +364,11 @@ class SetupCfgParser:
         config = configparser.ConfigParser()
         try:
             config.read_string(content)
-        except configparser.Error as exc:
+        except configparser.Error:
             return DependencyReport(
                 ecosystem=self.ecosystem,
                 kind="manifest",
-                diagnostics=(
-                    ParseDiagnostic(severity=Severity.WARNING, message=f"invalid cfg: {exc}"),
-                ),
+                diagnostics=(ParseDiagnostic(severity=Severity.WARNING, message=INVALID_CFG),),
             )
 
         declared: list[DeclaredDependency] = []
@@ -426,13 +426,11 @@ class UvLockParser:
     def parse(self, path: Path, content: str) -> DependencyReport:
         try:
             document = tomllib.loads(content)
-        except tomllib.TOMLDecodeError as exc:
+        except tomllib.TOMLDecodeError:
             return DependencyReport(
                 ecosystem=self.ecosystem,
                 kind="lockfile",
-                diagnostics=(
-                    ParseDiagnostic(severity=Severity.WARNING, message=f"invalid TOML: {exc}"),
-                ),
+                diagnostics=(ParseDiagnostic(severity=Severity.WARNING, message=INVALID_TOML),),
             )
 
         resolved: list[ResolvedDependency] = []

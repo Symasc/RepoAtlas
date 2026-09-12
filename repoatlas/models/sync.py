@@ -88,7 +88,20 @@ class SyncStatus(enum.StrEnum):
 class SyncDiagnostic(BaseModel):
     """One diagnostic V1 recorded while syncing a repository.
 
-    V1's messages are repository-relative by construction and carry no host path.
+    ``message`` is written by RepoAtlas and never repeats what a parser, grammar
+    loader or configuration library said. That is a property of where the text
+    comes from rather than of what it happens to look like, and it has to be:
+    ``configparser`` quotes the offending source line, PyYAML renders a snippet of
+    it, ``SyntaxError.msg`` quotes the token it tripped on, and a grammar loader
+    names the shared object it could not open. A sync response is a public machine
+    surface, so a diagnostic that repeated any of those would be a second way to
+    read the repository and the host underneath it.
+
+    What remains is what a caller can act on: the category of failure, the line
+    when one is deterministically known, and ``path`` --- the repository-relative
+    path *this sync admitted*, never a filename recovered from an exception.
+    ``path`` is ``None`` for a diagnostic about the repository rather than one of
+    its files.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -96,6 +109,9 @@ class SyncDiagnostic(BaseModel):
     severity: Severity
     message: str
     line: int | None = None
+    #: Repository-relative, and resolved by RepoAtlas rather than quoted from a
+    #: library. ``None`` when the diagnostic is about the repository itself.
+    path: str | None = None
 
 
 class RepositorySyncView(BaseModel):
