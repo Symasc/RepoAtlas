@@ -593,7 +593,7 @@ def test_retrieval_after_a_move_cites_the_new_location(relocation) -> None:
 
     workspace = open_at(settings, new)
     try:
-        from repoatlas.services.query_service import locate
+        from repoatlas.services.retrieval_service import locate
 
         context = workspace.resolver().resolve(new, command="locate")
         evidence = locate(workspace, "SERVICE_HOST", context)

@@ -51,7 +51,7 @@ from repoatlas.models.parsing import EdgeType, EntityType, ParsedFile
 from repoatlas.parsers.dockerfile import DockerfileParser
 from repoatlas.parsers.dockerwords import Proof, split_words
 from repoatlas.services.init_service import initialize
-from repoatlas.services.query_service import locate
+from repoatlas.services.retrieval_service import locate
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace
 from tests.conftest import fact_snapshot, git, init_git_repository, reindex_from_scratch

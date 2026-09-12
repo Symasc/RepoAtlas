@@ -112,6 +112,7 @@ DETERMINISTIC_IMPORTS = [
     pytest.param("import repoatlas.services", id="services-package"),
     pytest.param("import repoatlas.services.sync_service", id="sync-service"),
     pytest.param("from repoatlas.services import sync_service", id="sync-service-from-package"),
+    pytest.param("import repoatlas.services.retrieval_service", id="retrieval-service"),
     pytest.param("import repoatlas.services.status_service", id="status-service"),
     pytest.param("import repoatlas.services.freshness_service", id="freshness-service"),
     pytest.param("import repoatlas.services.init_service", id="init-service"),
@@ -223,6 +224,7 @@ def test_every_re_exported_name_is_the_real_object() -> None:
     from repoatlas.services import (
         init_service,
         query_service,
+        retrieval_service,
         status_service,
         sync_service,
         workspace,
@@ -234,9 +236,9 @@ def test_every_re_exported_name_is_the_real_object() -> None:
     assert services.list_repositories is status_service.list_repositories
     assert services.status is status_service.status
     assert services.sync is sync_service.sync
-    assert services.locate is query_service.locate
+    assert services.locate is retrieval_service.locate
+    assert services.locate_diagnostic is retrieval_service.locate_diagnostic
     assert services.reason is query_service.reason
-    assert services.retrieve_for is query_service.retrieve_for
 
 
 def test_the_exported_names_are_exactly_what_v1_exported() -> None:
@@ -247,9 +249,9 @@ def test_the_exported_names_are_exactly_what_v1_exported() -> None:
         "initialize",
         "list_repositories",
         "locate",
+        "locate_diagnostic",
         "open_workspace",
         "reason",
-        "retrieve_for",
         "status",
         "sync",
     ]
@@ -292,6 +294,7 @@ def test_resolving_a_name_twice_returns_one_object() -> None:
         "repoatlas.services.init_service",
         "repoatlas.services.freshness_service",
         "repoatlas.services.query_service",
+        "repoatlas.services.retrieval_service",
         "repoatlas.capabilities.service",
         "repoatlas.mcp.server",
         "repoatlas.cli.main",
