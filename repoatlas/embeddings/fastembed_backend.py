@@ -11,8 +11,7 @@ Embedding both sides identically measurably degrades recall, so :meth:`embed` an
 :meth:`embed_query` differ deliberately.
 
 **Availability never downloads.** ``available()`` probes the local cache and
-returns False if the model is absent, exactly as ``OllamaBackend.available()``
-reports a model that has not been pulled. A ``sync`` must not silently stall for
+returns False if the model is absent. A ``sync`` must not silently stall for
 minutes fetching 67 MB; the download is an explicit action (``sync --embed``), and
 until then semantic retrieval is simply off while every deterministic command
 keeps working.

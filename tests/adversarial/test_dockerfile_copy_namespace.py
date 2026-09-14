@@ -50,7 +50,7 @@ from repoatlas.models.parsing import EdgeType, EntityType, ParsedFile
 from repoatlas.parsers.dockerfile import DockerfileParser
 from repoatlas.parsers.dockerwords import SourceDomain, source_domain, split_flags
 from repoatlas.services.init_service import initialize
-from repoatlas.services.query_service import locate
+from repoatlas.services.retrieval_service import locate
 from repoatlas.services.status_service import status
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace

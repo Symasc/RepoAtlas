@@ -1045,7 +1045,6 @@ class Workspace:
             "REPOATLAS_DB": str(self.database),
             # A closed port: no command may quietly reach a model that happens
             # to be running on this machine.
-            "REPOATLAS_LLM_BASE_URL": "http://127.0.0.1:1",
             "REPOATLAS_SYNC_LOCK_TIMEOUT": "0",
         }
 
@@ -1108,8 +1107,6 @@ def workspace(tmp_path: Path) -> Workspace:
         ("status",),
         ("repos",),
         ("locate", "SERVICE_HOST"),
-        ("ask", "--no-llm", "where is SERVICE_HOST"),
-        ("debug", "--no-llm", "SERVICE_HOST is unset"),
     ],
     ids=lambda c: c[0],
 )

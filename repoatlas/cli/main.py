@@ -14,12 +14,9 @@ import typer
 
 from repoatlas import services
 from repoatlas.errors import ExitCode, RepoAtlasError
-from repoatlas.llm.reasoner import QueryIntent, ReasoningResult
 from repoatlas.models.evidence import EvidenceSet
 from repoatlas.models.reports import SyncReport
 from repoatlas.rendering import (
-    render_answer,
-    render_diagnosis,
     render_evidence,
     render_repos,
     render_status,
@@ -40,9 +37,6 @@ _VerboseOption = Annotated[
 ]
 _RepoOption = Annotated[
     str | None, typer.Option("--repo", help="Explicit repository; overrides the current directory.")
-]
-_NoLlmOption = Annotated[
-    bool, typer.Option("--no-llm", help="Evidence-only mode; do not consult a reasoning model.")
 ]
 
 
@@ -201,7 +195,7 @@ def locate(
     json_output: _JsonOption = False,
     verbose: _VerboseOption = False,
 ) -> None:
-    """Find where something is implemented or configured. Requires no LLM."""
+    """Find where something is implemented or configured."""
     workspace = _open()
     try:
         context = _resolve(workspace, repo, "locate", verbose)
@@ -216,64 +210,31 @@ def locate(
 
 
 @app.command()
-def ask(
-    question: Annotated[str, typer.Argument(help="Engineering question.")],
-    repo: _RepoOption = None,
-    no_llm: _NoLlmOption = False,
-    json_output: _JsonOption = False,
-    verbose: _VerboseOption = False,
-) -> None:
-    """Answer an engineering question with grounded evidence."""
-    _reasoning_command(question, repo, QueryIntent.ASK, no_llm, json_output, verbose)
+def mcp() -> None:
+    """Serve the RepoAtlas capabilities to an agent over MCP on stdio.
 
+    Runs until the transport ends; there is no daemon, no socket and no pidfile.
 
-@app.command()
-def debug(
-    question: Annotated[str, typer.Argument(help="Symptom or error to investigate.")],
-    repo: _RepoOption = None,
-    no_llm: _NoLlmOption = False,
-    json_output: _JsonOption = False,
-    verbose: _VerboseOption = False,
-) -> None:
-    """Investigate a failure, separating facts from hypotheses."""
-    _reasoning_command(question, repo, QueryIntent.DEBUG, no_llm, json_output, verbose)
+    Nothing is inferred from where this command was started. It opens the
+    configured index and serves it, and every tool call states its own repository
+    scope --- which is the point, since a tool launcher starts this process in
+    whatever directory it happens to be in, and that directory is evidence about
+    nothing.
 
+    Deliberately silent. On this transport stdout is the protocol, so a startup
+    banner here would be a framing error rather than a courtesy, and there is no
+    ``--json`` for the same reason: the output is already JSON-RPC.
 
-def _reasoning_command(
-    question: str,
-    repo: str | None,
-    intent: QueryIntent,
-    no_llm: bool,
-    json_output: bool,
-    verbose: bool,
-) -> None:
-    workspace = _open()
+    The import is local because it is the only path that pulls in the MCP SDK.
+    Keeping it out of module scope is what lets ``locate``, ``sync`` and the rest
+    go on starting without loading a protocol library they never use.
+    """
+    from repoatlas.mcp.server import serve
+
     try:
-        context = _resolve(workspace, repo, str(intent), verbose)
-
-        if no_llm:
-            # Evidence-only mode: skip reasoning entirely rather than narrate
-            # around a model that was not consulted (V1_SPEC §4).
-            evidence = services.retrieve_for(workspace, question, context, intent)
-            _emit(evidence, render_evidence(evidence), json_output)
-            workspace.close()
-            return
-
-        evidence, result = services.reason(workspace, question, context, intent)
+        serve()
     except RepoAtlasError as exc:
         _fail(exc)
-        return
-
-    if verbose:
-        _report_grounding(result)
-
-    if json_output:
-        typer.echo(_to_json(result.answer))
-    elif intent is QueryIntent.DEBUG:
-        typer.echo(render_diagnosis(result.answer, evidence))
-    else:
-        typer.echo(render_answer(result.answer, evidence))
-    workspace.close()
 
 
 def _report_sync_telemetry(report: SyncReport) -> None:
@@ -326,23 +287,6 @@ def _report_retrieval(evidence: EvidenceSet) -> None:
             f"{stage.candidates_in:>5} -> {stage.candidates_out:<5} {stage.detail}",
             err=True,
         )
-
-
-def _report_grounding(result: ReasoningResult) -> None:
-    """Surface what citation verification changed (ARCHITECTURE.md §11)."""
-    grounding = result.grounding
-    typer.echo(f"model: {result.model}", err=True)
-    if result.repaired:
-        typer.echo("model output required a repair attempt", err=True)
-    if grounding.modified:
-        typer.echo(
-            f"grounding: {grounding.dropped_citations} citation(s) dropped, "
-            f"{grounding.clamped_citations} clamped, "
-            f"{grounding.demoted_findings} hypothesis(es) demoted to unknown",
-            err=True,
-        )
-    else:
-        typer.echo("grounding: all citations verified", err=True)
 
 
 def _open() -> Workspace:

@@ -31,7 +31,6 @@ import pytest
 from repoatlas.cli.main import app
 from repoatlas.config.settings import SECRET_PATTERNS, Settings
 from repoatlas.discovery.ignore import is_secret_path
-from repoatlas.llm.scripted import ScriptedBackend
 from repoatlas.services.init_service import initialize
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace
@@ -803,63 +802,56 @@ def _run_in(directory: Path, *args: str):
         os.chdir(previous)
 
 
-def test_no_canary_reaches_the_model_prompt(
-    cli_env: Path, vault_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Inspect every message actually handed to the backend, not the rendering.
+def test_no_canary_reaches_retrieved_evidence(cli_env: Path, vault_root: Path) -> None:
+    """Inspect what a caller is actually handed, not the rendering of it.
 
     The questions name the excluded files directly, which is as hard as a user
-    can push retrieval toward them. A canary appearing in the prompt would mean
-    the file's *contents* were retrieved; the question text itself is the user's
-    own words and is excluded from the check, since echoing the question back is
-    what a prompt is for.
-    """
-    backend = ScriptedBackend(
-        [
-            json.dumps(
-                {"summary": "No such value is indexed.", "hypotheses": [], "unknowns": ["value"]}
-            )
-        ]
-        * 6
-    )
-    monkeypatch.setattr("repoatlas.services.query_service.build_model", lambda settings: backend)
+    can push retrieval toward them. A canary in the evidence would mean the
+    file's *contents* were retrieved. The question text is the user's own words
+    and is echoed back in the payload, so these three name files rather than
+    canaries and any canary present came from the index.
 
+    V1 asked this of the message list handed to a local model. The model is gone;
+    the surface that replaced it is this one, and it is the surface an external
+    agent reasons over.
+    """
     assert _run_in(vault_root, "init", str(vault_root)).exit_code == 0
     questions = [
         "What is in server.PEM?",
         "What credentials does ID_RSA hold?",
         "What is the value in the .ENV file?",
     ]
+    evidence = ""
     for question in questions:
-        result = _run_in(vault_root / "vault", "ask", question)
+        result = _run_in(vault_root / "vault", "locate", question, "--json")
         assert result.exit_code == 0, result.output
+        evidence += result.output
 
-    prompt = "\n".join(m.content for call in backend.calls for m in call)
-    assert leaked_canaries(prompt) == []
+    assert leaked_canaries(evidence) == []
     for secret in SECRET_FILES:
-        assert f"path={secret}" not in prompt, secret
+        assert f'"path": "{secret}"' not in evidence, secret
 
 
 def test_naming_a_canary_in_the_question_still_retrieves_nothing_from_it(
-    cli_env: Path, vault_root: Path, monkeypatch: pytest.MonkeyPatch
+    cli_env: Path, vault_root: Path
 ) -> None:
-    """The one case where the canary legitimately appears — and must appear only
+    """The one case where the canary legitimately appears --- and must appear only
     there. Quoting the user's question back is not a leak; carrying the file that
-    contains it into the evidence block is."""
-    backend = ScriptedBackend(
-        [json.dumps({"summary": "Not indexed.", "hypotheses": [], "unknowns": ["value"]})]
-    )
-    monkeypatch.setattr("repoatlas.services.query_service.build_model", lambda settings: backend)
-
+    contains it into the evidence is."""
     assert _run_in(vault_root, "init", str(vault_root)).exit_code == 0
     canary = "REPOATLAS_SECRET_CANARY_ENV_UPPER_001"
-    assert _run_in(vault_root / "vault", "ask", f"Where is {canary}?").exit_code == 0
+    result = _run_in(vault_root / "vault", "locate", f"Where is {canary}?", "--json")
+    assert result.exit_code == 0, result.output
 
-    prompt = "\n".join(m.content for call in backend.calls for m in call)
-    # Once, as the question. Never as retrieved evidence.
-    assert prompt.count(canary) == 1
-    assert f"Where is {canary}?" in prompt
-    assert ".ENV" not in prompt
+    # The question is echoed back --- in the `question` field and in the retrieval
+    # trace, which records what was searched for. That is the user's own string.
+    # What must never appear is the file it came from, so the candidates are the
+    # thing checked rather than the whole payload.
+    payload = json.loads(result.output)
+    assert canary in payload["question"]
+    candidates = json.dumps(payload["candidates"])
+    assert canary not in candidates
+    assert ".ENV" not in candidates
 
 
 def test_no_canary_appears_in_operator_visible_output(cli_env: Path, vault_root: Path) -> None:
@@ -881,7 +873,7 @@ def test_no_canary_appears_in_operator_visible_output(cli_env: Path, vault_root:
             ("locate", "server.PEM", "--verbose"),
             ("locate", "ID_RSA", "--verbose"),
             ("locate", "credentials", "--verbose", "--json"),
-            ("ask", "--no-llm", "What is in the .ENV file?"),
+            ("locate", "What is in the .ENV file?"),
         )
     )
     assert leaked_canaries(output) == []

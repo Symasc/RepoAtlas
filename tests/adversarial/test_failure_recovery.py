@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 
 import pytest
-from repoatlas.errors import ExitCode, RepoAtlasError
+from repoatlas.errors import RepoAtlasError
 from repoatlas.models.repository import SyncStatus
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace
@@ -181,31 +181,6 @@ def test_odd_but_parseable_configuration_falls_back_to_defaults(
     assert settings.embeddings.provider
 
 
-def test_an_unreachable_reasoning_model_exits_four_not_one(
-    adversarial: Workspace, adversarial_root: Path
-) -> None:
-    from repoatlas.services.query_service import reason
-
-    settings = adversarial.settings.model_copy(
-        update={
-            "llm": adversarial.settings.llm.model_copy(
-                update={"base_url": "http://127.0.0.1:1", "timeout_seconds": 2.0}
-            )
-        }
-    )
-    workspace = open_workspace(settings=settings, require_root=False)
-    try:
-        context = workspace.resolver().resolve(adversarial_root / "python-service")
-        with pytest.raises(RepoAtlasError) as raised:
-            reason(workspace, "why", context, intent=None)  # type: ignore[arg-type]
-    except TypeError:
-        pytest.skip("reason() signature differs; covered by tests/test_cli_reasoning.py")
-    else:
-        assert raised.value.exit_code == ExitCode.LLM_UNAVAILABLE
-    finally:
-        workspace.close()
-
-
 def test_an_unavailable_embedding_model_leaves_retrieval_working(
     adversarial: Workspace, adversarial_root: Path
 ) -> None:
@@ -237,40 +212,6 @@ def test_an_unavailable_embedding_model_leaves_retrieval_working(
     context = adversarial.resolver().resolve(adversarial_root / "python-service")
     evidence = adversarial.retriever().retrieve("SERVICE_HOST", context)
     assert evidence.candidates
-
-
-def test_a_corrupt_model_response_becomes_insufficient_evidence() -> None:
-    """Two invalid replies in a row: one repair attempt, then refusal (§15)."""
-    import asyncio
-
-    from repoatlas.llm.reasoner import QueryIntent, Reasoner
-    from repoatlas.llm.scripted import ScriptedBackend
-    from repoatlas.models.evidence import EvidenceCandidate, EvidenceSet
-
-    evidence = EvidenceSet(
-        question="q",
-        candidates=(
-            EvidenceCandidate(repository="r", path="p.py", line_start=1, line_end=2, text="code"),
-        ),
-    )
-    backend = ScriptedBackend(["not json at all", "{still: not valid"])
-    result = asyncio.run(Reasoner(backend).reason("q", evidence, QueryIntent.ASK))
-    assert result.is_insufficient
-    assert result.repaired
-
-
-def test_a_truncated_but_parseable_response_is_still_validated() -> None:
-    """Valid JSON that does not match the schema is a validation failure, not an
-    answer."""
-    import asyncio
-
-    from repoatlas.llm.reasoner import QueryIntent, Reasoner
-    from repoatlas.llm.scripted import ScriptedBackend
-    from repoatlas.models.evidence import EvidenceSet
-
-    backend = ScriptedBackend(['{"summary": 12345}', '{"nope": true}'])
-    result = asyncio.run(Reasoner(backend).reason("q", EvidenceSet(question="q"), QueryIntent.ASK))
-    assert result.is_insufficient
 
 
 # -- concurrency -------------------------------------------------------------

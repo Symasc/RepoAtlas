@@ -1,7 +1,7 @@
 """Deterministic query analysis (ARCHITECTURE.md §10 stage 1).
 
-No LLM is involved. The point is to recover the literal terms a question is really
-about, so exact search can find them.
+Deterministic throughout: the point is to recover the literal terms a question is
+really about, so exact search can find them.
 """
 
 from __future__ import annotations

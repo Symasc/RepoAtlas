@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from repoatlas.models.parsing import (
+    GRAMMAR_UNAVAILABLE,
     EdgeType,
     EntityType,
     ParsedFile,
@@ -295,12 +296,14 @@ class RubyParser:
     def parse(self, path: Path, content: str) -> ParsedFile:
         try:
             tree, source = parse_tree("ruby", content)
-        except GrammarUnavailable as exc:
+        except GrammarUnavailable:
             return ParsedFile(
                 language=self.language,
                 parser=self.name,
                 parser_version=self.version,
-                diagnostics=(ParseDiagnostic(severity=Severity.ERROR, message=str(exc)),),
+                diagnostics=(
+                    ParseDiagnostic(severity=Severity.ERROR, message=GRAMMAR_UNAVAILABLE),
+                ),
             )
 
         walker = _Walker(source)

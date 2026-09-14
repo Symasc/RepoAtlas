@@ -8,6 +8,8 @@ citation verification will validate model output against ``EvidenceSet``.
 from __future__ import annotations
 
 import enum
+from collections.abc import Mapping
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -15,7 +17,20 @@ from repoatlas.models.telemetry import RetrievalTrace
 
 
 class EvidenceSource(enum.StrEnum):
-    """Which retriever produced a candidate. Used by rank fusion and by --verbose."""
+    """How a piece of evidence was reached. Used by rank fusion and by --verbose.
+
+    The first six are retrieval stages, and they are the only ones fusion ever
+    sees. :attr:`INSPECT`, :attr:`RELATIONSHIP` and :attr:`DEPENDENCY` are not
+    stages: they name evidence that was *addressed* rather than searched for — the
+    source of a file, entity or span a caller named exactly, the lines that assert
+    a graph edge reached from one, and the manifest line stating a package fact.
+
+    They share this enum rather than getting ones of their own because the ledger
+    records a route for every piece of evidence it holds, and two vocabularies for
+    "how did this arrive" would drift apart the first time one of them gained a
+    member. Nothing about fusion changes: none of these capabilities produces
+    candidates, so none of these members ever reaches a ranking.
+    """
 
     EXACT = "exact"
     FILE = "file"
@@ -23,6 +38,15 @@ class EvidenceSource(enum.StrEnum):
     SYMBOL = "symbol"
     SEMANTIC = "semantic"
     GRAPH = "graph"
+    #: Addressed directly by the caller, not retrieved. Never ranked.
+    INSPECT = "inspect"
+    #: The source lines a deterministic graph edge is asserted by, supplied so the
+    #: edge's provenance can be checked rather than only named. Never ranked.
+    RELATIONSHIP = "relationship"
+    #: The manifest or lockfile line stating a dependency, supplied so a caller can
+    #: read what the file actually says rather than trust a parsed field. Never
+    #: ranked.
+    DEPENDENCY = "dependency"
 
 
 class EvidenceTier(enum.IntEnum):
@@ -102,6 +126,108 @@ class MatchClass(enum.IntEnum):
     SIMILAR = 7
 
 
+#: What each tier means to a client reading the number.
+#:
+#: Both of these enums serialize as **bare integers** --- they are
+#: :class:`enum.IntEnum`, so ``tier`` is ``0`` on the wire and not
+#: ``"deterministic"`` --- and an integer with no published key is a value a
+#: caller can order but cannot interpret. The prose above says what the ordering
+#: is *for*; these say which number is which, which is the half a machine needs.
+#:
+#: Kept as a mapping keyed by the member rather than written into the docstring
+#: by hand, so the numbers a client reads are the numbers the enum actually has.
+#: :func:`value_legend` derives the published sentence from ``member.value``, and
+#: a test fails if a member is missing, extra, or renumbered.
+TIER_MEANINGS: dict[EvidenceTier, str] = {
+    EvidenceTier.DETERMINISTIC: (
+        "a fact about the code, established by exact lookup --- a path, a symbol "
+        "or entity name, literal content, or a parsed relationship"
+    ),
+    EvidenceTier.ASSOCIATIVE: (
+        "recall rather than an exact match --- an embedding neighbour, or "
+        "word-overlap from the full-text index --- which is a guess about what "
+        "the question meant and never outranks a deterministic result"
+    ),
+}
+
+#: What each match class means to a client reading the number.
+#:
+#: Read off the member documentation above, which is the contract the retrieval
+#: stages implement. A match class says *how the query named this candidate*; it
+#: is not a score, a confidence, or a claim that the statement is true of the
+#: lines. See :class:`MatchClass` for why it is separate from the tier.
+MATCH_MEANINGS: dict[MatchClass, str] = {
+    MatchClass.EXACT_PATH: "the query spelled this file's whole repository-relative path",
+    MatchClass.EXACT_SUBPATH: (
+        "a trailing sub-path matched on segment boundaries, which may name several files"
+    ),
+    MatchClass.EXACT_BASENAME: "the file's basename, which says what it is called and not where",
+    MatchClass.EXACT_NAME: "an entity whose name, qualified name or key the query spelled exactly",
+    MatchClass.EXACT_CONTENT: "the query's literal text occurs in this span, verified by substring",
+    MatchClass.RELATED: "reached by a graph edge from something the query named",
+    MatchClass.LEXICAL: (
+        "word-overlap recall, from the full-text index or from an entity name the "
+        "query did not spell exactly"
+    ),
+    MatchClass.SIMILAR: "an embedding neighbour",
+}
+
+
+def value_legend[Member: enum.IntEnum](meanings: Mapping[Member, str]) -> str:
+    """The published number-to-name key, built from the members themselves.
+
+    The point of generating it is that there is then no second place holding the
+    numbers. A renumbered member changes this sentence automatically; a member
+    added without a meaning raises here rather than shipping an integer with no
+    published interpretation.
+    """
+    return "; ".join(
+        f"{member.value} = {member.name.lower()} ({meanings[member]})"
+        for member in sorted(meanings)
+    )
+
+
+# Appended rather than written inline, for the reason above: Pydantic publishes a
+# model's enum docstring as the JSON Schema ``description`` for that ``$def``, so
+# this one generated sentence is what reaches every client that inspects the
+# contract, whichever way it came to be looking at it.
+EvidenceTier.__doc__ = (
+    f"{EvidenceTier.__doc__}\n\n"
+    f"Serialized as an integer. Values, strongest first: {value_legend(TIER_MEANINGS)}."
+)
+MatchClass.__doc__ = (
+    f"{MatchClass.__doc__}\n\n"
+    f"Serialized as an integer. Values, most specific first: {value_legend(MATCH_MEANINGS)}."
+)
+
+#: The two fields, annotated once so the description cannot drift between the four
+#: models that carry them. The numeric key deliberately lives in the enum
+#: description instead of being repeated here.
+TierField = Annotated[
+    EvidenceTier,
+    Field(
+        description=(
+            "Precedence class: whether this is a fact about the code or an "
+            "embedding neighbour. Lower wins unconditionally, and scores are only "
+            "compared within a tier. Distinct from `match`. See the EvidenceTier "
+            "definition for the meaning of each value."
+        )
+    ),
+]
+MatchField = Annotated[
+    MatchClass,
+    Field(
+        description=(
+            "How precisely the query named this candidate, from a whole path down "
+            "to an embedding neighbour. Lower is more specific. Distinct from "
+            "`tier`: two candidates can share a tier and still have been asked "
+            "for in different ways. See the MatchClass definition for the meaning "
+            "of each value."
+        )
+    ),
+]
+
+
 class EvidenceCandidate(BaseModel):
     """One retrieved piece of a real repository, with the provenance that proves it.
 
@@ -134,13 +260,38 @@ class EvidenceCandidate(BaseModel):
     text: str = ""
     score: float = 0.0
     source: EvidenceSource = EvidenceSource.EXACT
-    tier: EvidenceTier = EvidenceTier.DETERMINISTIC
+    tier: TierField = EvidenceTier.DETERMINISTIC
     #: How precisely the query identified this candidate. Retained through fusion
     #: and deduplication — a span merged from several stages keeps the strongest
     #: class any of them claimed, exactly as it keeps its strongest tier.
-    match: MatchClass = MatchClass.EXACT_CONTENT
+    match: MatchField = MatchClass.EXACT_CONTENT
     description: str = ""
     entity_id: int | None = None
+    #: How many pieces the source span this text came from was cut into, or
+    #: ``None`` when this candidate did not come from a stored chunk at all.
+    #:
+    #: Three states, because there are three honest answers and collapsing any
+    #: two of them licenses a false citation:
+    #:
+    #: * ``1`` --- a whole chunk. Its text covers the span it carries, so a line
+    #:   claim is provable;
+    #: * ``> 1`` --- one piece of a span the character cap cut
+    #:   (ARCHITECTURE.md §6). Every piece carries the *span's* line range, so a
+    #:   piece other than a whole one begins or ends mid-line and covers fewer
+    #:   lines than it advertises;
+    #: * ``None`` --- no chunk was involved. An entity signature, a filename
+    #:   match, a ledger reference. Nothing was cut because nothing was chunked,
+    #:   and saying ``1`` here would assert a completeness no chunker vouched
+    #:   for.
+    #:
+    #: Excluded from serialization: this is provenance the shaper needs, not a
+    #: field any caller reads, and V1's ``locate --json`` predates it.
+    #:
+    #: ``split_index`` is deliberately *not* carried. Knowing which piece this is
+    #: could in principle license a narrower claim for the head piece, but that
+    #: proof depends on exactly where the cap fell and is not established here —
+    #: and an unprovable line claim is the defect this field exists to prevent.
+    split_total: int | None = Field(default=None, exclude=True)
 
     @property
     def is_file_level(self) -> bool:

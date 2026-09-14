@@ -1,0 +1,291 @@
+# RepoAtlas deterministic graph-capability evaluation set (V2 Slice F).
+#
+# GROUND TRUTH IS MANUAL. Every expectation below was written by reading the
+# fixture sources under tests/adversarial/fixtures/repos, not by asking RepoAtlas
+# what it returns. The line numbers in the notes are the lines of those files.
+# Deriving the expectations from the implementation would make this suite measure
+# self-consistency, which is the one thing a graph evaluation must not do: a
+# capability that invented an edge would invent the same edge in its own baseline.
+#
+# This is deliberately NOT part of the retrieval evaluation. Retrieval is scored
+# on recall over a ranked, partly associative result. A graph answer is exact:
+# the correct result is a specific set of edges, oriented a specific way, and
+# "close" is not a grade it can earn.
+#
+# Fields
+#   id                    stable identifier, used in the report
+#   category              outgoing | incoming | two-hop | cross-repo | containment
+#                         | ambiguity | zero-result | provenance
+#   target                the exact natural key asked about
+#   direction             outgoing | incoming | both
+#   hops                  1 or 2
+#   cross_repository      whether the walk may leave the target's repository
+#   include_containment   whether structural containment is shown
+#   max_neighbors         server bound applied to the answer
+#   expected_edges        EXACTLY the edges that must come back, as
+#                         [source key, edge type, target key], in stored
+#                         orientation. The set is closed: anything else is a
+#                         fabricated relationship.
+#   expected_paths        EXACTLY the node chains for second-hop results
+#   forbidden_nodes       keys that must appear at neither end of any edge
+#   expected_evidence     citable spans that must be supplied, with their exact
+#                         indexed text
+#   uncitable_edges       edges that must come back with no evidence id
+#   expect_truncated      whether the answer must report itself cut
+#   expected_edge_count_at_most / _at_least
+#                         bounds for cases whose exact set is large but whose
+#                         shape is the point
+#   notes                 why this is the ground truth
+
+cases:
+  # ------------------------------------------------------------- outgoing ----
+  - id: outgoing-deploy-script
+    category: outgoing
+    target: "file:scripts:deploy.sh"
+    direction: outgoing
+    hops: 1
+    cross_repository: false
+    include_containment: false
+    max_neighbors: 200
+    expected_edges:
+      - ["file:scripts:deploy.sh", "EXECUTES", "cmd:echo"]
+      - ["file:scripts:deploy.sh", "EXECUTES", "cmd:python3"]
+      - ["file:scripts:deploy.sh", "EXECUTES", "cmd:salt-call"]
+      - ["file:scripts:deploy.sh", "EXECUTES", "cmd:set"]
+      - ["file:scripts:deploy.sh", "EXECUTES", "file:scripts:notify.sh"]
+      - ["file:scripts:deploy.sh", "EXPORTS", "env:DEPLOY_STAGE"]
+      - ["file:scripts:deploy.sh", "EXPORTS", "env:LOG_LEVEL"]
+      - ["file:scripts:deploy.sh", "READS", "env:DB_URL"]
+      - ["file:scripts:deploy.sh", "SOURCES", "file:scripts:env.sh"]
+    forbidden_nodes:
+      # Reached only by the cross-repository EXECUTES on line 6, which this case
+      # does not permit.
+      - "file:python-service:src/app.py"
+      # Asserted by the shell function on line 10, which is a different entity.
+      - "env:SERVICE_HOST"
+    notes: >
+      scripts/deploy.sh: set on line 2, source ./env.sh on line 5, python3 on
+      line 6, salt-call on line 7, export DEPLOY_STAGE on line 13, echo "$DB_URL"
+      on line 14, and env LOG_LEVEL=debug ./notify.sh on line 15. Every one of
+      these is asserted by the file itself; SERVICE_HOST on line 10 is read
+      inside deploy_helper and belongs to that symbol, not to the file.
+
+  # ------------------------------------------------------------- incoming ----
+  - id: incoming-service-host
+    category: incoming
+    target: "env:SERVICE_HOST"
+    direction: incoming
+    hops: 1
+    cross_repository: false
+    include_containment: false
+    max_neighbors: 200
+    expected_edges:
+      - ["sym:deployment:service/init.sls:service_config:5", "CONFIGURES", "env:SERVICE_HOST"]
+      - ["file:scripts:env.sh", "EXPORTS", "env:SERVICE_HOST"]
+      - ["file:common-lib:lib/settings.rb", "READS", "env:SERVICE_HOST"]
+      - ["sym:common-lib:src/index.ts:commonHost:5", "READS", "env:SERVICE_HOST"]
+      - ["sym:python-service:src/config.py:build_config:10", "READS", "env:SERVICE_HOST"]
+      - ["sym:ruby-tooling:lib/runner.rb:RubyTooling::Runner::initialize:6", "READS", "env:SERVICE_HOST"]
+      - ["sym:scripts:deploy.sh:deploy_helper:9", "READS", "env:SERVICE_HOST"]
+      - ["sym:ts-service:src/settings.ts:readSettings:9", "READS", "env:SERVICE_HOST"]
+    notes: >
+      Seven repositories touch this variable. Every edge is stored with the
+      reader or exporter as the SOURCE and the variable as the TARGET, and asking
+      from the variable's end must not turn any of them around: an environment
+      variable does not read a Ruby file.
+
+  # -------------------------------------------------------------- two-hop ----
+  - id: two-hop-app-to-modules
+    category: two-hop
+    target: "file:python-service:src/app.py"
+    direction: both
+    hops: 2
+    cross_repository: false
+    include_containment: false
+    max_neighbors: 200
+    expected_edges:
+      - ["file:python-service:src/app.py", "IMPORTS", "file:python-service:src/config.py"]
+      - ["file:python-service:src/app.py", "IMPORTS", "module:src.config"]
+      - ["file:python-service:src/config.py", "IMPORTS", "module:common_lib.settings"]
+      - ["file:python-service:src/config.py", "IMPORTS", "module:os"]
+    expected_paths:
+      - ["file:python-service:src/app.py", "file:python-service:src/config.py", "module:common_lib.settings"]
+      - ["file:python-service:src/app.py", "file:python-service:src/config.py", "module:os"]
+    forbidden_nodes:
+      # Reached only by the cross-repository EXECUTES from scripts/deploy.sh.
+      - "file:scripts:deploy.sh"
+    notes: >
+      app.py line 3 imports src.config, which the linker also resolves to the
+      file. config.py imports os on line 3 and common_lib.settings on line 5. The
+      two-hop answer is those four edges and nothing joining app.py directly to
+      os or to common_lib.settings — no such import exists.
+
+  # ----------------------------------------------------------- cross-repo ----
+  - id: cross-repo-forbidden
+    category: cross-repo
+    target: "repo:python-service"
+    direction: outgoing
+    hops: 1
+    cross_repository: false
+    include_containment: false
+    max_neighbors: 200
+    expected_edges:
+      - ["repo:python-service", "DEPENDS_ON", "pkg:pypi:absent-from-managed-set"]
+      - ["repo:python-service", "DEPENDS_ON", "pkg:pypi:common-lib"]
+      - ["repo:python-service", "DEPENDS_ON", "pkg:pypi:requests"]
+      - ["repo:python-service", "DEPENDS_ON", "pkg:pypi:shared-utils"]
+    forbidden_nodes:
+      - "repo:common-lib"
+    notes: >
+      python-service/pyproject.toml declares four dependencies on lines 5-8. The
+      package nodes are interned and belong to no repository, so they are always
+      local; only the resolved repo:common-lib edge crosses a boundary, and it
+      must stay out when crossing is not permitted.
+
+  - id: cross-repo-allowed
+    category: cross-repo
+    target: "repo:python-service"
+    direction: outgoing
+    hops: 1
+    cross_repository: true
+    include_containment: false
+    max_neighbors: 200
+    expected_edges:
+      - ["repo:python-service", "DEPENDS_ON", "pkg:pypi:absent-from-managed-set"]
+      - ["repo:python-service", "DEPENDS_ON", "pkg:pypi:common-lib"]
+      - ["repo:python-service", "DEPENDS_ON", "pkg:pypi:requests"]
+      - ["repo:python-service", "DEPENDS_ON", "pkg:pypi:shared-utils"]
+      - ["repo:python-service", "DEPENDS_ON", "repo:common-lib"]
+    expected_evidence:
+      - location: "python-service/pyproject.toml:5"
+        text: '    "common-lib>=1.0",'
+    notes: >
+      DEPENDS_ON is in the shared cross-repository set because the linker's
+      global pass resolves it from an exact package name (V1_SPEC §9). Line 5 of
+      pyproject.toml asserts both the package edge and the resolved repository
+      edge, so one supplied span backs both.
+
+  # ------------------------------------------------------------ ambiguity ----
+  - id: ambiguous-provider-is-not-resolved
+    category: ambiguity
+    target: "repo:python-service"
+    direction: outgoing
+    hops: 1
+    cross_repository: true
+    include_containment: false
+    max_neighbors: 200
+    expected_edges:
+      - ["repo:python-service", "DEPENDS_ON", "pkg:pypi:absent-from-managed-set"]
+      - ["repo:python-service", "DEPENDS_ON", "pkg:pypi:common-lib"]
+      - ["repo:python-service", "DEPENDS_ON", "pkg:pypi:requests"]
+      - ["repo:python-service", "DEPENDS_ON", "pkg:pypi:shared-utils"]
+      - ["repo:python-service", "DEPENDS_ON", "repo:common-lib"]
+    forbidden_nodes:
+      - "repo:ambiguous-provider-a"
+      - "repo:ambiguous-provider-b"
+    notes: >
+      shared-utils is provided by BOTH ambiguous-provider-a and
+      ambiguous-provider-b, so the linker refuses to resolve it to a repository
+      and the graph holds no repository edge for it. The package node is
+      returned instead. Picking one provider would be a confident answer about
+      the wrong repository, and the caller would have no way to tell.
+
+  # ---------------------------------------------------------- containment ----
+  - id: containment-excluded
+    category: containment
+    target: "file:python-service:large.json"
+    direction: both
+    hops: 2
+    cross_repository: false
+    include_containment: false
+    max_neighbors: 200
+    expected_edges: []
+    notes: >
+      large.json declares 402 symbols and participates in no relationship at all.
+      With containment excluded — the default — the honest answer is empty. This
+      is the explosion pin: any leak of containment into the default policy turns
+      this case from zero edges into hundreds.
+
+  - id: containment-bounded-to-the-target
+    category: containment
+    target: "file:python-service:large.json"
+    direction: both
+    hops: 2
+    cross_repository: false
+    include_containment: true
+    max_neighbors: 200
+    expect_truncated: true
+    # A bound, not a count: 402 declarations are fetched down to the server
+    # ceiling and then deduplicated, and how many rows inside that window are
+    # duplicates is an index detail rather than ground truth. What is ground
+    # truth is that the answer is capped far below 402 and says so.
+    expected_edge_count_at_most: 200
+    expected_edge_count_at_least: 150
+    expected_edge_types: ["DEFINES"]
+    expected_hops: [1]
+    expected_sources: ["file:python-service:large.json"]
+    notes: >
+      Asked for explicitly, containment shows the file's own declarations and
+      stops at the server ceiling, reporting itself cut. Every edge is at hop one
+      and sourced by the queried file: none of the 402 symbols becomes a frontier
+      the walk expands from, so nothing arrives at hop two.
+
+  # --------------------------------------------------------- zero-result -----
+  - id: zero-result-exported-variable
+    category: zero-result
+    target: "env:DEPLOY_STAGE"
+    direction: outgoing
+    hops: 2
+    cross_repository: true
+    include_containment: false
+    max_neighbors: 200
+    expected_edges: []
+    notes: >
+      deploy.sh line 13 exports DEPLOY_STAGE and nothing reads it. The variable
+      is the destination of that one edge and the source of none, so an outgoing
+      question has an empty answer — which is a fact about the graph, not a
+      failure to search it.
+
+  # ---------------------------------------------------------- provenance -----
+  - id: provenance-binding-env-script
+    category: provenance
+    target: "file:scripts:env.sh"
+    direction: outgoing
+    hops: 1
+    cross_repository: false
+    include_containment: false
+    max_neighbors: 200
+    expected_edges:
+      - ["file:scripts:env.sh", "EXECUTES", "cmd:echo"]
+      - ["file:scripts:env.sh", "EXPORTS", "env:DB_URL"]
+      - ["file:scripts:env.sh", "EXPORTS", "env:SERVICE_HOST"]
+    expected_evidence:
+      - location: "scripts/env.sh:3"
+        text: "export SERVICE_HOST=scripts.internal.example"
+      - location: "scripts/env.sh:4"
+        text: 'export DB_URL="postgres://localhost/app"'
+      - location: "scripts/env.sh:6"
+        text: 'echo "$LOCAL_ONLY"'
+    notes: >
+      Every edge here is asserted by a single line the parser can point at, and
+      every one of those lines is indexed, so all three are citable and the
+      supplied text must be the file's bytes exactly. LOCAL_ONLY on line 5 is
+      assigned without export and produces no EXPORTS edge — a case where the
+      absence is the ground truth.
+
+  - id: provenance-absent-for-structure
+    category: provenance
+    target: "file:python-service:src/config.py"
+    direction: outgoing
+    hops: 1
+    cross_repository: false
+    include_containment: true
+    max_neighbors: 200
+    uncitable_edge_types: ["DEFINES"]
+    citable_edge_types: ["IMPORTS"]
+    notes: >
+      A DEFINES edge names its file and no line: the declaration is a fact about
+      the file rather than about one line of it. Those edges must come back with
+      provenance and no evidence id, while the IMPORTS edges on lines 3 and 5 are
+      citable. Returning a whole-file citation for the first group, or dropping
+      them for lacking text, would each be a different lie.

@@ -929,7 +929,7 @@ def test_an_assignment_does_not_make_a_script_look_executed(tmp_path: Path) -> N
     The literal text is still findable, because it is genuinely in the file. What
     must not exist is a *relationship* claiming the script runs it.
     """
-    from repoatlas.services.query_service import locate
+    from repoatlas.services.retrieval_service import locate
 
     root = _bash_root(tmp_path / "ret", DYNAMIC_SCRIPT)
     space = _workspace(tmp_path, "ret", root)

@@ -55,7 +55,7 @@ from repoatlas.discovery.finder import discover_repositories
 from repoatlas.discovery.ignore import IgnoreRules, _compile
 from repoatlas.gitstate.client import GitClient
 from repoatlas.services.init_service import initialize
-from repoatlas.services.query_service import locate
+from repoatlas.services.retrieval_service import locate
 from repoatlas.services.status_service import status
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace

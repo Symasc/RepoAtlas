@@ -560,20 +560,25 @@ def test_the_embedding_backend_never_receives_escaped_content(
         workspace.close()
 
 
-def test_the_model_prompt_never_contains_escaped_content(
+def test_retrieved_evidence_never_contains_escaped_content(
     victim: Path, containment_settings: Settings, managed_root: Path, tmp_path: Path
 ) -> None:
-    from repoatlas.llm.reasoner import QueryIntent, build_messages
+    """Whatever is asked, nothing from outside the managed root is handed back.
 
+    The questions name the escaped paths directly. Echoing the question is not a
+    leak --- the user supplied that string --- so it is removed before the check,
+    and anything left came out of the index.
+    """
     workspace = index(containment_settings, managed_root, tmp_path)
     try:
         context = workspace.resolver().resolve(managed_root)
         for question in ("/usr/sbin/nologin", OUTSIDE_CANARY, "configuration"):
             evidence = workspace.retriever().retrieve(question, context)
-            messages = build_messages(question, evidence, QueryIntent.ASK)
-            prompt = "\n".join(m.content for m in messages)
-            assert OUTSIDE_CANARY not in prompt.replace(question, "")
-            assert "/usr/sbin/nologin" not in prompt.replace(question, "")
+            supplied = "\n".join(
+                f"{c.repository}/{c.path}\n{c.text}\n{c.description}" for c in evidence.candidates
+            )
+            assert OUTSIDE_CANARY not in supplied.replace(question, "")
+            assert "/usr/sbin/nologin" not in supplied.replace(question, "")
     finally:
         workspace.close()
 

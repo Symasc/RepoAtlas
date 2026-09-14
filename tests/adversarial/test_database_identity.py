@@ -33,11 +33,9 @@ from __future__ import annotations
 import hashlib
 import os
 import signal
-import socket
 import sqlite3
 import subprocess
 import sys
-import threading
 from pathlib import Path
 
 import pytest
@@ -71,8 +69,6 @@ COMMANDS: tuple[tuple[str, ...], ...] = (
     ("repos",),
     ("sync",),
     ("locate", "SERVICE_HOST"),
-    ("ask", "where is SERVICE_HOST"),
-    ("debug", "SERVICE_HOST is unset"),
     ("init", "."),
 )
 
@@ -172,7 +168,6 @@ class Harness:
         self.root = base / "work"
         self.repo = self.root / "svc"
         self.database = base / "atlas.db"
-        self.llm_base_url = "http://127.0.0.1:1"
 
     def environment(self, **extra: str) -> dict[str, str]:
         return {
@@ -182,7 +177,6 @@ class Harness:
             "REPOATLAS_DB": str(self.database),
             # A closed port: any attempt to reach a model fails loudly rather
             # than quietly succeeding on a machine that happens to run Ollama.
-            "REPOATLAS_LLM_BASE_URL": self.llm_base_url,
             "REPOATLAS_SYNC_LOCK_TIMEOUT": "0",
             **extra,
         }
@@ -1036,39 +1030,6 @@ def test_a_configured_db_path_pointing_at_the_wrong_file_says_so(indexed: Harnes
 
 
 # == 28. no model contact ====================================================
-
-
-def test_ask_and_debug_fail_on_ownership_before_reaching_a_model(foreign: Harness) -> None:
-    """§24. Ownership is a property of the workspace, and the workspace is opened
-    first; a foreign database must never become a reason to send a prompt."""
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(4)
-    port = listener.getsockname()[1]
-    seen: list[str] = []
-
-    def accept() -> None:
-        listener.settimeout(30)
-        try:
-            while True:
-                connection, _ = listener.accept()
-                seen.append("contacted")
-                connection.close()
-        except OSError:
-            pass
-
-    watcher = threading.Thread(target=accept, daemon=True)
-    watcher.start()
-    try:
-        for command in (("ask", "where is SERVICE_HOST"), ("debug", "SERVICE_HOST is unset")):
-            result = foreign.run(*command, REPOATLAS_LLM_BASE_URL=f"http://127.0.0.1:{port}")
-            assert result.exit_code == ExitCode.NOT_INITIALIZED, result
-            assert "is not recognized as a RepoAtlas index" in result.stderr
-    finally:
-        listener.close()
-        watcher.join(timeout=5)
-
-    assert seen == [], "a model was contacted before ownership was established"
 
 
 # == 25 (brief). the writer lock =============================================

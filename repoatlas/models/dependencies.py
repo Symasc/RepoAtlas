@@ -172,6 +172,14 @@ class DependencyObservation(BaseModel):
     scope: str = "."
     source_path: str = ""
     line: int = 1
+    #: The last line of the declaration. Equal to :attr:`line` for the one-line
+    #: declarations every current parser produces, and carried separately because
+    #: the stored row has always had both: a consumer that wants to quote the
+    #: asserting text needs the whole span, and inferring the end from the start
+    #: would be a guess the row does not require anyone to make.
+    line_end: int = 1
+    #: Which parser stated this. Provenance, like the path and the lines.
+    parser: str = ""
 
     @property
     def order(self) -> tuple[str, int, str, int, str]:

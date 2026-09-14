@@ -29,7 +29,7 @@ from repoatlas.discovery.reconcile import plan_repository_set, register
 from repoatlas.errors import ExitCode
 from repoatlas.models.context import ContextScope
 from repoatlas.services.init_service import initialize
-from repoatlas.services.query_service import locate
+from repoatlas.services.retrieval_service import locate
 from repoatlas.services.status_service import list_repositories, status
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace
@@ -379,7 +379,6 @@ def _cli_env(state: Path) -> dict[str, str]:
         "HOME": str(state),
         "REPOATLAS_CONFIG": str(state / "config.yaml"),
         "REPOATLAS_DB": str(state / "atlas.db"),
-        "REPOATLAS_LLM_BASE_URL": "http://127.0.0.1:1",
     }
 
 

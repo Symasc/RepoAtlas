@@ -34,7 +34,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from repoatlas.dependencies.normalize import GEM, NPM, PYPI
+from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
 from repoatlas.models.dependencies import DependencyRecord
@@ -65,9 +65,6 @@ _PATH_KINDS = frozenset({EntityType.SCRIPT, EntityType.FILE})
 #: Producer recorded on every edge the global pass creates, so it can delete
 #: exactly its own output and rebuild (see the module docstring).
 GLOBAL_PARSER = "linker:global"
-
-#: Ecosystems whose package references can name a managed repository.
-_REPOSITORY_ECOSYSTEMS = frozenset({PYPI, NPM, GEM})
 
 
 class _NotClaimable:
@@ -658,7 +655,7 @@ class ReferenceLinker:
                 )
             )
 
-            if record.ecosystem not in _REPOSITORY_ECOSYSTEMS:
+            if record.ecosystem not in REPOSITORY_ECOSYSTEMS:
                 continue
             providers = [
                 (repo_id, name)
