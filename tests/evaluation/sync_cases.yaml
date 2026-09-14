@@ -1,0 +1,192 @@
+# RepoAtlas deterministic sync-capability evaluation set (V2 Slice I).
+#
+# GROUND TRUTH IS MANUAL. Every expectation was written by reasoning about what
+# the setup does to the working tree and what V1's sync does with that — never by
+# running the capability and copying its answer. A sync corpus derived from its
+# own output would measure self-consistency, and a sync that indexed a secret
+# would then agree with itself about having done so.
+#
+# Every case runs against a freshly built copy of the adversarial repositories,
+# because every case mutates something. Assertions are exact: counts are equal,
+# not at-least; an excluded path must be absent, not merely unranked; and each
+# exclusion case carries a visible control file whose presence proves the sync ran.
+#
+# No model is consulted and nothing is embedded.
+#
+# Fields
+#   id           stable identifier
+#   category     noop | change | removal | addition | dirty | admission
+#                | evidence | contention | initialization
+#   evidence     supply evidence before the setup: inspect REPO/PATH lines START-END.
+#                Exactly one segment must come back, so transitions can be exact.
+#   setup        steps applied to the working tree before the sync:
+#                  append: {repo, path}            add a line (left uncommitted)
+#                  delete: {repo, path}            remove the file
+#                  write:  {repo, path, text}      create a file
+#                  commit: {repo}                  commit everything in the repo
+#                  hold_writer_lock: true          another writer holds the lock
+#   uninitialized  true for a workspace with no configured root at all
+#   expect       exact expectations:
+#                  status             completed | incomplete
+#                  error              the capability error code, when refused
+#                  retryable          the error's retryable flag
+#                  no_changes         every repository reports 0 changed/new/deleted
+#                  repository         the repository the next four refer to
+#                  counts             {changed, new, deleted} for that repository
+#                  dirty              that repository's working tree was dirty
+#                  indexed            paths that must be in the index afterwards
+#                  not_indexed        paths that must not be
+#                  hash_changed       paths whose indexed content hash must move
+#                  tree_unchanged     the working tree is byte-identical after sync
+#                  evidence_status    the supplied evidence's status afterwards
+#                  transitions        EXACTLY the status transitions reported
+#   notes        why this is the ground truth
+
+cases:
+  - id: noop
+    category: noop
+    setup: []
+    expect:
+      status: completed
+      no_changes: true
+      tree_unchanged: true
+    notes: >-
+      Nothing changed since the index was built, so every repository reports zero
+      changed, new and deleted files. A sync that reported a change here would be
+      inventing one.
+
+  - id: changed-file
+    category: change
+    setup:
+      - append: {repo: python-service, path: src/config.py}
+    expect:
+      status: completed
+      repository: python-service
+      counts: {changed: 1, new: 0, deleted: 0}
+      hash_changed: [src/config.py]
+    notes: One line appended to one tracked file is exactly one changed file.
+
+  - id: removed-file
+    category: removal
+    setup:
+      - delete: {repo: python-service, path: src/config.py}
+    expect:
+      status: completed
+      repository: python-service
+      counts: {changed: 0, new: 0, deleted: 1}
+      not_indexed: [src/config.py]
+    notes: The file is gone from the tree, so its row and every fact derived from it go too.
+
+  - id: added-file
+    category: addition
+    setup:
+      - write: {repo: python-service, path: src/added_by_evaluation.py, text: "ADDED_BY_EVALUATION = 1\n"}
+      - commit: {repo: python-service}
+    expect:
+      status: completed
+      repository: python-service
+      counts: {changed: 0, new: 1, deleted: 0}
+      indexed: [src/added_by_evaluation.py]
+    notes: One committed file that did not exist before is exactly one new file.
+
+  - id: dirty-tree
+    category: dirty
+    setup:
+      - append: {repo: python-service, path: src/config.py}
+    expect:
+      status: completed
+      repository: python-service
+      counts: {changed: 1, new: 0, deleted: 0}
+      dirty: true
+      hash_changed: [src/config.py]
+      tree_unchanged: true
+    notes: >-
+      The edit is uncommitted. V1 indexes the working tree as it stands, so the
+      change is indexed and the tree is reported dirty — and nothing is stashed,
+      reset or cleaned: the tree is byte-identical before and after the sync.
+
+  - id: ignored-file
+    category: admission
+    setup:
+      - write: {repo: python-service, path: .repoatlasignore, text: "ignored_by_evaluation.py\n"}
+      - write: {repo: python-service, path: ignored_by_evaluation.py, text: "IGNORED_EVAL = 1\n"}
+      - write: {repo: python-service, path: visible_control_ignored.py, text: "VISIBLE_EVAL = 1\n"}
+      - commit: {repo: python-service}
+    expect:
+      status: completed
+      repository: python-service
+      indexed: [visible_control_ignored.py]
+      not_indexed: [ignored_by_evaluation.py]
+    notes: >-
+      Committed and tracked, and still refused: .repoatlasignore is RepoAtlas's own
+      policy and git tracking does not override it. The control proves the run.
+
+  - id: secret-exclusion
+    category: admission
+    setup:
+      - write: {repo: python-service, path: .env, text: "PASSWORD=EVAL_SECRET\n"}
+      - write: {repo: python-service, path: id_rsa, text: "EVAL_PRIVATE_KEY\n"}
+      - write: {repo: python-service, path: visible_control_secret.py, text: "VISIBLE_EVAL = 2\n"}
+      - commit: {repo: python-service}
+    expect:
+      status: completed
+      repository: python-service
+      indexed: [visible_control_secret.py]
+      not_indexed: [.env, id_rsa]
+    notes: The built-in secret policy runs ahead of everything else and cannot be widened by a caller.
+
+  - id: evidence-unchanged-stays-valid
+    category: evidence
+    evidence: {repo: python-service, path: src/config.py, line_start: 1, line_end: 4}
+    setup: []
+    expect:
+      status: completed
+      evidence_status: valid
+      transitions: {}
+    notes: Same identity, same bytes, same facts version. Nothing moves.
+
+  - id: evidence-valid-to-stale
+    category: evidence
+    evidence: {repo: python-service, path: src/config.py, line_start: 1, line_end: 4}
+    setup:
+      - append: {repo: python-service, path: src/config.py}
+    expect:
+      status: completed
+      evidence_status: stale
+      transitions: {valid->stale: 1}
+    notes: >-
+      The cited file's bytes changed and were reindexed. Exactly one record — the
+      one supplied — moves, and it moves to stale, not to a refreshed copy.
+
+  - id: evidence-valid-to-invalid
+    category: evidence
+    evidence: {repo: python-service, path: src/config.py, line_start: 1, line_end: 4}
+    setup:
+      - delete: {repo: python-service, path: src/config.py}
+    expect:
+      status: completed
+      evidence_status: invalid
+      transitions: {valid->invalid: 1}
+    notes: No indexed file stands at that identity and path any more.
+
+  - id: contention
+    category: contention
+    setup:
+      - hold_writer_lock: true
+    expect:
+      error: SYNC_IN_PROGRESS
+      retryable: true
+    notes: >-
+      Another writer holds V1's lock. The refusal is V1's own condition, retryable,
+      and nothing changed — the generation does not move.
+
+  - id: not-initialized
+    category: initialization
+    uninitialized: true
+    setup: []
+    expect:
+      error: NOT_INITIALIZED
+      retryable: false
+    notes: >-
+      No configured root, so there is nothing to sync and no index to create. The
+      capability refuses rather than initializing anything on the caller's behalf.

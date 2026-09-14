@@ -43,7 +43,7 @@ from repoatlas.config.settings import ReposSettings, Settings
 from repoatlas.models.parsing import EdgeType, ParsedFile
 from repoatlas.parsers.python import PythonParser
 from repoatlas.services.init_service import initialize
-from repoatlas.services.query_service import locate
+from repoatlas.services.retrieval_service import locate
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace
 from repoatlas.sync.planner import facts_version

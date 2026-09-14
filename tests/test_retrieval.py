@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from repoatlas.retrieval.query import analyze
-from repoatlas.services.query_service import locate
+from repoatlas.services.retrieval_service import locate
 from repoatlas.services.workspace import Workspace
 
 

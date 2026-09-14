@@ -59,19 +59,124 @@ class EdgeType(enum.StrEnum):
     GENERATES = "GENERATES"
 
 
+class EdgeDirection(enum.StrEnum):
+    """Which end of an edge the queried entity is required to sit on.
+
+    Edges are directed facts — ``a IMPORTS b`` is not ``b IMPORTS a`` — but a
+    neighbourhood query is often about either end. ``ANY`` is that query and stays
+    the default, so asking for a direction is a deliberate narrowing rather than
+    something a caller has to opt out of.
+    """
+
+    ANY = "any"
+    #: The queried entity is the edge's source: what it reaches.
+    OUT = "out"
+    #: The queried entity is the edge's target: what reaches it.
+    IN = "in"
+
+
+class NeighborOrder(enum.StrEnum):
+    """Which order the store returns one hop's edges in.
+
+    It matters only because a bounded hop is a *cut*, and whatever comes back
+    first is what survives it.
+
+    ``CONFIDENCE`` is the retrieval order and stays the default: the funnel reads
+    traversal order as a proximity signal, so the strongest edges must arrive
+    first and ties fall to row id. That tiebreak is insertion order, which is fine
+    for a stage about to fuse everything anyway and wrong for an answer a caller
+    reads directly — two indexes built from the same repositories in a different
+    file order would cut different edges, and neither would be wrong.
+
+    ``NATURAL`` orders on facts about the repositories instead, so the same
+    question against the same repositories survives a rebuild unchanged.
+    """
+
+    CONFIDENCE = "confidence"
+    NATURAL = "natural"
+
+
 class Severity(enum.StrEnum):
     WARNING = "warning"
     ERROR = "error"
 
 
+#: Safe wording for the failures a third-party exception used to describe.
+#:
+#: A parse problem is reported to whoever asked for the sync, and a sync response
+#: is a public machine surface. What produced the failure is a parser, a grammar
+#: loader or a configuration library, and the text those raise is theirs: PyYAML
+#: renders the offending source line into its message, ``configparser`` quotes the
+#: line verbatim, ``SyntaxError.msg`` quotes the token it tripped on, and a
+#: grammar loader names the shared object it could not open. None of that is a
+#: contract, all of it is attacker- or host-influenced, and repeating it turns a
+#: diagnostic into a second way to read the repository and the machine under it.
+#:
+#: So RepoAtlas writes the message and takes nothing from the exception but a line
+#: number. The categories below are the distinctions RepoAtlas already drew, kept
+#: because "the grammar is missing" and "this file is not valid TOML" call for
+#: different actions; what is gone is the library's commentary underneath them.
+#: They are constants rather than literals at each site because the same failure
+#: is reported from several parsers, and wording that drifts between them is
+#: wording a caller cannot match on.
+GRAMMAR_UNAVAILABLE = "parser grammar unavailable"
+SYNTAX_ERROR = "syntax error"
+PARSE_FAILED = "parse failed"
+INVALID_JSON = "invalid JSON"
+INVALID_YAML = "invalid YAML"
+INVALID_TOML = "invalid TOML"
+INVALID_CFG = "invalid cfg"
+
+#: Safe wording for an enumeration that git could not complete.
+#:
+#: The same rule as above, applied to the other source of arbitrary text on this
+#: model: a child process. ``git ls-files`` reports a directory it could not open
+#: as a *warning* on stderr and still exits 0, so those lines are the only
+#: evidence that a short listing is not a complete one --- and they are free-form
+#: prose, not a protocol. Git writes them about whatever it was pointed at, and
+#: part of what points it is ``.git/config``, which belongs to the repository
+#: rather than to RepoAtlas. A repository can therefore choose what git says: a
+#: repo-local ``core.excludesFile`` naming an unreadable absolute path was
+#: measured putting that path, verbatim, on a public sync response.
+#:
+#: Git's *stdout* here is the opposite case and is parsed as what it is --- a
+#: NUL-delimited list of repository-relative paths, a defined machine format that
+#: enumeration depends on. The distinction is contract, not origin: stdout has
+#: one, stderr does not.
+#:
+#: The fact worth reporting survives in full, because it was never the text: a
+#: successful sync must not be readable as a complete one. Which directory could
+#: not be read is reported separately, in ``SyncResponse.unreadable_paths``, from
+#: RepoAtlas's own walk rather than from anything git said.
+ENUMERATION_INCOMPLETE = (
+    "enumeration incomplete: git could not read part of this repository, "
+    "so files beneath it are not indexed"
+)
+
+
 class ParseDiagnostic(BaseModel):
-    """A parse problem. Never aborts a sync (V1_SPEC §7)."""
+    """A parse problem. Never aborts a sync (V1_SPEC §7).
+
+    ``message`` is always written by RepoAtlas. It may describe *what* could not
+    be understood and, through ``line`` and ``path``, *where* --- and it never
+    repeats text a parser, grammar loader or configuration library produced. See
+    the constants above for why that is a rule rather than a habit.
+
+    ``path`` is the repository-relative path the sync **admitted**, stamped on by
+    the engine that already knows it. It is deliberately not taken from an
+    exception: a library that happens to mention a filename is naming whatever it
+    was handed, which on some paths is an absolute host path, and a coordinate is
+    only trustworthy when it comes from the identity RepoAtlas itself resolved.
+    ``None`` means the diagnostic is about the repository rather than about one
+    file --- enumeration being incomplete, say.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     severity: Severity
     message: str
     line: int | None = None
+    path: str | None = None
 
 
 class ParsedSymbol(BaseModel):

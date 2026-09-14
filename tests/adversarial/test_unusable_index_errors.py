@@ -25,7 +25,6 @@ import os
 import sqlite3
 import subprocess
 import sys
-import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -58,8 +57,6 @@ COMMANDS: tuple[tuple[str, ...], ...] = (
     ("repos",),
     ("sync",),
     ("locate", "SERVICE_HOST"),
-    ("ask", "where is SERVICE_HOST"),
-    ("debug", "SERVICE_HOST is unset"),
 )
 
 #: What a Rich traceback panel and a bare Python traceback both contain.
@@ -91,7 +88,6 @@ class Harness:
         self.root = base / "work"
         self.repo = self.root / "demo"
         self.database = base / "atlas.db"
-        self.llm_base_url = "http://127.0.0.1:1"
 
     @property
     def environment(self) -> dict[str, str]:
@@ -102,7 +98,6 @@ class Harness:
             "REPOATLAS_DB": str(self.database),
             # A closed port. Any attempt to reach a model fails loudly rather
             # than quietly succeeding on a machine that happens to run Ollama.
-            "REPOATLAS_LLM_BASE_URL": self.llm_base_url,
             "REPOATLAS_SYNC_LOCK_TIMEOUT": "0",
         }
 
@@ -590,44 +585,25 @@ def test_an_unrelated_database_whose_names_collide_is_refused_intact(bare: Harne
 # == 10. precedence: which failure is reported when several are true =========
 
 
-def test_an_unusable_index_is_reported_before_the_model_is_contacted(indexed: Harness) -> None:
-    """§27: exit 3, and the backend is never reached.
+def test_an_unusable_index_is_never_reported_as_a_model_failure(indexed: Harness) -> None:
+    """§27: exit 3, and never the retired code 4.
 
-    A real listener stands in for Ollama and records every connection. If
-    retrieval cannot happen, asking a model to reason about nothing is not a
-    fallback — it is a second failure reported instead of the first.
+    Exit 4 was V1's "no reasoning model is reachable". Nothing raises it --- there
+    is no model --- and the number is reserved rather than reused so a wrapper
+    still branching on it cannot be handed a new meaning. What this pins is the
+    taxonomy: a storage failure reports storage, from every command.
+
+    The original form of this test stood a real listener in for the model server
+    and asserted nothing connected to it. That assertion moved somewhere it still
+    means something: ``tests/test_no_embedded_reasoner.py`` denies ``socket``
+    outright and runs the whole capability surface under it, which is a stronger
+    statement than watching a port the product was never told about.
     """
-    contacted: list[str] = []
-    import socket
-
-    server = socket.socket()
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("127.0.0.1", 0))
-    server.listen(4)
-    server.settimeout(15)
-
-    def accept() -> None:
-        while True:
-            try:
-                sock, _ = server.accept()
-            except OSError:
-                return
-            contacted.append("connected")
-            sock.close()
-
-    listener = threading.Thread(target=accept, daemon=True)
-    listener.start()
-    indexed.llm_base_url = f"http://127.0.0.1:{server.getsockname()[1]}"
     indexed.database.write_bytes(b"not sqlite\n" * 40)
-    try:
-        for command in (("ask", "why"), ("debug", "why"), ("ask", "why", "--no-llm")):
-            result = indexed.run(*command)
-            assert_clean_failure(result, ExitCode.NOT_INITIALIZED)
-            assert result.exit_code != ExitCode.LLM_UNAVAILABLE
-    finally:
-        server.close()
-        listener.join(timeout=5)
-    assert contacted == [], "the index failed; no model may be consulted"
+    for command in COMMANDS:
+        result = indexed.run(*command)
+        assert_clean_failure(result, ExitCode.NOT_INITIALIZED)
+        assert result.exit_code != ExitCode.LLM_UNAVAILABLE
 
 
 def test_writer_lock_contention_still_exits_5(indexed: Harness) -> None:

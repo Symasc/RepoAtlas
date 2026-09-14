@@ -197,6 +197,7 @@ class SqliteSearchIndex:
         rows = self._db.execute(
             f"""
             SELECT c.id AS chunk_id, c.file_id, c.repo_id, c.line_start, c.line_end, c.text,
+                   c.split_index, c.split_total,
                    f.rel_path AS path, r.name AS repository, r.slug AS repository_slug,
                    bm25(chunks_fts) AS rank
             FROM chunks_fts
@@ -229,6 +230,8 @@ class SqliteSearchIndex:
                     line_end=row["line_end"],
                     text=text,
                     score=base + (10.0 if literal else 0.0),
+                    split_index=row["split_index"],
+                    split_total=row["split_total"],
                 )
             )
         hits.sort(key=lambda h: h.score, reverse=True)
@@ -280,6 +283,7 @@ class SqliteSearchIndex:
         rows = self._db.execute(
             f"""
             SELECT c.id AS chunk_id, c.file_id, c.repo_id, c.line_start, c.line_end, c.text,
+                   c.split_index, c.split_total,
                    f.rel_path AS path, r.name AS repository, r.slug AS repository_slug
             FROM chunks c
             JOIN files        f ON f.id = c.file_id
@@ -302,6 +306,8 @@ class SqliteSearchIndex:
                 line_end=row["line_end"],
                 text=row["text"],
                 score=20.0,
+                split_index=row["split_index"],
+                split_total=row["split_total"],
             )
             for row in rows
             if term in row["text"]
@@ -392,6 +398,7 @@ class SqliteSearchIndex:
         rows = self._db.execute(
             f"""
             SELECT c.id AS chunk_id, c.file_id, c.repo_id, c.line_start, c.line_end, c.text,
+                   c.split_index, c.split_total,
                    f.rel_path AS path, r.name AS repository, r.slug AS repository_slug
             FROM chunks c
             JOIN files        f ON f.id = c.file_id
@@ -423,6 +430,12 @@ class SqliteSearchIndex:
                     line_end=head["line_end"],
                     text=text,
                     score=20.0,
+                    # The head piece's position, not a recomputed one. A stitched
+                    # hit is a contiguous region rebuilt from *some* pieces of a
+                    # cut span, so it inherits the span's ``split_total`` and is
+                    # correctly marked as not proving line coverage.
+                    split_index=head["split_index"],
+                    split_total=head["split_total"],
                 )
             )
         return hits

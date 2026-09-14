@@ -593,7 +593,7 @@ def test_a_reader_does_not_need_the_writer_lock(
     root, _database, env = cli_workspace
     from repoatlas.sync.lock import writer_lock
 
-    reads = (["status"], ["repos"], ["locate", "helper"], ["ask", "helper", "--no-llm"])
+    reads = (["status"], ["repos"], ["locate", "helper"], ["locate", "helper", "--json"])
     with writer_lock(Path(env["REPOATLAS_DB"]), timeout=0.0):
         for command in reads:
             started = time.perf_counter()

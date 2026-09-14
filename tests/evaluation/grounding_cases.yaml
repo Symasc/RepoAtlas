@@ -1,0 +1,324 @@
+# RepoAtlas deterministic grounding-capability evaluation set (V2 Slice H).
+#
+# GROUND TRUTH IS MANUAL, and it is unusual ground truth: every expectation below
+# is a statement about PROVENANCE, never about meaning. A case's expected verdict
+# was written by reasoning about which evidence id the answer cites and what the
+# ledger holds for it — never by asking RepoAtlas what it returns, and never by
+# reading the cited source and judging whether it supports the sentence.
+#
+# The pivotal pair is `semantic-consistent` and `semantic-contradiction`. They
+# submit the same citation structure against the same evidence, with statements
+# that mean opposite things, and they expect the SAME classification. A corpus
+# that expected them to differ would be a corpus demanding an entailment checker,
+# and the first person to satisfy it would ship a fact-checker that is sometimes
+# wrong under a name that promises it never is.
+#
+# Scored exactly on both sides. An expected-positive that comes back ungrounded is
+# a failure, and so is an expected-negative that comes back grounded: a verifier
+# that accepts everything and a verifier that accepts nothing are both useless,
+# and only closed scoring catches the second one.
+#
+# No model is consulted. No embedding is computed. Every case is deterministic.
+#
+# Fields
+#   id                  stable identifier, used in the report
+#   category            grounded | partial | ungrounded | unknown | stale
+#                       | superseded | range | isolation | origin | semantic
+#   supply              how the evidence was obtained:
+#                         capability: search | inspect | relationships | dependencies
+#                         plus that capability's parameters
+#   mutate              what happens to the index between supply and verification:
+#                         none | edit-cited-file | delete-cited-file | resupply-span
+#   claims              one entry per submitted claim:
+#                         statement  the prose (never read for meaning)
+#                         cite       index into the supplied evidence, or `unknown`
+#                         start/end  absolute line numbers, or omitted
+#                         shift      offset applied to the evidence's own span
+#                         path       `wrong` to submit a conflicting path
+#                         slug       `wrong` to submit a conflicting repository
+#                         omit       true for a claim with no citation at all
+#   summary             answer summary; `fabricated` plants an unsupplied path
+#   verify_under        `same` (default) or `other` for a second investigation
+#   expected_verdict    grounded | partially_grounded | ungrounded
+#   expected_findings   EXACTLY the finding codes that must come back
+#   expected_claims     number of claims surviving into the sanitized answer
+#   notes               why this is the ground truth
+
+cases:
+  # -------------------------------------------------------------- grounded ---
+  - id: grounded-search-whole-span
+    category: grounded
+    supply: {capability: search, question: SERVICE_HOST}
+    claims:
+      - {statement: "the service host is configured in this file", cite: 0}
+    expected_verdict: grounded
+    expected_findings: []
+    expected_claims: 1
+    notes: >-
+      The ordinary path. The citation names evidence this investigation supplied
+      and asks for the whole span it supplied, so there is nothing to narrow and
+      nothing to refuse.
+
+  - id: grounded-search-subrange
+    category: range
+    supply: {capability: inspect, path: src/config.py, repo: python-service, line_start: 1, line_end: 20}
+    claims:
+      - {statement: "one line of the supplied span", cite: 0, shift: inner}
+    expected_verdict: grounded
+    expected_findings: []
+    expected_claims: 1
+    notes: >-
+      Citing part of what you were shown is honest. The supplied span covers the
+      cited lines, so the citation resolves unchanged and confidence is untouched.
+
+  - id: grounded-two-claims-two-ids
+    category: grounded
+    supply: {capability: search, question: SERVICE_HOST}
+    claims:
+      - {statement: "the first thing the evidence shows", cite: 0}
+      - {statement: "the second thing the evidence shows", cite: 1}
+    expected_verdict: grounded
+    expected_findings: []
+    expected_claims: 2
+    notes: >-
+      Two claims resting on two different ids. Each is resolved against its own
+      evidence, so neither can borrow the other's span.
+
+  # -------------------------------------------------------------- semantic ---
+  - id: semantic-consistent
+    category: semantic
+    supply: {capability: search, question: SERVICE_HOST}
+    claims:
+      - {statement: "this configures the service host", cite: 0}
+    expected_verdict: grounded
+    expected_findings: []
+    expected_claims: 1
+    notes: >-
+      Half of the pivotal pair. A statement consistent with the cited lines.
+
+  - id: semantic-contradiction
+    category: semantic
+    supply: {capability: search, question: SERVICE_HOST}
+    claims:
+      - {statement: "this deletes every row of the production database", cite: 0}
+    expected_verdict: grounded
+    expected_findings: []
+    expected_claims: 1
+    notes: >-
+      The other half, and the most important row in this file. The statement is
+      flatly false about the cited lines, and the expected verdict is IDENTICAL to
+      semantic-consistent. RepoAtlas verified that the citation names evidence it
+      supplied at a span it supplied; it did not and cannot verify that the lines
+      mean what the sentence says. Changing this expectation would require an
+      entailment judgment, and a grounding verdict that sometimes encodes one is
+      no longer a fact a caller can rely on.
+
+  # --------------------------------------------------------------- unknown ---
+  - id: unknown-evidence-id
+    category: unknown
+    supply: {capability: search, question: SERVICE_HOST}
+    claims:
+      - {statement: "rests on a citation nobody issued", cite: unknown}
+    expected_verdict: ungrounded
+    expected_findings: [unknown_evidence]
+    expected_claims: 0
+    notes: >-
+      A fabricated id is diagnosed, not raised as an error, so an answer mixing
+      real and invented citations still produces a usable result.
+
+  - id: unknown-beside-valid-partial
+    category: partial
+    supply: {capability: search, question: SERVICE_HOST}
+    claims:
+      - {statement: "this one is real", cite: 0}
+      - {statement: "this one is invented", cite: unknown}
+    expected_verdict: partially_grounded
+    expected_findings: [unknown_evidence]
+    expected_claims: 1
+    notes: >-
+      One answer, two claims, one of each. The real claim survives and the
+      invented one is removed — the diagnostic is per claim, not per answer.
+
+  - id: unknown-poisons-its-own-claim
+    category: ungrounded
+    supply: {capability: search, question: SERVICE_HOST}
+    claims:
+      - {statement: "half real, and therefore not real", cite: 0, extra_cite: unknown}
+    expected_verdict: ungrounded
+    expected_findings: [unknown_evidence]
+    expected_claims: 0
+    notes: >-
+      V1's rule 1. A claim carrying one genuine citation and one invented one is
+      removed whole: a real reference does not license the material attached to a
+      fabricated one.
+
+  # ----------------------------------------------------------------- range ---
+  - id: citation-outside-supplied-span
+    category: range
+    supply: {capability: search, question: SERVICE_HOST}
+    claims:
+      - {statement: "points at lines nobody supplied", cite: 0, start: 9000, end: 9100}
+    expected_verdict: ungrounded
+    expected_findings: [citation_outside_supplied_span]
+    expected_claims: 0
+    notes: >-
+      Disjoint from the supplied span. Nothing overlapped, so there is no part of
+      the citation that was ever shown and none of it survives.
+
+  - id: citation-reaching-past-the-span
+    category: range
+    supply: {capability: inspect, path: src/config.py, repo: python-service, line_start: 5, line_end: 12}
+    claims:
+      - {statement: "reaches one line above what was supplied", cite: 0, shift: below}
+    expected_verdict: partially_grounded
+    expected_findings: [citation_clamped_to_supplied_span]
+    expected_claims: 1
+    notes: >-
+      Partial overlap. V1 narrows the citation to the part that was supplied and
+      caps the confidence, and the claim survives carrying only lines that were
+      shown. The verdict is not `grounded`, because the range the caller wrote
+      includes a line nobody gave them.
+
+  # ------------------------------------------------------------ provenance ---
+  - id: caller-path-conflicts-with-the-id
+    category: ungrounded
+    supply: {capability: search, question: SERVICE_HOST}
+    claims:
+      - {statement: "names a different file beside a real id", cite: 0, path: wrong}
+    expected_verdict: ungrounded
+    expected_findings: [citation_source_mismatch]
+    expected_claims: 0
+    notes: >-
+      The evidence reference is authoritative. A path submitted alongside an id is
+      checked against it, never substituted for it — otherwise an id would become
+      a token that unlocks any coordinates the caller likes.
+
+  - id: caller-repository-conflicts-with-the-id
+    category: ungrounded
+    supply: {capability: search, question: SERVICE_HOST}
+    claims:
+      - {statement: "names another repository beside a real id", cite: 0, slug: wrong}
+    expected_verdict: ungrounded
+    expected_findings: [citation_source_mismatch]
+    expected_claims: 0
+    notes: >-
+      Identity is the slug. The same path under a different repository is a
+      different file, and evidence from one does not carry to the other.
+
+  # ------------------------------------------------------------------ prose ---
+  - id: prose-names-an-unsupplied-file
+    category: partial
+    supply: {capability: search, question: SERVICE_HOST}
+    summary: fabricated
+    claims:
+      - {statement: "the citation itself is fine", cite: 0}
+    expected_verdict: partially_grounded
+    expected_findings: [prose_reference_not_supplied]
+    expected_claims: 1
+    notes: >-
+      V1's secondary defence. A fabricated path in free text reads as provenance
+      to a human wherever it sits, so the summary is replaced and the removal is
+      reported — while the genuinely cited claim survives.
+
+  # ------------------------------------------------------------ no citation ---
+  - id: claim-without-any-citation
+    category: ungrounded
+    supply: {capability: search, question: SERVICE_HOST}
+    claims:
+      - {statement: "asserted from nowhere", omit: true}
+    expected_verdict: ungrounded
+    expected_findings: [missing_citation]
+    expected_claims: 0
+    notes: >-
+      Nothing to check. An uncited claim is removed rather than trusted, which is
+      V1's behaviour and is the only safe default.
+
+  # ----------------------------------------------------------------- stale ---
+  - id: stale-evidence-does-not-ground
+    category: stale
+    supply: {capability: search, question: SERVICE_HOST}
+    mutate: edit-cited-file
+    claims:
+      - {statement: "cites evidence the index has moved past", cite: 0}
+    expected_verdict: ungrounded
+    expected_findings: [stale_evidence]
+    expected_claims: 0
+    notes: >-
+      The file changed after the evidence was supplied. The record still describes
+      something real; it no longer describes what is indexed, and it is not
+      refreshed to make the citation work.
+
+  - id: invalid-evidence-does-not-ground
+    category: stale
+    supply: {capability: search, question: SERVICE_HOST}
+    mutate: delete-cited-file
+    claims:
+      - {statement: "cites a file that left the index", cite: 0}
+    expected_verdict: ungrounded
+    expected_findings: [invalid_evidence]
+    expected_claims: 0
+    notes: >-
+      No indexed file stands at that identity and path any more, and no same-named
+      replacement is searched for.
+
+  - id: superseded-evidence-does-not-ground
+    category: superseded
+    supply: {capability: inspect, path: src/config.py, repo: python-service, line_start: 1, line_end: 4}
+    mutate: resupply-span
+    claims:
+      - {statement: "cites the id a newer one replaced", cite: 0}
+    expected_verdict: ungrounded
+    expected_findings: [superseded_evidence]
+    expected_claims: 0
+    notes: >-
+      Different bytes were later supplied for the same span under a newer id. The
+      replacement is named in the response and is never followed automatically:
+      citing it is a decision the caller has to make.
+
+  # ------------------------------------------------------------- isolation ---
+  - id: cross-investigation-id-collision
+    category: isolation
+    supply: {capability: search, question: SERVICE_HOST}
+    verify_under: other
+    claims:
+      - {statement: "cites an id under an investigation that never issued it", cite: last}
+    expected_verdict: ungrounded
+    expected_findings: [unknown_evidence]
+    expected_claims: 0
+    notes: >-
+      Evidence ids are per investigation, so both ledgers hold an E1 at different
+      files — that collision is the premise. The case cites the FIRST
+      investigation's highest id and verifies under a second that was supplied
+      deliberately narrowly, so the id is one that ledger genuinely never issued
+      and the refusal cannot be a coincidence of numbering.
+
+  # ---------------------------------------------------------------- origin ---
+  - id: origin-inspect
+    category: origin
+    supply: {capability: inspect, path: src/config.py, repo: python-service, line_start: 1, line_end: 6}
+    claims:
+      - {statement: "rests on evidence supplied by inspection", cite: 0}
+    expected_verdict: grounded
+    expected_findings: []
+    expected_claims: 1
+    notes: Origin is diagnostic. Inspection evidence grounds under the same rule as search evidence.
+
+  - id: origin-relationship
+    category: origin
+    supply: {capability: relationships, target: "file:scripts:deploy.sh"}
+    claims:
+      - {statement: "rests on the lines that assert a graph edge", cite: 0}
+    expected_verdict: grounded
+    expected_findings: []
+    expected_claims: 1
+    notes: Graph provenance is evidence like any other once it was supplied and ledgered.
+
+  - id: origin-dependency
+    category: origin
+    supply: {capability: dependencies}
+    claims:
+      - {statement: "rests on a quoted manifest line", cite: 0}
+    expected_verdict: grounded
+    expected_findings: []
+    expected_claims: 1
+    notes: A manifest line supplied by the dependency capability grounds under the same rule.
