@@ -573,7 +573,11 @@ def test_a_successful_sync_says_so_when_enumeration_was_incomplete(
         locked.chmod(0o755)
 
     assert any("enumeration incomplete" in note for note in notes), notes
-    assert any("locked" in note for note in notes), notes
+    # Which directory was refused used to be read out of this note, because the
+    # note was built from git's stderr. It is reported by the sync's own
+    # `unreadable_paths` instead now (RC audit, RCA-10): git names whatever it was
+    # pointed at, and a repository helps decide what that is.
+    assert not any("Permission denied" in note for note in notes), notes
 
 
 def test_a_complete_scan_reports_no_incompleteness(workspace_root: Path, tmp_path: Path) -> None:
@@ -584,21 +588,29 @@ def test_a_complete_scan_reports_no_incompleteness(workspace_root: Path, tmp_pat
     assert not any("enumeration incomplete" in note for note in notes), notes
 
 
-def test_the_diagnostic_is_a_warning_and_names_a_relative_path(tmp_path: Path) -> None:
+def test_the_diagnostic_is_a_warning_and_quotes_nothing_git_said(tmp_path: Path) -> None:
+    """One warning, whatever git wrote, and none of git's words in it.
+
+    This test used to assert the opposite --- that the message *named* the refused
+    directory --- on the reasoning that git reports it relative to the repository.
+    It also reports an absolute ``core.excludesFile`` the repository itself
+    configured, which is how a host path reached a public sync response (RC audit,
+    RCA-10). The projection now takes a count and writes its own sentence.
+    """
+    from repoatlas.models.parsing import ENUMERATION_INCOMPLETE
     from repoatlas.sync.engine import _enumeration_diagnostics
 
-    diagnostics = _enumeration_diagnostics(
-        [
-            "warning: could not open directory 'a/b/': Permission denied",
-            "warning: could not open directory 'c/': Permission denied",
-        ]
-    )
+    assert _enumeration_diagnostics(0) == []
+
+    diagnostics = _enumeration_diagnostics(2)
 
     assert len(diagnostics) == 1
     assert diagnostics[0].severity is Severity.WARNING
-    assert "a/b" in diagnostics[0].message
-    assert str(tmp_path) not in diagnostics[0].message, "no host-absolute path in a diagnostic"
+    assert diagnostics[0].message == ENUMERATION_INCOMPLETE
     assert "enumeration incomplete" in diagnostics[0].message
+    assert str(tmp_path) not in diagnostics[0].message, "no host-absolute path in a diagnostic"
+    for quoted in ("a/b", "Permission denied", "warning:", "2"):
+        assert quoted not in diagnostics[0].message, quoted
 
 
 # --- 20-22. determinism, unicode, punctuation ---------------------------------
@@ -824,7 +836,7 @@ def test_a_deep_marker_is_retrievable_after_a_sync(workspace_root: Path, tmp_pat
 
     workspace = open_at(settings, workspace_root)
     try:
-        from repoatlas.services.query_service import locate
+        from repoatlas.services.retrieval_service import locate
 
         context = workspace.resolver().resolve(workspace_root, command="locate")
         evidence = locate(workspace, "DEEP_UNIQUE_SYMBOL_918273", context)

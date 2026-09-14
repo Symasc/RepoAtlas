@@ -3,51 +3,32 @@
 from __future__ import annotations
 
 from repoatlas.discovery.reconcile import RepositorySetPlan, plan_repository_set
+from repoatlas.freshness import legacy_index_state
 from repoatlas.models.context import ContextScope, RepositoryContext
+from repoatlas.models.freshness import FreshnessDepth
 from repoatlas.models.reports import RepositoryStatus, StatusReport
-from repoatlas.models.repository import Repository, SyncStatus
+from repoatlas.models.repository import Repository
+from repoatlas.services.freshness_service import current_facts_version, repository_freshness_for
 from repoatlas.services.workspace import Workspace
-from repoatlas.sync.planner import facts_version
 
 
-def _index_state(repo: Repository, workspace: Workspace) -> str:
+def _index_state(repo: Repository, workspace: Workspace, facts: str | None = None) -> str:
     """Report freshness honestly (V1_SPEC §16).
 
     Never claim the index is current when RepoAtlas can cheaply tell it is not.
+
+    The decision moved to :mod:`repoatlas.freshness`, which the capability layer
+    needs and may not reach through a service. What is left here is the V1
+    rendering: ``index_state`` is a public string, printed in the status table and
+    emitted in ``--json``, and ``status`` derives its aggregate verdict by reading
+    these very strings. It is pinned character for character by
+    ``tests/capabilities/test_v1_status_compatibility.py``.
+
+    ``status`` always resolves at ``LIVE`` depth, exactly as before: V1 asks git
+    about every repository it reports on.
     """
-    if repo.last_indexed_at is None:
-        return "not indexed"
-    if repo.last_sync_status is SyncStatus.FAILED:
-        # Git could not say which files belong to this repository, so RepoAtlas
-        # indexed none of them. Whatever is stored is a previous run's, and saying
-        # "interrupted" would suggest a run that merely needs finishing.
-        return "unavailable (git could not enumerate the repository)"
-    if repo.last_sync_status is not SyncStatus.OK:
-        return "interrupted"
-
-    # Checked before the git state, and independently of it: a facts-version change
-    # makes stored facts stale while the working tree is untouched, so HEAD, mtime
-    # and content hash all still agree. This is the only signal that a build which
-    # fixed a parser has not yet reached this index — without it, an index full of
-    # facts the current build would compute differently reports itself as current,
-    # and the user has no way to learn otherwise (V1_SPEC §12).
-    if repo.id is not None and workspace.files.count_outdated(repo.id, _facts_version(workspace)):
-        return "stale (indexed by an older build)"
-
-    live = workspace.git.state(repo.path)
-    if not live.known:
-        return "unknown"
-    if live.head_sha != repo.last_indexed_head:
-        return "stale (HEAD changed)"
-    if repo.last_indexed_dirty is not None and live.is_dirty != repo.last_indexed_dirty:
-        return "stale (working tree changed)"
-    if live.is_dirty:
-        return "current (dirty working tree)"
-    return "current"
-
-
-def _facts_version(workspace: Workspace) -> str:
-    return facts_version(workspace.registry, workspace.dependency_registry)
+    freshness = repository_freshness_for(workspace, repo, depth=FreshnessDepth.LIVE, facts=facts)
+    return legacy_index_state(freshness)
 
 
 def _drift(workspace: Workspace, context: RepositoryContext) -> RepositorySetPlan | None:
@@ -81,6 +62,11 @@ def status(workspace: Workspace, context: RepositoryContext) -> StatusReport:
 
     drift = _drift(workspace, context)
 
+    # Computed once for the whole report: it is derived from the parser and
+    # dependency registries, so it cannot differ between two repositories of one
+    # run, and re-deriving it per repository was pure repetition.
+    facts = current_facts_version(workspace)
+
     per_repo: list[RepositoryStatus] = []
     for repo in context.repositories:
         repo_ids = [repo.id] if repo.id is not None else []
@@ -97,7 +83,7 @@ def status(workspace: Workspace, context: RepositoryContext) -> StatusReport:
                 symbols=workspace.knowledge.count_entities(repo_ids),
                 relationships=workspace.knowledge.count_edges(repo_ids),
                 last_sync=repo.last_indexed_at,
-                index_state=_index_state(repo, workspace),
+                index_state=_index_state(repo, workspace, facts),
             )
         )
 

@@ -54,7 +54,6 @@ def cli(tmp_path: Path) -> Iterator:
         "REPOATLAS_DB": str(state / "atlas.db"),
         # A closed port: any attempt to reach a model fails loudly rather than
         # quietly succeeding on a machine that happens to run Ollama.
-        "REPOATLAS_LLM_BASE_URL": "http://127.0.0.1:1",
     }
 
     def run(cwd: Path, *args: str) -> Result:
@@ -96,16 +95,21 @@ def test_the_full_scenario_with_answers_that_must_change(
     # The misleading document names this file; it contains the token nowhere.
     assert "legacy_config.py" not in located.stdout
 
-    # `ask --no-llm` and `debug --no-llm` are evidence-only and need no model.
-    for command in ("ask", "debug"):
-        result = cli(deep, command, "--no-llm", "Where is SERVICE_HOST configured?")
-        assert result.exit_code == ExitCode.OK, result
-        assert "deployment/service/init.sls:" in result.stdout
+    # The same question as JSON, which is the shape an agent consumes. The
+    # identity is two fields there rather than one rendered path, so the check is
+    # on the parsed pairs.
+    payload = cli(deep, "locate", "Where is SERVICE_HOST configured?", "--json")
+    assert payload.exit_code == ExitCode.OK, payload
+    reached = {
+        (candidate["repository"], candidate["path"])
+        for candidate in json.loads(payload.stdout)["candidates"]
+    }
+    assert ("python-service", "src/config.py") in reached, reached
+    assert ("deployment", "service/init.sls") in reached, reached
 
     errored = cli(
         adversarial_root / "python-service",
-        "debug",
-        "--no-llm",
+        "locate",
         "service failed to bind to the configured host",
     )
     assert errored.exit_code == ExitCode.OK, errored
@@ -169,7 +173,7 @@ def test_no_command_ever_prints_secret_content(cli, adversarial_root: Path) -> N
             ("repos",),
             ("locate", "credentials", "--json", "--verbose"),
             ("locate", "SERVICE_HOST", "--verbose"),
-            ("debug", "--no-llm", "private key", "--verbose"),
+            ("locate", "private key", "--verbose"),
         )
     )
     assert SECRET_SENTINEL not in output
@@ -217,10 +221,17 @@ def test_json_output_is_machine_readable_for_every_command(cli, adversarial_root
         json.loads(result.stdout)
 
 
-def test_ask_without_a_reachable_model_exits_four(cli, adversarial_root: Path) -> None:
+def test_the_reasoning_command_is_not_part_of_the_product(cli, adversarial_root: Path) -> None:
+    """``ask`` used to exit 4 here, having found no model. There is no command.
+
+    Through the real console script, in an environment that sets no model
+    variable --- which is the environment every other test in this file runs in,
+    and the point of the removal.
+    """
     assert cli(adversarial_root, "init", str(adversarial_root)).exit_code == ExitCode.OK
     result = cli(adversarial_root / "python-service", "ask", "why does startup fail")
-    assert result.exit_code == ExitCode.LLM_UNAVAILABLE, result
+    assert result.exit_code != ExitCode.OK, result
+    assert result.exit_code != ExitCode.LLM_UNAVAILABLE, result
 
 
 def test_an_injected_instruction_does_not_change_cli_output(cli, adversarial_root: Path) -> None:

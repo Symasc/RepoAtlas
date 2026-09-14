@@ -146,6 +146,43 @@ class Database:
         """Whether an outer transaction owns the commit. Used by tests and asserts."""
         return self._depth > 0
 
+    @contextmanager
+    def read_snapshot(self) -> Iterator[None]:
+        """One consistent view of the database, across however many reads.
+
+        Ordinary reads here run in autocommit — ``isolation_level="DEFERRED"``
+        makes Python begin a transaction before a write and never before a
+        ``SELECT`` — so two reads a moment apart can land either side of another
+        process's commit and describe two different generations of the same file.
+        That is invisible and it is exactly the wrong thing to be invisible: a
+        caller pairing text read before a sync with a content hash read after it
+        would hold evidence that revalidates cleanly against its own hash while
+        describing a state that never existed.
+
+        A deferred read transaction fixes it at the source rather than detecting
+        it afterwards. WAL gives the reader a snapshot at its first statement and
+        holds it to the end of the block, so every read inside sees one generation
+        no matter what commits meanwhile. Nothing is blocked in either direction:
+        WAL readers do not block the writer and the writer does not block them,
+        which is what makes this affordable on a read path.
+
+        It ends in ``rollback`` because nothing inside it may write. A caller that
+        needs to write wants :meth:`transaction`, and joining an outer one is
+        handled here so the two compose rather than conflict.
+        """
+        if self._depth or self.connection.in_transaction:
+            # Someone above already owns a view; a second BEGIN would fail and a
+            # nested snapshot would mean nothing anyway.
+            yield
+            return
+        with storage_errors(self.path):
+            self.connection.execute("BEGIN DEFERRED")
+        try:
+            yield
+        finally:
+            with storage_errors(self.path):
+                self.connection.rollback()
+
     def execute(self, sql: str, params: object = ()) -> sqlite3.Cursor:
         with storage_errors(self.path):
             return self.connection.execute(sql, params)  # type: ignore[arg-type]

@@ -603,7 +603,7 @@ def test_every_persisted_salt_span_lies_inside_its_file(tmp_path: Path) -> None:
 
 
 def test_retrieval_renders_the_corrected_span(tmp_path: Path) -> None:
-    from repoatlas.services.query_service import locate
+    from repoatlas.services.retrieval_service import locate
 
     root = _root(tmp_path, "locate", DANGEROUS)
     space = _workspace(tmp_path, "locate", root)

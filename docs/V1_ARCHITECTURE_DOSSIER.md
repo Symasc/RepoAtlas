@@ -1,5 +1,11 @@
 *Read-only architecture study · not a release audit*
 
+> **V2 note.** This is a snapshot of V1 at commit `c402463`, written to let a second architect draw the V2
+> boundary. It is kept unedited as the record of what was there. Since it was written, the embedded reasoning
+> subsystem it maps --- `repoatlas/llm/`, `services.reason`, `ask`, `debug`, `--no-llm`, `LLMSettings`,
+> `REPOATLAS_LLM_BASE_URL` and exit code 4 --- has been removed. Its "Local-model only" classifications turned out
+> to be right, and everything it marked reusable was reused.
+
 # RepoAtlas V1 Architecture Dossier
 
 A forensic map of what V1 actually does, where its boundaries fall, and which parts are reusable — written so a second architect can draw the V2 boundary without guessing. Implementation and tests are treated as the source of truth; documentation is treated as a claim to be checked.

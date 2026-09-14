@@ -151,10 +151,22 @@ def _read_owner(path: Path) -> str:
 
 
 def _in_progress(path: Path) -> SyncInProgressError:
-    owner = _read_owner(path)
-    detail = "Wait for it to finish and try again."
-    if owner:
-        detail += f"\n\nLock holder: {owner}\nLock file:   {path}"
+    """The contention error, with the remedy public and the coordinates local.
+
+    ``detail`` is the whole of what a V2 capability caller is told, because that
+    is the field the capability envelope carries to one. It says what to do and
+    nothing else: the holder's pid, the holder's hostname and the absolute lock
+    path describe the machine RepoAtlas is running on, and an external agent can
+    neither act on them nor be trusted with them merely because it asked to sync
+    (FINAL audit, F-01).
+
+    The coordinates are not discarded --- an operator resolving a wedged writer
+    needs exactly them. They travel as attributes and reach the terminal through
+    :meth:`SyncInProgressError.render`, which only the CLI calls.
+    """
     return SyncInProgressError(
-        "Another RepoAtlas synchronization is already in progress.", detail=detail
+        "Another RepoAtlas synchronization is already in progress.",
+        detail="Wait for it to finish and try again.",
+        owner=_read_owner(path),
+        lock_path=path,
     )

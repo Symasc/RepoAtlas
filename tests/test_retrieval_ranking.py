@@ -20,7 +20,7 @@ from repoatlas.models.evidence import (
 )
 from repoatlas.retrieval.ranking import NoopReranker, apply_budget, deduplicate, fuse
 from repoatlas.retrieval.retriever import RetrievalLimits, Retriever
-from repoatlas.services.query_service import locate
+from repoatlas.services.retrieval_service import locate
 from repoatlas.services.workspace import Workspace
 
 

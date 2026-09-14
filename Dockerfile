@@ -2,8 +2,9 @@
 #
 # Repositories are untrusted input and are never executed (V1_SPEC §17), so this
 # image installs nothing from them, runs as a non-root user, and needs no network
-# at runtime for any deterministic command. Reasoning is delegated to the separate
-# `ollama` service; embeddings are ONNX-only, so there is no CUDA and no PyTorch.
+# at runtime for any command. Reasoning is not in the image and not in the stack:
+# an external agent connects over `repoatlas mcp`. Embeddings are ONNX-only, so
+# there is no CUDA and no PyTorch.
 
 # -- build stage ---------------------------------------------------------------
 # Dependencies resolve from the committed uv.lock, so an image build is

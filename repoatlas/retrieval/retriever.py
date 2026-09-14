@@ -1,8 +1,8 @@
 """The retrieval funnel (ARCHITECTURE.md §10).
 
-Turns a question plus a ``RepositoryContext`` into a bounded ``EvidenceSet``. No
-LLM is involved at any stage — this is the layer that makes the trust rule
-affordable, and it is why ``locate`` works with no model installed.
+Turns a question plus a ``RepositoryContext`` into a bounded ``EvidenceSet``. Every
+stage is deterministic — this is the layer that makes the trust rule affordable,
+and it is the whole of what RepoAtlas contributes to an answer.
 
 The funnel's governing rule is V1_SPEC §14: **vector search must not replace exact
 search.** Semantic retrieval is one more source feeding fusion, and every
@@ -23,6 +23,7 @@ from dataclasses import dataclass, replace
 
 from repoatlas.config.settings import RetrievalSettings
 from repoatlas.embeddings.protocol import EmbeddingModel, EmbeddingUnavailable
+from repoatlas.graph.traversal import expand_from_seeds
 from repoatlas.models.context import ContextScope, RepositoryContext
 from repoatlas.models.evidence import (
     EvidenceCandidate,
@@ -31,7 +32,7 @@ from repoatlas.models.evidence import (
     EvidenceTier,
     MatchClass,
 )
-from repoatlas.models.parsing import EdgeType
+from repoatlas.models.retrieval import RetrievalOutcome, SuppressionOutcome
 from repoatlas.models.telemetry import RetrievalTrace, StageTiming, Stopwatch
 from repoatlas.retrieval.query import analyze
 from repoatlas.retrieval.ranking import (
@@ -46,48 +47,6 @@ from repoatlas.storage.protocols import ChunkHit, FileHit, VectorHit
 from repoatlas.storage.sqlite.search import SqliteSearchIndex
 from repoatlas.storage.sqlite.stores import SqliteKnowledgeStore
 from repoatlas.storage.sqlite.vectors import SqliteVectorIndex
-
-#: Edge types graph expansion may traverse.
-#:
-#: These are *relationship* edges. ``DEFINES`` and ``CONTAINS`` are deliberately
-#: absent even though they are perfectly good facts: they are containment, so
-#: traversing them turns any file node into a fan-out over every symbol it
-#: declares, and two hops of that buries the relationship the question was about
-#: under an inventory of the neighbourhood.
-_EXPANSION_EDGES = (
-    EdgeType.READS,
-    EdgeType.WRITES,
-    EdgeType.EXPORTS,
-    EdgeType.CONFIGURES,
-    EdgeType.DEPENDS_ON,
-    EdgeType.IMPORTS,
-    EdgeType.REFERENCES,
-    EdgeType.EXECUTES,
-    EdgeType.SOURCES,
-    EdgeType.INCLUDES,
-    EdgeType.REQUIRES,
-    EdgeType.WATCHES,
-    EdgeType.MANAGES,
-    EdgeType.GENERATES,
-)
-
-#: Edge types a traversal may follow **out of one repository into another**.
-#:
-#: Every one of these is produced by the linker's global pass from an exact match
-#: — a resolved package name, a resolved path, a resolved import — so a
-#: cross-repository answer always has a structural reason (V1_SPEC §9). A `CALLS`
-#: or `DEFINES` edge is deliberately absent: those are meaningful within a
-#: repository but would let a traversal wander between repositories on nothing
-#: stronger than a shared symbol name.
-_CROSS_REPOSITORY_EDGES = frozenset(
-    {
-        EdgeType.DEPENDS_ON,
-        EdgeType.REFERENCES,
-        EdgeType.EXECUTES,
-        EdgeType.SOURCES,
-        EdgeType.IMPORTS,
-    }
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +82,35 @@ class RetrievalLimits:
         return replace(self, per_source=per_source, final=final, token_budget=token_budget)
 
 
+#: The widened bounds ``debug`` retrieves under (V1_SPEC §16).
+#:
+#: A diagnosis benefits from more surrounding evidence than a direct lookup, so
+#: ``debug`` retrieves a wider set within the same token budget. Named here rather
+#: than in the service that happens to use it first: it is a property of retrieval,
+#: and the caller chooses a documented profile instead of assembling raw limits.
+DIAGNOSTIC_LIMITS = RetrievalLimits(per_source=40, final=18, token_budget=8000)
+
+#: What the trace says when the embedding backend could not answer.
+#:
+#: Fixed text, authored here, and deliberately not derived from the exception.
+#: :class:`~repoatlas.embeddings.protocol.EmbeddingUnavailable` carries whatever
+#: the backend raised — a loader's ``OSError`` naming a model cache directory, an
+#: ``ImportError`` naming a shared object, an HTTP body, a filesystem path — and a
+#: stage detail is a **public field of a successful response**, reaching the agent
+#: through ``search(include_trace=True)`` and V1's ``locate --json``. Repeating
+#: third-party text there discloses host layout that the caller asked nothing
+#: about and can act on in no way.
+#:
+#: It says what RepoAtlas could not do rather than what a backend complained
+#: about, so it stays true when the backend is replaced (V1_SPEC §3 makes that a
+#: configuration change). It is also distinct from every other semantic detail —
+#: "embeddings not configured", "no vectors stored for ...", "empty query vector"
+#: and "<model>: n hit(s)" — so the reason the stage produced nothing is still
+#: legible, and a failure is never mistaken for a stage that ran and matched
+#: nothing.
+SEMANTIC_UNAVAILABLE = "semantic retrieval unavailable"
+
+
 class Retriever:
     """Builds bounded evidence sets from deterministic signals, ranked by tier."""
 
@@ -151,6 +139,23 @@ class Retriever:
         ``literal_phrase`` additionally searches the whole question verbatim,
         which is how ``debug`` finds an unquoted error string embedded in source
         (V1_SPEC §16).
+
+        The V1 entry point, unchanged. It is one call to :meth:`retrieve_detailed`
+        with everything an ``EvidenceSet`` cannot carry dropped on the floor.
+        """
+        return self.retrieve_detailed(question, context, literal_phrase=literal_phrase).evidence
+
+    def retrieve_detailed(
+        self, question: str, context: RepositoryContext, *, literal_phrase: bool = False
+    ) -> RetrievalOutcome:
+        """The funnel: one pass, and everything that pass decided.
+
+        The same work :meth:`retrieve` does, returning the suppression decision and
+        the exact entity hits that seeded graph expansion alongside the evidence.
+        Both were already computed here and both used to survive only as an English
+        sentence in a trace field, which is not something a caller can act on
+        without re-deriving it — either by parsing prose or by running the funnel a
+        second time. Neither is acceptable, so the funnel says what it decided.
         """
         stages: list[StageTiming] = []
         analysis = analyze(question)
@@ -221,17 +226,21 @@ class Retriever:
         incoming = sum(len(ranked) for ranked in ranked_lists)
 
         if not ranked_lists:
-            return EvidenceSet(
-                question=question,
-                scope=str(context.scope),
-                primary_repository=primary_name,
-                trace=RetrievalTrace(
-                    stages=tuple(stages),
-                    literal_terms=tuple(literal_terms),
-                    scoped_repositories=len(primary_ids),
-                    semantic_used=semantic_used,
-                    semantic_detail=semantic_detail,
+            return RetrievalOutcome(
+                evidence=EvidenceSet(
+                    question=question,
+                    scope=str(context.scope),
+                    primary_repository=primary_name,
+                    trace=RetrievalTrace(
+                        stages=tuple(stages),
+                        literal_terms=tuple(literal_terms),
+                        scoped_repositories=len(primary_ids),
+                        semantic_used=semantic_used,
+                        semantic_detail=semantic_detail,
+                    ),
                 ),
+                suppression=suppressed,
+                seed_entity_ids=tuple(entity_ids),
             )
 
         with Stopwatch("fuse", candidates_in=incoming) as watch:
@@ -271,7 +280,7 @@ class Retriever:
             watch.detail = f"{tokens} tokens" + (", truncated" if truncated else "")
         stages.append(_recorded(watch))
 
-        return EvidenceSet(
+        evidence = EvidenceSet(
             question=question,
             candidates=tuple(bounded),
             scope=str(context.scope),
@@ -307,6 +316,11 @@ class Retriever:
                 ),
                 token_estimate=tokens,
             ),
+        )
+        return RetrievalOutcome(
+            evidence=evidence,
+            suppression=suppressed,
+            seed_entity_ids=tuple(entity_ids),
         )
 
     # -- stages --------------------------------------------------------------
@@ -347,13 +361,13 @@ class Retriever:
         scopes: list[list[int] | None],
         stages: list[StageTiming],
         *,
-        suppressed: str | None = None,
+        suppressed: SuppressionOutcome | None = None,
     ) -> list[list[EvidenceCandidate]]:
         """FTS recall over chunk text. Recall, not proof, so it is associative."""
         lists: list[list[EvidenceCandidate]] = []
         with Stopwatch("lexical") as watch:
             if suppressed is not None:
-                watch.detail = suppressed
+                watch.detail = suppressed.message
                 scopes = []
             for scope in scopes:
                 hits = self._search.search_text(question, scope, self._limits.per_source)
@@ -381,7 +395,7 @@ class Retriever:
         scopes: list[list[int] | None],
         stages: list[StageTiming],
         *,
-        suppressed: str | None = None,
+        suppressed: SuppressionOutcome | None = None,
     ) -> tuple[list[EvidenceCandidate], list[int]]:
         """Entity lookup. An exact name match is a fact; a fuzzy one is a lead.
 
@@ -475,7 +489,7 @@ class Retriever:
                     )
             watch.candidates_out = len(candidates)
             watch.detail = (
-                suppressed
+                suppressed.message
                 if suppressed is not None
                 else f"{by_name} exact entity name, {len(seen_entities) - by_name} full-text"
             )
@@ -556,7 +570,7 @@ class Retriever:
         literal_terms: list[str],
         exact: list[EvidenceCandidate],
         proven_files: set[str] | None = None,
-    ) -> str | None:
+    ) -> SuppressionOutcome | None:
         """Whether every associative source would be answering a different question.
 
         When the question names literal terms — a quoted string, an environment
@@ -585,7 +599,12 @@ class Retriever:
         if proven_files and any(term in proven_files for term in literal_terms):
             return None
         named = ", ".join(literal_terms[:3])
-        return f"suppressed: none of the named terms exist ({named})"
+        return SuppressionOutcome(
+            terms=tuple(literal_terms),
+            # Produced here and read from here. The trace renders this sentence; it
+            # is never the source anything recovers the decision from.
+            message=f"suppressed: none of the named terms exist ({named})",
+        )
 
     def _stage_semantic(
         self,
@@ -593,12 +612,12 @@ class Retriever:
         repo_ids: list[int] | None,
         stages: list[StageTiming],
         *,
-        suppressed: str | None = None,
+        suppressed: SuppressionOutcome | None = None,
     ) -> tuple[list[EvidenceCandidate], bool, str]:
         """Vector neighbours. Always associative — a guess about what was meant."""
         with Stopwatch("semantic") as watch:
             if suppressed is not None:
-                candidates, used, detail = [], False, suppressed
+                candidates, used, detail = [], False, suppressed.message
             else:
                 candidates, used, detail = self._semantic_candidates(question, repo_ids)
             watch.candidates_out = len(candidates)
@@ -609,6 +628,14 @@ class Retriever:
     def _semantic_candidates(
         self, question: str, repo_ids: list[int] | None
     ) -> tuple[list[EvidenceCandidate], bool, str]:
+        """Vector neighbours, whether the stage ran, and what the trace should say.
+
+        Every string returned here is written here, and that is the rule rather
+        than an accident of the current branches: the third element is published
+        verbatim as a public stage detail. It may describe RepoAtlas state —
+        configuration, stored vector counts, hit counts, the configured model id —
+        and it may never repeat text RepoAtlas did not author.
+        """
         if self._vectors is None or self._embeddings is None:
             return [], False, "embeddings not configured"
 
@@ -620,9 +647,16 @@ class Retriever:
 
         try:
             vector = self._embeddings.embed_query(question)
-        except EmbeddingUnavailable as exc:
+        except EmbeddingUnavailable:
             # Never fatal: the deterministic stages are the mandatory ones.
-            return [], False, str(exc)
+            #
+            # The exception is deliberately not bound. Its text belongs to
+            # whoever raised it — a backend, a loader, a transport — and this
+            # value is published. Not naming it is what keeps the two apart:
+            # there is no variable here through which backend text could reach a
+            # trace, so the guarantee cannot erode later into "just the class
+            # name" or "just the first line".
+            return [], False, SEMANTIC_UNAVAILABLE
         if not vector:
             return [], False, "empty query vector"
 
@@ -652,50 +686,21 @@ class Retriever:
     def _expand(self, entity_ids: list[int]) -> tuple[list[EvidenceCandidate], int]:
         """Bounded traversal from matched entities (ARCHITECTURE.md §10 stage 4).
 
-        Bounded on three axes at once — hop count, fan-out per hop and total nodes
-        — because a popular hub such as ``env:SERVICE_HOST`` legitimately touches
-        every repository, and an unbounded walk from it would return the world.
-
-        Two hops is the useful minimum, not an arbitrary depth: an interned node
-        like an environment variable has no location of its own, so hop one reaches
-        the hub and hop two reaches the files on the other side of it. That is what
-        makes "where is SERVICE_HOST configured?" answerable from inside a service
-        that only reads it.
+        The walk itself is :func:`repoatlas.graph.traversal.expand_from_seeds`,
+        which owns the edge whitelist and the cross-repository rule. What remains
+        here is turning what it reached into candidates — and preserving the order
+        it reached them in, because that order is the proximity signal fusion reads.
         """
-        if not entity_ids:
-            return [], 0
-
-        frontier = entity_ids[: self._limits.graph_seeds]
-        visited: set[int] = set(frontier)
-        reached: list[int] = []
-        reason: dict[int, str] = {}
-
-        for hop in range(max(0, self._limits.graph_hops)):
-            if not frontier:
-                break
-            edges = self._knowledge.expand_neighbors(
-                frontier,
-                _EXPANSION_EDGES,
-                limit=self._limits.graph_fanout * max(1, len(frontier)),
-            )
-            next_frontier: list[int] = []
-            for edge in edges:
-                if edge.crosses_repositories and edge.type not in _CROSS_REPOSITORY_EDGES:
-                    continue
-                for neighbor in (edge.src_id, edge.dst_id):
-                    if neighbor in visited:
-                        continue
-                    visited.add(neighbor)
-                    next_frontier.append(neighbor)
-                    reached.append(neighbor)
-                    reason[neighbor] = f"{edge.type.value.lower()} (hop {hop + 1})"
-                if len(next_frontier) >= self._limits.graph_fanout:
-                    break
-            frontier = next_frontier
-
-        if not reached:
-            return [], len(visited)
-        return self._knowledge_candidates(reached, reason), len(visited)
+        walk = expand_from_seeds(
+            self._knowledge,
+            entity_ids,
+            hops=self._limits.graph_hops,
+            fanout=self._limits.graph_fanout,
+            seed_limit=self._limits.graph_seeds,
+        )
+        if not walk.reached:
+            return [], walk.visited
+        return self._knowledge_candidates(walk.reached, walk.reasons), walk.visited
 
     def _knowledge_candidates(
         self, entity_ids: list[int], reason: dict[int, str] | None = None
@@ -765,6 +770,11 @@ class Retriever:
             tier=tier,
             match=match,
             description=description,
+            # Whether this text is a whole chunk or one piece of a cut span
+            # decides whether anything may be cited by line. It is a fact the
+            # store already established, so it travels rather than being
+            # re-derived downstream from the shape of the text.
+            split_total=hit.split_total,
         )
 
     @staticmethod
@@ -781,6 +791,7 @@ class Retriever:
             tier=EvidenceTier.ASSOCIATIVE,
             match=MatchClass.SIMILAR,
             description="semantically similar",
+            split_total=hit.split_total,
         )
 
 

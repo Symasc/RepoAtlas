@@ -14,6 +14,8 @@ import ast
 from pathlib import Path
 
 from repoatlas.models.parsing import (
+    PARSE_FAILED,
+    SYNTAX_ERROR,
     EdgeType,
     EntityType,
     ParsedFile,
@@ -351,19 +353,20 @@ class PythonParser:
                 diagnostics=(
                     ParseDiagnostic(
                         severity=Severity.ERROR,
-                        message=f"syntax error: {exc.msg}",
+                        # `exc.msg` is CPython's, and CPython quotes the source in
+                        # it --- "unmatched ']'", "invalid conversion character
+                        # 'z'". The line number is a number and stays.
+                        message=SYNTAX_ERROR,
                         line=exc.lineno,
                     ),
                 ),
             )
-        except (ValueError, RecursionError) as exc:
+        except (ValueError, RecursionError):
             return ParsedFile(
                 language=self.language,
                 parser=self.name,
                 parser_version=self.version,
-                diagnostics=(
-                    ParseDiagnostic(severity=Severity.ERROR, message=f"parse failed: {exc}"),
-                ),
+                diagnostics=(ParseDiagnostic(severity=Severity.ERROR, message=PARSE_FAILED),),
             )
 
         visitor = _Visitor(module_name)

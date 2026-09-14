@@ -14,7 +14,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict
 
 from repoatlas.models.dependencies import DependencyPackage, DependencyRecord
-from repoatlas.models.parsing import EdgeType, EntityType
+from repoatlas.models.parsing import EdgeDirection, EdgeType, EntityType, NeighborOrder
 from repoatlas.models.repository import FileState, IndexedFile, Repository
 
 
@@ -116,6 +116,15 @@ class ChunkHit(BaseModel):
     line_end: int
     text: str
     score: float
+    #: Position of this piece within the line span it came from, and how many
+    #: pieces that span became. Every piece of a cut span carries the *span's*
+    #: line range (ARCHITECTURE.md §6), which is truthful at chunking's
+    #: granularity but means a piece other than a whole one begins or ends
+    #: mid-line: its text does not cover the range it advertises. A caller that
+    #: must prove line coverage needs to see that, so it is surfaced here rather
+    #: than left in the table.
+    split_index: int = 0
+    split_total: int = 1
 
 
 class FileHit(BaseModel):
@@ -157,6 +166,13 @@ class VectorHit(BaseModel):
     line_end: int
     text: str
     score: float
+    #: The same cut provenance :class:`ChunkHit` carries, and for the same
+    #: reason. A vector hit is a chunk like any other, so a piece of a cut span
+    #: can be reached semantically exactly as it can be reached lexically; a
+    #: caller that must prove line coverage needs to see that on both routes or
+    #: the weaker one becomes the way around the rule.
+    split_index: int = 0
+    split_total: int = 1
 
 
 class EntityHit(BaseModel):
@@ -172,6 +188,32 @@ class EntityHit(BaseModel):
     line_start: int | None
     line_end: int | None
     score: float
+
+
+class EntityIdentity(BaseModel):
+    """An entity addressed by its natural key (ARCHITECTURE.md §3).
+
+    ``key`` is the identity: it is derived from what the repository says, so it
+    survives a reindex that renumbers every row. ``entity_id`` is a storage row id
+    and is the opposite — useful inside one process, meaningless outside it.
+
+    ``repository_slug`` and ``path`` are ``None`` for an interned entity. An
+    environment variable has no location of its own, and giving it one would
+    manufacture provenance for a fact that has none (V1_SPEC §11).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    entity_id: int
+    key: str
+    type: EntityType
+    name: str
+    qualified_name: str | None = None
+    repository_slug: str | None = None
+    path: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    signature: str | None = None
 
 
 class UnresolvedRefRecord(BaseModel):
@@ -237,6 +279,14 @@ class NeighborEdge(BaseModel):
     confidence: float = 1.0
     src_repo_id: int | None = None
     dst_repo_id: int | None = None
+    #: The file that asserted this edge, and where in it. An edge is provenanced
+    #: by the file that claims it (ARCHITECTURE.md §3); carrying that here is what
+    #: lets a caller supply the asserting lines as evidence instead of offering
+    #: coordinates the reader has no way to check.
+    file_id: int | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    parser: str | None = None
 
     def other(self, entity_id: int) -> int:
         return self.dst_id if entity_id == self.src_id else self.src_id
@@ -278,6 +328,7 @@ class RepositoryStore(Protocol):
 
 class FileStore(Protocol):
     def list_states(self, repo_id: int) -> dict[str, FileState]: ...
+    def states_for(self, repo_id: int, rel_paths: Sequence[str]) -> dict[str, FileState]: ...
     def upsert(self, repo_id: int, file: IndexedFile) -> int: ...
     def delete_many(self, file_ids: Sequence[int]) -> None: ...
     def count_outdated(self, repo_id: int, parser_version: str) -> int: ...
@@ -304,7 +355,12 @@ class KnowledgeStore(Protocol):
         entity_ids: Sequence[int],
         edge_types: Sequence[EdgeType] | None,
         limit: int,
+        direction: EdgeDirection = EdgeDirection.ANY,
+        order: NeighborOrder = NeighborOrder.CONFIDENCE,
     ) -> list[NeighborEdge]: ...
+    def get_entities_by_key(self, keys: Sequence[str]) -> list[EntityIdentity]: ...
+    def keys_for_entities(self, entity_ids: Sequence[int]) -> dict[int, EntityIdentity]: ...
+    def chunks_for_file(self, file_id: int, line_start: int, line_end: int) -> list[ChunkHit]: ...
     def gc_orphan_entities(self) -> int: ...
 
 

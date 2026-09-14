@@ -3,14 +3,18 @@
 The guarantee is structural, not a filter applied late: secret files are dropped
 **at enumeration**, so nothing downstream ever sees the path, let alone the
 content. These tests assert that separately at each stage the content could
-otherwise reach — files, chunks, the FTS index, embeddings, evidence, the model
-prompt, and operator-visible output — because a single choke point is only a
-guarantee if the stages behind it really do depend on it.
+otherwise reach — files, chunks, the FTS index, embeddings, evidence and
+operator-visible output — because a single choke point is only a guarantee if
+the stages behind it really do depend on it.
+
+A stage is missing from that list. V1 also handed evidence to a local model, and
+this suite inspected every message the backend received. There is no such model
+and no such prompt: an agent reasons over what ``search`` returned, and what
+``search`` may return is the evidence stage above.
 """
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -18,7 +22,6 @@ from pathlib import Path
 import pytest
 from repoatlas.cli.main import app
 from repoatlas.discovery.ignore import is_secret_path
-from repoatlas.llm.scripted import ScriptedBackend
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace
 from typer.testing import CliRunner
@@ -132,7 +135,7 @@ def test_secret_files_are_absent_from_a_full_reindex_too(
     assert {row["rel_path"] for row in rows}.isdisjoint(SECRET_FILES)
 
 
-# -- the prompt and operator-visible output ---------------------------------
+# -- operator-visible output ------------------------------------------------
 
 
 @pytest.fixture
@@ -149,28 +152,6 @@ def _run_in(directory: Path, *args: str):
         return runner.invoke(app, list(args))
     finally:
         os.chdir(previous)
-
-
-def test_no_secret_reaches_the_model_prompt(
-    cli_env: Path, workspace_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The strongest form: inspect every message actually handed to the backend."""
-    repo = workspace_root / "python-service"
-    for name, text in SECRET_FILES.items():
-        (repo / name).write_text(text)
-
-    backend = ScriptedBackend(
-        [json.dumps({"summary": "No credentials are indexed.", "hypotheses": [], "unknowns": []})]
-    )
-    monkeypatch.setattr("repoatlas.services.query_service.build_model", lambda settings: backend)
-
-    assert _run_in(workspace_root, "init", str(workspace_root)).exit_code == 0
-    result = _run_in(repo, "ask", "What is SECRET_TOKEN set to?")
-    assert result.exit_code == 0
-
-    prompt = "\n".join(message.content for call in backend.calls for message in call)
-    assert _leaks(prompt) == []
-    assert ".env" not in prompt
 
 
 def test_no_secret_appears_in_verbose_operator_output(cli_env: Path, workspace_root: Path) -> None:

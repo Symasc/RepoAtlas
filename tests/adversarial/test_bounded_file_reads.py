@@ -853,17 +853,11 @@ def test_no_oversized_text_is_ever_offered_to_the_embedding_backend(
         space.close()
 
 
-def test_no_oversized_content_reaches_the_model_prompt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_no_oversized_content_reaches_retrieved_evidence(tmp_path: Path) -> None:
     """§23. The question names the marker directly, which is as hard as a user can
     push retrieval at it. Knowing the *path* exists is permitted by the current
-    model; carrying the file's bytes into the evidence block is not."""
-    import json
-
-    from repoatlas.llm.reasoner import QueryIntent
-    from repoatlas.llm.scripted import ScriptedBackend
-    from repoatlas.services.query_service import reason
+    model; carrying the file's bytes into the evidence is not."""
+    from repoatlas.services.retrieval_service import locate
 
     root = tmp_path / "repos"
     repo = _repo(root)
@@ -871,25 +865,12 @@ def test_no_oversized_content_reaches_the_model_prompt(
     (repo / "big.py").write_bytes(f"HUGE = '{MARKER}_PROMPT'\n".encode() + b"#" * (CAP * 2))
     _commit(repo)
 
-    backend = ScriptedBackend(
-        [json.dumps({"summary": "Not indexed.", "hypotheses": [], "unknowns": ["value"]})] * 4
-    )
-    del monkeypatch
-
     space = _indexed(tmp_path, root)
     try:
         context = space.resolver().resolve(root / "svc")
-        reason(
-            space,
-            f"What is {MARKER}_PROMPT in big.py?",
-            context,
-            QueryIntent.ASK,
-            model=backend,
-        )
-        prompt = "\n".join(m.content for call in backend.calls for m in call)
-        assert backend.calls, "the model must actually have been called"
-        # Once, as the user's own question. Never as retrieved evidence.
-        assert prompt.count(f"{MARKER}_PROMPT") == 1
+        evidence = locate(space, f"What is {MARKER}_PROMPT in big.py?", context)
+        supplied = "\n".join(candidate.text for candidate in evidence.candidates)
+        assert f"{MARKER}_PROMPT" not in supplied
     finally:
         space.close()
 
@@ -1205,6 +1186,11 @@ READERS = {
     "repoatlas/storage/sqlite/migrator.py": "migration SQL shipped inside the package",
     "repoatlas/llm/prompts/loader.py": "prompt templates shipped inside the package",
     "repoatlas/sync/lock.py": "RepoAtlas's own writer-lock file",
+    # Opens no path at all: it wraps an already-open descriptor (the process's own
+    # stdout) so the MCP protocol can write to it, and reads from it never. It is
+    # listed because the sweep below cannot tell a descriptor from a path, and
+    # because `CapabilityService.open` reads as `.open` to a name-based check.
+    "repoatlas/mcp/server.py": "wraps the process's own stdout descriptor; writes only",
 }
 
 
@@ -1227,7 +1213,13 @@ def test_no_module_reads_a_file_without_being_on_the_audit_list() -> None:
             rendered = ast.unparse(node.func)
             reads = rendered.endswith((".read_bytes", ".read_text", "os.read", ".read"))
             opens = rendered.endswith(".open") and "boundary" not in rendered
-            if reads or opens:
+            # A bare `open(...)` renders as exactly "open" and so ends with
+            # neither, which left the most ordinary way to read a file the one
+            # way past this sweep. Named here with the descriptor-level calls for
+            # the same reason: the check is only worth having if the obvious
+            # spelling is the one it catches.
+            bare = rendered in {"open", "os.open", "os.fdopen"}
+            if reads or opens or bare:
                 found.append(rendered)
         if found and rel not in READERS:
             offenders[rel] = sorted(set(found))

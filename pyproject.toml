@@ -10,11 +10,20 @@ dependencies = [
     "typer>=0.15",
     "pydantic>=2.10",
     "pyyaml>=6.0",
-    "httpx>=0.28",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.7",
     "numpy>=2.0",
     "fastembed>=0.5",
+    # The official Model Context Protocol SDK, for the stdio transport adapter
+    # only. Pinned below 2.0: that line swaps `httpx` for a second HTTP client
+    # (`httpx2`) and adds an OpenTelemetry dependency, neither of which a local
+    # stdio adapter needs.
+    #
+    # RepoAtlas itself declares no HTTP client. It had one --- `httpx`, for the
+    # embedded reasoner's model server --- and nothing first-party imports one
+    # now. The SDK still installs `httpx` transitively, and an installed HTTP
+    # library is not network use: on stdio nothing opens a connection.
+    "mcp>=1.30,<2",
 ]
 
 [project.scripts]
@@ -34,6 +43,46 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["repoatlas"]
+
+# The canonical agent skill lives at the repository root, where it is
+# vendor-neutral and discoverable, and it is mapped into the installed package so
+# that `pip install repoatlas` ships it too. Mapped rather than copied: two
+# manually maintained copies of behavioural guidance is exactly how the guidance
+# comes to disagree with itself. The sdist picks the directory up as source.
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "repoatlas/skills"
+
+# The adversarial suite proves that a file named like a private key is never read,
+# and the only honest way to prove it is with files named like private keys. Those
+# fixtures are fake --- each carries a sentinel where a secret would be --- and
+# they belong in the checkout, where they do their job.
+#
+# They do not belong in a published artifact. A source distribution is scanned,
+# mirrored and unpacked by tooling that reads a filename before it reads a
+# sentinel, so shipping `id_rsa` and `secret.pem` means shipping a permanent false
+# positive to everyone downstream, plus the small chance that someone believes it.
+# The wheel never carried them; only the sdist did, because hatchling includes the
+# tree by default (RC audit, RCA-04).
+#
+# Excluded by shape rather than by listing today's files, so a new fixture of the
+# same kind is excluded when it is added rather than when someone remembers. The
+# checkout is untouched: this is artifact hygiene, and weakening the adversarial
+# coverage to quiet a scanner would trade a real guarantee for a cosmetic one.
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "tests/**/fixtures/**/.env",
+  "tests/**/fixtures/**/.env.*",
+  "tests/**/fixtures/**/id_rsa",
+  "tests/**/fixtures/**/id_dsa",
+  "tests/**/fixtures/**/id_ecdsa",
+  "tests/**/fixtures/**/id_ed25519",
+  "tests/**/fixtures/**/*.pem",
+  "tests/**/fixtures/**/*.key",
+  "tests/**/fixtures/**/*.p12",
+  "tests/**/fixtures/**/*.pfx",
+  "tests/**/fixtures/**/.netrc",
+  "tests/**/fixtures/**/.pgpass",
+]
 
 [tool.ruff]
 line-length = 100

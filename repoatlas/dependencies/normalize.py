@@ -15,6 +15,16 @@ NPM = "npm"
 GEM = "gem"
 DOCKER = "docker"
 
+#: Ecosystems in which one *repository* can be said to provide a package.
+#:
+#: Cross-repository dependency resolution is defined only here (V1_SPEC §9): these
+#: are the ecosystems whose manifests name the package the repository itself
+#: publishes, so a declaration in one repository can be matched against a
+#: provision in another. Outside this set RepoAtlas records declarations and
+#: resolutions perfectly well and simply proves nothing about which repository, if
+#: any, is behind the name.
+REPOSITORY_ECOSYSTEMS = frozenset({PYPI, NPM, GEM})
+
 #: PEP 503: runs of ``-``, ``_`` and ``.`` are equivalent, comparison is lowercase.
 _PEP503_SEPARATORS = re.compile(r"[-_.]+")
 
