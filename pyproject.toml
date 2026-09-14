@@ -91,7 +91,11 @@ src = ["repoatlas", "tests"]
 # Fixture repositories are sample content, not project code, and some of it is
 # deliberately unparseable (invalid UTF-8, truncated YAML). A parse error is not
 # suppressible by a per-file ignore, so they are excluded outright.
-extend-exclude = ["tests/fixtures/repos", "tests/adversarial/fixtures/repos"]
+extend-exclude = [
+    "tests/fixtures/repos",
+    "tests/fixtures/http",
+    "tests/adversarial/fixtures/repos",
+]
 
 [tool.ruff.lint]
 select = [
@@ -112,6 +116,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S603", "S607"]          # tests invoke git deliberately
 "tests/fixtures/repos/*" = ["ALL"]    # fixture content is sample code, not project code
+"tests/fixtures/http/*" = ["ALL"]     # likewise: HTTP linkage scenario repositories
 # Confusable characters are this suite's subject, not a mistake in it: the
 # supplementary-plane round-trip case needs codepoints that look like ASCII.
 "tests/adversarial/test_unicode_exact_retrieval.py" = ["RUF001", "RUF002", "RUF003"]
@@ -119,7 +124,7 @@ ignore = [
 
 [tool.pyright]
 include = ["repoatlas", "tests"]
-exclude = ["tests/fixtures/repos", "tests/adversarial/fixtures/repos"]
+exclude = ["tests/fixtures/repos", "tests/fixtures/http", "tests/adversarial/fixtures/repos"]
 # Point Pyright at the project environment. Without this it looks for `python`
 # on PATH -- it ignores VIRTUAL_ENV entirely -- so a bare `pyright` run resolved
 # the *system* interpreter and reported 95 unresolved-import errors for

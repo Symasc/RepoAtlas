@@ -24,6 +24,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
     Severity,
 )
+from repoatlas.parsers.http_python import PythonHttp
 from repoatlas.parsers.marks import whole_file_span
 
 _SUFFIXES = frozenset({".py", ".pyi"})
@@ -56,8 +57,9 @@ def _string_value(node: ast.expr) -> str | None:
 class _Visitor(ast.NodeVisitor):
     """Single walk collecting symbols and unresolved references."""
 
-    def __init__(self, module_name: str) -> None:
+    def __init__(self, module_name: str, http: PythonHttp | None = None) -> None:
         self.module_name = module_name
+        self._http = http
         self.symbols: list[ParsedSymbol] = []
         self.references: list[ParsedReference] = []
         self._scope: list[str] = []
@@ -203,6 +205,10 @@ class _Visitor(ast.NodeVisitor):
                         meta={"role": "decorator"},
                     )
                 )
+        if self._http is not None and not self._scope:
+            # Routes are read on module-level functions only: a decorator inside a
+            # factory or a class names an application this module does not prove.
+            self.references.extend(self._http.route_references(node, qualified))
         self._scope.append(node.name)
         self.generic_visit(node)
         self._scope.pop()
@@ -260,6 +266,8 @@ class _Visitor(ast.NodeVisitor):
                 )
             )
             self._maybe_env_read(node, name)
+        if self._http is not None:
+            self.references.extend(self._http.call_references(node, self._current_symbol))
         self.generic_visit(node)
 
     def _maybe_env_read(self, node: ast.Call, name: str) -> None:
@@ -333,7 +341,9 @@ class PythonParser:
     #    the package prefix. The bump is load-bearing: the Python file that lost
     #    the edge is byte-identical afterwards, so only a facts-version change
     #    makes an ordinary `sync` reparse it and produce the edge (V1_SPEC §12).
-    version = "3"
+    # 4: routes a proven FastAPI or Flask application serves, and requests a
+    #    proven `requests` or `httpx` call makes, become HTTP facts.
+    version = "4"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
@@ -369,7 +379,7 @@ class PythonParser:
                 diagnostics=(ParseDiagnostic(severity=Severity.ERROR, message=PARSE_FAILED),),
             )
 
-        visitor = _Visitor(module_name)
+        visitor = _Visitor(module_name, PythonHttp(tree))
         visitor.visit(tree)
 
         whole_file_start, whole_file_last = whole_file_span(content)
