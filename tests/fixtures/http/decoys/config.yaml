@@ -1,0 +1,7 @@
+# A CI file with a `paths` key. Not a specification.
+name: build
+paths:
+  /hello:
+    get: true
+servers:
+  - url: https://api.example.com

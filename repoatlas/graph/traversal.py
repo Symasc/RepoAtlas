@@ -39,6 +39,15 @@ EXPANSION_EDGES = (
     EdgeType.WATCHES,
     EdgeType.MANAGES,
     EdgeType.GENERATES,
+    # HTTP linkage. Each joins a repository-owned fact to a shared HTTP node and
+    # never two repositories directly, so none belongs in the crossing set below:
+    # a walk reaches the far side of an HTTP operation the way it reaches the far
+    # side of an environment variable, through the node.
+    EdgeType.SERVES_HTTP_ROUTE,
+    EdgeType.CALLS_HTTP_ROUTE,
+    EdgeType.DECLARES_HTTP_DEPLOYMENT,
+    EdgeType.EXPOSES_HTTP_ENDPOINT,
+    EdgeType.CALLS_HTTP_ENDPOINT,
 )
 
 #: Edge types a traversal may follow **out of one repository into another**.

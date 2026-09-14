@@ -23,9 +23,11 @@ from repoatlas.models.parsing import (
     EntityType,
     ParsedFile,
     ParseDiagnostic,
+    ParsedReference,
     ParsedSymbol,
     Severity,
 )
+from repoatlas.parsers.http_openapi import MAX_OPERATIONS, specification_references
 from repoatlas.parsers.marks import diagnostic_line, node_span
 
 _YAML_SUFFIXES = frozenset({".yaml", ".yml"})
@@ -118,7 +120,10 @@ class StructuredParser:
     """Deterministic YAML/JSON configuration keys with line provenance."""
 
     name = "structured-config"
-    version = "1"
+    # 2: OpenAPI 3 and Swagger 2 documents also yield HTTP route, deployment and
+    #    endpoint facts. A specification is unchanged on disk when this ships, so
+    #    only a facts-version change makes an ordinary sync reparse it.
+    version = "2"
     language = "YAML"
 
     def supports(self, path: Path) -> bool:
@@ -161,26 +166,47 @@ class StructuredParser:
         # ``splitlines()`` deliberately: this array is indexed by PyYAML marks and
         # must use PyYAML's line-break set rather than the source-grammar splitter
         # in :mod:`repoatlas.parsers.marks`.
-        collector = _KeyCollector(lines=content.splitlines())
+        lines = content.splitlines()
+        collector = _KeyCollector(lines=lines)
+        # A specification spread over several YAML documents is unusual, but two
+        # documents declaring the same fact are still one fact.
+        references: dict[tuple[str, str, int, int], ParsedReference] = {}
+        operations_truncated = False
         for document in documents:
             if document is not None:
                 collector.walk(document)
+                found, cut = specification_references(document, lines)
+                operations_truncated = operations_truncated or cut
+                for reference in found:
+                    identity = (
+                        str(reference.edge_type),
+                        reference.target_key,
+                        reference.line_start,
+                        reference.line_end,
+                    )
+                    references.setdefault(identity, reference)
 
-        diagnostics = (
-            (
+        diagnostics: list[ParseDiagnostic] = []
+        if collector.truncated:
+            diagnostics.append(
                 ParseDiagnostic(
                     severity=Severity.WARNING,
                     message=f"document truncated at {_MAX_KEYS} keys",
-                ),
+                )
             )
-            if collector.truncated
-            else ()
-        )
+        if operations_truncated:
+            diagnostics.append(
+                ParseDiagnostic(
+                    severity=Severity.WARNING,
+                    message=f"HTTP operations truncated at {MAX_OPERATIONS}",
+                )
+            )
 
         return ParsedFile(
             language=language,
             parser=self.name,
             parser_version=self.version,
             symbols=tuple(collector.symbols),
-            diagnostics=diagnostics,
+            references=tuple(references.values()),
+            diagnostics=tuple(diagnostics),
         )
