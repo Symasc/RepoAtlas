@@ -1,0 +1,23 @@
+openapi: 3.0.3
+info:
+  title: api-a
+  version: "1"
+servers:
+  - url: https://api.example.com
+  - url: https://api-eu.example.com
+paths:
+  /hello:
+    get:
+      responses:
+        "200":
+          description: greeting
+  /users:
+    post:
+      responses:
+        "201":
+          description: created
+  /health:
+    get:
+      responses:
+        "200":
+          description: ok

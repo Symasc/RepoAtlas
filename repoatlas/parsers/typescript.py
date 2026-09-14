@@ -23,6 +23,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
     Severity,
 )
+from repoatlas.parsers.http_typescript import TypeScriptHttp
 from repoatlas.parsers.marks import whole_file_span
 from repoatlas.parsers.treesitter import (
     GrammarUnavailable,
@@ -64,9 +65,10 @@ def _relative(specifier: str) -> bool:
 class _Walker:
     """Recursive descent that keeps a scope stack for qualified names."""
 
-    def __init__(self, source: bytes, language: str) -> None:
+    def __init__(self, source: bytes, language: str, http: TypeScriptHttp | None = None) -> None:
         self._source = source
         self._language = language
+        self._http = http
         self.symbols: list[ParsedSymbol] = []
         self.references: list[ParsedReference] = []
         self._scope: list[str] = []
@@ -350,6 +352,8 @@ class _Walker:
             self._module_call(node, start, end)
             return
 
+        if self._http is not None:
+            self.references.extend(self._http.call_references(node, self._current))
         self.references.append(
             ParsedReference(
                 edge_type=EdgeType.CALLS,
@@ -429,7 +433,9 @@ class TypeScriptParser:
     name = "tree-sitter-typescript"
     # 2: whole-file spans stop at EOF and are absent for an empty file; a
     #    classic-Mac (CR-only) file is no longer collapsed into one line.
-    version = "2"
+    # 3: routes a proven Express application serves, and requests `fetch` and
+    #    `axios` provably make, become HTTP facts.
+    version = "3"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
@@ -457,7 +463,7 @@ class TypeScriptParser:
                 ),
             )
 
-        walker = _Walker(source, grammar)
+        walker = _Walker(source, grammar, TypeScriptHttp(source, tree.root_node))
         walker.run(tree.root_node)
 
         whole_file_start, whole_file_last = whole_file_span(content)
