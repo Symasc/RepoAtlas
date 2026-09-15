@@ -35,7 +35,7 @@ opposite directions:
   which is exactly the wrong way round.
 
 Everything is driven through ``CapabilityService.sync`` over a real repository.
-The grammar failure is injected at ``tree_sitter_language_pack``, so production's
+The grammar failure is injected at the shipped grammars' bindings, so production's
 own wrapper builds the ``GrammarUnavailable``; the library failures are injected
 by writing malformed files, so the libraries produce their real messages.
 """
@@ -174,21 +174,25 @@ def _git(repo: Path, *args: str) -> None:
 def grammar_fails(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[str], None]]:
     """Make tree-sitter grammar loading fail with a message of the test's choosing.
 
-    Patched at ``tree_sitter_language_pack`` rather than at the diagnostic, so
-    production's own ``except Exception as exc: raise GrammarUnavailable(...)``
-    wrapper is what builds the exception. A test that constructed the wrapper
-    itself would be asserting its own idea of the message.
+    Patched at each shipped grammar's own binding function rather than at the
+    diagnostic, so production's own ``except Exception as exc: raise
+    GrammarUnavailable(...)`` wrapper is what builds the exception. A test that
+    constructed the wrapper itself would be asserting its own idea of the message.
 
     The cache is cleared on both sides: it is module-level and would otherwise
     leak a broken parser into whatever runs next.
     """
-    import tree_sitter_language_pack
+    import importlib
+
+    from repoatlas.parsers.grammars import GRAMMARS
 
     def install(message: str) -> None:
         def refuse(*_args: object, **_kwargs: object) -> object:
             raise ImportError(message)
 
-        monkeypatch.setattr(tree_sitter_language_pack, "get_parser", refuse)
+        for grammar in GRAMMARS.values():
+            module = importlib.import_module(grammar.module)
+            monkeypatch.setattr(module, grammar.function, refuse)
         treesitter.load_parser.cache_clear()
 
     treesitter.load_parser.cache_clear()

@@ -60,7 +60,13 @@ def test_the_packaging_configuration_maps_the_canonical_skill_in() -> None:
     """
     config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     wheel = config["tool"]["hatch"]["build"]["targets"]["wheel"]
-    assert wheel["force-include"] == {"skills": "repoatlas/skills"}
+    # The whole mapping, not just the skill's entry: a force-include is how a tree
+    # nobody meant to publish gets into the wheel. The only other entry is the
+    # grammar provenance notice (OFF-01).
+    assert wheel["force-include"] == {
+        "skills": "repoatlas/skills",
+        "THIRD_PARTY_NOTICES.md": "repoatlas/THIRD_PARTY_NOTICES.md",
+    }
 
 
 @requires_uv
