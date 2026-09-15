@@ -141,7 +141,11 @@ What the results mean:
 - `incoming` changes which direction the walk travels. It does not reverse the
   edge: the source and target of each edge still mean what they say.
 - Hops are bounded, and containment edges are excluded unless you ask for them.
-- Crossing repositories is allowed only for the edge types the policy permits.
+- `cross_repository` false keeps the walk inside the target's repository, even
+  through a shared node such as `env:SERVICE_HOST` or an HTTP endpoint. A walk
+  that starts *at* a shared node sees every repository that touches it.
+- Crossing repositories directly is allowed only for the edge types the policy
+  permits.
 
 **An edge is a fact. It is not automatically a citation.** Only provenance that
 was actually supplied and carries an evidence id can be cited as text. An edge
