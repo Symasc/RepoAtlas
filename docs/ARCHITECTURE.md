@@ -103,11 +103,12 @@ RepoAtlas/
 │   │   ├── base.py         LanguageParser protocol, ParsedFile contract
 │   │   ├── registry.py     extension/filename → parser dispatch
 │   │   ├── marks.py        YAML mark → line provenance, clamped to the file
-│   │   ├── treesitter.py   shared grammar loading, node helpers (lazy, cached)
+│   │   ├── grammars.py     the shipped grammars: pinned distribution, version, provenance
+│   │   ├── treesitter.py   pinned-grammar loading (fail closed), node helpers (lazy, cached)
 │   │   ├── python.py       stdlib ast
 │   │   ├── typescript.py   tree-sitter (ts, tsx, js, jsx, mjs, cjs)
 │   │   ├── bash.py         tree-sitter
-│   │   ├── ruby.py         tree-sitter
+│   │   ├── ruby.py         claims Ruby files; structural parsing gated (OFF-01)
 │   │   ├── salt.py         Jinja neutralization + lenient YAML + fallback line scan
 │   │   ├── jinja.py        template relationships; owns neutralize()
 │   │   ├── structured.py   YAML / JSON config keys; owns collect_config_keys()
@@ -943,6 +944,73 @@ class DependencyParser(Protocol):
     def supports(self, path: Path) -> bool: ...
     def parse(self, path: Path, content: str) -> DependencyReport: ...
 ```
+
+### Grammars are installed artifacts, never downloads (OFF-01)
+
+**Indexing performs no network access, and that includes obtaining parser code.** The tree-sitter grammars are
+package dependencies: the tree-sitter organisation's own abi3 wheels, pinned exactly in `pyproject.toml` and
+hash-verified through `uv.lock`. The network boundary is package installation. A first sync on a fresh machine needs
+neither the network nor a warm cache, and the RepoAtlas wheel stays `py3-none-any` because no grammar binary is
+built into it.
+
+| Grammar(s) | Distribution | Pin | Upstream tag (commit) |
+|---|---|---|---|
+| `typescript`, `tsx` | `tree-sitter-typescript` | 0.23.2 | v0.23.2 (`f975a621`) |
+| `javascript` | `tree-sitter-javascript` | 0.25.0 | v0.25.0 (`44c892e0`) |
+| `bash` | `tree-sitter-bash` | 0.25.1 | v0.25.1 (`a06c2e44`) |
+
+`parsers/grammars.py` is the only list of shipped grammars. `treesitter.load_parser` opens exactly those artifacts,
+or raises `GrammarUnavailable`, which every parser turns into the fixed `parser grammar unavailable` diagnostic. The
+loader checks four things:
+
+- **Listed.** The grammar must be in the table. Nothing is looked up by name anywhere else.
+- **Pinned.** Its distribution must be installed at exactly the pinned version. A grammar is parser behaviour, so a
+  different grammar version produces different facts from the same file with no parser-version bump to invalidate
+  the stored ones.
+- **The package it installed.** Before import, the package the import system would load must be a file that
+  distribution's RECORD lists. A same-named module earlier on `sys.path` is refused rather than executed.
+- **The binding it installed.** After import, the native binding that holds the grammar must also be one of those
+  files.
+
+There is no cache directory, environment variable, search path or fallback. "Try local, then download" is
+deliberately absent.
+
+**What this replaced.** Grammars used to come through `tree-sitter-language-pack`, whose wheel holds no grammars. On
+first use its native code fetched a manifest and a platform bundle of about 22 MB from GitHub releases into
+`$XDG_CACHE_HOME/tree-sitter-language-pack/v<version>/libs`. On every later run it `dlopen`-ed whatever that mutable
+directory held, with no integrity check at load: a tampered `.so` placed there was loaded as is. The consequences:
+- On a fresh install with no network, TypeScript, JavaScript, Bash and Ruby degraded to `parser grammar unavailable`.
+- The fetch ran in native code, so the Python-level socket denial in this suite could not see it.
+- Every offline test that passed had borrowed a warm cache.
+The kernel-level proof is now part of the suite: `tests/packaging/test_offline_grammars.py` installs the release
+artifacts into a clean environment and indexes inside `unshare -rn`, with an empty HOME and cache.
+
+**Output parity.** The pinned wheels were compared with the language pack's grammars before the switch. Their grammar
+sources are the same upstream revisions: the language pack's commits add only CI and documentation changes on top of
+these tags. The syntax trees were identical for every node (type, byte and point range, error and missing flags)
+across:
+- every TypeScript, TSX, JavaScript and Bash fixture, with 16 truncations and a byte flip each
+- 328 upstream corpus examples
+
+`ParsedFile` output was identical for 306 inputs. Parser versions therefore did not change.
+`tests/test_grammar_loader.py` ties each pin to its parser version, so moving a pin forces a re-characterization.
+
+**Ruby is gated.** `RubyParser.parse` returns `structural parsing disabled` before any grammar, parser or byte of the
+file is touched.
+- **Why.** The only offline-installable Ruby grammar, `tree-sitter-ruby` 0.23.1, predates upstream commit
+  `ad907a69da0c8a4f7a943a7fe012712208da6dee` ("scanner: fix heredoc serialization buffer overflows"). Its external
+  scanner serializes `2 + 5·literals + Σ(4 + heredoc word)` bytes into tree-sitter's 1024-byte buffer, and can write
+  one attacker-chosen byte past the end.
+- **Why no guard.** A guard on the raw text is not sound. In error recovery that scanner pushes a literal for every
+  quote, slash or percent byte, so short heredoc words reach the overflow as readily as long ones.
+- **What still works.** Ruby files are discovered, hashed and chunked for text search, and `Gemfile` / `*.gemspec`
+  dependencies are still read by the text-level dependency parsers. The extraction code is kept, unreachable, as
+  `RubyParser._structure`, and its tests are kept under an OFF-01 skip.
+- **Re-enabling:**
+  1. Adopt a wheel-installable release that contains `ad907a69`, and pin it.
+  2. Re-characterize the Ruby parser's output against those tests.
+  3. Only then route `parse` back through `_structure`.
+  4. Remove `tests/test_ruby_gate.py`'s removal-condition test in the same change.
 
 ### Embedding and ranking
 
@@ -3006,7 +3074,8 @@ Repositories are **untrusted input**. Static analysis only.
 |---|---|
 | Repository Bash | Parsed with tree-sitter; never executed |
 | Repository Python | Parsed with `ast`; never imported. `setup.py` included |
-| Repository Ruby | Parsed with tree-sitter; never executed |
+| Repository Ruby | Indexed as text only; never parsed structurally while no safe offline grammar exists (§4), never executed |
+| Parser grammars | Pinned installed wheels, origin-checked at load; never downloaded, never loaded from a cache directory (§4) |
 | Salt / Jinja | Jinja neutralized to placeholders; never rendered |
 | npm lifecycle scripts | `package.json` read as JSON; npm never invoked |
 | Dockerfiles | Parsed as text; never built or run |
@@ -3420,10 +3489,19 @@ Test layers:
 | Performance | Shape properties from the traces (§10) plus wall-clock ceilings roughly 20× the observed cost |
 | Container | The delivery invariants of §12, parsed out of `Dockerfile` and `docker-compose.yml`, so they need no daemon |
 
-CI requires no network and no embedding-model download: semantic-search tests use a deterministic stub
-`EmbeddingModel` (hash-based pseudo-vectors), and there is no reasoning layer left to stub. The strongest form of
-that claim is asserted rather than described --- `tests/test_no_embedded_reasoner.py` runs the whole capability
-surface with `socket` replaced by something that raises.
+Once dependencies are installed, the tests require no network and no embedding-model download.
+- **Embeddings.** Semantic-search tests use a deterministic stub `EmbeddingModel` (hash-based pseudo-vectors).
+- **Reasoning.** There is no reasoning layer left to stub.
+- **Parsing.** Grammars are installed with the dependencies rather than fetched on first parse (§4).
+
+**What is asserted, not just described:**
+- `tests/test_no_embedded_reasoner.py` runs the whole capability surface with `socket` replaced by something that
+  raises.
+- `tests/test_grammar_loader.py` syncs with an empty and with a poisoned grammar cache under an audit hook.
+
+**Why the kernel-level test matters.** Python-level denial cannot see a download made from native code, and that
+blind spot is exactly how the old grammar fetch went unnoticed. So the `slow` suite also indexes from a freshly
+installed wheel inside a network namespace with loopback only: `tests/packaging/test_offline_grammars.py`.
 
 **The real model is exercised behind the `slow` marker**, which `addopts` deselects by default. `tests/test_real_embeddings.py`
 runs `BAAI/bge-small-en-v1.5` through the whole pipeline — factory, sync, vector index, retrieval funnel — and
@@ -3502,6 +3580,8 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | SQLite only | Embedded graph DB (Kùzu, Neo4j-embedded) | FTS5 + an indexed edge table with recursive CTEs covers V1's traversal needs; a graph DB adds a dependency and operational surface for no proven gain at this scale |
 | stdlib `ast` for Python | tree-sitter for uniformity | `ast` is exact, zero-dependency, gives precise line ranges and decorator/call structure. Uniformity is not worth accuracy loss on the primary language |
 | tree-sitter for TS/JS/Bash/Ruby | Hand-written parsers, or language-native tooling (tsc, ripper) | Language-native tooling means executing runtimes near untrusted code; tree-sitter is in-process, error-tolerant, and one dependency for four languages |
+| Grammars as the tree-sitter organisation's pinned per-language wheels (OFF-01) | Keep `tree-sitter-language-pack` and pre-populate its cache; vendor grammar binaries into this wheel; compile grammars at build time | The pack downloads at run time and trusts a mutable cache, and has no offline mode in its Python wheel. Vendoring or compiling would turn a `py3-none-any` wheel into one platform wheel per OS and architecture, with a release pipeline to match. Upstream wheels already cover the same platforms, carry their own licenses, and are hash-pinned by `uv.lock` (§4) |
+| Ruby structural parsing gated rather than guarded (OFF-01) | Ship `tree-sitter-ruby` 0.23.1 with a pre-parse check on heredocs; build a patched Ruby wheel | 0.23.1 lacks upstream fix `ad907a69` for a scanner buffer overflow, and no check on raw text is sound under error recovery. A RepoAtlas-built grammar is a platform-wheel release decision. Text search and Gemfile dependencies are unaffected; structure returns when a fixed release installs as a wheel (§4) |
 | Brute-force NumPy vectors | `sqlite-vec`, FAISS | ~77 MB / single-digit ms at target scale. Hidden behind `VectorIndex`, so upgrading is a one-file change if profiling demands it |
 | RRF for fusion | Weighted score normalization | BM25, cosine and graph distance are not commensurable; RRF is stable without per-source calibration |
 | `git ls-files` for enumeration | Reimplementing gitignore over `os.walk` | Real gitignore semantics for free, including nested and negated patterns, plus tracked/untracked distinction |
