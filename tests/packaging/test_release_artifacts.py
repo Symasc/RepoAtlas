@@ -267,6 +267,77 @@ def test_a_wheel_can_still_be_built_from_the_source_distribution(
     assert "repoatlas/__init__.py" in rebuilt
     assert credential_shaped(rebuilt) == []
 
+    # The sdist must reproduce the wheel, not merely a wheel (OFF-01): the same
+    # files, and the same pinned grammar dependencies. An input present only in the
+    # checkout would show up here as a difference.
+    direct = next(built.glob("*.whl"))
+    assert sorted(rebuilt) == sorted(wheel_names(built))
+    assert requires_dist(wheels[0]) == requires_dist(direct)
+
+
+# ---------------------------------------------------------------------------
+# Grammars ship as pinned dependencies, never as downloads (OFF-01)
+# ---------------------------------------------------------------------------
+
+
+def wheel_text(wheel: Path, suffix: str) -> str:
+    with zipfile.ZipFile(wheel) as archive:
+        name = next(n for n in archive.namelist() if n.endswith(suffix))
+        return archive.read(name).decode("utf-8")
+
+
+def requires_dist(wheel: Path) -> list[str]:
+    return sorted(
+        line.split(":", 1)[1].strip()
+        for line in wheel_text(wheel, ".dist-info/METADATA").splitlines()
+        if line.startswith("Requires-Dist:")
+    )
+
+
+@requires_uv
+def test_the_wheel_is_still_pure_python(built: Path) -> None:
+    """Grammars are native code, and none of it is RepoAtlas's to compile or tag.
+
+    Shipping grammar binaries inside this wheel would turn it into a platform wheel
+    per operating system and architecture. They arrive as the tree-sitter
+    organisation's own wheels instead, so this one stays ``py3-none-any``.
+    """
+    wheel = next(built.glob("*.whl"))
+    tags = [
+        line
+        for line in wheel_text(wheel, ".dist-info/WHEEL").splitlines()
+        if line.startswith("Tag:")
+    ]
+    assert tags == ["Tag: py3-none-any"]
+    assert "Root-Is-Purelib: true" in wheel_text(wheel, ".dist-info/WHEEL")
+    assert not [
+        name for name in wheel_names(built) if name.endswith((".so", ".dylib", ".dll", ".pyd"))
+    ]
+
+
+@requires_uv
+def test_the_wheel_requires_exactly_the_pinned_grammars(built: Path) -> None:
+    from repoatlas.parsers.grammars import GRAMMARS
+
+    wheel = next(built.glob("*.whl"))
+    grammar_requirements = {r for r in requires_dist(wheel) if r.lower().startswith("tree-sitter-")}
+    expected = {f"{g.distribution}=={g.version}" for g in GRAMMARS.values()}
+    assert grammar_requirements == expected
+    for forbidden in ("tree-sitter-language-pack", "tree-sitter-languages", "tree-sitter-ruby"):
+        assert not any(r.lower().startswith(forbidden) for r in requires_dist(wheel)), forbidden
+
+
+@requires_uv
+def test_both_artifacts_carry_the_grammar_table_and_its_notices(built: Path) -> None:
+    wheel = wheel_names(built)
+    assert "repoatlas/parsers/grammars.py" in wheel
+    assert "repoatlas/THIRD_PARTY_NOTICES.md" in wheel
+    sdist = sdist_names(built)
+    assert any(name.endswith("/repoatlas/parsers/grammars.py") for name in sdist)
+    assert any(name.endswith("/THIRD_PARTY_NOTICES.md") for name in sdist)
+    shipped = wheel_text(next(built.glob("*.whl")), "repoatlas/THIRD_PARTY_NOTICES.md")
+    assert shipped == (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+
 
 # ---------------------------------------------------------------------------
 # The embedded reasoner is not in either artifact (legacy local-LLM removal)
