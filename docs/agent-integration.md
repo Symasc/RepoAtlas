@@ -112,6 +112,12 @@ else. Retrieval, traversal, dependency reads and grounding verification are all
 deterministic and local, and a full session including a sync completes with
 outbound networking unavailable.
 
+That includes parsing. The tree-sitter grammars for TypeScript, JavaScript and
+Bash are package dependencies, installed with RepoAtlas and pinned exactly, so a
+first sync on a fresh machine needs neither the network nor a warm cache.
+Installation is the only step that downloads anything. Ruby files are indexed as
+text but not parsed structurally; see the README's language table.
+
 There is nothing to install first and nothing to configure. Earlier versions ran
 a local reasoning model behind the `ask` and `debug` CLI commands; those commands,
 that model and its configuration are gone. The agent is the reasoner, which was
