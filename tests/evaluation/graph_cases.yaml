@@ -82,17 +82,23 @@ cases:
     expected_edges:
       - ["sym:deployment:service/init.sls:service_config:5", "CONFIGURES", "env:SERVICE_HOST"]
       - ["file:scripts:env.sh", "EXPORTS", "env:SERVICE_HOST"]
-      - ["file:common-lib:lib/settings.rb", "READS", "env:SERVICE_HOST"]
       - ["sym:common-lib:src/index.ts:commonHost:5", "READS", "env:SERVICE_HOST"]
       - ["sym:python-service:src/config.py:build_config:10", "READS", "env:SERVICE_HOST"]
-      - ["sym:ruby-tooling:lib/runner.rb:RubyTooling::Runner::initialize:6", "READS", "env:SERVICE_HOST"]
       - ["sym:scripts:deploy.sh:deploy_helper:9", "READS", "env:SERVICE_HOST"]
       - ["sym:ts-service:src/settings.ts:readSettings:9", "READS", "env:SERVICE_HOST"]
+    forbidden_nodes:
+      # Ruby is not parsed structurally (OFF-01), so its two reads are text only:
+      # common-lib/lib/settings.rb line 7 and ruby-tooling/lib/runner.rb line 7
+      # still say ENV['SERVICE_HOST'], and asserting an edge for either would be
+      # asserting a fact nothing now extracts.
+      - "file:common-lib:lib/settings.rb"
+      - "file:ruby-tooling:lib/runner.rb"
     notes: >
-      Seven repositories touch this variable. Every edge is stored with the
-      reader or exporter as the SOURCE and the variable as the TARGET, and asking
-      from the variable's end must not turn any of them around: an environment
-      variable does not read a Ruby file.
+      Seven repositories touch this variable; five of them in a language that is
+      parsed structurally. Every edge is stored with the reader or exporter as the
+      SOURCE and the variable as the TARGET, and asking from the variable's end
+      must not turn any of them around. The two Ruby readers are gated (OFF-01)
+      and must not appear.
 
   # -------------------------------------------------------------- two-hop ----
   - id: two-hop-app-to-modules

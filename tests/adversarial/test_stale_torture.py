@@ -15,10 +15,12 @@ index of the same tree, which is invariant 2 of ARCHITECTURE §9.
 from __future__ import annotations
 
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 from repoatlas.config.settings import Settings
+from repoatlas.models.evidence import EvidenceCandidate
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace
 from tests.adversarial.conftest import ADVERSARIAL_ROOT, REPOSITORIES
@@ -67,6 +69,22 @@ def can_find(workspace: Workspace, text: str) -> bool:
 
 def symbol_exists(workspace: Workspace, name: str) -> bool:
     return bool(workspace.search.find_entities_by_name([name], None, 10))
+
+
+def file_indexed(workspace: Workspace, repository: str, rel_path: str) -> bool:
+    row = workspace.database.execute(
+        "SELECT COUNT(*) AS n FROM files f JOIN repositories r ON r.id = f.repo_id "
+        "WHERE r.name = ? AND f.rel_path = ?",
+        (repository, rel_path),
+    ).fetchone()
+    return bool(row["n"])
+
+
+def text_indexed(workspace: Workspace, needle: str) -> bool:
+    row = workspace.database.execute(
+        "SELECT COUNT(*) AS n FROM chunks WHERE instr(text, ?) > 0", (needle,)
+    ).fetchone()
+    return bool(row["n"])
 
 
 # -- symbols -----------------------------------------------------------------
@@ -181,20 +199,52 @@ def test_removing_a_configures_relationship_changes_the_answer(
     adversarial: Workspace, adversarial_root: Path
 ) -> None:
     """The §21 chain, broken on purpose. Asking where SERVICE_HOST is configured
-    must stop naming deployment."""
-    context = adversarial.resolver().resolve(adversarial_root / "python-service")
-    before = adversarial.retriever().retrieve("Where is SERVICE_HOST configured?", context)
-    assert any(c.repository == "deployment" for c in before.candidates)
+    must stop citing the line that configured it, and the fact must be gone.
 
+    What the answer may still contain is exactly what the file still says. Line 4
+    of init.sls is a comment naming SERVICE_HOST, and a lexical match on it is true
+    evidence of a mention, not a claim of configuration. An earlier version of this
+    test asserted that nothing from init.sls came back at all; that held only while
+    the evidence budget happened to cut the comment chunk, and changing which other
+    files are parsed structurally (OFF-01) moved it back inside the budget. The
+    guarantee is about the configuring line and the relationship, so that is what is
+    asserted --- independently of where the budget falls.
+    """
+    context = adversarial.resolver().resolve(adversarial_root / "python-service")
     init = adversarial_root / "deployment" / "service" / "init.sls"
+    configuring_line = next(
+        number
+        for number, line in enumerate(init.read_text().splitlines(), start=1)
+        if "SERVICE_HOST:" in line
+    )
+
+    def citing_the_configuring_line(
+        candidates: Sequence[EvidenceCandidate],
+    ) -> list[EvidenceCandidate]:
+        return [
+            c
+            for c in candidates
+            if c.repository == "deployment"
+            and "init.sls" in c.path
+            and c.line_start is not None
+            and c.line_end is not None
+            and c.line_start <= configuring_line <= c.line_end
+        ]
+
+    before = adversarial.retriever().retrieve("Where is SERVICE_HOST configured?", context)
+    assert citing_the_configuring_line(before.candidates)
+
     init.write_text(init.read_text().replace("SERVICE_HOST:", "RENAMED_HOST:"))
     _sync(adversarial, adversarial_root)
 
     after = adversarial.retriever().retrieve("Where is SERVICE_HOST configured?", context)
-    configuring = [
-        c for c in after.candidates if c.repository == "deployment" and "init.sls" in c.path
-    ]
+    configuring = citing_the_configuring_line(after.candidates)
     assert configuring == [], [c.location for c in configuring]
+    remaining = adversarial.database.execute(
+        "SELECT COUNT(*) AS n FROM edges e JOIN entities dst ON dst.id = e.dst_id "
+        "WHERE dst.key = 'env:SERVICE_HOST' AND e.type = 'CONFIGURES'"
+    ).fetchone()["n"]
+    assert remaining == 0
 
 
 def test_renaming_an_environment_variable_everywhere_retires_the_entity(
@@ -355,34 +405,42 @@ def git_rev(repo: Path) -> str:
 def test_a_hard_reset_removes_what_it_discarded(
     adversarial: Workspace, adversarial_root: Path
 ) -> None:
+    # Ruby is indexed as text, not structure (OFF-01), so what a hard reset must
+    # discard here is the file and its searchable text rather than a symbol.
     repo = adversarial_root / "ruby-tooling"
     baseline = git_rev(repo)
-    (repo / "lib" / "extra.rb").write_text("module RubyTooling\n  class Extra\n  end\nend\n")
+    (repo / "lib" / "extra.rb").write_text(
+        "module RubyTooling\n  class ExtraDiscarded\n  end\nend\n"
+    )
     _commit(repo, "extra")
     _sync(adversarial, adversarial_root, "ruby-tooling")
-    assert symbol_exists(adversarial, "Extra")
+    assert file_indexed(adversarial, "ruby-tooling", "lib/extra.rb")
+    assert text_indexed(adversarial, "ExtraDiscarded")
 
     git(repo, "reset", "--hard", "--quiet", baseline)
     _sync(adversarial, adversarial_root, "ruby-tooling")
-    assert not symbol_exists(adversarial, "Extra")
+    assert not file_indexed(adversarial, "ruby-tooling", "lib/extra.rb")
+    assert not text_indexed(adversarial, "ExtraDiscarded")
 
 
 def test_stashing_and_restoring_tracks_the_working_tree(
     adversarial: Workspace, adversarial_root: Path
 ) -> None:
+    # The working tree is tracked through the Ruby file's text (Ruby is gated,
+    # OFF-01), which is what stays searchable for it.
     repo = adversarial_root / "common-lib"
     settings = repo / "lib" / "settings.rb"
     settings.write_text(settings.read_text().replace("class Settings", "class StashedSettings"))
     _sync(adversarial, adversarial_root, "common-lib")
-    assert symbol_exists(adversarial, "StashedSettings")
+    assert text_indexed(adversarial, "StashedSettings")
 
     git(repo, "stash", "push", "--quiet")
     _sync(adversarial, adversarial_root, "common-lib")
-    assert not symbol_exists(adversarial, "StashedSettings")
+    assert not text_indexed(adversarial, "StashedSettings")
 
     git(repo, "stash", "pop", "--quiet")
     _sync(adversarial, adversarial_root, "common-lib")
-    assert symbol_exists(adversarial, "StashedSettings")
+    assert text_indexed(adversarial, "StashedSettings")
 
 
 def test_a_large_branch_change_equals_a_clean_index(

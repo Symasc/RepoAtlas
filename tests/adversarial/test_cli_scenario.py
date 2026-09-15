@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -41,6 +42,16 @@ class Result:
 
     def __repr__(self) -> str:  # pragma: no cover - failure messages only
         return f"exit={self.exit_code}\n--stdout--\n{self.stdout}\n--stderr--\n{self.stderr}"
+
+
+def _cites_line(stdout: str, path: str, line: int) -> bool:
+    """Whether rendered evidence cites a span of ``path`` that covers ``line``."""
+    for match in re.finditer(rf"{re.escape(path)}:(\d+)(?:-(\d+))?", stdout):
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if start <= line <= end:
+            return True
+    return False
 
 
 @pytest.fixture
@@ -115,8 +126,18 @@ def test_the_full_scenario_with_answers_that_must_change(
     assert errored.exit_code == ExitCode.OK, errored
     assert "src/app.py:" in errored.stdout
 
-    # Change where the value comes from, and the answer must follow.
+    # Change where the value comes from, and the answer must follow. What must go
+    # is the citation of the configuring line; line 4 of init.sls is a comment that
+    # still names SERVICE_HOST, and a lexical hit on it is a true mention. Whether
+    # that chunk fits the evidence budget depends on every other file in the
+    # ecosystem, so the assertion is about the line, not the file (OFF-01 moved it).
     init_sls = adversarial_root / "deployment" / "service" / "init.sls"
+    configuring_line = next(
+        number
+        for number, line in enumerate(init_sls.read_text().splitlines(), start=1)
+        if "SERVICE_HOST:" in line
+    )
+    assert _cites_line(located.stdout, "deployment/service/init.sls", configuring_line), located
     init_sls.write_text(init_sls.read_text().replace("SERVICE_HOST:", "OTHER_HOST:"))
     scoped = cli(adversarial_root / "deployment" / "service", "sync")
     assert scoped.exit_code == ExitCode.OK, scoped
@@ -125,7 +146,7 @@ def test_the_full_scenario_with_answers_that_must_change(
 
     changed = cli(deep, "locate", "Where is SERVICE_HOST configured?")
     assert changed.exit_code == ExitCode.OK, changed
-    assert "deployment/service/init.sls:" not in changed.stdout, changed
+    assert not _cites_line(changed.stdout, "deployment/service/init.sls", configuring_line), changed
     assert "python-service/src/config.py:" in changed.stdout
 
     # A branch that removes a symbol; after sync it must be unfindable.

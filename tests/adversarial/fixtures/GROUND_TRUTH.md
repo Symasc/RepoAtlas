@@ -38,6 +38,10 @@ sharing a relationship, and two repositories claiming the same package identity.
 | `common-lib/src/index.ts:6` | `process.env.SERVICE_HOST` |
 | `ruby-tooling/lib/runner.rb:7` | `ENV['SERVICE_HOST']` |
 
+The two Ruby reads are true of the source and stay listed. While Ruby structural
+parsing is gated (OFF-01) they are indexed as text only: they must be *searchable*,
+and they must **not** appear as `READS` edges, because nothing extracts them.
+
 **Exports:** `scripts/env.sh:3` (`export SERVICE_HOST=...`).
 
 **Configures:** `deployment/service/init.sls`, in the `service_config` context block.
