@@ -209,15 +209,18 @@ def test_a_relative_typescript_import_resolves_to_the_file(initialized: Workspac
     assert edge["path"] == "src/index.ts"
 
 
-def test_require_relative_resolves_in_ruby(initialized: Workspace) -> None:
-    edge = one(
-        [
-            row
-            for row in edges(initialized, type="IMPORTS", repository="common-lib")
-            if row["dst_path"] == "lib/logging.rb"
-        ]
-    )
-    assert edge["path"] == "lib/settings.rb"
+def test_ruby_asserts_no_imports_while_it_is_gated(initialized: Workspace) -> None:
+    """``require_relative "logging"`` in lib/settings.rb is text only (OFF-01).
+
+    Ruby structural parsing is gated, so no Ruby file may be the source of an
+    import edge, and lib/logging.rb may not be reached by one either.
+    """
+    ruby = [
+        row
+        for row in edges(initialized, repository="common-lib")
+        if str(row["path"]).endswith(".rb") or str(row["dst_path"]).endswith(".rb")
+    ]
+    assert ruby == []
 
 
 def test_a_bash_source_resolves_to_the_sourced_script(initialized: Workspace) -> None:
@@ -279,8 +282,9 @@ def test_service_host_connects_every_language_that_touches_it(
     assert ("deployment", "service/init.sls", "CONFIGURES") in reached
     assert ("scripts", "deploy.sh", "EXPORTS") in reached
     assert ("ts-service", "src/index.ts", "READS") in reached
-    assert ("common-lib", "lib/settings.rb", "READS") in reached
     assert ("python-service", "Dockerfile", "EXPORTS") in reached
+    # Ruby still reads it in the source, but Ruby is gated (OFF-01): text only.
+    assert ("common-lib", "lib/settings.rb", "READS") not in reached
 
 
 # --- idempotence and staleness ------------------------------------------------

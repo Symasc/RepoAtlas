@@ -214,15 +214,19 @@ def _env_edges(workspace: Workspace, variable: str, edge_type: str) -> set[str]:
 def test_service_host_is_read_in_every_language_that_reads_it(
     adversarial: Workspace,
 ) -> None:
-    """GROUND_TRUTH lists five reads across Python, TypeScript and Ruby."""
+    """GROUND_TRUTH lists five reads across Python, TypeScript and Ruby.
+
+    The two Ruby reads are text only while Ruby structural parsing is gated
+    (OFF-01): the lines still say ``ENV['SERVICE_HOST']``, and nothing extracts
+    them, so neither may appear as a fact.
+    """
     readers = _env_edges(adversarial, "SERVICE_HOST", "READS")
     assert readers >= {
         "python-service/src/config.py",
         "ts-service/src/settings.ts",
-        "common-lib/lib/settings.rb",
         "common-lib/src/index.ts",
-        "ruby-tooling/lib/runner.rb",
     }, readers
+    assert readers.isdisjoint({"common-lib/lib/settings.rb", "ruby-tooling/lib/runner.rb"}), readers
 
 
 def test_service_host_is_exported_by_the_shell_script(adversarial: Workspace) -> None:

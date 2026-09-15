@@ -68,7 +68,8 @@ BODIES = {
     "svc.js": "const x = 1;" + LF + "const y = 2;",
     "run.sh": "echo one" + LF + "echo two",
     "Dockerfile": "FROM alpine" + LF + "RUN echo hello",
-    "lib.rb": "x = 1" + LF + "y = 2",
+    # lib.rb is absent on purpose: Ruby is not parsed structurally (OFF-01), so it
+    # yields no spans to be wrong about. That it claims none is asserted below.
 }
 
 #: Parsers the review found already correct. They must stay correct.
@@ -167,6 +168,23 @@ def test_an_empty_file_claims_no_lines_at_all() -> None:
         for symbol in parsed.symbols:
             assert symbol.line_start is None, name
             assert symbol.line_end is None, name
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "x = 1" + LF + "y = 2",
+        "def foo" + LF + "  1" + LF + "end" + LF + LF,
+        "def alpha" + CR + "  1" + CR + "end" + CR,
+        "",
+    ],
+)
+def test_a_gated_ruby_file_claims_no_lines(body: str) -> None:
+    """Ruby is not parsed structurally (OFF-01), so every provenance claim it could
+    get wrong is a claim it does not make: no symbol, no reference, no span."""
+    parsed = parse("lib.rb", body)
+    assert parsed.symbols == ()
+    assert parsed.references == ()
 
 
 # == 3. the registry-wide invariant ==========================================
@@ -554,8 +572,8 @@ CR_BODIES = {
         "export function alpha() {{{s}  return 1;{s}}}{s}{s}"
         "export function beta() {{{s}  return 2;{s}}}{s}"
     ),
-    "lib.rb": "def alpha{s}  1{s}end{s}{s}def beta{s}  2{s}end{s}",
     "run.sh": "alpha() {{{s}  echo one{s}}}{s}{s}beta() {{{s}  echo two{s}}}{s}",
+    # lib.rb: gated (OFF-01); see test_a_gated_ruby_file_claims_no_lines.
 }
 
 

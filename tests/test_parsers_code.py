@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedFile, Severity
 from repoatlas.parsers.base import LanguageParser
 from repoatlas.parsers.bash import BashParser
@@ -219,6 +220,17 @@ def test_bash_does_not_guess_a_computed_source_path() -> None:
 
 
 # --- Ruby --------------------------------------------------------------------
+#
+# Structural Ruby parsing is gated (OFF-01; tests/test_ruby_gate.py). The tests
+# below characterize the extraction the gate keeps unreachable, and they are kept
+# rather than deleted because re-enabling Ruby starts by re-running them against
+# a grammar that contains upstream fix ad907a69. No such grammar is installed, so
+# they cannot run, and a skip that says why is more honest than a silent absence.
+
+ruby_structural = pytest.mark.skip(
+    reason="OFF-01: Ruby structural parsing is gated until an offline-installable "
+    "tree-sitter-ruby containing ad907a69 is adopted"
+)
 
 RUBY_SOURCE = """\
 require "json"
@@ -241,13 +253,14 @@ end
 
 
 def parse_ruby(source: str = RUBY_SOURCE, name: str = "runner.rb") -> ParsedFile:
-    return RubyParser().parse(Path(name), source)
+    return RubyParser()._structure(Path(name), source)
 
 
 def test_ruby_parser_satisfies_the_protocol() -> None:
     assert isinstance(RubyParser(), LanguageParser)
 
 
+@ruby_structural
 def test_ruby_extracts_modules_classes_and_methods() -> None:
     parsed = parse_ruby()
     qualified = {s.qualified_name for s in parsed.symbols}
@@ -257,6 +270,7 @@ def test_ruby_extracts_modules_classes_and_methods() -> None:
     assert "Deploy::Runner::self.build" in qualified
 
 
+@ruby_structural
 def test_ruby_distinguishes_require_from_require_relative() -> None:
     parsed = parse_ruby()
     specifiers = {
@@ -267,19 +281,22 @@ def test_ruby_distinguishes_require_from_require_relative() -> None:
     assert specifiers == {"json": "package", "logging": "relative"}
 
 
+@ruby_structural
 def test_ruby_reads_environment_in_both_forms() -> None:
     parsed = parse_ruby()
     assert set(references(parsed, EdgeType.READS)) == {"SERVICE_HOST", "SERVICE_TIMEOUT"}
 
 
+@ruby_structural
 def test_ruby_records_superclass_and_calls() -> None:
     parsed = parse_ruby()
     assert "Base" in [r.target_key for r in parsed.references if r.meta.get("role") == "base"]
     assert "notify" in references(parsed, EdgeType.CALLS)
 
 
+@ruby_structural
 def test_ruby_records_gem_declarations() -> None:
-    parsed = RubyParser().parse(Path("Gemfile"), 'gem "rails", "~> 7.0"\n')
+    parsed = RubyParser()._structure(Path("Gemfile"), 'gem "rails", "~> 7.0"\n')
     dependency = next(r for r in parsed.references if r.edge_type is EdgeType.DEPENDS_ON)
     assert dependency.target_key == "rails"
     assert dependency.meta == {"ecosystem": "gem", "constraint": "~> 7.0"}
