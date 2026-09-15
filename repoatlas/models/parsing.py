@@ -127,6 +127,16 @@ INVALID_YAML = "invalid YAML"
 INVALID_TOML = "invalid TOML"
 INVALID_CFG = "invalid cfg"
 
+#: A language RepoAtlas recognizes but deliberately does not parse structurally.
+#:
+#: Distinct from :data:`GRAMMAR_UNAVAILABLE` on purpose. That one means a grammar
+#: RepoAtlas ships could not be loaded --- a broken installation, worth fixing.
+#: This one is policy: no grammar is loaded at all, because none can be shipped
+#: safely (OFF-01, Ruby). The file is still discovered, hashed and chunked for text
+#: search; it just yields no symbols and no references. Like every constant here it
+#: is written by RepoAtlas and repeats nothing from the file.
+STRUCTURAL_PARSING_DISABLED = "structural parsing disabled"
+
 #: Safe wording for an enumeration that git could not complete.
 #:
 #: The same rule as above, applied to the other source of arbitrary text on this

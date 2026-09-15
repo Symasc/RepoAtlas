@@ -60,6 +60,7 @@ from repoatlas.models.parsing import (
     INVALID_TOML,
     INVALID_YAML,
     PARSE_FAILED,
+    STRUCTURAL_PARSING_DISABLED,
     SYNTAX_ERROR,
     Severity,
 )
@@ -418,7 +419,9 @@ def test_every_file_diagnostic_names_the_file_it_is_about(synced: SyncResponse) 
 
     assert "app.ts" in located and GRAMMAR_UNAVAILABLE in located["app.ts"]
     assert "script.sh" in located and GRAMMAR_UNAVAILABLE in located["script.sh"]
-    assert "lib.rb" in located and GRAMMAR_UNAVAILABLE in located["lib.rb"]
+    # Ruby is gated before any grammar is consulted (OFF-01), so it reports the
+    # policy, not the injected loader failure --- and still names its file.
+    assert "lib.rb" in located and STRUCTURAL_PARSING_DISABLED in located["lib.rb"]
     assert "setup.cfg" in located and INVALID_CFG in located["setup.cfg"]
     assert "pyproject.toml" in located and INVALID_TOML in located["pyproject.toml"]
     assert "pnpm-lock.yaml" in located and INVALID_YAML in located["pnpm-lock.yaml"]

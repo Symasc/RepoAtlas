@@ -1,11 +1,36 @@
-"""Ruby parser using tree-sitter (V1_SPEC §7.4).
+"""Ruby parser using tree-sitter (V1_SPEC §7.4) --- **structurally gated (OFF-01)**.
 
-Deliberately basic, per the specification: requires, modules, classes, methods,
-gem references and calls that are reliable to read statically. Ruby's dynamism
-makes anything beyond that a guess, and a guess is not evidence (V1_SPEC §2).
+**Ruby files are not parsed structurally.** :meth:`RubyParser.parse` returns a
+fixed diagnostic and no symbols or references before it touches a grammar, a
+parser or a single byte of the file. The file is still discovered, hashed and
+chunked for text search, and ``Gemfile`` / ``*.gemspec`` dependencies are still
+read by the text-level dependency parsers, none of which involves native code.
 
-Ruby's own tooling (``ripper``) would mean running a Ruby interpreter beside
-untrusted repository content, so tree-sitter is used instead.
+Why. RepoAtlas must never download a parser component while indexing, so every
+grammar it uses ships as a pinned, installed dependency. For Ruby the only such
+artifact is ``tree-sitter-ruby`` 0.23.1 on PyPI, and it predates upstream commit
+``ad907a69da0c8a4f7a943a7fe012712208da6dee`` ("scanner: fix heredoc
+serialization buffer overflows"). Its external scanner serializes
+``2 + 5·literals + Σ(4 + heredoc word)`` bytes into tree-sitter's 1024-byte
+buffer and can write one attacker-chosen byte past it; under error recovery the
+literal stack grows on every quote, slash or percent byte, so no check on the raw
+text short of refusing most heredoc-bearing files is sound. Parsing untrusted
+repositories with that scanner is not acceptable, and shipping an unpinned or
+downloaded grammar is exactly the defect being corrected.
+
+Re-enabling is deliberate, not a flag: adopt an offline-installable
+``tree-sitter-ruby`` release that contains ``ad907a69``, pin it exactly beside
+the other grammars, re-characterize this parser's output against the tests kept
+under the OFF-01 skip, and only then route :meth:`RubyParser.parse` back through
+:meth:`RubyParser._structure`. The extraction below is kept, unreachable, for
+that purpose.
+
+What the extraction does, once enabled, is deliberately basic, per the
+specification: requires, modules, classes, methods, gem references and calls
+that are reliable to read statically. Ruby's dynamism makes anything beyond that
+a guess, and a guess is not evidence (V1_SPEC §2). Ruby's own tooling
+(``ripper``) would mean running a Ruby interpreter beside untrusted repository
+content, which is why tree-sitter was chosen at all.
 """
 
 from __future__ import annotations
@@ -15,6 +40,7 @@ from typing import TYPE_CHECKING
 
 from repoatlas.models.parsing import (
     GRAMMAR_UNAVAILABLE,
+    STRUCTURAL_PARSING_DISABLED,
     EdgeType,
     EntityType,
     ParsedFile,
@@ -281,19 +307,36 @@ class _Walker:
         return strings[0] if strings else None
 
 
+#: The one answer :meth:`RubyParser.parse` gives. Built once: it depends on nothing
+#: about the file, which is the point --- no byte of it is examined.
+_GATED = ParseDiagnostic(severity=Severity.WARNING, message=STRUCTURAL_PARSING_DISABLED)
+
+
 class RubyParser:
-    """Deterministic Ruby structure extraction."""
+    """Claims Ruby files and declines to parse them structurally (OFF-01)."""
 
     name = "tree-sitter-ruby"
     # 2: whole-file spans stop at EOF and are absent for an empty file; a
     #    classic-Mac (CR-only) file is no longer collapsed into one line.
-    version = "2"
+    # 3: structural parsing gated (OFF-01). Bumped so that facts stored from a
+    #    downloaded grammar are dropped on the next sync rather than outliving it.
+    version = "3"
     language = "Ruby"
 
     def supports(self, path: Path) -> bool:
         return path.suffix in _SUFFIXES or path.name in _FILENAMES
 
     def parse(self, path: Path, content: str) -> ParsedFile:
+        """The gate: a fixed diagnostic, no facts, and no grammar ever loaded."""
+        return ParsedFile(
+            language=self.language,
+            parser=self.name,
+            parser_version=self.version,
+            diagnostics=(_GATED,),
+        )
+
+    def _structure(self, path: Path, content: str) -> ParsedFile:
+        """Structural extraction, unreachable while the gate stands (module docstring)."""
         try:
             tree, source = parse_tree("ruby", content)
         except GrammarUnavailable:
