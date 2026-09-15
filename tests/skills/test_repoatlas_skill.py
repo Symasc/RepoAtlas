@@ -521,3 +521,12 @@ def test_semantic_responsibility_stays_with_the_agent(skill: str) -> None:
     assert "you may reason. you may not invent evidence." in text
     assert 'never write "repoatlas concluded that' in text
     assert contains_all(text, "repoatlas owns", "you own")
+
+
+# == HTTP linkage and repository confinement =====================================
+
+
+def test_cross_repository_is_taught_as_confinement_through_shared_nodes(skill: str) -> None:
+    """``cross_repository`` false means the target's repository, hubs included."""
+    block = sections(skill)["relationships"]
+    assert contains_all(block, "cross_repository", "even through a shared node")
