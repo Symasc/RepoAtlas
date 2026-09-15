@@ -11,7 +11,18 @@ dependencies = [
     "pydantic>=2.10",
     "pyyaml>=6.0",
     "tree-sitter>=0.23",
-    "tree-sitter-language-pack>=0.7",
+    # Grammars are installed artifacts, pinned exactly, and never fetched while
+    # indexing (OFF-01). Each is the tree-sitter organisation's own upstream-built
+    # wheel, so the network boundary is package installation and nothing later.
+    # The pins are exact because a grammar is parser behaviour: a different
+    # version is a different set of facts from the same file, with no parser
+    # version bump to invalidate the old ones. `repoatlas/parsers/grammars.py`
+    # records the same versions with their provenance and refuses any other at
+    # load time. There is deliberately no Ruby grammar: see
+    # `repoatlas/parsers/ruby.py`.
+    "tree-sitter-bash==0.25.1",
+    "tree-sitter-javascript==0.25.0",
+    "tree-sitter-typescript==0.23.2",
     "numpy>=2.0",
     "fastembed>=0.5",
     # The official Model Context Protocol SDK, for the stdio transport adapter
@@ -51,6 +62,10 @@ packages = ["repoatlas"]
 # comes to disagree with itself. The sdist picks the directory up as source.
 [tool.hatch.build.targets.wheel.force-include]
 "skills" = "repoatlas/skills"
+# Provenance of the grammars an installation pulls in (OFF-01). The grammar
+# wheels carry their own licenses; this makes the pins, commits and hashes
+# readable from an installed RepoAtlas without the source tree.
+"THIRD_PARTY_NOTICES.md" = "repoatlas/THIRD_PARTY_NOTICES.md"
 
 # The adversarial suite proves that a file named like a private key is never read,
 # and the only honest way to prove it is with files named like private keys. Those

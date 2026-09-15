@@ -51,15 +51,18 @@ def _git(repo: Path, *args: str) -> None:
 
 @pytest.fixture
 def grammar_fails(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[str], None]]:
-    """Fail grammar loading at the library, so production builds the exception."""
-    import tree_sitter_language_pack
+    """Fail grammar loading at each grammar's binding, so production builds the exception."""
+    import importlib
+
     from repoatlas.parsers import treesitter
+    from repoatlas.parsers.grammars import GRAMMARS
 
     def install(message: str) -> None:
         def refuse(*_args: object, **_kwargs: object) -> object:
             raise ImportError(message)
 
-        monkeypatch.setattr(tree_sitter_language_pack, "get_parser", refuse)
+        for grammar in GRAMMARS.values():
+            monkeypatch.setattr(importlib.import_module(grammar.module), grammar.function, refuse)
         treesitter.load_parser.cache_clear()
 
     treesitter.load_parser.cache_clear()
