@@ -730,6 +730,22 @@ class CapabilityService:
                 with self._workspace.database.read_snapshot():
                     identity = self._resolve_graph_entity(request.target, resolution)
                     target = entity_ref(identity)
+                    # "Whether the walk may leave the target's repository" holds
+                    # through shared nodes too, not only across direct edges. A
+                    # shared node itself has no repository, so a walk rooted at one
+                    # is not confined to anything.
+                    home_repo_id = (
+                        None
+                        if request.cross_repository or identity.repository_slug is None
+                        else next(
+                            (
+                                repo.id
+                                for repo in registered
+                                if repo.slug == identity.repository_slug
+                            ),
+                            None,
+                        )
+                    )
                     walked = walk(
                         self._workspace.knowledge,
                         [identity.entity_id],
@@ -750,6 +766,7 @@ class CapabilityService:
                         # The cut is the answer here, so it falls on the
                         # repositories' own facts rather than on insertion order.
                         order=NeighborOrder.NATURAL,
+                        home_repo_id=home_repo_id,
                     )
                     walked_edges = self._walked_edges(walked)
                     # Ordered and cut before anything is fetched, so what comes

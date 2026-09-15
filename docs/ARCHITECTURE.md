@@ -2823,6 +2823,14 @@ pass from an exact match — so a cross-repository answer always has a structura
 entity is labelled with the edge that reached it, because the reader asked about a relationship, not about what the
 file happens to declare.
 
+A relationships walk with `cross_repository` off is confined to the target's repository **through shared nodes as
+well**. The crossing rule above sees an edge whose two ends belong to different repositories, and an edge onto
+`env:SERVICE_HOST` or an HTTP node has a repository at one end only — so two such edges in a row left the repository
+without either one "crossing". The walk is therefore given the target's repository and follows no edge whose far end
+belongs to another. The shared node stays reachable, and so does everything on the target's side of it; a target that
+is itself a shared node belongs to no repository and is not confined. Retrieval's expansion is not a relationships
+request and is unchanged: it still reaches the other side of a hub, bounded as above.
+
 ### Scoping, fusion and deduplication
 
 Scoping happens at stages 2-7, *before* scoring — this is what satisfies "never scan every repo for every
