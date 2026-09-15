@@ -27,6 +27,7 @@ validated; see the checklist in [docs/V1_SPEC.md §23](docs/V1_SPEC.md#23-implem
 | Python, TypeScript/JavaScript, Bash, Ruby, Salt, Jinja, YAML/JSON, Dockerfile | — |
 | Dependency detection across pypi, npm and gem — declared *and* resolved versions | — |
 | Cross-file imports and cross-repository relationships | — |
+| HTTP routes, declared deployments and endpoints shared across repositories (OpenAPI 3, Swagger 2, FastAPI, Flask, Express, fetch, requests, httpx, axios) | route-pattern matching, OpenAPI server variables, infrastructure manifests |
 | Exact search, semantic search, bounded graph expansion, rank fusion | — |
 | Docker image and compose stack, read-only repository mounts | — |
 
@@ -36,6 +37,12 @@ Exact identifiers, exact error strings, symbol names, environment variables and 
 **deterministic evidence**; embedding neighbours and lexical recall are **associative**. Rank fusion compares
 scores only within a tier, so no similarity score can displace a fact about the code. Semantic search is an aid,
 never a replacement.
+
+HTTP operations are graph facts too. A backend route or OpenAPI operation and a client call that name the same
+method and path meet on one shared `http-route` node, and a declared server URL plus an absolute client call meet on
+one `http-endpoint` node, so `relationships` can show both sides without either repository naming the other. These
+are static declarations: nothing is resolved, fetched or probed, and a declared deployment is not evidence that
+anything is live. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#http-routes-deployments-and-endpoints).
 
 Embeddings use a local [fastembed](https://github.com/qdrant/fastembed) model (`BAAI/bge-small-en-v1.5`, ONNX, no
 PyTorch, no paid API). It is **not** downloaded automatically — an ordinary `sync` never stalls on a 67 MB fetch.
