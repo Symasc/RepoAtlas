@@ -530,3 +530,22 @@ def test_cross_repository_is_taught_as_confinement_through_shared_nodes(skill: s
     """``cross_repository`` false means the target's repository, hubs included."""
     block = sections(skill)["relationships"]
     assert contains_all(block, "cross_repository", "even through a shared node")
+
+
+def test_http_nodes_are_taught_as_static_shared_operations(skill: str) -> None:
+    block = sections(skill)["relationships"]
+    assert contains_all(block, "http-route:", "http-deployment:", "http-endpoint:")
+    # A shared route is not a shared deployment, and a declaration is not a service.
+    assert contains_all(block, "not proof of which host", "declared is not live")
+    assert "runtime availability" in block
+    assert "too strong" in block
+
+
+def test_several_http_providers_remain_candidates(skill: str) -> None:
+    block = sections(skill)["relationships"]
+    assert contains_all(block, "all candidates", "do not pick one")
+
+
+def test_a_composed_http_declaration_is_not_cited_as_one_span(skill: str) -> None:
+    block = sections(skill)["relationships"]
+    assert contains_all(block, "not citable", "separately citable")
