@@ -153,6 +153,36 @@ may carry a path and line numbers with `citable` false and no evidence id; those
 coordinates are metadata about where the fact came from, not text you were shown.
 Discuss the fact, and cite the evidence ids the edge actually carries, if any.
 
+### HTTP routes, deployments and endpoints
+
+HTTP operations are shared nodes. Repositories meet on them and never directly, so relate from the node to see every
+side:
+
+```json
+{"tool": "repoatlas_relationships", "arguments": {"context": {"scope": "global"}, "target": "http-endpoint:GET:https://api.example.com/hello/me", "investigation_id": "<the id search returned>"}}
+```
+
+- `http-route:GET:/hello/me` is a method and path that code serves (`SERVES_HTTP_ROUTE`) or calls
+  (`CALLS_HTTP_ROUTE`). Sides meeting here share a method and path. That is not proof of which host, deployment or
+  service is involved.
+- `http-deployment:https://api.example.com` is a base URL a specification declares. Declared is not live.
+- `http-endpoint:GET:https://api.example.com/hello/me` is a complete method and URL. A specification exposes it
+  (`EXPOSES_HTTP_ENDPOINT`) or a client calls it (`CALLS_HTTP_ENDPOINT`). Both sides statically name the same
+  operation, but runtime availability and the current deployment are not verified.
+
+Say what the index shows, qualified:
+
+- Good: "web calls GET https://api.example.com/hello/me, which svc-a's OpenAPI declaration also exposes."
+- Good: "web and svc-a meet at the same statically declared HTTP endpoint."
+- Too strong: "web definitely connects to the live svc-a deployment."
+
+If several repositories serve or expose the same node, they are all candidates. Name them and do not pick one. A
+route match alone says nothing about which deployment a caller reaches. `GET /users/{id}` does not match
+`GET /users/42`.
+
+An endpoint a specification composes from a server URL and a path has no single source span, so its edge is not
+citable. Cite the server and route lines, which are separately citable.
+
 ## Dependencies
 
 These are static observations from files in the index. Nothing here contacts a
