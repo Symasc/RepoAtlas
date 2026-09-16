@@ -37,6 +37,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from tests.test_grammar_loader import core_requirement
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -286,6 +287,10 @@ def wheel_text(wheel: Path, suffix: str) -> str:
         return archive.read(name).decode("utf-8")
 
 
+#: The parser core itself, never one of the grammar distributions named after it.
+_CORE = re.compile(r"tree-sitter(==|>=|<=|<|>|~=|!=)[0-9].*")
+
+
 def requires_dist(wheel: Path) -> list[str]:
     return sorted(
         line.split(":", 1)[1].strip()
@@ -325,6 +330,26 @@ def test_the_wheel_requires_exactly_the_pinned_grammars(built: Path) -> None:
     assert grammar_requirements == expected
     for forbidden in ("tree-sitter-language-pack", "tree-sitter-languages", "tree-sitter-ruby"):
         assert not any(r.lower().startswith(forbidden) for r in requires_dist(wheel)), forbidden
+
+
+@requires_uv
+def test_the_wheel_requires_the_pinned_parser_core(built: Path) -> None:
+    """The published metadata, not the lockfile, is what an ordinary install reads.
+
+    ``uv.lock`` governs this checkout, the container and CI; somebody running
+    ``pip install repoatlas`` never sees it, and the wheel's own
+    ``Requires-Dist`` is then the entire contract. While that contract named a
+    range it had a valid solution --- an older core, resolvable with no pin and
+    no warning --- in which the JavaScript and Bash grammars could not be loaded
+    and those files silently lost structural parsing. An exact pin has exactly
+    one solution, so there is no resolution of RepoAtlas that supplies a core its
+    grammars cannot run on.
+    """
+    requirement = core_requirement()
+    assert re.fullmatch(r"tree-sitter==[0-9][0-9A-Za-z.]*", requirement), requirement
+    wheel = next(built.glob("*.whl"))
+    core = [r for r in requires_dist(wheel) if _CORE.fullmatch(r.split(";")[0].replace(" ", ""))]
+    assert core == [requirement]
 
 
 @requires_uv

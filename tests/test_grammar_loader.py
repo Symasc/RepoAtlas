@@ -42,6 +42,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import tree_sitter
 from repoatlas.models.parsing import GRAMMAR_UNAVAILABLE, EntityType, ParsedFile
 from repoatlas.parsers import treesitter
 from repoatlas.parsers.bash import BashParser
@@ -83,6 +84,31 @@ def _lock_packages() -> dict[str, dict[str, object]]:
         package["name"]: package
         for package in tomllib.loads((ROOT / "uv.lock").read_text())["package"]
     }
+
+
+def core_requirement() -> str:
+    """RepoAtlas's declared requirement on the parser core, whitespace removed.
+
+    Shared with ``tests/packaging`` so the published artifact is checked against
+    the same declaration this suite reads, rather than against a second copy of
+    the expected version.
+    """
+    declared = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["dependencies"]
+    core = [
+        spec
+        for spec in declared
+        if re.split(r"[<>=!~;\[ ]", spec, maxsplit=1)[0].lower().replace("_", "-") == "tree-sitter"
+    ]
+    assert len(core) == 1, core
+    return core[0].replace(" ", "")
+
+
+def core_pin() -> str:
+    """The single core version that requirement admits, or a failure saying so."""
+    requirement = core_requirement()
+    match = re.fullmatch(r"tree-sitter==([0-9][0-9A-Za-z.]*)", requirement)
+    assert match, f"{requirement!r}: the parser core must be pinned with ==, not a range"
+    return match.group(1)
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +158,45 @@ def test_the_lockfile_pins_and_hashes_every_grammar_artifact() -> None:
         assert isinstance(sdist, dict) and str(sdist["hash"]).startswith("sha256:"), distribution
         assert isinstance(wheels, list) and wheels, distribution
         assert all(str(wheel["hash"]).startswith("sha256:") for wheel in wheels), distribution
+
+
+def test_the_parser_core_is_pinned_to_exactly_one_version() -> None:
+    """A range here is how a supported grammar becomes an unavailable one.
+
+    The shipped JavaScript and Bash grammars were generated at a newer ABI than
+    the shipped TypeScript one, and a core that predates that ABI cannot load
+    them at all: it raises, the loader fails closed as it should, and those two
+    languages degrade to ``parser grammar unavailable`` on an installation whose
+    metadata was perfectly valid --- which is the failure OFF-01 exists to
+    remove, arrived at by a resolver instead of by a missing download.
+
+    Admitting exactly one version is what makes that resolution unreachable
+    rather than merely unlikely, and the version admitted is the one this
+    release characterized its parser output against. Moving it is a parser
+    change: re-characterize first.
+    """
+    pinned = core_pin()
+    assert _lock_packages()["tree-sitter"]["version"] == pinned
+    assert importlib.metadata.version("tree-sitter") == pinned
+
+
+def test_the_pinned_core_supports_the_abi_of_every_shipped_grammar() -> None:
+    """Read off the installed artifacts, so there is no ABI table to maintain here.
+
+    This does not stand in for the pin above: a correct answer here on this
+    machine says nothing about what a user's resolver would install. It is the
+    reason the pin is the version it is.
+    """
+    oldest = tree_sitter.MIN_COMPATIBLE_LANGUAGE_VERSION
+    newest = tree_sitter.LANGUAGE_VERSION
+    for language in sorted(GRAMMARS):
+        grammar = load_parser(language).language
+        assert grammar is not None
+        supported = range(oldest, newest + 1)
+        assert grammar.abi_version in supported, (
+            f"{language}: grammar ABI {grammar.abi_version} is outside the pinned core's "
+            f"supported range {supported.start}-{supported.stop - 1}"
+        )
 
 
 @pytest.mark.parametrize(("pin", "expected"), sorted(PARSER_FOR_PIN.items()))

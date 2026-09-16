@@ -35,6 +35,7 @@ from typing import Any
 import pytest
 from repoatlas.models.parsing import GRAMMAR_UNAVAILABLE, STRUCTURAL_PARSING_DISABLED
 from repoatlas.parsers.grammars import GRAMMARS
+from tests.test_grammar_loader import core_pin
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -121,6 +122,7 @@ absent = {m: importlib.util.find_spec(m) is None for m in forbidden}
 out.write_text(json.dumps({
     "exit": exit_code,
     "repoatlas": repoatlas.__file__,
+    "core": importlib.metadata.version("tree-sitter"),
     "attempts": attempts,
     "diagnostics": diagnostics,
     "entities": entities,
@@ -279,6 +281,10 @@ def test_a_fresh_installation_parses_every_shipped_grammar_with_no_network(
         assert result["attempts"] == [], "no Python-level network attempt either"
         assert result["absent"] == {"tree_sitter_language_pack": True, "tree_sitter_ruby": True}
 
+        # F1: the core the grammars run on is the one the metadata pins, so this
+        # proof is about the installation a user actually gets, not a luckier one.
+        assert result["core"] == core_pin(), result["core"]
+
         # CASE 9: the installed dependency form is exactly the pinned grammars.
         installed = result["grammars"]
         for grammar in GRAMMARS.values():
@@ -309,3 +315,38 @@ def test_a_fresh_installation_parses_every_shipped_grammar_with_no_network(
     # CASE 8: the wheel rebuilt from the sdist is the same product.
     for key in ("entities", "edges", "dependencies", "diagnostics", "grammars"):
         assert results["direct"][key] == results["from-sdist"][key], key
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv to resolve")
+def test_no_resolution_of_the_published_wheel_supplies_an_unsupported_core(
+    artifacts: dict[str, Path], tmp_path: Path
+) -> None:
+    """The failure this correction removes was reachable through plain resolution.
+
+    Before the core was pinned, ``pip install repoatlas 'tree-sitter<0.25'`` was a
+    perfectly valid solve: it installed, it ran, and the JavaScript and Bash
+    grammars quietly stopped loading, because they are a newer ABI than such a
+    core can accept. No download was involved, so every other offline proof in
+    this module still passed while a real installation was degraded.
+
+    The invariant is therefore about resolution, not about parsing: there is no
+    solution of RepoAtlas's published requirements that supplies a core its
+    grammars cannot run on. Asserted by resolving the real wheel against the real
+    index --- the control shows the command is well-formed and the constrained
+    solve is the only thing that changes --- and by exit status rather than by
+    any resolver's wording, which is not a contract.
+    """
+    venv = tmp_path / "resolve"
+    _run("uv", "venv", "--python", "3.13", str(venv))
+    python = str(venv / "bin" / "python")
+    resolve = ["uv", "pip", "install", "--dry-run", "--python", python, str(artifacts["direct"])]
+
+    control = subprocess.run(resolve, capture_output=True, text=True, check=False)
+    assert control.returncode == 0, control.stderr
+
+    constrained = subprocess.run(
+        [*resolve, "tree-sitter<0.25"], capture_output=True, text=True, check=False
+    )
+    assert constrained.returncode != 0, (
+        "a core older than the shipped grammars' ABI is still resolvable:\n" + constrained.stdout
+    )

@@ -10,7 +10,16 @@ dependencies = [
     "typer>=0.15",
     "pydantic>=2.10",
     "pyyaml>=6.0",
-    "tree-sitter>=0.23",
+    # The parser core is pinned exactly, for the same reason the grammars below
+    # are. The pinned JavaScript and Bash grammars are ABI 15, which a core older
+    # than 0.25 cannot load at all, so a `>=` range let an ordinary `pip install`
+    # resolve a core in which those two languages silently degraded to "parser
+    # grammar unavailable" --- the very failure OFF-01 exists to remove. 0.26.0
+    # is the core this release characterised its parser output against, so an
+    # ordinary installation gets the core the facts were characterised with.
+    # Changing it is a parser change, not a resolver accident: re-characterise
+    # output and bump the affected parser versions wherever observable facts move.
+    "tree-sitter==0.26.0",
     # Grammars are installed artifacts, pinned exactly, and never fetched while
     # indexing (OFF-01). Each is the tree-sitter organisation's own upstream-built
     # wheel, so the network boundary is package installation and nothing later.
