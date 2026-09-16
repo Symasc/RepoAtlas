@@ -975,6 +975,17 @@ loader checks four things:
 There is no cache directory, environment variable, search path or fallback. "Try local, then download" is
 deliberately absent.
 
+**The parser core is pinned the same way, at `tree-sitter==0.26.0`.** A grammar is compiled against a tree-sitter
+ABI, and the shipped JavaScript and Bash grammars are a newer ABI than the shipped TypeScript one: a core older than
+0.25 cannot load them at all. While this requirement was a `>=` range, RepoAtlas's own published metadata had a valid
+solution --- `pip install repoatlas "tree-sitter<0.25"` --- that installed cleanly and then degraded those two
+languages to `parser grammar unavailable`, with no download involved anywhere. An exact pin admits one solution, and
+it is the core this release characterized its parser output against.
+
+The core version is not part of `facts_version`, so moving it is a parser change rather than a resolver's to make:
+re-characterize parser output against the new core first, and bump the affected parser versions wherever observable
+facts move --- the same discipline moving a grammar pin requires.
+
 **What this replaced.** Grammars used to come through `tree-sitter-language-pack`, whose wheel holds no grammars. On
 first use its native code fetched a manifest and a platform bundle of about 22 MB from GitHub releases into
 `$XDG_CACHE_HOME/tree-sitter-language-pack/v<version>/libs`. On every later run it `dlopen`-ed whatever that mutable
