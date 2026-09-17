@@ -108,7 +108,6 @@ RepoAtlas/
 │   │   ├── python.py       stdlib ast
 │   │   ├── typescript.py   tree-sitter (ts, tsx, js, jsx, mjs, cjs)
 │   │   ├── bash.py         tree-sitter
-│   │   ├── ruby.py         claims Ruby files; structural parsing gated (OFF-01)
 │   │   ├── salt.py         Jinja neutralization + lenient YAML + fallback line scan
 │   │   ├── jinja.py        template relationships; owns neutralize()
 │   │   ├── structured.py   YAML / JSON config keys; owns collect_config_keys()
@@ -723,7 +722,7 @@ untouched.
 `marks.line_count`, `marks.whole_file_span`, and the chunker's line array. There is one because there were once
 seven. Five parsers each reimplemented `content.count("\n") + 1`, which counts the line *slots* newlines delimit
 rather than the lines that hold anything, so every file ending in a newline — nearly all of them — gained a phantom
-line; Python, TypeScript/JavaScript, Bash, Ruby and Dockerfile all had it, Salt, Jinja, YAML and JSON did not. The
+line; Python, TypeScript/JavaScript, Bash and Dockerfile all had it, Salt, Jinja, YAML and JSON did not. The
 chunker had a sixth model, `str.splitlines()`, and Salt's fallback scan a seventh. Chunk ranges and entity ranges
 are compared, fused and cited side by side, so two line models is two sets of line numbers for the same file.
 
@@ -757,7 +756,7 @@ refactor fails there rather than silently shifting every YAML line number. Salt'
 that proves the rule: it runs precisely because PyYAML refused the content, so PyYAML's line breaks no longer govern
 and it uses the source-grammar splitter.
 
-**Classic-Mac line endings are normalized before tree-sitter sees them.** The TypeScript, Ruby and Bash grammars do
+**Classic-Mac line endings are normalized before tree-sitter sees them.** The TypeScript and Bash grammars do
 not accept a lone `\r` as a line terminator, so a CR-only file collapsed into one line: in a seven-line TypeScript
 file, `beta` on lines 5-7 was reported at `1-1`, and Bash lost both function definitions outright. A wrong line for
 *real* content is worse than a phantom line at EOF, because grounding will believe it. `parse_tree` rewrites `\r`
@@ -1006,22 +1005,25 @@ across:
 `ParsedFile` output was identical for 306 inputs. Parser versions therefore did not change.
 `tests/test_grammar_loader.py` ties each pin to its parser version, so moving a pin forces a re-characterization.
 
-**Ruby is gated.** `RubyParser.parse` returns `structural parsing disabled` before any grammar, parser or byte of the
-file is touched.
+**Ruby has no structural parser.** No parser claims a `.rb`, `.rake`, `.gemspec`, `Gemfile` or `Rakefile`, so the
+registry returns nothing for them and the sync spine takes its ordinary no-parser path.
 - **Why.** The only offline-installable Ruby grammar, `tree-sitter-ruby` 0.23.1, predates upstream commit
   `ad907a69da0c8a4f7a943a7fe012712208da6dee` ("scanner: fix heredoc serialization buffer overflows"). Its external
   scanner serializes `2 + 5·literals + Σ(4 + heredoc word)` bytes into tree-sitter's 1024-byte buffer, and can write
   one attacker-chosen byte past the end.
 - **Why no guard.** A guard on the raw text is not sound. In error recovery that scanner pushes a literal for every
   quote, slash or percent byte, so short heredoc words reach the overflow as readily as long ones.
-- **What still works.** Ruby files are discovered, hashed and chunked for text search, and `Gemfile` / `*.gemspec`
-  dependencies are still read by the text-level dependency parsers. The extraction code is kept, unreachable, as
-  `RubyParser._structure`, and its tests are kept under an OFF-01 skip.
-- **Re-enabling:**
-  1. Adopt a wheel-installable release that contains `ad907a69`, and pin it.
-  2. Re-characterize the Ruby parser's output against those tests.
-  3. Only then route `parse` back through `_structure`.
-  4. Remove `tests/test_ruby_gate.py`'s removal-condition test in the same change.
+- **Why no parser at all.** An earlier pass kept a `RubyParser` whose only behaviour was to refuse, returning a fixed
+  `structural parsing disabled` diagnostic. It carried an unreachable extraction path and announced itself once per
+  Ruby file, and a parser that parses nothing is harder to reason about than no parser: the spine already has a
+  correct, tested answer for a file nobody claims. The class, its diagnostic constant, its dead `require` resolution
+  and its skipped characterization tests are gone.
+- **What still works, unchanged.** Ruby files are discovered, hashed and chunked for text search, and `Gemfile`,
+  `*.gemspec` and `Gemfile.lock` dependencies are read by the text-level dependency parsers, which never involved a
+  grammar. What changed is that an unparsed Ruby file now reports no diagnostic, like every other unparsed language.
+- **Adding one later** is an ordinary parser addition, not an un-gating: pin a release containing `ad907a69` in
+  `GRAMMARS`, write the parser against the shipped loader, and characterize its output before trusting a fact from
+  it. `tests/test_grammar_loader.py` fails if a Ruby grammar is declared without that work.
 
 ### Embedding and ranking
 
@@ -1545,7 +1547,7 @@ sync never touched.
 | environment variable, module, command, config key | interned as a global entity in the per-file pass |
 | symbol defined in the same file | resolved directly in the per-file pass |
 | symbol defined in another file | resolved **only through an import this file actually wrote** |
-| module specifier | resolved to a file: Python dotted and relative, TS/JS relative with index resolution, Ruby `require_relative` |
+| module specifier | resolved to a file: Python dotted and relative, TS/JS relative with index resolution |
 | Python `from . import x` | `x` is a *candidate* module in the package the dots name; an edge only when that package and that module both exist |
 | script / file path | joined against the referencing file's directory, then matched to a managed repository — including paths that climb out of one repository into another |
 | Salt `include:` | dotted state path → `x/y.sls` or `x/y/init.sls` |
@@ -3193,7 +3195,7 @@ Repositories are **untrusted input**. Static analysis only.
 |---|---|
 | Repository Bash | Parsed with tree-sitter; never executed |
 | Repository Python | Parsed with `ast`; never imported. `setup.py` included |
-| Repository Ruby | Indexed as text only; never parsed structurally while no safe offline grammar exists (§4), never executed |
+| Repository Ruby | Indexed as text only; no structural parser exists while no safe offline grammar does (§4), never executed |
 | Parser grammars | Pinned installed wheels, origin-checked at load; never downloaded, never loaded from a cache directory (§4) |
 | Salt / Jinja | Jinja neutralized to placeholders; never rendered |
 | npm lifecycle scripts | `package.json` read as JSON; npm never invoked |
@@ -3698,9 +3700,9 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | No embedded reasoning model at all: delete `llm/`, `ask`, `debug`, `--no-llm`, the provider configuration and exit code 4 | Keep the subsystem and default `provider: none`; or keep `ask` as an alias for `locate` | Reversing the four rows below. A disabled subsystem is still a subsystem: it ships, it is imported, it has configuration a user can set and a dependency the product does not otherwise need, and it advertises a capability RepoAtlas is not the right place to provide. External agents reason, and they do it better with the whole evidence surface than through one command's rendering. What made `ask` trustworthy was never the model --- it was `ground_answer`, which is deterministic, stayed, and is now reachable as `verify_grounding` by any agent rather than by one caller |
 | SQLite only | Embedded graph DB (Kùzu, Neo4j-embedded) | FTS5 + an indexed edge table with recursive CTEs covers V1's traversal needs; a graph DB adds a dependency and operational surface for no proven gain at this scale |
 | stdlib `ast` for Python | tree-sitter for uniformity | `ast` is exact, zero-dependency, gives precise line ranges and decorator/call structure. Uniformity is not worth accuracy loss on the primary language |
-| tree-sitter for TS/JS/Bash/Ruby | Hand-written parsers, or language-native tooling (tsc, ripper) | Language-native tooling means executing runtimes near untrusted code; tree-sitter is in-process, error-tolerant, and one dependency for four languages |
+| tree-sitter for TS/JS/Bash | Hand-written parsers, or language-native tooling (tsc) | Language-native tooling means executing runtimes near untrusted code; tree-sitter is in-process, error-tolerant, and one dependency for three languages |
 | Grammars as the tree-sitter organisation's pinned per-language wheels (OFF-01) | Keep `tree-sitter-language-pack` and pre-populate its cache; vendor grammar binaries into this wheel; compile grammars at build time | The pack downloads at run time and trusts a mutable cache, and has no offline mode in its Python wheel. Vendoring or compiling would turn a `py3-none-any` wheel into one platform wheel per OS and architecture, with a release pipeline to match. Upstream wheels already cover the same platforms, carry their own licenses, and are hash-pinned by `uv.lock` (§4) |
-| Ruby structural parsing gated rather than guarded (OFF-01) | Ship `tree-sitter-ruby` 0.23.1 with a pre-parse check on heredocs; build a patched Ruby wheel | 0.23.1 lacks upstream fix `ad907a69` for a scanner buffer overflow, and no check on raw text is sound under error recovery. A RepoAtlas-built grammar is a platform-wheel release decision. Text search and Gemfile dependencies are unaffected; structure returns when a fixed release installs as a wheel (§4) |
+| No Ruby structural parser rather than a guarded or refusing one | Ship `tree-sitter-ruby` 0.23.1 with a pre-parse check on heredocs; build a patched Ruby wheel; keep a parser that only refuses | 0.23.1 lacks upstream fix `ad907a69` for a scanner buffer overflow, and no check on raw text is sound under error recovery. A RepoAtlas-built grammar is a platform-wheel release decision. A parser that refuses every file is dead weight the spine already handles. Text search and Gemfile dependencies are unaffected (§4) |
 | Brute-force NumPy vectors | `sqlite-vec`, FAISS | ~77 MB / single-digit ms at target scale. Hidden behind `VectorIndex`, so upgrading is a one-file change if profiling demands it |
 | RRF for fusion | Weighted score normalization | BM25, cosine and graph distance are not commensurable; RRF is stable without per-source calibration |
 | `git ls-files` for enumeration | Reimplementing gitignore over `os.walk` | Real gitignore semantics for free, including nested and negated patterns, plus tracked/untracked distinction |

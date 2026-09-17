@@ -27,7 +27,6 @@ from repoatlas.storage.protocols import FileRow, SymbolRow
 _EXTENSIONS: dict[str, tuple[str, ...]] = {
     "python": (".py", ".pyi"),
     "node": (".ts", ".tsx", ".d.ts", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"),
-    "ruby": (".rb",),
 }
 _PYTHON_PACKAGE_FILES = ("__init__.py", "__init__.pyi")
 _NODE_INDEX_STEMS = ("index",)
@@ -43,9 +42,6 @@ _FLAVOR_BY_SUFFIX: dict[str, str] = {
     ".jsx": "node",
     ".mjs": "node",
     ".cjs": "node",
-    ".rb": "ruby",
-    ".rake": "ruby",
-    ".gemspec": "ruby",
 }
 
 _SALT_SCHEME = "salt://"
@@ -180,8 +176,6 @@ class ResolutionIndex:
             return self._resolve_python(origin, specifier)
         if flavor == "node":
             return self._resolve_node(origin, specifier)
-        if flavor == "ruby":
-            return self._resolve_ruby(origin, specifier)
         return None
 
     def _candidates(self, base: str, flavor: str) -> list[str]:
@@ -286,19 +280,6 @@ class ResolutionIndex:
         return (
             direct if direct is not None else self._first_existing(origin.repo_id, [target], "node")
         )
-
-    def _resolve_ruby(self, origin: FileRow, specifier: str) -> FileRow | None:
-        directory = PurePosixPath(origin.rel_path).parent
-        target = _normalize(str(directory / specifier))
-        candidates = [t for t in (target, _normalize(specifier)) if t is not None]
-        for candidate in candidates:
-            direct = self.file(origin.repo_id, candidate)
-            if direct is not None:
-                return direct
-            found = self._first_existing(origin.repo_id, [candidate], "ruby")
-            if found is not None:
-                return found
-        return None
 
     # -- symbols -------------------------------------------------------------
 

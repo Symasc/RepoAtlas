@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from repoatlas.models.parsing import GRAMMAR_UNAVAILABLE, STRUCTURAL_PARSING_DISABLED
+from repoatlas.models.parsing import GRAMMAR_UNAVAILABLE
 from repoatlas.parsers.grammars import GRAMMARS
 from tests.test_grammar_loader import core_pin
 
@@ -301,15 +301,15 @@ def test_a_fresh_installation_parses_every_shipped_grammar_with_no_network(
         assert ("bash", "hello.sh", "function", "greet") in entities
         # CASE 4: Python, the control.
         assert ("py", "pkg/hello.py", "function", "hello") in entities
-        # CASE 3: Ruby is gated, text-indexed, and its Gemfile is still read.
+        # CASE 3: Ruby has no structural parser, yet is still text-indexed and its
+        # Gemfile is still read --- the capability that survives having no grammar.
         assert {kind for repo, _, kind, _ in entities if repo == "ruby"} == {"file"}
         assert ["gem", "rack", "declared"] in result["dependencies"]
 
-        # CASE 7: the only diagnostics are Ruby's policy; no grammar is unavailable.
-        assert result["diagnostics"] == [
-            ["ruby", "Gemfile", STRUCTURAL_PARSING_DISABLED],
-            ["ruby", "lib/hello.rb", STRUCTURAL_PARSING_DISABLED],
-        ]
+        # CASE 7: a complete offline index reports nothing at all. Every shipped
+        # grammar loaded, and the languages RepoAtlas does not parse stay quiet
+        # rather than announcing themselves once per file.
+        assert result["diagnostics"] == []
         assert GRAMMAR_UNAVAILABLE not in json.dumps(result["diagnostics"])
 
     # CASE 8: the wheel rebuilt from the sdist is the same product.

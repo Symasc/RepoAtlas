@@ -23,8 +23,14 @@ The wheels are built and published by the tree-sitter organisation itself, and
 the lockfile verifies the bytes. ``THIRD_PARTY_NOTICES.md`` carries the same facts
 for a human reader.
 
-**Ruby is absent on purpose.** The only offline-installable Ruby grammar predates
-an upstream memory-safety fix; see :mod:`repoatlas.parsers.ruby`.
+**Ruby is absent on purpose.** The only offline-installable Ruby grammar,
+``tree-sitter-ruby`` 0.23.1, predates upstream commit ``ad907a69`` ("scanner: fix
+heredoc serialization buffer overflows"), whose external scanner can write one
+attacker-chosen byte past tree-sitter's serialization buffer. RepoAtlas reads
+untrusted repositories, so no Ruby grammar is shipped and Ruby has no structural
+parser at all: those files are discovered, chunked and searchable as text, and
+``Gemfile`` / ``*.gemspec`` dependencies are read by the text-level dependency
+parsers. Adding one means pinning a release that contains the fix, beside these.
 """
 
 from __future__ import annotations
