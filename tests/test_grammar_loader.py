@@ -54,7 +54,7 @@ from repoatlas.parsers.typescript import TypeScriptParser
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = ROOT / "repoatlas"
 
-#: Anything that obtains grammars at run time, or a Ruby grammar (OFF-01).
+#: Anything that obtains grammars at run time, or a Ruby grammar (none is shipped).
 DOWNLOADERS = ("tree_sitter_language_pack", "tree_sitter_languages", "tree_sitter_ruby")
 
 #: Parser versions are part of fact identity; a grammar pin is parser behaviour.
@@ -149,6 +149,29 @@ def test_pyproject_pins_every_grammar_exactly_and_nothing_else_supplies_one() ->
             assert match, f"{spec!r}: a grammar must be pinned with ==, not a range"
             pins[name] = match.group(1)
     assert pins == _distributions()
+
+
+def test_nothing_declares_a_ruby_grammar_or_a_downloader() -> None:
+    """Ruby has no parser, and adding a grammar back is a decision, not a bump.
+
+    RepoAtlas ships no Ruby grammar: the only offline-installable release,
+    ``tree-sitter-ruby`` 0.23.1, predates upstream fix ``ad907a69`` for a heredoc
+    scanner overflow that repository content controls, and RepoAtlas reads
+    untrusted repositories. Ruby files are chunked for text search and their
+    ``Gemfile`` / ``*.gemspec`` dependencies are read; nothing parses them.
+
+    If this fails because a ``tree-sitter-ruby`` release was added: verify it
+    contains ``ad907a69``, pin it exactly in ``GRAMMARS`` beside the others, add
+    a parser that routes through the shipped loader, and characterize its output
+    before trusting a single fact it produces.
+    """
+    declared = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["dependencies"]
+    names = {
+        re.split(r"[<>=!~;\[ ]", spec, maxsplit=1)[0].lower().replace("_", "-") for spec in declared
+    }
+    for forbidden in DOWNLOADERS:
+        assert forbidden.replace("_", "-") not in names, forbidden
+    assert "ruby" not in GRAMMARS
 
 
 def test_the_lockfile_pins_and_hashes_every_grammar_artifact() -> None:
@@ -436,7 +459,7 @@ def test_facts_are_identical_with_an_empty_or_a_poisoned_grammar_cache(
     entities = {tuple(row) for row in clean["snapshot"]["entities"]}  # type: ignore[index]
     names = {row[2] for row in entities}
     assert {"serve", "host", "View", "legacy", "deploy", "app"} <= names, names
-    assert "tool" not in names, "Ruby stays gated"
+    assert "tool" not in names, "Ruby has no structural parser"
     messages = {message for _, message in clean["diagnostics"]}  # type: ignore[misc]
     assert GRAMMAR_UNAVAILABLE not in messages
 

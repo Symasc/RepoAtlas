@@ -14,7 +14,6 @@ from repoatlas.parsers.bash import BashParser
 from repoatlas.parsers.dockerfile import DockerfileParser
 from repoatlas.parsers.jinja import JinjaParser
 from repoatlas.parsers.python import PythonParser
-from repoatlas.parsers.ruby import RubyParser
 from repoatlas.parsers.salt import SaltParser
 from repoatlas.parsers.structured import StructuredParser
 from repoatlas.parsers.typescript import TypeScriptParser
@@ -65,7 +64,6 @@ def default_parsers() -> list[LanguageParser]:
         PythonParser(),
         TypeScriptParser(),
         BashParser(),
-        RubyParser(),
         SaltParser(),
         JinjaParser(),
         DockerfileParser(),

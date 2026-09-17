@@ -1,8 +1,8 @@
 """Shared tree-sitter machinery (ARCHITECTURE.md §15, V1_SPEC §7).
 
-tree-sitter is chosen for TypeScript/JavaScript, Bash and Ruby because the
-alternative — language-native tooling such as ``tsc`` or ``ripper`` — means
-starting a language runtime next to untrusted repository content. tree-sitter
+tree-sitter is chosen for TypeScript/JavaScript and Bash because the
+alternative — language-native tooling such as ``tsc`` — means starting a
+language runtime next to untrusted repository content. tree-sitter
 parses in-process, never evaluates what it reads, and tolerates syntax errors by
 producing a partial tree, which is exactly the "diagnostic plus partial results"
 behavior V1_SPEC §7 requires.
@@ -117,7 +117,7 @@ def parse_tree(language: str, content: str) -> tuple[Tree, bytes]:
     the tree; slicing anything else would misalign on non-ASCII input.
 
     **Classic-Mac line endings are normalized first.** The grammars for
-    TypeScript, Ruby and Bash do not accept a lone ``\r`` as a line terminator, so
+    TypeScript and Bash do not accept a lone ``\r`` as a line terminator, so
     a file that uses only ``\r`` collapses into a single line as far as tree-sitter
     is concerned. That is not a cosmetic loss: in a seven-line CR-only TypeScript
     file, ``beta`` on lines 5-7 was reported at ``1-1``, and grounding would have

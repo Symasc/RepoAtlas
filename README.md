@@ -24,7 +24,7 @@ validated; see the checklist in [docs/V1_SPEC.md §23](docs/V1_SPEC.md#23-implem
 | Working now | Not yet |
 |---|---|
 | `init`, `sync`, `status`, `repos`, `locate`, `mcp` | `watch` (optional) |
-| Python, TypeScript/JavaScript, Bash, Salt, Jinja, YAML/JSON, Dockerfile | Ruby structure (text search only until a safe offline grammar exists) |
+| Python, TypeScript/JavaScript, Bash, Salt, Jinja, YAML/JSON, Dockerfile | Ruby structure (text search and gem dependencies only) |
 | Dependency detection across pypi, npm and gem — declared *and* resolved versions | — |
 | Cross-file imports and cross-repository relationships | — |
 | HTTP routes, declared deployments and endpoints shared across repositories (OpenAPI 3, Swagger 2, FastAPI, Flask, Express, fetch, requests, httpx, axios) | route-pattern matching, OpenAPI server variables, infrastructure manifests |
@@ -132,7 +132,7 @@ Python        structural (imports, functions, classes, methods, decorators, call
 TypeScript    structural (imports, definitions, exports, heritage, env reads); pinned installed grammar
 JavaScript    structural, through the same parser; pinned installed grammar
 Bash          structural (functions, sourced and executed scripts, exports, env reads); pinned installed grammar
-Ruby          detected and indexed for text search; structural parsing gated (no safe offline grammar)
+Ruby          detected and indexed for text search; no structural parser (no safe offline grammar)
 Salt          detected and indexed for text search; no structural parsing yet
 Jinja         detected and indexed for text search; no structural parsing yet
 YAML / JSON   detected and indexed for text search; no structural parsing yet
@@ -142,10 +142,10 @@ Dockerfile    detected and indexed for text search; no structural parsing yet
 Every file above is discovered, hashed, chunked and lexically searchable today. The rows marked structural also
 yield symbols and relationships.
 
-Ruby is gated deliberately. The only Ruby grammar that installs without a download at index time predates an
-upstream fix for a heredoc buffer overflow in its scanner, and RepoAtlas reads untrusted repositories. Ruby files
-report `structural parsing disabled` and stay searchable as text; `Gemfile` and `*.gemspec` dependencies are still
-read.
+Ruby has no structural parser, deliberately. The only Ruby grammar that installs without a download at index time
+predates an upstream fix for a heredoc buffer overflow in its scanner, and RepoAtlas reads untrusted repositories.
+Rather than ship a parser that refuses every file, there is none: Ruby files are discovered, chunked and searchable
+as text like any other unparsed language, and `Gemfile`, `*.gemspec` and `Gemfile.lock` dependencies are still read.
 
 ## Agents
 

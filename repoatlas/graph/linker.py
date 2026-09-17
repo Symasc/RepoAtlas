@@ -750,6 +750,4 @@ def _flavor(origin: FileRow, meta: dict[str, str]) -> str | None:
         return "python"
     if "typescript" in parser:
         return "node"
-    if "ruby" in parser:
-        return "ruby"
     return flavor_for(origin.rel_path)

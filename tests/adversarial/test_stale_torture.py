@@ -405,7 +405,7 @@ def git_rev(repo: Path) -> str:
 def test_a_hard_reset_removes_what_it_discarded(
     adversarial: Workspace, adversarial_root: Path
 ) -> None:
-    # Ruby is indexed as text, not structure (OFF-01), so what a hard reset must
+    # Ruby is indexed as text, not structure (no parser), so what a hard reset must
     # discard here is the file and its searchable text rather than a symbol.
     repo = adversarial_root / "ruby-tooling"
     baseline = git_rev(repo)
@@ -426,7 +426,7 @@ def test_a_hard_reset_removes_what_it_discarded(
 def test_stashing_and_restoring_tracks_the_working_tree(
     adversarial: Workspace, adversarial_root: Path
 ) -> None:
-    # The working tree is tracked through the Ruby file's text (Ruby is gated,
+    # The working tree is tracked through the Ruby file's text (nothing parses Ruby,
     # OFF-01), which is what stays searchable for it.
     repo = adversarial_root / "common-lib"
     settings = repo / "lib" / "settings.rb"
