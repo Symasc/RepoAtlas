@@ -35,6 +35,13 @@ class EntityType(enum.StrEnum):
     ENV_VAR = "env_var"
     SERVICE = "service"
     TEST = "test"
+    #: HTTP linkage (see :mod:`repoatlas.models.http`). Repository-less shared
+    #: nodes: a route is a method and a path, a deployment a statically declared
+    #: base URL, and an endpoint a method and an absolute URL. Appended, never
+    #: inserted — these values are on the public wire.
+    HTTP_ROUTE = "http_route"
+    HTTP_DEPLOYMENT = "http_deployment"
+    HTTP_ENDPOINT = "http_endpoint"
 
 
 class EdgeType(enum.StrEnum):
@@ -57,6 +64,14 @@ class EdgeType(enum.StrEnum):
     CONFIGURES = "CONFIGURES"
     MANAGES = "MANAGES"
     GENERATES = "GENERATES"
+    #: HTTP linkage. Every one is stored as *repository-owned fact → shared HTTP
+    #: node*; none joins two repositories directly, so two sides of an API meet
+    #: on the node and nowhere else.
+    SERVES_HTTP_ROUTE = "SERVES_HTTP_ROUTE"
+    CALLS_HTTP_ROUTE = "CALLS_HTTP_ROUTE"
+    DECLARES_HTTP_DEPLOYMENT = "DECLARES_HTTP_DEPLOYMENT"
+    EXPOSES_HTTP_ENDPOINT = "EXPOSES_HTTP_ENDPOINT"
+    CALLS_HTTP_ENDPOINT = "CALLS_HTTP_ENDPOINT"
 
 
 class EdgeDirection(enum.StrEnum):

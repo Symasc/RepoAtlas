@@ -200,8 +200,11 @@ class RelationshipsRequest(BaseModel):
     edge_types: tuple[EdgeType, ...] | None = None
     hops: int = Field(default=DEFAULT_HOPS, ge=1, le=MAX_HOPS)
     max_neighbors: int | None = Field(default=None, gt=0)
-    #: Whether the walk may leave the target's repository. Even when true, only
-    #: the edge types the shared policy allows to cross may do so.
+    #: Whether the walk may leave the target's repository — directly, or through a
+    #: shared node such as an environment variable or an HTTP operation that
+    #: other repositories also touch. Even when true, only the edge types the
+    #: shared policy allows to cross may join two repositories directly. A target
+    #: that is itself a shared node belongs to no repository and is not confined.
     cross_repository: bool = False
     #: Whether structural containment edges are shown. Off by default, because
     #: they turn a file into an inventory of every symbol it declares. When on,

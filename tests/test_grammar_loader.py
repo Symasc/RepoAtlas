@@ -60,9 +60,14 @@ DOWNLOADERS = ("tree_sitter_language_pack", "tree_sitter_languages", "tree_sitte
 #: Parser versions are part of fact identity; a grammar pin is parser behaviour.
 #: If a pin moves, the matching parser's output must be re-characterized and its
 #: version bumped, and this table updated in the same change.
+#:
+#: The converse is not true, and the TypeScript entries are why: the parser went
+#: to 3 when it began extracting HTTP facts, with both grammars sitting still.
+#: A parser may outrun its grammar; what this table forbids is a grammar moving
+#: underneath a parser that stayed put.
 PARSER_FOR_PIN = {
-    ("tree-sitter-typescript", "0.23.2"): (TypeScriptParser, "2"),
-    ("tree-sitter-javascript", "0.25.0"): (TypeScriptParser, "2"),
+    ("tree-sitter-typescript", "0.23.2"): (TypeScriptParser, "3"),
+    ("tree-sitter-javascript", "0.25.0"): (TypeScriptParser, "3"),
     ("tree-sitter-bash", "0.25.1"): (BashParser, "2"),
 }
 

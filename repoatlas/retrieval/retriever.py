@@ -205,7 +205,13 @@ class Retriever:
         ranked_lists.extend(lexical)
 
         symbols, entity_ids = self._stage_symbols(
-            question, analysis.terms, literal_terms, scopes, stages, suppressed=suppressed
+            question,
+            analysis.terms,
+            literal_terms,
+            scopes,
+            stages,
+            suppressed=suppressed,
+            http_keys=analysis.http_keys,
         )
         if symbols:
             ranked_lists.append(symbols)
@@ -396,6 +402,7 @@ class Retriever:
         stages: list[StageTiming],
         *,
         suppressed: SuppressionOutcome | None = None,
+        http_keys: tuple[str, ...] = (),
     ) -> tuple[list[EvidenceCandidate], list[int]]:
         """Entity lookup. An exact name match is a fact; a fuzzy one is a lead.
 
@@ -425,6 +432,10 @@ class Retriever:
             # an exact-name hit on one of them would enter as DETERMINISTIC — the
             # strongest tier — for a question whose subject does not exist.
             named = list(literal_terms) if suppressed is not None else [*literal_terms, *terms]
+            # An HTTP key is an exact identity the question spelled — `GET /users`
+            # names one route — so it is looked up under suppression as well. It
+            # can only ever match an entity *key*, which is what keeps it exact.
+            named.extend(http_keys)
             #: Split for the trace: an exact entity-name match and a full-text one
             #: are different claims, and the trace must not blur them.
             by_name = 0

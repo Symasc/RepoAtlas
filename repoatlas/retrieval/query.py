@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from repoatlas.models import http
+
 _QUOTED = re.compile(r"[\"'`]([^\"'`]{2,})[\"'`]")
 _ENV_VAR = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
 _DOTTED = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b")
@@ -153,6 +155,12 @@ class QueryAnalysis:
     #: A lone non-ASCII token that is the whole question: a pasted literal.
     pasted_literals: tuple[str, ...] = ()
     terms: tuple[str, ...] = field(default=())
+    #: Exact HTTP route, deployment and endpoint keys the question spells out —
+    #: ``GET /users`` is ``http-route:GET:/users`` (see :mod:`repoatlas.models.http`).
+    #: Looked up only as entity keys: never searched as text, and deliberately not
+    #: part of :attr:`literal_terms`, so they neither widen the lexical stages nor
+    #: decide suppression.
+    http_keys: tuple[str, ...] = field(default=())
 
     @property
     def literal_terms(self) -> tuple[str, ...]:
@@ -303,4 +311,5 @@ def analyze(question: str) -> QueryAnalysis:
         ambiguous_packages=ambiguous,
         pasted_literals=pasted,
         terms=terms,
+        http_keys=http.query_keys(question),
     )
