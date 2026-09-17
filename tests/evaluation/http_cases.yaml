@@ -1,0 +1,88 @@
+# RepoAtlas HTTP linkage evaluation set (brief §71).
+#
+# GROUND TRUTH IS MANUAL. Every link below was written by reading the fixture
+# sources under tests/fixtures/http, not by asking RepoAtlas what it returns.
+#
+# A *link* is one provider side and one caller side meeting on the same shared
+# HTTP node. Provider sides are SERVES_HTTP_ROUTE and EXPOSES_HTTP_ENDPOINT
+# edges; caller sides are CALLS_HTTP_ROUTE and CALLS_HTTP_ENDPOINT. Sides are
+# spelled `repository/path` for a file and `repository/path::symbol` for a symbol.
+#
+# The `links` set is CLOSED: every link RepoAtlas produces must be listed, and
+# every listed link must be produced. A produced link that is not listed is a
+# false link, and the suite requires zero of them. `forbidden` restates the
+# scenario-specific false links worth naming individually; each must be absent.
+
+links:
+  # A: a relative call and a framework route share the route.
+  - node: "http-route:GET:/hello"
+    providers: ["api-a/app/main.py::hello", "api-a/openapi.yaml"]
+    callers:
+      - "web/src/api.ts::helloRelative"
+      - "web/src/api.ts::helloAbsolute"
+      - "web/src/api.ts::helloEu"
+      - "pyclient/client/calls.py::hello_absolute"
+  # B: a specification and absolute calls share the endpoint.
+  - node: "http-endpoint:GET:https://api.example.com/hello"
+    providers: ["api-a/openapi.yaml"]
+    callers: ["web/src/api.ts::helloAbsolute", "pyclient/client/calls.py::hello_absolute"]
+  # C: a Swagger 2 base path is part of the endpoint.
+  - node: "http-endpoint:GET:https://api.example.com/v1/users"
+    providers: ["api-b/swagger.yaml"]
+    callers: ["web/src/api.ts::listUsersV1", "pyclient/client/calls.py::users_v1"]
+  # D: the same route on a different deployment shares only the route.
+  - node: "http-route:GET:/ping"
+    providers: ["api-d/openapi.yaml"]
+    callers: ["web/src/api.ts::pingOtherDeployment"]
+  # E: GET /users is a different operation from POST /users. The GET call still
+  # meets api-b's GET /users at route level, which proves no deployment.
+  - node: "http-route:GET:/users"
+    providers: ["api-b/app.py::list_users", "api-b/swagger.yaml"]
+    callers: ["web/src/api.ts::listUsers"]
+  - node: "http-route:POST:/users"
+    providers: ["api-a/openapi.yaml"]
+    callers: ["web/src/api.ts::createUser"]
+  - node: "http-endpoint:POST:https://api.example.com/users"
+    providers: ["api-a/openapi.yaml"]
+    callers: ["web/src/api.ts::createUser"]
+  # G: a call to one of two deployments links to that one only.
+  - node: "http-endpoint:GET:https://api-eu.example.com/hello"
+    providers: ["api-a/openapi.yaml"]
+    callers: ["web/src/api.ts::helloEu"]
+  # H: two declarers of one endpoint stay two.
+  - node: "http-route:GET:/health"
+    providers: ["api-a/openapi.yaml", "api-c/openapi.json"]
+    callers: ["web/src/api.ts::health"]
+  - node: "http-endpoint:GET:https://api.example.com/health"
+    providers: ["api-a/openapi.yaml", "api-c/openapi.json"]
+    callers: ["web/src/api.ts::health"]
+
+forbidden:
+  - scenario: D
+    node: "http-endpoint:GET:https://api-b.example.com/ping"
+    provider: "api-d/openapi.yaml"
+    caller: "web/src/api.ts::pingOtherDeployment"
+  - scenario: E
+    node: "http-endpoint:GET:https://api.example.com/users"
+    provider: "api-a/openapi.yaml"
+    caller: "web/src/api.ts::listUsers"
+  - scenario: F
+    node: "http-route:GET:/hello"
+    provider: "api-a/app/main.py::hello"
+    caller: "pyclient/client/calls.py::hello_dynamic"
+  - scenario: G
+    node: "http-endpoint:GET:https://api.example.com/hello"
+    provider: "api-a/openapi.yaml"
+    caller: "web/src/api.ts::helloEu"
+  - scenario: I
+    node: "http-route:GET:/users/42"
+    provider: "api-a/app/main.py::show_user"
+    caller: "web/src/api.ts::user42"
+  - scenario: J
+    node: "http-route:GET:/hello"
+    provider: "decoys/src/lookups.py::not_a_fastapi_route"
+    caller: "web/src/api.ts::helloRelative"
+  - scenario: C
+    node: "http-route:GET:/v1/users"
+    provider: "api-b/swagger.yaml"
+    caller: "web/src/api.ts::listUsersV1"

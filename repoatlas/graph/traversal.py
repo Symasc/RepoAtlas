@@ -39,6 +39,15 @@ EXPANSION_EDGES = (
     EdgeType.WATCHES,
     EdgeType.MANAGES,
     EdgeType.GENERATES,
+    # HTTP linkage. Each joins a repository-owned fact to a shared HTTP node and
+    # never two repositories directly, so none belongs in the crossing set below:
+    # a walk reaches the far side of an HTTP operation the way it reaches the far
+    # side of an environment variable, through the node.
+    EdgeType.SERVES_HTTP_ROUTE,
+    EdgeType.CALLS_HTTP_ROUTE,
+    EdgeType.DECLARES_HTTP_DEPLOYMENT,
+    EdgeType.EXPOSES_HTTP_ENDPOINT,
+    EdgeType.CALLS_HTTP_ENDPOINT,
 )
 
 #: Edge types a traversal may follow **out of one repository into another**.
@@ -143,6 +152,7 @@ def walk(
     crossing_edges: frozenset[EdgeType] = CROSS_REPOSITORY_EDGES,
     containment: bool = False,
     order: NeighborOrder = NeighborOrder.CONFIDENCE,
+    home_repo_id: int | None = None,
 ) -> WalkResult:
     """The one bounded walk. Everything that traverses this graph comes through here.
 
@@ -172,6 +182,17 @@ def walk(
     it declares — the answer would not have expanded *through* containment, but it
     would have exploded all the same, which is the outcome the exclusion exists to
     prevent.
+
+    ``home_repo_id`` confines the walk to one repository **through shared nodes as
+    well**. ``crossing_edges`` governs an edge whose two ends belong to different
+    repositories, and an edge touching a shared node — ``env:SERVICE_HOST``, an
+    HTTP operation — has a repository at one end only, so it never "crosses". Two
+    such edges in a row still leave the repository: a service reaches the hub, and
+    the hub reaches every other repository that touches it. A walk given a home
+    repository follows no edge whose far end belongs to another one. The shared
+    node stays reachable, and so does everything on the home side of it. ``None``
+    — retrieval's expansion, and a walk rooted at a shared node, which has no
+    repository to stay in — confines nothing.
 
     ``order`` decides which edges survive the per-hop bound. Retrieval's default
     puts the most confident first because rank fusion reads that as proximity; a
@@ -229,6 +250,11 @@ def walk(
                 from_id, to_id, outgoing = edge.dst_id, edge.src_id, False
             else:  # pragma: no cover - the query guarantees one end is in scope
                 continue
+
+            if home_repo_id is not None:
+                far_repo = edge.dst_repo_id if outgoing else edge.src_repo_id
+                if far_repo is not None and far_repo != home_repo_id:
+                    continue
 
             identity = (
                 edge.src_id,

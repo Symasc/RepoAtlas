@@ -1627,6 +1627,106 @@ needs a real resolver per ecosystem (§14).
 
 ---
 
+### HTTP routes, deployments and endpoints
+
+Two repositories talk over HTTP without either one naming the other. A backend serves `GET /hello/me`, and a frontend
+calls `fetch("https://api.example.com/hello/me")`. The only thing both sides can state is the operation. So the
+operation is what the graph records, as a repository-less shared node that each side reaches with its own edge. That
+is the same shape `env:SERVICE_HOST` already has, and it inherits the same property: repositories meet on the node
+and never directly. No `web → backend` edge is ever materialized, because nothing in either repository asserts one.
+A derived shortcut would hide exactly the ambiguity and provenance an agent needs to see.
+
+Three kinds, kept apart because each proves a different amount:
+
+| Kind | Natural key | What it proves |
+|---|---|---|
+| `http_route` | `http-route:GET:/hello/me` | Some code serves or calls this method and path. Nothing about the host, the deployment or the service. |
+| `http_deployment` | `http-deployment:https://api.example.com/v1` | A specification statically declares this base URL. **Declared is not live**: no DNS, reachability or runtime state is known or implied. |
+| `http_endpoint` | `http-endpoint:GET:https://api.example.com/v1/users` | Both sides statically name the same complete operation: method, scheme, host, explicit port and path. |
+
+Five edge types, every one oriented *repository-owned fact → shared node*:
+
+| Edge | From | Produced by |
+|---|---|---|
+| `SERVES_HTTP_ROUTE` | handler symbol, or the specification / server file | FastAPI, Flask and Express routes; OpenAPI `paths` operations |
+| `CALLS_HTTP_ROUTE` | calling symbol or file | every statically known client call (for an absolute call, its pathname) |
+| `DECLARES_HTTP_DEPLOYMENT` | specification file | OpenAPI 3 `servers[].url`; Swagger 2 `schemes` × `host` + `basePath` |
+| `EXPOSES_HTTP_ENDPOINT` | specification file | each operation under each applicable base |
+| `CALLS_HTTP_ENDPOINT` | calling symbol or file | absolute client calls |
+
+**Sources and their limits.** Parsers extract local facts and the linker interns them. There is no global-pass work,
+because two sides meet by key equality alone.
+
+- **OpenAPI 3.0/3.1** is recognized only by an `openapi: 3.x` signature, never by the shape of a `paths:` key.
+  - It reads root, path-item and operation `servers`; the most specific level that declares any wins, and is never
+    bypassed.
+  - A server with a variable, a relative server, or one carrying credentials or a query names no deployment. Its
+    routes are still recorded.
+  - A `$ref` path item is left unresolved; nothing is fetched.
+- **Swagger 2.0** keeps the route (`GET /users`) apart from the base (`https://api.example.com/v1`), and emits one
+  deployment per declared `http`/`https` scheme. An operation's own `schemes` replace the document's. Without `host`
+  or `schemes` there is no deployment.
+- **FastAPI and Flask.** Routes count only on an application or router whose identity the module proves: imported
+  from `fastapi`/`flask`, constructed at module level, and bound exactly once in the module.
+  - `APIRouter` and `Blueprint` routes are recorded only under a literal mount in the same file.
+  - An application passed to `.mount()` is a sub-application and yields nothing.
+  - `api_route` needs literal `methods`.
+  - Flask's `route` default is GET; the HEAD and OPTIONS Flask adds implicitly are not recorded.
+- **Express** is the same rule for `express()`, `express.Router()` and `Router()` imported from `"express"`.
+  - A route needs at least two arguments, because one is the settings getter.
+  - A path with pattern characters is not an identity.
+- **fetch** means the global function, only when the file binds no `fetch` of its own.
+  - With no options the method is GET.
+  - With options, the method must be a literal in an object literal with no spread, shorthand or computed key.
+  - The Fetch standard's case normalization is applied: `"patch"` is not `PATCH`.
+- **requests and httpx**: module-level functions with absolute URLs only.
+- **axios**: the default export's method aliases with absolute URLs only. A relative axios URL is combined with a
+  `baseURL` any file may set.
+
+Values are literal or nothing. A string literal, a concatenation of literals, and an f-string or template with no
+placeholder are read; anything else is not. **A known suffix of a dynamic URL proves no route**:
+`requests.get(f"{base}/hello/me")` names `/hello/me` only if `base` has no path, and nothing here knows that.
+
+**Normalization** lives in one pure module, `repoatlas/models/http.py`. Parsers, the linker and query analysis
+therefore agree on it byte for byte.
+
+- The scheme and host are lowercased, because URL semantics make them case-insensitive.
+- The query and fragment are dropped: they do not change which operation is named, and a token in a query string
+  must never reach a key.
+- Nothing else is folded: not path case, a trailing slash, a default port, http against https, `www`, or a
+  parameter template against a concrete path.
+- A URL carrying userinfo is refused outright rather than stripped.
+- Composition is literal append after removing one trailing slash from the base. `urljoin` would resolve
+  `/users` against `https://x/v1` to `https://x/users`, which OpenAPI does not mean.
+
+**Parameters are literal.** `GET /users/{id}` matches `GET /users/{id}` and nothing else. In particular it does not
+match `GET /users/42`, and it does not match Express's `/users/:id`. Pattern matching is a separate feature.
+
+**Multiple providers stay multiple.** Two specifications exposing one endpoint produce one node with two
+`EXPOSES_HTTP_ENDPOINT` edges, and nothing chooses between them. This is the rule dependency providers follow (§5).
+A specification and an implementation that disagree are two facts, not one to reconcile.
+
+**Provenance of a composed identity.** An edge has one span, and a span may be cited only when it alone contains
+every literal that decides the target. An OpenAPI endpoint is a server URL and a path from different lines, and a
+router route is a prefix and a decorator. Neither has such a span. So a parser marks such a fact `composed`, and the
+linker stores its edge with no lines. The fact is in the graph, but it is not citable. Its constituents are:
+- the `servers[].url` line that declares the deployment
+- the path-key-to-operation-key span that declares the route
+
+Stitching the two into one "span" would cite text that was never written together.
+
+**Search** generates the exact keys a question spells, then feeds them to the existing exact-name lookup. A key hit
+is a seed, and its handle is published like `env:` handles, so no tier, match class or ranking changed. The spellings
+it reads:
+- `GET /users` gives one route key.
+- `GET https://…/users` gives one endpoint key.
+- A bare path is looked up under every method.
+- A bare URL is looked up under every method and as a deployment.
+
+**Security.** HTTP extraction reads only files the sync already admitted, so an excluded `.env` holding `API_URL`
+declares nothing and is not cross-resolved. Nothing resolves DNS, fetches a specification or `$ref`, probes an
+endpoint, starts a server, or imports repository code.
+
 ## 6. The indexing pipeline
 
 ### Repository discovery
@@ -2901,6 +3001,14 @@ requires `DEPENDS_ON`, `REFERENCES`, `EXECUTES`, `SOURCES` or `IMPORTS` — ever
 pass from an exact match — so a cross-repository answer always has a structural reason (V1_SPEC §9). Each reached
 entity is labelled with the edge that reached it, because the reader asked about a relationship, not about what the
 file happens to declare.
+
+A relationships walk with `cross_repository` off is confined to the target's repository **through shared nodes as
+well**. The crossing rule above sees an edge whose two ends belong to different repositories, and an edge onto
+`env:SERVICE_HOST` or an HTTP node has a repository at one end only — so two such edges in a row left the repository
+without either one "crossing". The walk is therefore given the target's repository and follows no edge whose far end
+belongs to another. The shared node stays reachable, and so does everything on the target's side of it; a target that
+is itself a shared node belongs to no repository and is not confined. Retrieval's expansion is not a relationships
+request and is unchanged: it still reaches the other side of a hub, bounded as above.
 
 ### Scoping, fusion and deduplication
 

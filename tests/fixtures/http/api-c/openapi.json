@@ -1,0 +1,10 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "api-c", "version": "1" },
+  "servers": [{ "url": "https://api.example.com" }],
+  "paths": {
+    "/health": {
+      "get": { "responses": { "200": { "description": "ok" } } }
+    }
+  }
+}
