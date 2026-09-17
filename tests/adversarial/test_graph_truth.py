@@ -216,7 +216,7 @@ def test_service_host_is_read_in_every_language_that_reads_it(
 ) -> None:
     """GROUND_TRUTH lists five reads across Python, TypeScript and Ruby.
 
-    The two Ruby reads are text only while Ruby structural parsing is gated
+    The two Ruby reads are text only because Ruby has no structural parser
     (OFF-01): the lines still say ``ENV['SERVICE_HOST']``, and nothing extracts
     them, so neither may appear as a fact.
     """

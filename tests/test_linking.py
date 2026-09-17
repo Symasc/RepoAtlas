@@ -209,10 +209,10 @@ def test_a_relative_typescript_import_resolves_to_the_file(initialized: Workspac
     assert edge["path"] == "src/index.ts"
 
 
-def test_ruby_asserts_no_imports_while_it_is_gated(initialized: Workspace) -> None:
+def test_ruby_asserts_no_imports_because_nothing_parses_it(initialized: Workspace) -> None:
     """``require_relative "logging"`` in lib/settings.rb is text only (OFF-01).
 
-    Ruby structural parsing is gated, so no Ruby file may be the source of an
+    Ruby has no structural parser, so no Ruby file may be the source of an
     import edge, and lib/logging.rb may not be reached by one either.
     """
     ruby = [
@@ -283,7 +283,7 @@ def test_service_host_connects_every_language_that_touches_it(
     assert ("scripts", "deploy.sh", "EXPORTS") in reached
     assert ("ts-service", "src/index.ts", "READS") in reached
     assert ("python-service", "Dockerfile", "EXPORTS") in reached
-    # Ruby still reads it in the source, but Ruby is gated (OFF-01): text only.
+    # Ruby still reads it in the source, but nothing parses Ruby: text only.
     assert ("common-lib", "lib/settings.rb", "READS") not in reached
 
 

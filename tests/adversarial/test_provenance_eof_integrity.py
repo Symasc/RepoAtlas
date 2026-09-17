@@ -68,8 +68,8 @@ BODIES = {
     "svc.js": "const x = 1;" + LF + "const y = 2;",
     "run.sh": "echo one" + LF + "echo two",
     "Dockerfile": "FROM alpine" + LF + "RUN echo hello",
-    # lib.rb is absent on purpose: Ruby is not parsed structurally (OFF-01), so it
-    # yields no spans to be wrong about. That it claims none is asserted below.
+    # lib.rb is absent on purpose: no parser claims a Ruby file, so there are no
+    # spans to be wrong about. That nothing claims it is asserted below.
 }
 
 #: Parsers the review found already correct. They must stay correct.
@@ -170,21 +170,20 @@ def test_an_empty_file_claims_no_lines_at_all() -> None:
             assert symbol.line_end is None, name
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        "x = 1" + LF + "y = 2",
-        "def foo" + LF + "  1" + LF + "end" + LF + LF,
-        "def alpha" + CR + "  1" + CR + "end" + CR,
-        "",
-    ],
-)
-def test_a_gated_ruby_file_claims_no_lines(body: str) -> None:
-    """Ruby is not parsed structurally (OFF-01), so every provenance claim it could
-    get wrong is a claim it does not make: no symbol, no reference, no span."""
-    parsed = parse("lib.rb", body)
-    assert parsed.symbols == ()
-    assert parsed.references == ()
+@pytest.mark.parametrize("name", ["lib.rb", "tasks.rake", "pkg.gemspec", "Gemfile", "Rakefile"])
+def test_no_parser_claims_a_ruby_file(name: str) -> None:
+    """Ruby has no structural parser, so it makes no provenance claim to get wrong.
+
+    RepoAtlas ships no Ruby grammar --- the only offline-installable one predates
+    upstream fix ``ad907a69`` for a heredoc scanner overflow, and repositories are
+    untrusted input. There is no gate and no parser to hold to a span contract:
+    the registry simply claims nothing, and the sync spine chunks the file for
+    text search without deriving a symbol, a reference or a line range from it.
+
+    Asserted at the registry rather than on a parser's output because that is
+    where re-adding one would show up first.
+    """
+    assert ParserRegistry().for_path(Path(name)) is None
 
 
 # == 3. the registry-wide invariant ==========================================
@@ -200,7 +199,6 @@ INVARIANT_BODIES = {
     "blank.py": LF + LF,
     "svc.ts": "export function foo() {" + LF + "  return 1;" + LF + "}" + LF,
     "run.sh": "foo() {" + LF + "  echo hello" + LF + "}" + LF,
-    "lib.rb": "def foo" + LF + "  1" + LF + "end" + LF,
     "Dockerfile": (
         "FROM alpine" + LF + "RUN printf '%s" + chr(92) + "n' " + chr(92) + LF + "    hello" + LF
     ),
@@ -573,7 +571,7 @@ CR_BODIES = {
         "export function beta() {{{s}  return 2;{s}}}{s}"
     ),
     "run.sh": "alpha() {{{s}  echo one{s}}}{s}{s}beta() {{{s}  echo two{s}}}{s}",
-    # lib.rb: gated (OFF-01); see test_a_gated_ruby_file_claims_no_lines.
+    # lib.rb: no parser claims it; see test_no_parser_claims_a_ruby_file.
 }
 
 
@@ -581,7 +579,7 @@ CR_BODIES = {
 def test_a_lone_carriage_return_is_a_line_terminator(name: str) -> None:
     """Reported as untested after the last pass; testing it found a defect.
 
-    The tree-sitter grammars for TypeScript, Ruby and Bash do not accept a lone
+    The tree-sitter grammars for TypeScript and Bash do not accept a lone
     `\\r`, so a classic-Mac file collapsed into a single line: `beta` on lines 5-7
     was reported at `1-1`, and grounding would have believed a citation to line 1
     for content that is not there. Bash lost both definitions entirely. A CR-only
