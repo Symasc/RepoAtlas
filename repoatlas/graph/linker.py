@@ -5,9 +5,9 @@ runs in two passes, and the split is deliberate:
 
 **Per file** (:meth:`ReferenceLinker.link_file`, during indexing) creates only what
 one file can prove on its own — its definitions, its interned global targets
-(environment variables, modules, commands) and references to symbols it defines
-itself. Everything else is written to ``unresolved_refs`` as a durable record of
-the claim.
+(environment variables, modules, commands, HTTP routes, deployments and
+endpoints) and references to symbols it defines itself. Everything else is
+written to ``unresolved_refs`` as a durable record of the claim.
 
 **Globally** (:meth:`ReferenceLinker.link_global`, once at the end of a sync)
 resolves those standing claims against everything currently indexed: the import
@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
+from repoatlas.models import http
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.parsing import (
     EdgeType,
@@ -56,8 +57,28 @@ from repoatlas.storage.sqlite.stores import SqliteDependencyStore, SqliteKnowled
 
 #: Reference kinds interned as global entities during the per-file pass.
 _INTERNED_KINDS = frozenset(
-    {EntityType.ENV_VAR, EntityType.MODULE, EntityType.COMMAND, EntityType.CONFIG}
+    {
+        EntityType.ENV_VAR,
+        EntityType.MODULE,
+        EntityType.COMMAND,
+        EntityType.CONFIG,
+        EntityType.HTTP_ROUTE,
+        EntityType.HTTP_DEPLOYMENT,
+        EntityType.HTTP_ENDPOINT,
+    }
 )
+
+#: The shared HTTP kinds, each with the check its target must pass to be interned.
+#:
+#: A parser already normalized the target, so a failure here is a parser defect
+#: rather than a repository's. It is checked anyway because a shared node is where
+#: two repositories meet: a target that is not exactly canonical would be a second
+#: spelling of an identity, and two spellings of one operation never meet.
+_HTTP_CANONICAL = {
+    EntityType.HTTP_ROUTE: http.canonical_route,
+    EntityType.HTTP_DEPLOYMENT: http.canonical_deployment,
+    EntityType.HTTP_ENDPOINT: http.canonical_endpoint,
+}
 
 #: Reference kinds resolved to a file by path during the global pass.
 _PATH_KINDS = frozenset({EntityType.SCRIPT, EntityType.FILE})
@@ -176,6 +197,18 @@ class ReferenceLinker:
             source_id = symbol_ids.get(reference.source_symbol or "", file_entity_id)
 
             if reference.target_kind in _INTERNED_KINDS:
+                line_start: int | None = reference.line_start
+                line_end: int | None = reference.line_end
+                canonical = _HTTP_CANONICAL.get(reference.target_kind)
+                if canonical is not None:
+                    if canonical(reference.target_key) is None:
+                        continue
+                    if reference.meta.get("provenance") != "exact":
+                        # Composed from literals in more than one place, so no
+                        # single span proves it. The edge is kept as a fact about
+                        # the file and stored without lines, which is what makes
+                        # it uncitable; its constituents keep their own spans.
+                        line_start = line_end = None
                 target_id = self._knowledge.intern_entity(
                     EntityRecord(
                         type=reference.target_kind,
@@ -192,8 +225,8 @@ class ReferenceLinker:
                         confidence=reference.confidence,
                         repo_id=repo_id,
                         file_id=file_id,
-                        line_start=reference.line_start,
-                        line_end=reference.line_end,
+                        line_start=line_start,
+                        line_end=line_end,
                         parser=parsed.parser,
                     )
                 )

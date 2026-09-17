@@ -12,6 +12,7 @@ name two different things at once, which is not a key.
 
 from __future__ import annotations
 
+from repoatlas.models import http
 from repoatlas.models.parsing import EntityType
 
 #: The one key shape that embeds a source position.
@@ -89,5 +90,11 @@ def global_key(kind: EntityType, target: str) -> str:
             return config_key(target)
         case EntityType.REPOSITORY:
             return repository_key(target)
+        case EntityType.HTTP_ROUTE:
+            return http.route_key(target)
+        case EntityType.HTTP_DEPLOYMENT:
+            return http.deployment_key(target)
+        case EntityType.HTTP_ENDPOINT:
+            return http.endpoint_key(target)
         case _:
             return f"{kind.value}:{target}"

@@ -1,0 +1,12 @@
+openapi: 3.0.3
+info:
+  title: api-d
+  version: "1"
+servers:
+  - url: https://api-a.example.com
+paths:
+  /ping:
+    get:
+      responses:
+        "200":
+          description: pong
