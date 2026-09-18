@@ -292,6 +292,19 @@ class _InspectedSource:
     requested: LineRange | None
 
 
+def _resolvable_in(identity: EntityIdentity, in_scope: frozenset[str]) -> bool:
+    """Whether ``relationships`` answers about this entity under this scope.
+
+    The single statement of the ``search`` → ``relationships`` handoff. An interned
+    entity — an environment variable, a command, an HTTP operation — belongs to no
+    repository and is in every scope; a repository-owned one has to belong to a
+    repository the call named. Search publishes a handle only when this holds, and
+    relationships resolves a target only when it holds, so a handle search hands
+    back is one relationships will take under the same context.
+    """
+    return identity.repository_slug is None or identity.repository_slug in in_scope
+
+
 def _snapshot_key(state: FileState) -> tuple[int, str, str]:
     """What must not change between reading a file's text and its metadata."""
     return (state.file_id, state.content_hash, state.parser_version)
@@ -1500,7 +1513,8 @@ class CapabilityService:
         as though this query had established it — true of the ledger, false of the
         search.
         """
-        handles = self._entity_handles(shaped.items)
+        in_scope = frozenset(repo.slug for repo in resolution.repositories)
+        handles = self._entity_handles(shaped.items, in_scope)
         incomplete = shaped.truncated or outcome.evidence.truncated
         items = [
             EvidenceItem(
@@ -1546,12 +1560,14 @@ class CapabilityService:
             truncated=incomplete,
             has_more=incomplete,
             suppressed=outcome.suppression,
-            entities=self._seed_handles(outcome.seed_entity_ids),
+            entities=self._seed_handles(outcome.seed_entity_ids, in_scope),
             trace=outcome.evidence.trace if request.include_trace else None,
             ledger=session.ledger.summary(),
         )
 
-    def _seed_handles(self, seed_entity_ids: tuple[int, ...]) -> tuple[EntityHandle, ...]:
+    def _seed_handles(
+        self, seed_entity_ids: tuple[int, ...], in_scope: frozenset[str]
+    ) -> tuple[EntityHandle, ...]:
         """Natural handles for the exact-name hits that seeded graph expansion.
 
         These are the ``search`` → ``relationships`` handoff, and the reason they
@@ -1560,6 +1576,11 @@ class CapabilityService:
         admits it as a seed and produces no candidate for it. Returning it here
         gives the caller the hub it actually wants to traverse from, without
         RepoAtlas inventing a citation for something no file supplies.
+
+        A handle is published only if ``relationships`` will accept it under the
+        same context (:func:`_resolvable_in`). Offering one it must refuse would
+        break the handoff this list exists for, and the refusal would look like a
+        key that moved rather than a key from somewhere else.
 
         Order follows the retriever's own seed order, which is the order the
         question mentioned them in.
@@ -1573,6 +1594,8 @@ class CapabilityService:
             identity = identities.get(entity_id)
             if identity is None or not identity.key or identity.key in seen:
                 continue
+            if not _resolvable_in(identity, in_scope):
+                continue
             seen.add(identity.key)
             handles.append(
                 EntityHandle(
@@ -1583,7 +1606,9 @@ class CapabilityService:
             )
         return tuple(handles)
 
-    def _entity_handles(self, shaped: list[ShapedEvidence]) -> dict[int, EntityHandle]:
+    def _entity_handles(
+        self, shaped: list[ShapedEvidence], in_scope: frozenset[str]
+    ) -> dict[int, EntityHandle]:
         """Resolve entity-backed evidence to natural keys, in one query.
 
         Exact resolution by row id through the Slice 0 identity read — never a
@@ -1593,7 +1618,9 @@ class CapabilityService:
 
         An id that does not resolve yields no handle. The evidence still stands:
         failing to name the entity behind a span is not a reason to withhold the
-        span, and inventing a plausible key would be worse than saying nothing.
+        span, and inventing a plausible key would be worse than saying nothing. The
+        same holds for a key ``relationships`` would refuse under this context
+        (:func:`_resolvable_in`): the span is still evidence, the handle is not one.
         """
         wanted = {
             item.candidate.entity_id for item in shaped if item.candidate.entity_id is not None
@@ -1607,7 +1634,7 @@ class CapabilityService:
             if entity_id is None:
                 continue
             identity = identities.get(entity_id)
-            if identity is None or not identity.key:
+            if identity is None or not identity.key or not _resolvable_in(identity, in_scope):
                 continue
             handles[id(item)] = EntityHandle(
                 key=identity.key,
@@ -2098,14 +2125,8 @@ class CapabilityService:
         identities = self._workspace.knowledge.get_entities_by_key([key])
         if not identities:
             raise EntityNotFoundError()
-        in_scope = {repo.slug for repo in resolution.repositories}
-        # An interned entity belongs to no repository and is in every scope; a
-        # file-scoped one has to be in the scope that was asked for.
-        allowed = [
-            identity
-            for identity in identities
-            if identity.repository_slug is None or identity.repository_slug in in_scope
-        ]
+        in_scope = frozenset(repo.slug for repo in resolution.repositories)
+        allowed = [identity for identity in identities if _resolvable_in(identity, in_scope)]
         if not allowed:
             # Absent *from this context* rather than answered from outside it.
             # Crossing the boundary silently would make the scope advisory, which
