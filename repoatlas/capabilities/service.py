@@ -43,7 +43,7 @@ the wrong place.
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -303,6 +303,18 @@ def _resolvable_in(identity: EntityIdentity, in_scope: frozenset[str]) -> bool:
     back is one relationships will take under the same context.
     """
     return identity.repository_slug is None or identity.repository_slug in in_scope
+
+
+def _edge_repositories(edges: Iterable[GraphEdge], items: Iterable[EvidenceItem]) -> set[str]:
+    """Every repository a relationships answer draws on: endpoints, provenance, text."""
+    slugs = {item.ref.repository_slug for item in items}
+    for edge in edges:
+        for ref in (edge.source, edge.target):
+            if ref.repository_slug is not None:
+                slugs.add(ref.repository_slug)
+        if edge.provenance is not None and edge.provenance.repository_slug is not None:
+            slugs.add(edge.provenance.repository_slug)
+    return slugs
 
 
 def _snapshot_key(state: FileState) -> tuple[int, str, str]:
@@ -1537,10 +1549,11 @@ class CapabilityService:
             )
         ]
 
+        supplied = (item.ref.repository_slug for item in items)
         freshness = index_freshness(
             [
                 repository_freshness_for(self._workspace, repo, depth=request.depth, facts=facts)
-                for repo in resolution.repositories
+                for repo in self._covering_repositories(resolution, supplied)
             ],
             depth=request.depth,
         )
@@ -1642,6 +1655,25 @@ class CapabilityService:
                 positional=is_positional(identity.key),
             )
         return handles
+
+    def _covering_repositories(
+        self, resolution: ContextResolution, supplied: Iterable[str]
+    ) -> list[Repository]:
+        """The repositories a response's freshness must describe.
+
+        The scope the caller named, and then every repository this response drew
+        anything from. An agent reads the freshness of evidence from the response
+        that supplied it, so evidence from outside the scope — reached across a
+        shared node with crossing enabled, say — must not arrive under a freshness
+        report that says nothing about where it came from. Scope first, in
+        resolution order; anything else after it, by identity.
+        """
+        covered = list(resolution.repositories)
+        extra = sorted(set(supplied) - {repo.slug for repo in covered})
+        if extra:
+            by_slug = {repo.slug: repo for repo in self._workspace.repositories.list_all()}
+            covered.extend(by_slug[slug] for slug in extra if slug in by_slug)
+        return covered
 
     def _repository_view(
         self,
@@ -2404,10 +2436,11 @@ class CapabilityService:
         )
 
         facts = current_facts_version(self._workspace)
+        supplied = _edge_repositories(bound_edges, items)
         freshness = index_freshness(
             [
                 repository_freshness_for(self._workspace, repo, depth=request.depth, facts=facts)
-                for repo in resolution.repositories
+                for repo in self._covering_repositories(resolution, supplied)
             ],
             depth=request.depth,
         )
