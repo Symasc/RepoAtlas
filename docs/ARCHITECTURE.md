@@ -3008,15 +3008,34 @@ A relationships walk with `cross_repository` off is confined to the target's rep
 well**. The crossing rule above sees an edge whose two ends belong to different repositories, and an edge onto
 `env:SERVICE_HOST` or an HTTP node has a repository at one end only — so two such edges in a row left the repository
 without either one "crossing". The walk is therefore given the target's repository and follows no edge whose far end
-belongs to another. The shared node stays reachable, and so does everything on the target's side of it; a target that
-is itself a shared node belongs to no repository and is not confined. Retrieval's expansion is not a relationships
-request and is unchanged: it still reaches the other side of a hub, bounded as above.
+belongs to another. The shared node stays reachable, and so does everything on the target's side of it.
+
+**A target that is itself a shared node belongs to no repository, so the context supplies one.** Under
+`scope: repository` the walk is confined to the repository the caller named: a call that says which repository it is
+about must not answer about three, and hop two out of a hub is where it used to. Under `scope: global` there is no
+one repository to be confined to and a hub-rooted walk still sees every side, which is how "where is `SERVICE_HOST`
+configured?" is answered across a workspace. The hub itself is reachable either way — no repository owns it to
+withhold — so a confined answer still hands back the handle that leads out of it, and `cross_repository` still
+crosses when asked. Retrieval's expansion is not a relationships request and is unchanged: it still reaches the
+other side of a hub, bounded as above.
 
 ### Scoping, fusion and deduplication
 
 Scoping happens at stages 2-7, *before* scoring — this is what satisfies "never scan every repo for every
 question" (V1_SPEC §20), for the vector stage as much as the lexical one. In `REPOSITORY` scope the primary
 repository is searched first; other repositories stay reachable, so primary scope is a bias rather than a wall.
+
+**Two callers, two readings of the same scope, and the difference is the caller rather than the funnel.** The
+above is the V1 CLI's: `locate` and `debug` infer their scope from a working directory, which makes it a guess
+about what the user meant, and a guess is a good thing to bias with and a bad thing to refuse on. A capability
+call states its scope explicitly and can be refused on it, which is why every other capability treats the
+statement as a boundary — `inspect` refuses a path outside it, `relationships` refuses a key outside it,
+`dependencies` narrows and never merges. Search says the same thing by passing `confined` into this one funnel
+run: the second, unscoped pass is dropped and expansion is given the repository as a home, so a shared node
+stays reachable and nothing on the far side of one is followed. Nothing about ranking, fusion or deduplication
+differs between the two; one pass happens or it does not. Crossing from a capability call is asked for, by
+`scope: global` or by `relationships(cross_repository=true)`, and the handle that leads across still comes back
+from a confined search — a hub belongs to no repository, so no repository's boundary hides it.
 
 Reciprocal-rank fusion is chosen over score normalization because BM25 ranks, cosine similarities, literal-match
 scores and graph distances are not commensurable, and RRF needs no per-source calibration to combine them stably.
