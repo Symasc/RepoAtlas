@@ -51,6 +51,15 @@ class CapabilityContext(BaseModel):
     So the caller says. ``repository`` accepts a canonical slug or a display name;
     a display name that identifies more than one repository is refused rather than
     resolved, exactly as V1 refuses it (V1_SPEC §6).
+
+    **What it is saying is a boundary.** Because the scope is stated rather than
+    guessed, every capability answers out of it and nothing else: an answer from
+    outside would make the statement advisory, which is the one property that makes
+    a scoped answer worth having. Entities that belong to no repository — an
+    environment variable, a command, an HTTP operation — are in every scope, so a
+    confined answer still names the hub that leads out of it. Reaching another
+    repository is a thing the caller asks for: ``GLOBAL`` scope, or a
+    ``relationships`` walk that says ``cross_repository``.
     """
 
     model_config = ConfigDict(frozen=True)
