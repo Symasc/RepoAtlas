@@ -40,6 +40,10 @@ class RetrievalTrace(BaseModel):
 
     stages: tuple[StageTiming, ...] = ()
     literal_terms: tuple[str, ...] = ()
+    #: How many repositories the scoped pass covered. For a confined run — every
+    #: capability search — that is the whole search. The V1 CLI also makes a second,
+    #: unscoped pass that this number says nothing about, so there it is "how narrow
+    #: the first pass was" rather than "how much was searched".
     scoped_repositories: int = 0
     semantic_used: bool = False
     semantic_detail: str = ""

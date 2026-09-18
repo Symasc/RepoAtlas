@@ -299,6 +299,7 @@ def expand_from_seeds(
     hops: int,
     fanout: int,
     seed_limit: int,
+    home_repo_id: int | None = None,
 ) -> TraversalResult:
     """The nodes a bounded walk reaches, in the order it reaches them.
 
@@ -306,6 +307,13 @@ def expand_from_seeds(
     why, and nothing about the edges themselves. The order is load-bearing —
     entities found on the first hop precede those found on the second, so rank
     fusion sees the closer relationship as the stronger one.
+
+    ``home_repo_id`` confines the walk exactly as it does for a relationships
+    request: the shared node stays reachable and nothing on the far side of one is
+    followed. ``None`` — V1's own expansion, which has no repository to stay in —
+    confines nothing, and is what this has always done.
     """
-    result = walk(knowledge, seeds, hops=hops, fanout=fanout, seed_limit=seed_limit)
+    result = walk(
+        knowledge, seeds, hops=hops, fanout=fanout, seed_limit=seed_limit, home_repo_id=home_repo_id
+    )
     return TraversalResult(reached=result.reached, reasons=result.reasons, visited=result.visited)
