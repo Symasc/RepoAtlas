@@ -139,24 +139,34 @@ class FileNotIndexedError(RepoAtlasError):
 
 
 class EntityNotFoundError(RepoAtlasError):
-    """No entity holds that exact natural key.
+    """No entity *in this context* holds that exact natural key.
 
     Exact means exact. There is no fallback to a name search, and specifically
     none for a ``sym:`` key whose definition has moved: such a key embeds the line
     it was defined at, so it stops resolving when the definition does, and
     resolving it to the nearest similarly-named symbol would silently answer about
     a different definition than the caller named.
+
+    A key that resolves only *outside* the scope the call named is reported the
+    same way, on purpose. Distinguishing the two would answer a question about
+    another repository with the one fact a scoped caller was not given: that the
+    entity is there. So the two are indistinguishable from outside, and the detail
+    has to be true of both — in particular it may not send a caller back to a
+    search that would hand back the very key just refused, which is the loop the
+    old wording produced.
     """
 
     exit_code = ExitCode.RUNTIME
 
     def __init__(
         self,
-        message: str = "no entity holds that key",
+        message: str = "no entity in this context holds that key",
         *,
         detail: str | None = (
-            "Entity keys are exact and positional `sym:` keys move with their "
-            "definition. Search for the symbol again to obtain a current key."
+            "Keys are exact, and a key resolves only inside the scope the call "
+            "named. A positional `sym:` key also moves with its definition. Search "
+            "under the context you mean — `scope: global` if the question is not "
+            "about one repository — and use the key that search returns."
         ),
     ) -> None:
         super().__init__(message, detail=detail)

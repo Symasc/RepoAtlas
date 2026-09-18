@@ -26,9 +26,10 @@ dependencies = [
     # The pins are exact because a grammar is parser behaviour: a different
     # version is a different set of facts from the same file, with no parser
     # version bump to invalidate the old ones. `repoatlas/parsers/grammars.py`
-    # records the same versions with their provenance and refuses any other at
-    # load time. There is deliberately no Ruby grammar: see
-    # `repoatlas/parsers/ruby.py`.
+    # records the same versions with their provenance, refuses any other at load
+    # time, and says why there is deliberately no Ruby grammar — and therefore no
+    # Ruby structural parser — and what a release carrying the fix would have to
+    # be.
     "tree-sitter-bash==0.25.1",
     "tree-sitter-javascript==0.25.0",
     "tree-sitter-typescript==0.23.2",

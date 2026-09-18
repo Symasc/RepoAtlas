@@ -33,6 +33,7 @@ from repoatlas.capabilities.errors import (
     EntityAmbiguousError,
     EntityNotFoundError,
     InvalidRelationshipRequestError,
+    capability_error,
 )
 from repoatlas.capabilities.service import CapabilityService
 from repoatlas.graph.traversal import CONTAINMENT_EDGES, CROSS_REPOSITORY_EDGES, EXPANSION_EDGES
@@ -169,6 +170,50 @@ def test_a_target_outside_the_asked_scope_is_absent_from_it(initialized: Workspa
         _service(initialized).relationships(
             RelationshipsRequest(context=scoped, target=CONFIG, max_neighbors=200)
         )
+
+
+def test_a_key_outside_the_scope_is_refused_exactly_as_one_that_exists_nowhere(
+    initialized: Workspace,
+) -> None:
+    """Indistinguishable on purpose, because the difference is the withheld fact.
+
+    Telling the two apart would answer a scoped caller's question about another
+    repository with the one thing the scope exists to withhold: that the entity is
+    over there. So the envelopes match to the field, and this is what catches a
+    "more helpful" refusal that helps by disclosing.
+    """
+    scoped = CapabilityContext(scope=CapabilityScope.REPOSITORY, repository="ts-service")
+    service = _service(initialized)
+
+    with pytest.raises(EntityNotFoundError) as elsewhere:
+        service.relationships(RelationshipsRequest(context=scoped, target=CONFIG))
+    with pytest.raises(EntityNotFoundError) as nowhere:
+        service.relationships(
+            RelationshipsRequest(context=scoped, target="env:NO_SUCH_VARIABLE_ANYWHERE")
+        )
+
+    assert capability_error(elsewhere.value) == capability_error(nowhere.value)
+
+
+def test_the_refusal_does_not_send_the_caller_back_into_the_same_call(
+    initialized: Workspace,
+) -> None:
+    """The loop the LVL AuthZ audit walked into, closed at the wording.
+
+    Search returned a key, relationships refused it under the same context, and
+    the refusal advised searching for the symbol again — which returned the same
+    key, which was refused again. A key refused for scope is not stale and no
+    amount of searching in that context improves it, so the guidance has to name
+    the other possibility. That it is a real possibility is the second assertion:
+    the very same key answers under ``global``.
+    """
+    scoped = CapabilityContext(scope=CapabilityScope.REPOSITORY, repository="ts-service")
+    with pytest.raises(EntityNotFoundError) as refused:
+        _service(initialized).relationships(RelationshipsRequest(context=scoped, target=CONFIG))
+
+    detail = refused.value.detail or ""
+    assert "scope" in detail, detail
+    assert _ask(initialized, CONFIG).edges, "the refused key answers under global scope"
 
 
 def test_an_interned_target_is_reachable_from_every_scope(initialized: Workspace) -> None:

@@ -869,6 +869,7 @@ class SqliteKnowledgeStore:
                 line_end=row["line_end"] or row["line_start"] or 1,
                 text=row["signature"] or "",
                 description=f"defines {row['name']}",
+                entity_type=EntityType(row["type"]),
             )
             for row in rows
         ]

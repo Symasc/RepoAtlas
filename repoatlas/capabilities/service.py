@@ -43,7 +43,7 @@ the wrong place.
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -290,6 +290,61 @@ class _InspectedSource:
     source: InspectionSource
     worktree_matches_index: bool | None
     requested: LineRange | None
+
+
+def _resolvable_in(identity: EntityIdentity, in_scope: frozenset[str]) -> bool:
+    """Whether ``relationships`` answers about this entity under this scope.
+
+    The single statement of the ``search`` → ``relationships`` handoff. An interned
+    entity — an environment variable, a command, an HTTP operation — belongs to no
+    repository and is in every scope; a repository-owned one has to belong to a
+    repository the call named. Search publishes a handle only when this holds, and
+    relationships resolves a target only when it holds, so a handle search hands
+    back is one relationships will take under the same context.
+    """
+    return identity.repository_slug is None or identity.repository_slug in in_scope
+
+
+def _walk_home(
+    identity: EntityIdentity, resolution: ContextResolution, *, crossing: bool
+) -> int | None:
+    """The repository a walk may not leave, or ``None`` when nothing confines it.
+
+    ``cross_repository`` is the caller asking to leave, so it confines nothing.
+    Otherwise the walk is about one repository, and there are two ways to know
+    which. A target that belongs to one brings its own — the rule the HTTP linkage
+    work established, and the one that holds in ``GLOBAL`` scope, where the caller
+    named no repository but the target did.
+
+    A target that belongs to *none* — an environment variable, a command, an HTTP
+    operation — used to bring nothing, so a walk rooted at a hub was confined to
+    nothing even under a context that named a repository. It went to the hub and
+    straight out into every repository touching it. Under an explicit context the
+    caller has already said which repository the question is about, so that is the
+    home: "what does my repository do with this endpoint", not "and here is what
+    two others do with it". In ``GLOBAL`` scope there is still nothing to be
+    confined to and a hub-rooted walk still sees every side.
+
+    The lookup is over ``resolution.repositories`` rather than the register,
+    because a repository-owned target is only resolvable when it is in scope
+    (:func:`_resolvable_in`) — so the home is always a repository the call named.
+    """
+    if crossing:
+        return None
+    slug = identity.repository_slug or (resolution.primary.slug if resolution.primary else None)
+    return next((repo.id for repo in resolution.repositories if repo.slug == slug), None)
+
+
+def _edge_repositories(edges: Iterable[GraphEdge], items: Iterable[EvidenceItem]) -> set[str]:
+    """Every repository a relationships answer draws on: endpoints, provenance, text."""
+    slugs = {item.ref.repository_slug for item in items}
+    for edge in edges:
+        for ref in (edge.source, edge.target):
+            if ref.repository_slug is not None:
+                slugs.add(ref.repository_slug)
+        if edge.provenance is not None and edge.provenance.repository_slug is not None:
+            slugs.add(edge.provenance.repository_slug)
+    return slugs
 
 
 def _snapshot_key(state: FileState) -> tuple[int, str, str]:
@@ -587,6 +642,14 @@ class CapabilityService:
                         request.question,
                         to_repository_context(resolution),
                         literal_phrase=diagnostic,
+                        # Search mints citable ids, so an entity it names is
+                        # worth quoting: a bare location cannot be cited.
+                        quote_signatures=True,
+                        # An explicit context is a boundary here, as it already is
+                        # for inspect, relationships and dependencies. Crossing it
+                        # takes `scope: global`, or a relationships walk that says
+                        # cross_repository.
+                        confined=True,
                     )
                     shaped = shape_candidates(outcome.evidence.candidates, applied)
                     proposed = self._propose(shaped.items, registered)
@@ -731,20 +794,10 @@ class CapabilityService:
                     identity = self._resolve_graph_entity(request.target, resolution)
                     target = entity_ref(identity)
                     # "Whether the walk may leave the target's repository" holds
-                    # through shared nodes too, not only across direct edges. A
-                    # shared node itself has no repository, so a walk rooted at one
-                    # is not confined to anything.
-                    home_repo_id = (
-                        None
-                        if request.cross_repository or identity.repository_slug is None
-                        else next(
-                            (
-                                repo.id
-                                for repo in registered
-                                if repo.slug == identity.repository_slug
-                            ),
-                            None,
-                        )
+                    # through shared nodes too, not only across direct edges — and
+                    # a shared node has no repository, so the context supplies one.
+                    home_repo_id = _walk_home(
+                        identity, resolution, crossing=request.cross_repository
                     )
                     walked = walk(
                         self._workspace.knowledge,
@@ -1497,7 +1550,8 @@ class CapabilityService:
         as though this query had established it — true of the ledger, false of the
         search.
         """
-        handles = self._entity_handles(shaped.items)
+        in_scope = frozenset(repo.slug for repo in resolution.repositories)
+        handles = self._entity_handles(shaped.items, in_scope)
         incomplete = shaped.truncated or outcome.evidence.truncated
         items = [
             EvidenceItem(
@@ -1520,10 +1574,11 @@ class CapabilityService:
             )
         ]
 
+        supplied = (item.ref.repository_slug for item in items)
         freshness = index_freshness(
             [
                 repository_freshness_for(self._workspace, repo, depth=request.depth, facts=facts)
-                for repo in resolution.repositories
+                for repo in self._covering_repositories(resolution, supplied)
             ],
             depth=request.depth,
         )
@@ -1543,12 +1598,14 @@ class CapabilityService:
             truncated=incomplete,
             has_more=incomplete,
             suppressed=outcome.suppression,
-            entities=self._seed_handles(outcome.seed_entity_ids),
+            entities=self._seed_handles(outcome.seed_entity_ids, in_scope),
             trace=outcome.evidence.trace if request.include_trace else None,
             ledger=session.ledger.summary(),
         )
 
-    def _seed_handles(self, seed_entity_ids: tuple[int, ...]) -> tuple[EntityHandle, ...]:
+    def _seed_handles(
+        self, seed_entity_ids: tuple[int, ...], in_scope: frozenset[str]
+    ) -> tuple[EntityHandle, ...]:
         """Natural handles for the exact-name hits that seeded graph expansion.
 
         These are the ``search`` → ``relationships`` handoff, and the reason they
@@ -1557,6 +1614,11 @@ class CapabilityService:
         admits it as a seed and produces no candidate for it. Returning it here
         gives the caller the hub it actually wants to traverse from, without
         RepoAtlas inventing a citation for something no file supplies.
+
+        A handle is published only if ``relationships`` will accept it under the
+        same context (:func:`_resolvable_in`). Offering one it must refuse would
+        break the handoff this list exists for, and the refusal would look like a
+        key that moved rather than a key from somewhere else.
 
         Order follows the retriever's own seed order, which is the order the
         question mentioned them in.
@@ -1570,6 +1632,8 @@ class CapabilityService:
             identity = identities.get(entity_id)
             if identity is None or not identity.key or identity.key in seen:
                 continue
+            if not _resolvable_in(identity, in_scope):
+                continue
             seen.add(identity.key)
             handles.append(
                 EntityHandle(
@@ -1580,7 +1644,9 @@ class CapabilityService:
             )
         return tuple(handles)
 
-    def _entity_handles(self, shaped: list[ShapedEvidence]) -> dict[int, EntityHandle]:
+    def _entity_handles(
+        self, shaped: list[ShapedEvidence], in_scope: frozenset[str]
+    ) -> dict[int, EntityHandle]:
         """Resolve entity-backed evidence to natural keys, in one query.
 
         Exact resolution by row id through the Slice 0 identity read — never a
@@ -1590,7 +1656,9 @@ class CapabilityService:
 
         An id that does not resolve yields no handle. The evidence still stands:
         failing to name the entity behind a span is not a reason to withhold the
-        span, and inventing a plausible key would be worse than saying nothing.
+        span, and inventing a plausible key would be worse than saying nothing. The
+        same holds for a key ``relationships`` would refuse under this context
+        (:func:`_resolvable_in`): the span is still evidence, the handle is not one.
         """
         wanted = {
             item.candidate.entity_id for item in shaped if item.candidate.entity_id is not None
@@ -1604,7 +1672,7 @@ class CapabilityService:
             if entity_id is None:
                 continue
             identity = identities.get(entity_id)
-            if identity is None or not identity.key:
+            if identity is None or not identity.key or not _resolvable_in(identity, in_scope):
                 continue
             handles[id(item)] = EntityHandle(
                 key=identity.key,
@@ -1612,6 +1680,25 @@ class CapabilityService:
                 positional=is_positional(identity.key),
             )
         return handles
+
+    def _covering_repositories(
+        self, resolution: ContextResolution, supplied: Iterable[str]
+    ) -> list[Repository]:
+        """The repositories a response's freshness must describe.
+
+        The scope the caller named, and then every repository this response drew
+        anything from. An agent reads the freshness of evidence from the response
+        that supplied it, so evidence from outside the scope — reached across a
+        shared node with crossing enabled, say — must not arrive under a freshness
+        report that says nothing about where it came from. Scope first, in
+        resolution order; anything else after it, by identity.
+        """
+        covered = list(resolution.repositories)
+        extra = sorted(set(supplied) - {repo.slug for repo in covered})
+        if extra:
+            by_slug = {repo.slug: repo for repo in self._workspace.repositories.list_all()}
+            covered.extend(by_slug[slug] for slug in extra if slug in by_slug)
+        return covered
 
     def _repository_view(
         self,
@@ -2095,14 +2182,8 @@ class CapabilityService:
         identities = self._workspace.knowledge.get_entities_by_key([key])
         if not identities:
             raise EntityNotFoundError()
-        in_scope = {repo.slug for repo in resolution.repositories}
-        # An interned entity belongs to no repository and is in every scope; a
-        # file-scoped one has to be in the scope that was asked for.
-        allowed = [
-            identity
-            for identity in identities
-            if identity.repository_slug is None or identity.repository_slug in in_scope
-        ]
+        in_scope = frozenset(repo.slug for repo in resolution.repositories)
+        allowed = [identity for identity in identities if _resolvable_in(identity, in_scope)]
         if not allowed:
             # Absent *from this context* rather than answered from outside it.
             # Crossing the boundary silently would make the scope advisory, which
@@ -2380,10 +2461,11 @@ class CapabilityService:
         )
 
         facts = current_facts_version(self._workspace)
+        supplied = _edge_repositories(bound_edges, items)
         freshness = index_freshness(
             [
                 repository_freshness_for(self._workspace, repo, depth=request.depth, facts=facts)
-                for repo in resolution.repositories
+                for repo in self._covering_repositories(resolution, supplied)
             ],
             depth=request.depth,
         )
