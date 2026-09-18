@@ -13,6 +13,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from repoatlas.models.parsing import EntityType
 from repoatlas.models.telemetry import RetrievalTrace
 
 
@@ -228,6 +229,16 @@ MatchField = Annotated[
 ]
 
 
+#: Entity kinds whose whole claim is a file rather than a declaration inside one:
+#: the file, the module that is that file, a script, a template. The indexer stores
+#: no signature for any of them because there is no declaration to store, so
+#: supplying one names the file and nothing in it — which is exactly what
+#: file-level provenance is for.
+_FILE_IDENTITY_KINDS = frozenset(
+    {EntityType.FILE, EntityType.MODULE, EntityType.SCRIPT, EntityType.TEMPLATE}
+)
+
+
 class EvidenceCandidate(BaseModel):
     """One retrieved piece of a real repository, with the provenance that proves it.
 
@@ -292,6 +303,39 @@ class EvidenceCandidate(BaseModel):
     #: proof depends on exactly where the cap fell and is not established here —
     #: and an unprovable line claim is the defect this field exists to prevent.
     split_total: int | None = Field(default=None, exclude=True)
+    #: The type of the entity this candidate was reached through, when a stage
+    #: knows it. Only the graph stage needs to: it describes whatever an edge
+    #: reached, and a file reached that way is a claim about the file, while a
+    #: symbol reached that way names lines it may hold no text for.
+    #:
+    #: Excluded from serialization for the reason ``split_total`` is: provenance
+    #: the capability layer reads, not a field V1's ``locate --json`` publishes.
+    entity_type: EntityType | None = Field(default=None, exclude=True)
+
+    @property
+    def is_handle_only(self) -> bool:
+        """True when this names an entity and supplies nothing to cite about it.
+
+        An entity reached with no stored text — an exact-name symbol hit, a graph
+        neighbour with no signature — carries the entity's line range and not one
+        byte of it. What it establishes is an identity, which is what a handle is
+        for; admitted as evidence it would receive a citable id that any claim at
+        all could rest on, because there is nothing in it to check a claim against.
+
+        File identity is the exception, and a designed one (ARCHITECTURE.md §10,
+        *File-level provenance is representable*): a filename match, or a file an
+        edge reached, supports exactly "this file exists", and grounding already
+        refuses to let a line range rest on it. A module, a script and a template
+        belong with them rather than with declarations — each one *is* its file,
+        which is why no signature is stored for any of them — and a text-less
+        candidate that names no entity at all claims only its file too.
+        """
+        return (
+            not self.text
+            and self.entity_id is not None
+            and self.source is not EvidenceSource.FILE
+            and self.entity_type not in _FILE_IDENTITY_KINDS
+        )
 
     @property
     def is_file_level(self) -> bool:

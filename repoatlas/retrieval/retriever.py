@@ -146,7 +146,12 @@ class Retriever:
         return self.retrieve_detailed(question, context, literal_phrase=literal_phrase).evidence
 
     def retrieve_detailed(
-        self, question: str, context: RepositoryContext, *, literal_phrase: bool = False
+        self,
+        question: str,
+        context: RepositoryContext,
+        *,
+        literal_phrase: bool = False,
+        quote_signatures: bool = False,
     ) -> RetrievalOutcome:
         """The funnel: one pass, and everything that pass decided.
 
@@ -156,6 +161,12 @@ class Retriever:
         sentence in a trace field, which is not something a caller can act on
         without re-deriving it — either by parsing prose or by running the funnel a
         second time. Neither is acceptable, so the funnel says what it decided.
+
+        ``quote_signatures`` supplies the declaration the indexer stored for each
+        entity-name hit, so that a caller which turns candidates into citable
+        evidence has bytes to cite rather than a bare location. Nothing about
+        ranking changes. V1 renders these candidates as locations, passes nothing
+        here, and is unchanged.
         """
         stages: list[StageTiming] = []
         analysis = analyze(question)
@@ -212,6 +223,7 @@ class Retriever:
             stages,
             suppressed=suppressed,
             http_keys=analysis.http_keys,
+            quote_signatures=quote_signatures,
         )
         if symbols:
             ranked_lists.append(symbols)
@@ -403,6 +415,7 @@ class Retriever:
         *,
         suppressed: SuppressionOutcome | None = None,
         http_keys: tuple[str, ...] = (),
+        quote_signatures: bool = False,
     ) -> tuple[list[EvidenceCandidate], list[int]]:
         """Entity lookup. An exact name match is a fact; a fuzzy one is a lead.
 
@@ -419,6 +432,14 @@ class Retriever:
         would launder a guess into the tier that outranks every genuine lead.
         ARCHITECTURE §10 specifies expansion "from the exact entity hits" for
         exactly this reason.
+
+        ``quote_signatures`` supplies the declaration the indexer stored for each
+        hit, which is what the graph stage has always done with the same column. A
+        caller that turns candidates into citable evidence needs the bytes: the
+        definition of the symbol a question names is frequently the only candidate
+        that points at the defining file at all, and returning it with no text
+        turns the answer into a location nobody can quote. V1 renders these
+        candidates as locations and passes nothing here, so its output is unchanged.
         """
         exact_names = {term.lower() for term in terms}
         with Stopwatch("symbol") as watch:
@@ -457,13 +478,14 @@ class Retriever:
                             path=hit.path,
                             line_start=hit.line_start,
                             line_end=hit.line_end or hit.line_start,
-                            text="",
+                            text=hit.signature if quote_signatures else "",
                             score=hit.score,
                             source=EvidenceSource.SYMBOL,
                             tier=EvidenceTier.DETERMINISTIC,
                             match=MatchClass.EXACT_NAME,
                             description=f"defines {hit.name}",
                             entity_id=hit.entity_id,
+                            entity_type=hit.type,
                         )
                     )
             for scope in scopes if suppressed is None else []:
@@ -487,7 +509,7 @@ class Retriever:
                             path=hit.path,
                             line_start=hit.line_start,
                             line_end=hit.line_end or hit.line_start,
-                            text="",
+                            text=hit.signature if quote_signatures else "",
                             score=hit.score,
                             source=EvidenceSource.SYMBOL,
                             tier=(
@@ -496,6 +518,7 @@ class Retriever:
                             match=MatchClass.EXACT_NAME if exact else MatchClass.LEXICAL,
                             description=f"defines {hit.name}",
                             entity_id=hit.entity_id,
+                            entity_type=hit.type,
                         )
                     )
             watch.candidates_out = len(candidates)
@@ -744,6 +767,7 @@ class Retriever:
                 # declares: the reader asked about a relationship.
                 description=(reason or {}).get(row.entity_id) or row.description,
                 entity_id=row.entity_id,
+                entity_type=row.entity_type,
             )
             for row in rows
         ]
