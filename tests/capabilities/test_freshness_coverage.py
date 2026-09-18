@@ -52,9 +52,19 @@ def _drawn_on(response: RelationshipsResponse) -> set[str]:
 
 
 def test_a_walk_from_a_hub_reports_the_repositories_it_reached(initialized: Workspace) -> None:
-    """A hub belongs to no repository, so a walk from one leaves the scope behind."""
+    """A walk from a hub that was asked to cross reaches past its scope.
+
+    This case used to need no ``cross_repository``: a hub belongs to no
+    repository, so a walk rooted at one was confined to nothing and left the scope
+    behind on its own. That was the last hub escape and it is now closed, which
+    the guard below caught rather than letting this pass while proving nothing.
+    Asking to cross is now how a hub-rooted answer draws on another repository —
+    and the freshness report still has to say so.
+    """
     response = CapabilityService(initialized).relationships(
-        RelationshipsRequest(context=_scoped("ts-service"), target=SERVICE_HOST, hops=2)
+        RelationshipsRequest(
+            context=_scoped("ts-service"), target=SERVICE_HOST, hops=2, cross_repository=True
+        )
     )
     drawn = _drawn_on(response)
     assert drawn - {"ts-service"}, "the fixture no longer reaches past the scope"
@@ -80,6 +90,23 @@ def test_freshness_still_matches_the_scope_when_nothing_else_contributed(
         RelationshipsRequest(context=_scoped("python-service"), target=CONFIG, max_neighbors=200)
     )
     assert _reported(response) == {"python-service"}
+
+
+def test_a_confined_hub_walk_claims_no_repository_it_no_longer_answers_about(
+    initialized: Workspace,
+) -> None:
+    """Freshness widens for what an answer drew on, so it must narrow again with it.
+
+    The set is "the scope, plus whatever else contributed". Once a hub-rooted walk
+    is confined, nothing else contributes, and reporting the freshness of
+    repositories the answer no longer touches would describe an answer that was
+    not given.
+    """
+    response = CapabilityService(initialized).relationships(
+        RelationshipsRequest(context=_scoped("ts-service"), target=SERVICE_HOST, hops=2)
+    )
+    assert _drawn_on(response) <= {"ts-service"}
+    assert _reported(response) == {"ts-service"}
 
 
 def test_the_scope_is_reported_even_when_it_supplied_nothing(initialized: Workspace) -> None:
