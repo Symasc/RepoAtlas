@@ -305,6 +305,36 @@ def _resolvable_in(identity: EntityIdentity, in_scope: frozenset[str]) -> bool:
     return identity.repository_slug is None or identity.repository_slug in in_scope
 
 
+def _walk_home(
+    identity: EntityIdentity, resolution: ContextResolution, *, crossing: bool
+) -> int | None:
+    """The repository a walk may not leave, or ``None`` when nothing confines it.
+
+    ``cross_repository`` is the caller asking to leave, so it confines nothing.
+    Otherwise the walk is about one repository, and there are two ways to know
+    which. A target that belongs to one brings its own — the rule the HTTP linkage
+    work established, and the one that holds in ``GLOBAL`` scope, where the caller
+    named no repository but the target did.
+
+    A target that belongs to *none* — an environment variable, a command, an HTTP
+    operation — used to bring nothing, so a walk rooted at a hub was confined to
+    nothing even under a context that named a repository. It went to the hub and
+    straight out into every repository touching it. Under an explicit context the
+    caller has already said which repository the question is about, so that is the
+    home: "what does my repository do with this endpoint", not "and here is what
+    two others do with it". In ``GLOBAL`` scope there is still nothing to be
+    confined to and a hub-rooted walk still sees every side.
+
+    The lookup is over ``resolution.repositories`` rather than the register,
+    because a repository-owned target is only resolvable when it is in scope
+    (:func:`_resolvable_in`) — so the home is always a repository the call named.
+    """
+    if crossing:
+        return None
+    slug = identity.repository_slug or (resolution.primary.slug if resolution.primary else None)
+    return next((repo.id for repo in resolution.repositories if repo.slug == slug), None)
+
+
 def _edge_repositories(edges: Iterable[GraphEdge], items: Iterable[EvidenceItem]) -> set[str]:
     """Every repository a relationships answer draws on: endpoints, provenance, text."""
     slugs = {item.ref.repository_slug for item in items}
@@ -764,20 +794,10 @@ class CapabilityService:
                     identity = self._resolve_graph_entity(request.target, resolution)
                     target = entity_ref(identity)
                     # "Whether the walk may leave the target's repository" holds
-                    # through shared nodes too, not only across direct edges. A
-                    # shared node itself has no repository, so a walk rooted at one
-                    # is not confined to anything.
-                    home_repo_id = (
-                        None
-                        if request.cross_repository or identity.repository_slug is None
-                        else next(
-                            (
-                                repo.id
-                                for repo in registered
-                                if repo.slug == identity.repository_slug
-                            ),
-                            None,
-                        )
+                    # through shared nodes too, not only across direct edges — and
+                    # a shared node has no repository, so the context supplies one.
+                    home_repo_id = _walk_home(
+                        identity, resolution, crossing=request.cross_repository
                     )
                     walked = walk(
                         self._workspace.knowledge,

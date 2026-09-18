@@ -92,11 +92,12 @@ def relationships(
     cross_repository: bool = False,
     investigation_id: str | None = None,
     service: CapabilityService | None = None,
+    context: CapabilityContext = GLOBAL,
 ) -> RelationshipsResponse:
     """Ask ``relationships``. Pass ``service`` to stay in its investigations."""
     return (service or CapabilityService(workspace)).relationships(
         RelationshipsRequest(
-            context=GLOBAL,
+            context=context,
             target=target,
             direction=direction,
             hops=hops,
