@@ -143,7 +143,14 @@ Pass the exact natural entity handle RepoAtlas returned, verbatim:
 If search returned `env:SERVICE_HOST`, use `env:SERVICE_HOST`. Do not shorten it
 to `SERVICE_HOST`, do not rebuild it from a display name, and do not guess a
 similar key. There is no fuzzy matching here: a key that resolves to nothing is
-refused rather than approximated. On `ENTITY_NOT_FOUND`, go back to search.
+refused rather than approximated.
+
+`ENTITY_NOT_FOUND` means the key resolves to nothing *in the context you asked
+under*. Repeating the same search in the same context will hand you the same key
+and the same refusal. Either the key is stale — a `sym:` key moves with its
+definition, so search again and take the new one — or the context is narrower
+than the question, and `{"scope": "global"}` is the answer. Change one of the two
+before asking again.
 
 What the results mean:
 
@@ -356,7 +363,7 @@ Read the structured fields: `code`, `category`, `retryable`, `detail`. Branch on
 | `SYNC_IN_PROGRESS` | another writer holds the lock; retry is reasonable |
 | `UNKNOWN_INVESTIGATION` | start a new investigation and reacquire evidence |
 | `LEDGER_FULL` | this investigation cannot hold more; start a fresh one |
-| `ENTITY_NOT_FOUND` | go back to search; do not invent a key |
+| `ENTITY_NOT_FOUND` | stale key or too narrow a scope; change one, do not repeat the same call |
 | `STALE_CURSOR` | the inventory moved; restart the pagination, do not continue it |
 | `INVALID_REQUEST` | fix the named field |
 | `REPOSITORY_AMBIGUOUS` | choose among the candidates it returns, by slug |
