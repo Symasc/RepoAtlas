@@ -370,8 +370,11 @@ class ContextView(BaseModel):
     scope: CapabilityScope
     #: Canonical identities of the repositories in scope, ordered by slug.
     repositories: tuple[str, ...] = ()
-    #: The repository the question was asked "in", if any. Retrieval biases
-    #: towards it; it is not a wall, and evidence from elsewhere may still rank.
+    #: The repository the question was asked "in", if any. In a capability call it
+    #: is a boundary: evidence comes from it or from something that belongs to no
+    #: repository at all. Reaching another one is asked for, by ``scope: global`` or
+    #: by ``relationships(cross_repository=true)``. The V1 CLI's own primary scope
+    #: is a bias rather than a wall (ARCHITECTURE.md §10); this is not that field.
     primary: str | None = None
     #: Human-readable account of how the scope was decided. Never a discriminator.
     reason: str = ""
