@@ -587,6 +587,9 @@ class CapabilityService:
                         request.question,
                         to_repository_context(resolution),
                         literal_phrase=diagnostic,
+                        # Search mints citable ids, so an entity it names is
+                        # worth quoting: a bare location cannot be cited.
+                        quote_signatures=True,
                     )
                     shaped = shape_candidates(outcome.evidence.candidates, applied)
                     proposed = self._propose(shaped.items, registered)
