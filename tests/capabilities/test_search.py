@@ -531,20 +531,85 @@ def test_the_response_echoes_what_was_searched(initialized: Workspace) -> None:
     assert response.context.repositories == ("python-service",)
 
 
-def test_repository_scope_still_permits_cross_repository_evidence(
+def test_repository_scope_answers_out_of_the_repository_it_names(
     initialized: Workspace,
 ) -> None:
-    """V1 biases towards the primary repository; it is not a wall (V1_SPEC §6).
+    """An explicit context is a boundary, not a bias.
 
-    Reinterpreting scope as a hard boundary here would change what search finds
-    relative to ``locate``, which is a retrieval change wearing a capability's
-    clothes.
+    This reverses what Slice D shipped, deliberately. Search inherited V1's
+    "primary scope is a bias rather than a wall" (V1_SPEC §6) by being an adapter
+    over the V1 funnel, and stated no rule of its own — while every other
+    capability had already written the opposite about itself: ``inspect`` refuses a
+    path outside the scope, ``relationships`` refuses a key outside it,
+    ``dependencies`` "narrows the answer; it never merges across repositories".
+    A search that federated while the capabilities it hands its own keys to refuse
+    them is not a bias, it is an inconsistency, and the agent pays for it one call
+    later. The bias remains exactly where it was written: the V1 CLI.
     """
     response = _service(initialized).search(
         SearchRequest(question=SERVICE_HOST, context=_repository_scope("python-service"))
     )
-    slugs = {item.ref.repository_slug for item in response.evidence}
-    assert len(slugs) > 1, slugs
+    assert response.evidence, "the question is still answerable inside one repository"
+    assert {item.ref.repository_slug for item in response.evidence} == {"python-service"}
+
+
+def test_a_shared_node_is_still_named_under_repository_scope(initialized: Workspace) -> None:
+    """The boundary is around repositories, and a hub belongs to none of them.
+
+    This is what keeps confinement from being a dead end. The evidence stops at the
+    repository, but the handle that leads out of it still comes back, so "where is
+    SERVICE_HOST set?" is one deliberate ``relationships`` call away rather than
+    unanswerable — and the agent chooses to cross instead of crossing unknowingly.
+    """
+    response = _service(initialized).search(
+        SearchRequest(question=SERVICE_HOST, context=_repository_scope("python-service"))
+    )
+    assert "env:SERVICE_HOST" in {handle.key for handle in response.entities}
+
+
+def test_global_scope_still_sees_every_repository(initialized: Workspace) -> None:
+    """The way across is stated in the request, and it still works."""
+    response = _service(initialized).search(SearchRequest(question=SERVICE_HOST, context=GLOBAL))
+    assert len({item.ref.repository_slug for item in response.evidence}) > 1
+
+
+def test_a_repository_context_is_one_repository_and_it_is_the_primary(
+    initialized: Workspace,
+) -> None:
+    """What "the" repository means, for the code that confines a walk to it.
+
+    Confinement reads its home off ``context.primary``; the scoped lookups read
+    their ids off ``context.repositories``. Those are two expressions of one
+    repository *because resolution says so*, and this is where it says it. If
+    ``REPOSITORY`` scope ever resolved to several — a nesting rule, a group — the
+    two would part company silently, one confining to a repository the other was
+    not searching, and this fails first instead.
+    """
+    from repoatlas.capabilities.context import resolve_context
+
+    resolution = resolve_context(
+        _repository_scope("python-service"), initialized.repositories.list_all()
+    )
+    assert len(resolution.repositories) == 1
+    assert resolution.primary == resolution.repositories[0]
+
+
+def test_the_v1_funnel_still_crosses_for_the_cli(initialized: Workspace) -> None:
+    """Confinement is a capability-layer option, not a change to the funnel.
+
+    ``locate`` and ``debug`` keep the documented primary-first behaviour, which
+    ``tests/test_retrieval.py`` pins from the CLI side. Asserted here too, against
+    the same retriever the capability uses, so that a later "simplification" that
+    moves confinement into the funnel's default fails in the suite that wanted it.
+    """
+    from repoatlas.capabilities.context import resolve_context, to_repository_context
+
+    resolution = resolve_context(
+        _repository_scope("python-service"), initialized.repositories.list_all()
+    )
+    context = to_repository_context(resolution)
+    outcome = initialized.retriever().retrieve_detailed(SERVICE_HOST, context)
+    assert len({c.repository_slug for c in outcome.evidence.candidates}) > 1
 
 
 def test_an_empty_question_is_refused() -> None:

@@ -3018,6 +3018,18 @@ Scoping happens at stages 2-7, *before* scoring — this is what satisfies "neve
 question" (V1_SPEC §20), for the vector stage as much as the lexical one. In `REPOSITORY` scope the primary
 repository is searched first; other repositories stay reachable, so primary scope is a bias rather than a wall.
 
+**Two callers, two readings of the same scope, and the difference is the caller rather than the funnel.** The
+above is the V1 CLI's: `locate` and `debug` infer their scope from a working directory, which makes it a guess
+about what the user meant, and a guess is a good thing to bias with and a bad thing to refuse on. A capability
+call states its scope explicitly and can be refused on it, which is why every other capability treats the
+statement as a boundary — `inspect` refuses a path outside it, `relationships` refuses a key outside it,
+`dependencies` narrows and never merges. Search says the same thing by passing `confined` into this one funnel
+run: the second, unscoped pass is dropped and expansion is given the repository as a home, so a shared node
+stays reachable and nothing on the far side of one is followed. Nothing about ranking, fusion or deduplication
+differs between the two; one pass happens or it does not. Crossing from a capability call is asked for, by
+`scope: global` or by `relationships(cross_repository=true)`, and the handle that leads across still comes back
+from a confined search — a hub belongs to no repository, so no repository's boundary hides it.
+
 Reciprocal-rank fusion is chosen over score normalization because BM25 ranks, cosine similarities, literal-match
 scores and graph distances are not commensurable, and RRF needs no per-source calibration to combine them stably.
 

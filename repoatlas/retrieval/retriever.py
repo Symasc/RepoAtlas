@@ -152,6 +152,7 @@ class Retriever:
         *,
         literal_phrase: bool = False,
         quote_signatures: bool = False,
+        confined: bool = False,
     ) -> RetrievalOutcome:
         """The funnel: one pass, and everything that pass decided.
 
@@ -167,6 +168,14 @@ class Retriever:
         evidence has bytes to cite rather than a bare location. Nothing about
         ranking changes. V1 renders these candidates as locations, passes nothing
         here, and is unchanged.
+
+        ``confined`` makes ``REPOSITORY`` scope a boundary rather than a bias: only
+        the named repository is searched, and expansion is given it as a home, so a
+        shared node stays reachable and nothing on the far side of one is followed.
+        That is what an explicit capability context means, and what ``inspect``,
+        ``relationships`` and ``dependencies`` already enforce. V1's own scope is a
+        bias (ARCHITECTURE.md §10), its second pass is untouched, and it passes
+        nothing here.
         """
         stages: list[StageTiming] = []
         analysis = analyze(question)
@@ -179,7 +188,16 @@ class Retriever:
         # `teamB/common` must not promote evidence from `teamA/common` merely
         # because both directories are called `common` (ARCHITECTURE.md §10).
         primary_slug = context.primary.slug if context.primary else None
-        scopes = self._scopes(context, primary_ids)
+        scopes = self._scopes(context, primary_ids, confined=confined)
+        # The repository a confined walk may not leave. Taken from the primary
+        # rather than from the first scoped id, so the walk and the scoped lookups
+        # can never disagree about which repository "the" repository is. ``None``
+        # in global scope, where there is no one repository to be confined to.
+        home_repo_id = (
+            context.primary.id
+            if confined and context.scope is not ContextScope.GLOBAL and context.primary
+            else None
+        )
 
         ranked_lists: list[list[EvidenceCandidate]] = []
 
@@ -237,7 +255,7 @@ class Retriever:
         if semantic:
             ranked_lists.append(semantic)
 
-        graph, visited = self._stage_graph(entity_ids, stages)
+        graph, visited = self._stage_graph(entity_ids, stages, home_repo_id=home_repo_id)
         if graph:
             ranked_lists.append(graph)
 
@@ -708,16 +726,18 @@ class Retriever:
         )
 
     def _stage_graph(
-        self, entity_ids: list[int], stages: list[StageTiming]
+        self, entity_ids: list[int], stages: list[StageTiming], *, home_repo_id: int | None = None
     ) -> tuple[list[EvidenceCandidate], int]:
         with Stopwatch("graph", candidates_in=len(entity_ids)) as watch:
-            candidates, visited = self._expand(entity_ids)
+            candidates, visited = self._expand(entity_ids, home_repo_id=home_repo_id)
             watch.candidates_out = len(candidates)
             watch.detail = f"{visited} node(s) over {self._limits.graph_hops} hop(s)"
         stages.append(_recorded(watch))
         return candidates, visited
 
-    def _expand(self, entity_ids: list[int]) -> tuple[list[EvidenceCandidate], int]:
+    def _expand(
+        self, entity_ids: list[int], *, home_repo_id: int | None = None
+    ) -> tuple[list[EvidenceCandidate], int]:
         """Bounded traversal from matched entities (ARCHITECTURE.md §10 stage 4).
 
         The walk itself is :func:`repoatlas.graph.traversal.expand_from_seeds`,
@@ -731,6 +751,7 @@ class Retriever:
             hops=self._limits.graph_hops,
             fanout=self._limits.graph_fanout,
             seed_limit=self._limits.graph_seeds,
+            home_repo_id=home_repo_id,
         )
         if not walk.reached:
             return [], walk.visited
@@ -774,15 +795,26 @@ class Retriever:
 
     # -- helpers -------------------------------------------------------------
 
-    def _scopes(self, context: RepositoryContext, primary_ids: list[int]) -> list[list[int] | None]:
+    def _scopes(
+        self, context: RepositoryContext, primary_ids: list[int], *, confined: bool = False
+    ) -> list[list[int] | None]:
         """Search scopes in priority order.
 
         In repository scope the primary repository is searched first; other managed
         repositories are reachable, so a justified cross-repository answer is still
         possible (V1_SPEC §6). In global scope there is a single unscoped pass.
+
+        ``confined`` drops that second, unscoped pass. A capability call states its
+        scope explicitly, and every other capability treats the statement as a
+        boundary: answering outside it would make the scope advisory, which is the
+        one property that makes a scoped answer worth having. Interned entities are
+        unaffected — they belong to no repository, and the scoped lookups admit them
+        by ``repo_id IS NULL`` rather than by scope.
         """
         if context.scope is ContextScope.GLOBAL:
             return [None]
+        if confined:
+            return [primary_ids]
         return [primary_ids, None]
 
     @staticmethod
