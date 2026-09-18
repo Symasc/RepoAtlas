@@ -648,7 +648,7 @@ class SqliteSearchIndex:
         rows = self._db.execute(
             f"""
             SELECT e.id AS entity_id, e.type, e.name, e.qualified_name,
-                   e.line_start, e.line_end,
+                   e.line_start, e.line_end, e.signature,
                    f.rel_path AS path, r.name AS repository, r.slug AS repository_slug
             FROM entities e
             LEFT JOIN files        f ON f.id = e.file_id
@@ -673,6 +673,7 @@ class SqliteSearchIndex:
                 line_start=row["line_start"],
                 line_end=row["line_end"],
                 score=100.0,
+                signature=row["signature"] or "",
             )
             for row in rows
         ]
@@ -711,7 +712,7 @@ class SqliteSearchIndex:
         rows = self._db.execute(
             f"""
             SELECT e.id AS entity_id, e.type, e.name, e.qualified_name,
-                   e.line_start, e.line_end,
+                   e.line_start, e.line_end, e.signature,
                    f.rel_path AS path, r.name AS repository, r.slug AS repository_slug,
                    bm25(entities_fts) AS rank
             FROM entities_fts
@@ -745,6 +746,7 @@ class SqliteSearchIndex:
                     line_start=row["line_start"],
                     line_end=row["line_end"],
                     score=-float(row["rank"]) + (25.0 if exact else 0.0),
+                    signature=row["signature"] or "",
                 )
             )
         hits.sort(key=lambda h: h.score, reverse=True)

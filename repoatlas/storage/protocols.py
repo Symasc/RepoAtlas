@@ -188,6 +188,9 @@ class EntityHit(BaseModel):
     line_start: int | None
     line_end: int | None
     score: float
+    #: The declaration the indexer stored for this entity, empty when it stored
+    #: none. It is what lets a name match be quoted rather than merely pointed at.
+    signature: str = ""
 
 
 class EntityIdentity(BaseModel):
@@ -313,6 +316,10 @@ class EntityDescription(BaseModel):
     line_end: int
     text: str
     description: str
+    #: What kind of entity this is. A file reached through an edge is a claim
+    #: about the file; a symbol reached the same way names lines it may hold no
+    #: text for, and only the kind tells the two apart once both are described.
+    entity_type: EntityType | None = None
 
 
 class RepositoryStore(Protocol):

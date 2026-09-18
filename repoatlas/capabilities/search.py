@@ -2,7 +2,9 @@
 
 Retrieval decides *what* and in *what order*. This module decides how much of it
 fits. It performs no ranking, no scoring and no selection by relevance — every
-decision here is about how many characters remain.
+decision here is about how many characters remain, with one exception that is not
+a budget decision at all: a candidate that names an entity and supplies no text
+about it is never evidence (:attr:`EvidenceCandidate.is_handle_only`).
 
 What may honestly be claimed about the part that fits is not decided here either:
 that question is identical for every capability that supplies citable bytes, and
@@ -56,6 +58,10 @@ class ShapingResult:
     #: Candidates that collapsed onto a reference already supplied by a
     #: higher-ranked one. Not an omission — the evidence is in the response.
     duplicates: int = 0
+    #: Handle-only candidates: entities named with no text to cite. Not an
+    #: omission either — there was never anything here that could be evidence,
+    #: and the exact-name ones reach the caller as seed handles.
+    withheld: int = 0
 
 
 def _claim(
@@ -106,22 +112,36 @@ def shape_candidates(
     admitted while item slots remain — it is a deterministic fact about the
     repository, and dropping it to save characters it does not consume would lose
     evidence for nothing.
+
+    A handle-only candidate is never admitted, wherever it ranks. It names an
+    entity and supplies no text about it, so an id issued for it would let any
+    claim at all verify against it. Withholding one is not budgeting — it spends
+    no slot, is not an omission, and does not mark the response truncated —
+    because nothing was left out that could have been cited.
     """
     items: list[ShapedEvidence] = []
     remaining_total = budget.max_total_chars
-    considered = 0
+    duplicates = 0
+    withheld = 0
+    #: Where the walk stopped for budget, if it did. Everything citable from here
+    #: on was ranked and not returned.
+    stopped_at: int | None = None
     #: What has already been supplied, by the identity the ledger will give it.
     supplied: set[tuple[str, str, int | None, int | None, str]] = set()
 
-    for candidate in candidates:
+    for index, candidate in enumerate(candidates):
+        if candidate.is_handle_only:
+            withheld += 1
+            continue
         if len(items) >= budget.max_items:
+            stopped_at = index
             break
-        considered += 1
 
         if not candidate.text:
             # Costs no characters. Its line claim is whatever it could prove,
             # which for empty text is nothing.
             if _claim(candidate, "", None, None) in supplied:
+                duplicates += 1
                 continue
             supplied.add(_claim(candidate, "", None, None))
             items.append(
@@ -145,7 +165,7 @@ def shape_candidates(
             # response: returning the file identity instead would silently swap a
             # content answer for a weaker one, and skipping ahead to something
             # smaller would reorder the trusted ranking.
-            considered -= 1
+            stopped_at = index
             break
 
         text = piece.text
@@ -161,6 +181,7 @@ def shape_candidates(
             # give them one id, correctly, and returning that id twice would spend
             # two rank slots on one piece of evidence and invite a caller to
             # wonder what the difference was. The first, strongest sighting stands.
+            duplicates += 1
             continue
         supplied.add(claim)
 
@@ -177,9 +198,18 @@ def shape_candidates(
 
     # Duplicates are not "more evidence that did not fit": they are the same
     # evidence, so collapsing them is not an omission and must not report one.
-    duplicates = considered - len(items)
-    dropped = len(candidates) - considered
+    # Neither is a handle-only candidate past the stopping point: it could never
+    # have been returned, so it is not something the budget left out.
+    dropped = (
+        0
+        if stopped_at is None
+        else sum(1 for candidate in candidates[stopped_at:] if not candidate.is_handle_only)
+    )
     truncated_anything = dropped > 0 or any(item.truncated for item in items)
     return ShapingResult(
-        items=items, truncated=truncated_anything, dropped=dropped, duplicates=duplicates
+        items=items,
+        truncated=truncated_anything,
+        dropped=dropped,
+        duplicates=duplicates,
+        withheld=withheld,
     )
