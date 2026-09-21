@@ -170,6 +170,17 @@ class ProposedEvidence(BaseModel):
     #: Characters supplied. A number, not the text: it cannot reconstruct content
     #: and it makes a truncated supply visible.
     text_length: int = 0
+    #: The natural key of the entity whose recorded declaration this text is, or
+    #: ``None`` for text read from the file. Should the key not resolve, the
+    #: declared line span stands in (``lines:16-21``) rather than any invented key.
+    #:
+    #: A declaration has no span of its own to be identified by: it is supplied as
+    #: a claim about its file, and every such claim in one file shares one
+    #: ``ref.span_key``. Keyed on that alone, ``class ServiceConfig`` and
+    #: ``def load_config()`` would be two versions of the same bytes and the second
+    #: would supersede the first. They are two different facts, and the entity
+    #: they declare is what tells them apart.
+    declares: str | None = None
 
 
 class LedgerEntry(BaseModel):
@@ -207,6 +218,10 @@ class LedgerEntry(BaseModel):
     supersedes: EvidenceId | None = None
     allocated_at: datetime
     text_length: int = 0
+    #: The entity this evidence is the recorded declaration of, or ``None`` for
+    #: text read from the file. Part of the identity: see
+    #: :attr:`ProposedEvidence.declares`.
+    declares: str | None = None
 
     @property
     def number(self) -> int:

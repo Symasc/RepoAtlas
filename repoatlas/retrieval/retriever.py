@@ -622,6 +622,8 @@ class Retriever:
                         description=f"defines {hit.name}",
                         entity_id=hit.entity_id,
                         entity_type=hit.type,
+                        # The recorded declaration, not the span's own lines.
+                        declaration=bool(quote_signatures and hit.signature),
                     )
                 )
             for scope in scopes if suppressed is None else []:
@@ -655,6 +657,7 @@ class Retriever:
                             description=f"defines {hit.name}",
                             entity_id=hit.entity_id,
                             entity_type=hit.type,
+                            declaration=bool(quote_signatures and hit.signature),
                         )
                     )
             watch.candidates_out = len(candidates)
@@ -938,6 +941,9 @@ class Retriever:
                 description=(reason or {}).get(row.entity_id) or row.description,
                 entity_id=row.entity_id,
                 entity_type=row.entity_type,
+                # What the store describes an entity with is its recorded
+                # declaration, so any text here is that and not source lines.
+                declaration=bool(row.text),
             )
             for row in rows
         ]
