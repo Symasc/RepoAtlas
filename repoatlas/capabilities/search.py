@@ -76,17 +76,37 @@ def _claim(
     return (candidate.repository_slug, candidate.path, line_start, line_end, text)
 
 
+def offered_lines(candidate: EvidenceCandidate) -> tuple[int | None, int | None]:
+    """The line range this candidate may try to prove, before any arithmetic.
+
+    Its own range, except for a declaration (:attr:`EvidenceCandidate.declaration`),
+    which offers none. A declaration's text was assembled from facts about the
+    source, so there are no lines for it to prove — and the arithmetic would not
+    notice: ``service.host`` is one line of text, the key's span is one line of
+    source, the counts agree, and the evidence would then tell a caller that line
+    reads ``service.host`` when it reads ``host: service.internal.example``.
+
+    Withholding the range here, rather than teaching the arithmetic about
+    declarations, keeps :func:`~repoatlas.capabilities.evidence_shaping.provable_span`
+    exactly what it was: a check on text that *was* read from the file. The
+    declaration is still supplied, as a claim about the file it is declared in.
+    """
+    if candidate.declaration:
+        return (None, None)
+    return (candidate.line_start, candidate.line_end)
+
+
 def provable_line_span(candidate: EvidenceCandidate) -> tuple[int, int] | None:
     """The source lines this candidate's text demonstrably covers, or ``None``.
 
     The candidate-shaped spelling of
     :func:`~repoatlas.capabilities.evidence_shaping.provable_span`, which holds the
-    reasoning and the four producers that legitimately prove nothing.
+    reasoning and the four producers that legitimately prove nothing, applied to
+    the range :func:`offered_lines` allows.
     """
     return provable_span(
         candidate.text,
-        candidate.line_start,
-        candidate.line_end,
+        *offered_lines(candidate),
         split_total=candidate.split_total,
     )
 
@@ -154,8 +174,7 @@ def shape_candidates(
         allowance = min(budget.max_item_chars, remaining_total)
         piece = supply(
             candidate.text,
-            candidate.line_start,
-            candidate.line_end,
+            *offered_lines(candidate),
             limit=allowance,
             split_total=candidate.split_total,
         )
