@@ -340,7 +340,11 @@ class ReferenceLinker:
             entity_id = self._knowledge.find_file_entity(file_id, key)
             if entity_id is not None:
                 mapping[symbol.qualified_name] = entity_id
-                mapping.setdefault(symbol.name, entity_id)
+                # A returned object's property is reachable only through the object,
+                # never by its bare name: `createCourse()` beside a `createCourse:`
+                # property names whatever `createCourse` is bound to, not the property.
+                if symbol.meta.get("kind") != "property":
+                    mapping.setdefault(symbol.name, entity_id)
         return mapping
 
     # -- global pass ---------------------------------------------------------
