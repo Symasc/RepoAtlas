@@ -194,9 +194,10 @@ class RelationshipsRequest(BaseModel):
     #: verbatim: there is no name lookup here and nothing to reconstruct.
     target: str
     direction: RelationshipDirection = RelationshipDirection.BOTH
-    #: Narrow to particular relationships. ``None`` means the whole set the
-    #: deterministic traversal policy permits; naming a type outside that set is
-    #: refused rather than silently returning nothing.
+    #: Narrow to particular relationships. ``None`` means the default expansion
+    #: set, which leaves out call relationships; ``CALLS`` is returned only when
+    #: named here. Naming a type the deterministic traversal policy does not admit
+    #: is refused rather than silently returning nothing.
     edge_types: tuple[EdgeType, ...] | None = None
     hops: int = Field(default=DEFAULT_HOPS, ge=1, le=MAX_HOPS)
     max_neighbors: int | None = Field(default=None, gt=0)
