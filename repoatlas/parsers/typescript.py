@@ -10,6 +10,7 @@ linker's job (ARCHITECTURE.md §5); the parser only records what is written.
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -44,6 +45,24 @@ _TSX_SUFFIXES = frozenset({".tsx"})
 _JS_SUFFIXES = frozenset({".js", ".mjs", ".cjs", ".jsx"})
 
 _FUNCTION_VALUES = frozenset({"arrow_function", "function_expression", "function"})
+
+#: Where a function's own body ends: what a nested function or class returns is
+#: its own, never the enclosing function's.
+_NESTED_SCOPES = frozenset(
+    {
+        *_FUNCTION_VALUES,
+        "generator_function",
+        "function_declaration",
+        "generator_function_declaration",
+        "method_definition",
+        "class_declaration",
+        "abstract_class_declaration",
+        "class",
+    }
+)
+
+#: Expressions that are their operand as far as its value is concerned.
+_TRANSPARENT = frozenset({"parenthesized_expression", "as_expression", "satisfies_expression"})
 
 #: Declaration nodes that name a definition, mapped to the entity they become.
 _DECLARATIONS: dict[str, tuple[EntityType, str]] = {
@@ -81,6 +100,9 @@ class _Walker:
         self.references: list[ParsedReference] = []
         self._scope: list[str] = []
         self._exported: set[str] = set()
+        #: Object literals a named function returns, by span: their function-valued
+        #: properties are that function's methods (see :meth:`_returned_object`).
+        self._returned: set[tuple[int, int]] = set()
 
     # -- scope ---------------------------------------------------------------
 
@@ -117,6 +139,9 @@ class _Walker:
             return
         if kind in {"lexical_declaration", "variable_declaration"}:
             self._variable_declaration(node, exported=exported)
+            return
+        if kind == "object" and (node.start_byte, node.end_byte) in self._returned:
+            self._returned_object(node)
             return
         if kind == "call_expression":
             self._call(node)
@@ -263,6 +288,8 @@ class _Walker:
             )
         )
         self._record_heritage(node, self._qualify(name))
+        if entity_type is EntityType.FUNCTION:
+            self._mark_returns(node)
         self._scope.append(name)
         self._visit_children(node)
         self._scope.pop()
@@ -306,9 +333,99 @@ class _Walker:
                 parent=self._current,
             )
         )
+        self._mark_returns(node)
         self._scope.append(name)
         self._visit_children(node)
         self._scope.pop()
+
+    def _returned_object(self, node: Node) -> None:
+        """The object a named function returns: its function properties are methods.
+
+        ``return { createCourse: async (auth, input) => request(…) }`` makes
+        ``createCourse`` a method of the enclosing factory, exactly as
+        ``return { async createCourse(auth, input) { … } }`` already does. Only a
+        property with a static key counts; a computed key names nothing this can
+        read, and a key written twice in one object is not one definition. A
+        property whose value is itself an object keeps its own name as a scope,
+        so ``factory.courses.list`` stays distinguishable from ``factory.list``.
+        Everything else is visited exactly as it was, so no other fact changes.
+        """
+        keys = Counter(
+            key for child in node.named_children if (key := self._property_key(child)) is not None
+        )
+        for child in node.children:
+            name = self._property_key(child)
+            value = child.child_by_field_name("value") if child.type == "pair" else None
+            target = _operand(value) if value is not None else None
+            if name is None or keys[name] != 1 or target is None:
+                self._visit(child)
+            elif target.type in _FUNCTION_VALUES:
+                self._property_method(child, name, target)
+            elif target.type == "object":
+                self._scope.append(name)
+                self._returned_object(target)
+                self._scope.pop()
+            else:
+                self._visit(child)
+
+    def _property_key(self, node: Node) -> str | None:
+        """The static key of a ``pair``, or ``None``."""
+        if node.type != "pair":
+            return None
+        key = node.child_by_field_name("key")
+        if key is None:
+            return None
+        if key.type == "property_identifier":
+            return node_text(self._source, key)
+        if key.type == "string":
+            literal = string_literal(self._source, key)
+            return literal if literal and "\\" not in literal else None
+        return None
+
+    def _property_method(self, pair: Node, name: str, function: Node) -> None:
+        start, end = line_range(pair)
+        self.symbols.append(
+            ParsedSymbol(
+                kind=EntityType.METHOD,
+                name=name,
+                qualified_name=self._qualify(name),
+                line_start=start,
+                line_end=end,
+                signature=self._signature(function, "method", name),
+                parent=self._current,
+                meta={"kind": "property"},
+            )
+        )
+        self._mark_returns(function)
+        self._scope.append(name)
+        self._visit_children(function)
+        self._scope.pop()
+
+    def _mark_returns(self, function: Node) -> None:
+        """Record the object literals ``function`` itself returns."""
+        body = function.child_by_field_name("body")
+        if body is None:
+            return
+        if body.type != "statement_block":
+            # `() => ({ … })`: the expression body is the returned value.
+            self._mark_object(body)
+            return
+        pending = [body]
+        while pending:
+            node = pending.pop()
+            for child in node.children:
+                if child.type in _NESTED_SCOPES:
+                    continue
+                if child.type == "return_statement":
+                    value = next((c for c in child.named_children if c.type != "comment"), None)
+                    if value is not None:
+                        self._mark_object(value)
+                pending.append(child)
+
+    def _mark_object(self, node: Node) -> None:
+        target = _operand(node)
+        if target.type == "object":
+            self._returned.add((target.start_byte, target.end_byte))
 
     def _variable_declaration(self, node: Node, *, exported: bool) -> None:
         """Top-level ``const``/``let``/``var``; function values become functions."""
@@ -341,6 +458,8 @@ class _Walker:
                     )
                 )
             if is_function:
+                assert value is not None
+                self._mark_returns(value)
                 self._scope.append(name)
                 self._visit_children(declarator)
                 self._scope.pop()
@@ -433,8 +552,23 @@ class _Walker:
 
     def _signature(self, node: Node, label: str, name: str) -> str:
         parameters = node.child_by_field_name("parameters")
-        arguments = node_text(self._source, parameters) if parameters else ""
+        if parameters is not None:
+            arguments = node_text(self._source, parameters)
+        else:
+            # `x => …`: one bare parameter, which the grammar does not parenthesize.
+            single = node.child_by_field_name("parameter")
+            arguments = f"({node_text(self._source, single)})" if single is not None else ""
         return f"{label} {name}{arguments}".strip()
+
+
+def _operand(node: Node) -> Node:
+    """``node`` with parentheses, ``as`` and ``satisfies`` looked through."""
+    while node.type in _TRANSPARENT:
+        inner = [child for child in node.named_children if child.type != "comment"]
+        if not inner:
+            break
+        node = inner[0]
+    return node
 
 
 class TypeScriptParser:
@@ -448,7 +582,9 @@ class TypeScriptParser:
     # 4: NestJS controller routes, modules, application roots and routing markers
     #    are recorded as pending claims; the global pass decides which route a
     #    proven application serves.
-    version = "4"
+    # 5: a function-valued property of an object a named function returns is a
+    #    method of that function, and owns the calls made inside it.
+    version = "5"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
