@@ -11,7 +11,9 @@ neither does a name like ``createCourse``.
 from __future__ import annotations
 
 import textwrap
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from repoatlas.models.parsing import EntityType, ParsedReference
@@ -376,14 +378,36 @@ def _index(tmp_path: Path, source: str) -> tuple[Workspace, Path]:
     return workspace, root
 
 
+Index = Callable[..., tuple[Workspace, Path]]
+
+
+@pytest.fixture
+def index(tmp_path: Path) -> Iterator[Index]:
+    """``_index`` for one test; every workspace it opens is closed when the test ends."""
+    opened: list[Workspace] = []
+
+    def make(*args: Any, **kwargs: Any) -> tuple[Workspace, Path]:
+        indexed = _index(tmp_path, *args, **kwargs)
+        opened.append(indexed[0])
+        return indexed
+
+    try:
+        yield make
+    finally:
+        for workspace in opened:
+            workspace.close()
+
+
 def _commit_and_sync(workspace: Workspace, root: Path, message: str) -> None:
     git(root / "web", "add", "-A")
     git(root / "web", "commit", "--quiet", "-m", message)
     sync(workspace, workspace.resolver().resolve(root))
 
 
-def test_a_changed_or_removed_request_leaves_no_obsolete_route(tmp_path: Path) -> None:
-    workspace, root = _index(tmp_path, IDENTITY)
+def test_a_changed_or_removed_request_leaves_no_obsolete_route(
+    index: Index, tmp_path: Path
+) -> None:
+    workspace, root = index(IDENTITY)
     prefix = "sym:web:src/identity-client.ts:createIdentityClient"
     assert (f"{prefix}.me:20", "CALLS_HTTP_ROUTE", "http-route:GET:/v1/me") in (
         stored_http_edges(workspace)

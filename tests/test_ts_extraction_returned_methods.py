@@ -10,8 +10,11 @@ property, every object that is not returned, and every existing method.
 from __future__ import annotations
 
 import textwrap
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
+import pytest
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedFile, ParsedSymbol
 from repoatlas.parsers.typescript import TypeScriptParser
 from repoatlas.services.sync_service import sync
@@ -234,6 +237,26 @@ def _index(tmp_path: Path, files: dict[str, str]) -> tuple[Workspace, Path]:
     return workspace, root
 
 
+Index = Callable[..., tuple[Workspace, Path]]
+
+
+@pytest.fixture
+def index(tmp_path: Path) -> Iterator[Index]:
+    """``_index`` for one test; every workspace it opens is closed when the test ends."""
+    opened: list[Workspace] = []
+
+    def make(*args: Any, **kwargs: Any) -> tuple[Workspace, Path]:
+        indexed = _index(tmp_path, *args, **kwargs)
+        opened.append(indexed[0])
+        return indexed
+
+    try:
+        yield make
+    finally:
+        for workspace in opened:
+            workspace.close()
+
+
 def _method_keys(workspace: Workspace) -> set[str]:
     rows = workspace.database.execute("SELECT key FROM entities WHERE type = 'method'").fetchall()
     return {row["key"] for row in rows}
@@ -245,8 +268,8 @@ def _commit_and_sync(workspace: Workspace, root: Path, message: str) -> None:
     sync(workspace, workspace.resolver().resolve(root))
 
 
-def test_returned_methods_are_indexed_and_follow_their_source(tmp_path: Path) -> None:
-    workspace, root = _index(tmp_path, {"src/learning-client.ts": LEARNING})
+def test_returned_methods_are_indexed_and_follow_their_source(index: Index, tmp_path: Path) -> None:
+    workspace, root = index({"src/learning-client.ts": LEARNING})
     assert _method_keys(workspace) == {
         "sym:web:src/learning-client.ts:createLearningClient.getPreferences:7",
         "sym:web:src/learning-client.ts:createLearningClient.createCourse:10",
@@ -282,10 +305,9 @@ def test_returned_methods_are_indexed_and_follow_their_source(tmp_path: Path) ->
     assert _method_keys(workspace) == set()
 
 
-def test_a_method_is_never_the_target_of_a_bare_call_with_its_name(tmp_path: Path) -> None:
+def test_a_method_is_never_the_target_of_a_bare_call_with_its_name(index: Index) -> None:
     """A property is not in lexical scope: ``createCourse()`` names the import."""
-    workspace, _ = _index(
-        tmp_path,
+    workspace, _ = index(
         {
             "src/api.ts": "export function createCourse() {\n  return 1;\n}\n",
             "src/client.ts": (

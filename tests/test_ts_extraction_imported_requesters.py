@@ -11,8 +11,11 @@ read the stored graph — including what must stay unresolved.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
+import pytest
 from repoatlas.graph.linker import ReferenceLinker
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace
@@ -113,9 +116,28 @@ def _index(tmp_path: Path, files: dict[str, str]) -> tuple[Workspace, Path]:
     return workspace, root
 
 
-def _learning(tmp_path: Path, default: str = "POST", **extra: str) -> tuple[Workspace, Path]:
-    return _index(
-        tmp_path,
+Index = Callable[..., tuple[Workspace, Path]]
+
+
+@pytest.fixture
+def index(tmp_path: Path) -> Iterator[Index]:
+    """``_index`` for one test; every workspace it opens is closed when the test ends."""
+    opened: list[Workspace] = []
+
+    def make(*args: Any, **kwargs: Any) -> tuple[Workspace, Path]:
+        indexed = _index(tmp_path, *args, **kwargs)
+        opened.append(indexed[0])
+        return indexed
+
+    try:
+        yield make
+    finally:
+        for workspace in opened:
+            workspace.close()
+
+
+def _learning(index: Index, default: str = "POST", **extra: str) -> tuple[Workspace, Path]:
+    return index(
         {
             "src/http.ts": HTTP.replace("{default}", default),
             "src/learning-client.ts": CLIENT,
@@ -149,15 +171,15 @@ def _commit_and_sync(workspace: Workspace, root: Path, message: str) -> None:
     sync(workspace, workspace.resolver().resolve(root))
 
 
-def test_an_imported_requester_factory_is_read_across_one_import(tmp_path: Path) -> None:
-    workspace, _ = _learning(tmp_path)
+def test_an_imported_requester_factory_is_read_across_one_import(index: Index) -> None:
+    workspace, _ = _learning(index)
     assert _calls(workspace) == PROVEN
     # The injected base names no deployment and no endpoint.
     assert all(key.startswith("http-route:") for key in http_nodes(workspace))
 
 
-def test_where_each_deciding_literal_is_written_decides_citability(tmp_path: Path) -> None:
-    workspace, _ = _learning(tmp_path)
+def test_where_each_deciding_literal_is_written_decides_citability(index: Index) -> None:
+    workspace, _ = _learning(index)
     rows = workspace.database.execute(
         "SELECT src.qualified_name AS caller, e.line_start, e.line_end, e.parser, f.rel_path "
         "FROM edges e JOIN entities src ON src.id = e.src_id JOIN files f ON f.id = e.file_id "
@@ -172,17 +194,16 @@ def test_where_each_deciding_literal_is_written_decides_citability(tmp_path: Pat
     assert lines["createLearningClient.createCourse"] == (None, None)
 
 
-def test_a_template_path_stays_unresolved_and_is_counted(tmp_path: Path) -> None:
-    workspace, _ = _learning(tmp_path)
+def test_a_template_path_stays_unresolved_and_is_counted(index: Index) -> None:
+    workspace, _ = _learning(index)
     assert all(caller != "createLearningClient.getOrganization" for caller, _ in _calls(workspace))
     assert _outcomes(workspace)["createLearningClient.getOrganization"] == (
         "the path is not a literal"
     )
 
 
-def test_an_imported_wrapper_function_is_read_too(tmp_path: Path) -> None:
-    workspace, _ = _index(
-        tmp_path,
+def test_an_imported_wrapper_function_is_read_too(index: Index) -> None:
+    workspace, _ = index(
         {
             "src/fetcher.ts": (
                 "export async function request(path: string, init?: RequestInit) {\n"
@@ -200,14 +221,13 @@ def test_an_imported_wrapper_function_is_read_too(tmp_path: Path) -> None:
     assert _calls(workspace) == {("load", "http-route:PATCH:/v1/direct")}
 
 
-def test_only_the_imported_module_is_read_never_a_same_named_one(tmp_path: Path) -> None:
+def test_only_the_imported_module_is_read_never_a_same_named_one(index: Index) -> None:
     impostor = (
         "export function createRequester() {\n"
         "  return { request: (schema: Schema, path: string) => database.read(path) };\n"
         "}\n"
     )
-    workspace, _ = _index(
-        tmp_path,
+    workspace, _ = index(
         {
             # A real requester elsewhere, and an impostor where the import points.
             "src/http.ts": HTTP.replace("{default}", "POST"),
@@ -224,7 +244,7 @@ def test_only_the_imported_module_is_read_never_a_same_named_one(tmp_path: Path)
     assert _calls(workspace) == set()
 
 
-def test_a_re_export_a_package_and_an_unresolved_import_prove_nothing(tmp_path: Path) -> None:
+def test_a_re_export_a_package_and_an_unresolved_import_prove_nothing(index: Index) -> None:
     def client(factory: str, specifier: str) -> str:
         return (
             f'import {{ createRequester }} from "{specifier}";\n'
@@ -234,8 +254,7 @@ def test_a_re_export_a_package_and_an_unresolved_import_prove_nothing(tmp_path: 
             "}\n"
         )
 
-    workspace, _ = _index(
-        tmp_path,
+    workspace, _ = index(
         {
             "src/http.ts": HTTP.replace("{default}", "POST"),
             "src/index.ts": 'export { createRequester } from "./http";\n',
@@ -253,16 +272,16 @@ def test_a_re_export_a_package_and_an_unresolved_import_prove_nothing(tmp_path: 
     }
 
 
-def test_a_cycle_between_the_two_modules_is_still_one_hop(tmp_path: Path) -> None:
+def test_a_cycle_between_the_two_modules_is_still_one_hop(index: Index) -> None:
     looped = HTTP.replace("{default}", "POST") + (
         'import { VERSION } from "./learning-client";\nexport const SEEN = VERSION;\n'
     )
-    workspace, _ = _index(tmp_path, {"src/http.ts": looped, "src/learning-client.ts": CLIENT})
+    workspace, _ = index({"src/http.ts": looped, "src/learning-client.ts": CLIENT})
     assert _calls(workspace) == PROVEN
 
 
-def test_changing_the_helper_file_moves_the_client_requests(tmp_path: Path) -> None:
-    workspace, root = _learning(tmp_path)
+def test_changing_the_helper_file_moves_the_client_requests(index: Index, tmp_path: Path) -> None:
+    workspace, root = _learning(index)
 
     # The helper's default is written in the helper's file; the client did not change.
     (root / "web/src/http.ts").write_text(HTTP.replace("{default}", "PATCH"))
@@ -291,8 +310,8 @@ def test_changing_the_helper_file_moves_the_client_requests(tmp_path: Path) -> N
     assert fact_snapshot(workspace) == fresh
 
 
-def test_a_declaration_is_not_an_unresolved_reference(tmp_path: Path) -> None:
-    workspace, _ = _learning(tmp_path)
+def test_a_declaration_is_not_an_unresolved_reference(index: Index) -> None:
+    workspace, _ = _learning(index)
     rows = workspace.database.execute("SELECT meta_json FROM unresolved_refs").fetchall()
     roles = [json.loads(row["meta_json"] or "{}").get("pending_fact") for row in rows]
     assert roles.count("http-requester") == 1

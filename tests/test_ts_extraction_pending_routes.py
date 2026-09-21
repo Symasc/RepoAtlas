@@ -11,9 +11,11 @@ changes, and that it is never confused with an ordinary unresolved reference.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+import pytest
 from repoatlas.models.reports import SyncReport
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace
@@ -63,6 +65,26 @@ def _setup(tmp_path: Path) -> tuple[Workspace, Path, SyncReport]:
     return workspace, root, report
 
 
+Index = Callable[..., tuple[Workspace, Path, SyncReport]]
+
+
+@pytest.fixture
+def index(tmp_path: Path) -> Iterator[Index]:
+    """``_setup`` for one test; every workspace it opens is closed when the test ends."""
+    opened: list[Workspace] = []
+
+    def make(*args: Any, **kwargs: Any) -> tuple[Workspace, Path, SyncReport]:
+        indexed = _setup(tmp_path, *args, **kwargs)
+        opened.append(indexed[0])
+        return indexed
+
+    try:
+        yield make
+    finally:
+        for workspace in opened:
+            workspace.close()
+
+
 def _commit(repo: Path, message: str) -> None:
     git(repo, "add", "-A")
     git(repo, "commit", "--quiet", "-m", message)
@@ -91,8 +113,8 @@ def _equals_full_reindex(workspace: Workspace, root: Path, tmp_path: Path, tag: 
     assert fact_snapshot(workspace) == fresh
 
 
-def test_a_pending_route_is_recorded_with_everything_it_declares(tmp_path: Path) -> None:
-    workspace, _, _ = _setup(tmp_path)
+def test_a_pending_route_is_recorded_with_everything_it_declares(index: Index) -> None:
+    workspace, _, _ = index()
     detail, create = _routes(workspace)
 
     assert detail["edge_type"] == "SERVES_HTTP_ROUTE"
@@ -122,14 +144,14 @@ def test_a_pending_route_is_recorded_with_everything_it_declares(tmp_path: Path)
     assert stored_http_edges(workspace) == set()
 
 
-def test_a_message_handler_leaves_no_http_claim(tmp_path: Path) -> None:
-    workspace, _, _ = _setup(tmp_path)
+def test_a_message_handler_leaves_no_http_claim(index: Index) -> None:
+    workspace, _, _ = index()
     sources = {c["source"] for c in _claims(workspace)}
     assert "CoursesController.byId" not in sources
 
 
-def test_the_sync_report_counts_pending_routes_as_unresolved(tmp_path: Path) -> None:
-    workspace, root, report = _setup(tmp_path)
+def test_the_sync_report_counts_pending_routes_as_unresolved(index: Index) -> None:
+    workspace, root, report = index()
     ordinary = [c for c in _claims(workspace) if "pending_fact" not in c["meta"]]
     # Both route declarations and every ordinary claim are unresolved references;
     # nothing else in these files is.
@@ -137,8 +159,8 @@ def test_the_sync_report_counts_pending_routes_as_unresolved(tmp_path: Path) -> 
     assert _sync(workspace, root).unresolved_references == report.unresolved_references
 
 
-def test_editing_a_route_replaces_its_claim(tmp_path: Path) -> None:
-    workspace, root, _ = _setup(tmp_path)
+def test_editing_a_route_replaces_its_claim(index: Index, tmp_path: Path) -> None:
+    workspace, root, _ = index()
     (root / "api" / CONTROLLER_PATH).write_text(CONTROLLER.format(detail=":id/summary"))
     _commit(root / "api", "rename the parameter")
     _sync(workspace, root)
@@ -151,8 +173,8 @@ def test_editing_a_route_replaces_its_claim(tmp_path: Path) -> None:
     _equals_full_reindex(workspace, root, tmp_path, "edited")
 
 
-def test_deleting_the_controller_removes_its_claims(tmp_path: Path) -> None:
-    workspace, root, _ = _setup(tmp_path)
+def test_deleting_the_controller_removes_its_claims(index: Index, tmp_path: Path) -> None:
+    workspace, root, _ = index()
     git(root / "api", "rm", "--quiet", CONTROLLER_PATH)
     _commit(root / "api", "remove the controller")
     _sync(workspace, root)
@@ -162,8 +184,8 @@ def test_deleting_the_controller_removes_its_claims(tmp_path: Path) -> None:
     _equals_full_reindex(workspace, root, tmp_path, "deleted")
 
 
-def test_a_pending_route_is_not_an_ordinary_unresolved_reference(tmp_path: Path) -> None:
-    workspace, root, _ = _setup(tmp_path)
+def test_a_pending_route_is_not_an_ordinary_unresolved_reference(index: Index) -> None:
+    workspace, root, _ = index()
     [ordinary] = [
         c
         for c in _claims(workspace)
@@ -199,13 +221,13 @@ def test_a_pending_route_is_not_an_ordinary_unresolved_reference(tmp_path: Path)
 
 
 def test_an_existing_references_own_role_is_never_read_as_a_pending_fact(
-    tmp_path: Path,
+    index: Index,
 ) -> None:
     """Parsers already tag references with a ``role`` (a base class, a re-export).
 
     Those are ordinary references and must still resolve as they always have.
     """
-    workspace, root, _ = _setup(tmp_path)
+    workspace, root, _ = index()
     (root / "api" / "src" / "base.ts").write_text("export class Base {}\n")
     (root / "api" / "src" / "child.ts").write_text(
         'import { Base } from "./base";\nexport class Child extends Base {}\n'
