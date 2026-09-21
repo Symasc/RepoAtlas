@@ -1493,6 +1493,19 @@ class CapabilityService:
             for path, state in self._workspace.files.states_for(repo_id, sorted(paths)).items():
                 states[(slug, path)] = state
 
+        # A declaration is told apart from every other claim on its file by the
+        # entity it declares (ProposedEvidence.declares). Resolved here, inside the
+        # same read view as the text, and by row id rather than by name.
+        declared = self._workspace.knowledge.keys_for_entities(
+            sorted(
+                {
+                    item.candidate.entity_id
+                    for item in shaped
+                    if item.candidate.declaration and item.candidate.entity_id is not None
+                }
+            )
+        )
+
         proposed: list[ProposedEvidence] = []
         for item in shaped:
             candidate = item.candidate
@@ -1504,6 +1517,22 @@ class CapabilityService:
                 # a reference carrying a blank hash would revalidate as stale
                 # forever and look like ordinary drift.
                 raise IndexInconsistencyError(f"{candidate.repository_slug}/{candidate.path}")
+            declares: str | None = None
+            if candidate.declaration:
+                identity = (
+                    declared.get(candidate.entity_id) if candidate.entity_id is not None else None
+                )
+                # The entity's natural key when it resolves. When it does not, the
+                # evidence still stands — failing to name an entity is never a
+                # reason to withhold what was found (see _entity_handles) — and the
+                # declared span stands in for the key: still a fact about the
+                # source rather than an invented identity, and distinct for every
+                # declaration that does not share its exact lines.
+                declares = (
+                    identity.key
+                    if identity is not None and identity.key
+                    else f"lines:{candidate.line_start}-{candidate.line_end}"
+                )
             proposed.append(
                 ProposedEvidence(
                     ref=EvidenceRef(
@@ -1525,6 +1554,7 @@ class CapabilityService:
                     origin=candidate.source,
                     reason=candidate.description,
                     text_length=len(item.text),
+                    declares=declares,
                 )
             )
         return proposed
@@ -1565,6 +1595,7 @@ class CapabilityService:
                 why=shaped_item.candidate.description,
                 tier=shaped_item.candidate.tier,
                 match=shaped_item.candidate.match,
+                declaration=shaped_item.candidate.declaration,
                 entity=handles.get(id(shaped_item)),
                 status=entry.status,
             )
