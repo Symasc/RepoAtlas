@@ -78,7 +78,8 @@ INSTRUCTIONS = (
     "call for that same task, including verify_grounding. Do not reuse an "
     "investigation_id for an unrelated task. Verification checks that citations "
     "resolve to evidence supplied in that investigation; it does not check whether "
-    "a statement is true."
+    "a statement is true. A search item marked declaration is RepoAtlas's record of "
+    "a definition, not its source: inspect its entity key to read the source."
 )
 
 
