@@ -47,6 +47,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
 )
 from repoatlas.models.telemetry import LinkTrace, StageTiming, Stopwatch
+from repoatlas.parsers.http_facts import DECLARATION_ROLES, PENDING_FACT
 from repoatlas.storage.protocols import (
     EdgeRecord,
     EntityRecord,
@@ -195,6 +196,13 @@ class ReferenceLinker:
         claims: list[UnresolvedRefRecord] = []
         for reference in parsed.references:
             source_id = symbol_ids.get(reference.source_symbol or "", file_entity_id)
+
+            if reference.meta.get(PENDING_FACT):
+                # A pending fact (repoatlas.parsers.http_facts): only the global pass
+                # can prove it, so it is kept as a claim — never interned here, and
+                # never matched against a local definition by name.
+                claims.append(self._claim(repo_id, file_id, source_id, reference, parsed))
+                continue
 
             if reference.target_kind in _INTERNED_KINDS:
                 line_start: int | None = reference.line_start
@@ -379,6 +387,13 @@ class ReferenceLinker:
             unresolved = 0
 
             for claim in claims:
+                role = claim_role(claim)
+                if role is not None:
+                    # A pending fact is never proven by symbol resolution. A
+                    # declaration is not a claim at all, so it is not counted.
+                    if role not in DECLARATION_ROLES:
+                        unresolved += 1
+                    continue
                 origin = by_id.get(claim.file_id)
                 if origin is None:
                     unresolved += 1
@@ -708,6 +723,14 @@ class ReferenceLinker:
             cross_pairs.add((record.repo_id, providers[0][0]))
 
         return planned, len(cross_pairs)
+
+
+def claim_role(claim: UnresolvedRefRecord) -> str | None:
+    """The pending-fact role a claim carries, or ``None`` for an ordinary claim."""
+    if not claim.meta_json:
+        return None
+    role = json.loads(claim.meta_json).get(PENDING_FACT)
+    return role if isinstance(role, str) and role else None
 
 
 def _imported_names(parsed: ParsedFile) -> dict[str, str]:
