@@ -43,9 +43,11 @@ import enum
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from repoatlas.models.capability import (
+    PRESENTATION_DESCRIPTION,
     AppliedBudget,
     CapabilityContext,
     EvidenceBudget,
+    Presentation,
 )
 from repoatlas.models.capability_io import ContextView, EvidenceItem, LineRange
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
@@ -241,6 +243,10 @@ class InspectRequest(BaseModel):
     #: an evidence id has no meaning outside the investigation that minted it.
     investigation_id: str | None = None
     depth: FreshnessDepth = FreshnessDepth.STORED
+    #: How the response is written out. The capability runs identically either way.
+    presentation: Presentation = Field(
+        default=Presentation.FULL, description=PRESENTATION_DESCRIPTION
+    )
 
     @model_validator(mode="after")
     def _range_is_coherent(self) -> InspectRequest:

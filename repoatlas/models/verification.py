@@ -46,6 +46,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from repoatlas.models.capability import PRESENTATION_DESCRIPTION, Presentation
 from repoatlas.models.capability_io import LineRange
 from repoatlas.models.evidence import EvidenceSource
 from repoatlas.models.freshness import IndexFreshness
@@ -265,6 +266,16 @@ class VerifyGroundingRequest(BaseModel):
 
     investigation_id: str = Field(min_length=1)
     answer: AgentAnswer
+    #: How the verdict is written out. The verification is identical either way.
+    presentation: Presentation = Field(
+        default=Presentation.FULL,
+        description=(
+            f"{PRESENTATION_DESCRIPTION} For verification, `compact` also leaves out the "
+            "submitted answer, which the caller already holds, and includes "
+            "`sanitized_answer` only when grounding removed or narrowed something, as "
+            "`answer_changed` says."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

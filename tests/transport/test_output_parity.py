@@ -290,6 +290,25 @@ def test_the_text_block_carries_the_same_object_as_the_structured_field(
     assert text_payload["evidence"][0]["id"] == "E1"
 
 
+def test_a_compact_search_is_the_projection_of_the_direct_call(
+    service: CapabilityService,
+) -> None:
+    """``presentation: compact`` is chosen below the transport, not inside it."""
+    from repoatlas.capabilities.presentation import present
+    from repoatlas.models.capability import Presentation
+
+    mcp = over(
+        service,
+        "repoatlas_search",
+        {"question": QUESTION, "context": GLOBAL, "presentation": "compact"},
+    )
+    request = SearchRequest(question=QUESTION, context=CONTEXT, presentation=Presentation.COMPACT)
+    direct = present(request, service.search(request))
+    assert_parity(mcp, direct)
+    assert mcp["presentation"] == "compact"
+    assert mcp["evidence"] and "ref" not in mcp["evidence"][0]
+
+
 def test_the_text_block_is_compact_json_for_results_and_refusals(
     service: CapabilityService,
 ) -> None:
