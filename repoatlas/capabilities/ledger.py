@@ -9,6 +9,18 @@ different bytes for that span allocates a new id and marks the old one supersede
 Rebinding would be worse than losing the evidence: every claim already citing
 ``E4`` would silently start pointing at content the caller never saw.
 
+Sameness is decided by the bytes and where they are, and by nothing else: the same
+bytes at the same coordinates are one evidence identity whichever route, or
+whichever declared entity, supplied them. Whether *different* bytes replace what is
+there is decided by identity, which for a recorded declaration includes the entity
+it declares. Its text was assembled from facts about the source rather than read
+from it, so it claims its file and no lines — and every such claim in one file
+shares a span. ``class ServiceConfig`` and ``def load_config()`` are not two
+versions of one file's bytes, and keying replacement on the span alone made
+whichever arrived second supersede the other, in the same response that issued
+both. A new declaration of the *same* entity still supersedes the old one, and text
+read from the file is keyed exactly as it always was.
+
 **Nothing is forgotten silently.** At capacity the ledger refuses new identities
 rather than evicting old ones. An evicted id does not become an error a caller can
 handle, it becomes a citation that no longer resolves — indistinguishable, to
@@ -47,6 +59,23 @@ from repoatlas.models.investigation import (
 #: Stale evidence is excluded by default: it described the index accurately once,
 #: and a citation to it now asserts something about content that has moved.
 GROUNDABLE_STATUSES: tuple[EvidenceStatus, ...] = (EvidenceStatus.VALID,)
+
+#: The span, then the entity a declaration declares (``None`` for text read from
+#: the file). Scopes supersession; see :func:`evidence_identity`.
+EvidenceIdentity = tuple[str, str, int | None, int | None, str | None]
+
+
+def evidence_identity(ref: EvidenceRef, declares: str | None) -> EvidenceIdentity:
+    """What different bytes at one span would *replace*, as the ledger decides it.
+
+    Not what makes two supplies the same evidence — identical bytes at identical
+    coordinates are that, whatever this says. For text read from the file this is
+    ``ref.span_key`` and nothing more, so every rule about source spans is
+    unchanged. A declaration adds the entity it declares (see
+    :attr:`~repoatlas.models.investigation.ProposedEvidence.declares`), so a
+    different declaration in the same file sits beside it rather than replacing it.
+    """
+    return (*ref.span_key, declares)
 
 
 class LedgerCapacityError(Exception):
@@ -96,7 +125,7 @@ class _Plan:
     #: rather than patched during application: a batch that supersedes an entry it
     #: also allocated would otherwise have its own new entry removed by the
     #: supersession that followed it.
-    active_after: dict[tuple[str, str, int | None, int | None], str] = field(default_factory=dict)
+    active_after: dict[EvidenceIdentity, str] = field(default_factory=dict)
     #: The next free allocation number afterwards.
     next_number: int = 1
 
@@ -126,9 +155,10 @@ class EvidenceLedger:
         #: Allocation-ordered. Python dicts preserve insertion order, which is
         #: what makes every projection deterministic without a sort.
         self._entries: dict[str, LedgerEntry] = {}
-        #: The **currently active** id for each span. A superseded id leaves this
-        #: map, which is what stops a resurrected digest reusing a dead identity.
-        self._active_by_span: dict[tuple[str, str, int | None, int | None], str] = {}
+        #: The **currently active** id for each location (:func:`evidence_identity`).
+        #: A superseded id leaves this map, which is what stops a resurrected digest
+        #: reusing a dead identity.
+        self._active_by_identity: dict[EvidenceIdentity, str] = {}
         self._next_number = 1
 
     # -- reading ------------------------------------------------------------
@@ -238,24 +268,38 @@ class EvidenceLedger:
         """
         plan = _Plan()
         # Shadow state: the real maps plus whatever this batch would do to them.
-        active: dict[tuple[str, str, int | None, int | None], str] = dict(self._active_by_span)
+        active: dict[EvidenceIdentity, str] = dict(self._active_by_identity)
         pending: dict[str, LedgerEntry] = {}
         number = self._next_number
+        # Every live id by where it is and the bytes it binds. At most one live id
+        # ever holds a given pair: a new one is allocated only when none does, and
+        # a successor always binds different bytes. A superseded id is not live, so
+        # it is not here, and re-supplying its bytes cannot resurrect it.
+        live: dict[tuple[tuple[str, str, int | None, int | None], str], str] = {}
+        for evidence_id in active.values():
+            entry = self._lookup(evidence_id, pending)
+            if entry is not None:
+                live[(entry.ref.span_key, entry.ref.span_digest)] = evidence_id
 
         for item in proposed:
-            span = item.ref.span_key
-            current_id = active.get(span)
-            current = self._lookup(current_id, pending) if current_id else None
-
-            if current is not None and current.ref.span_digest == item.ref.span_digest:
+            same_id = live.get((item.ref.span_key, item.ref.span_digest))
+            same = self._lookup(same_id, pending) if same_id else None
+            if same is not None:
                 # The same bytes at the same coordinates. One evidence identity,
-                # discovered again — possibly by a stronger route.
-                merged = _strengthen(current, item)
-                if merged != current:
-                    plan.merges[current.id] = merged
-                    pending[current.id] = merged
-                plan.resolved.append(current.id)
+                # discovered again — possibly by a stronger route, and whichever
+                # entity, if any, the bytes were supplied as the declaration of.
+                merged = _strengthen(same, item)
+                if merged != same:
+                    plan.merges[same.id] = merged
+                    pending[same.id] = merged
+                plan.resolved.append(same.id)
                 continue
+
+            # Different bytes. Whether they replace what is there is a question
+            # about identity: the same span, and for a declaration the same entity.
+            identity = evidence_identity(item.ref, item.declares)
+            current_id = active.get(identity)
+            current = self._lookup(current_id, pending) if current_id else None
 
             evidence_id = format_evidence_id(number)
             number += 1
@@ -275,12 +319,15 @@ class EvidenceLedger:
                 supersedes=current.id if current is not None else None,
                 allocated_at=now,
                 text_length=item.text_length,
+                declares=item.declares,
             )
             if current is not None:
                 plan.supersessions[current.id] = evidence_id
+                live.pop((current.ref.span_key, current.ref.span_digest), None)
             plan.allocations.append(entry)
             pending[evidence_id] = entry
-            active[span] = evidence_id
+            active[identity] = evidence_id
+            live[(item.ref.span_key, item.ref.span_digest)] = evidence_id
             plan.resolved.append(evidence_id)
 
         plan.active_after = active
@@ -312,7 +359,7 @@ class EvidenceLedger:
                 update={"status": EvidenceStatus.SUPERSEDED, "superseded_by": new_id}
             )
 
-        self._active_by_span = plan.active_after
+        self._active_by_identity = plan.active_after
         self._next_number = plan.next_number
 
     # -- revalidation -------------------------------------------------------
