@@ -156,8 +156,8 @@ def _arguments(node: Node) -> list[Node] | None:
     return [child for child in arguments.children if child.is_named and child.type != "comment"]
 
 
-def _binding_counts(source: bytes, root: Node) -> Counter[str]:
-    """How many times each name is bound anywhere in the file."""
+def binding_counts(source: bytes, root: Node) -> Counter[str]:
+    """How many times each name is bound anywhere beneath ``root`` (a file, or a scope)."""
     counts: Counter[str] = Counter()
     for node in walk(root):
         for index, child in enumerate(node.children):
@@ -222,7 +222,10 @@ class TypeScriptHttp:
 
     def __init__(self, source: bytes, root: Node) -> None:
         self._source = source
-        counts = _binding_counts(source, root)
+        counts = binding_counts(source, root)
+        #: How often each name is bound anywhere in the file, shared with the other
+        #: readers of the same file so every one proves a binding by the same rule.
+        self.counts = counts
         self._express: set[str] = set()
         self._router_factories: set[str] = set()
         self._axios: set[str] = set()
