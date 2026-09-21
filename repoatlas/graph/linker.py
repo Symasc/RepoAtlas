@@ -32,9 +32,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
+from repoatlas.graph.http_claims import HttpClaimPlan, plan_http_claims
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
 from repoatlas.models import http
@@ -47,7 +48,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
 )
 from repoatlas.models.telemetry import LinkTrace, StageTiming, Stopwatch
-from repoatlas.parsers.http_facts import DECLARATION_ROLES, PENDING_FACT
+from repoatlas.parsers.http_facts import PENDING_FACT
 from repoatlas.storage.protocols import (
     EdgeRecord,
     EntityRecord,
@@ -142,6 +143,8 @@ class GlobalPlan:
 
     edges: tuple[EdgeRecord, ...] = ()
     dependencies: tuple[PendingEdge, ...] = ()
+    #: What the pending HTTP facts established, and why each one did or did not.
+    http: HttpClaimPlan = field(default_factory=HttpClaimPlan)
     resolved: int = 0
     unresolved: int = 0
     cross_repository: int = 0
@@ -385,14 +388,12 @@ class ReferenceLinker:
             edges: list[EdgeRecord] = []
             resolved = 0
             unresolved = 0
+            pending: list[UnresolvedRefRecord] = []
 
             for claim in claims:
-                role = claim_role(claim)
-                if role is not None:
-                    # A pending fact is never proven by symbol resolution. A
-                    # declaration is not a claim at all, so it is not counted.
-                    if role not in DECLARATION_ROLES:
-                        unresolved += 1
+                if claim_role(claim) is not None:
+                    # Never proven by symbol resolution: decided below, together.
+                    pending.append(claim)
                     continue
                 origin = by_id.get(claim.file_id)
                 if origin is None:
@@ -408,6 +409,15 @@ class ReferenceLinker:
             watch.detail = f"{unresolved} still unresolved"
         stages.append(_timing(watch))
 
+        with Stopwatch("http", candidates_in=len(pending)) as watch:
+            decided = plan_http_claims(pending, index, file_rows, producer=GLOBAL_PARSER)
+            edges.extend(decided.edges)
+            resolved += decided.resolved
+            unresolved += decided.unresolved
+            watch.candidates_out = decided.resolved
+            watch.detail = decided.detail
+        stages.append(_timing(watch))
+
         with Stopwatch("dependencies") as watch:
             dependencies, cross = self._plan_dependencies(index)
             watch.candidates_in = len(dependencies)
@@ -418,6 +428,7 @@ class ReferenceLinker:
         return GlobalPlan(
             edges=tuple(edges),
             dependencies=tuple(dependencies),
+            http=decided,
             resolved=resolved,
             unresolved=unresolved,
             cross_repository=cross,
@@ -446,10 +457,12 @@ class ReferenceLinker:
         stages = list(plan.stages)
         edges = list(plan.edges)
 
-        with Stopwatch("swap", candidates_in=len(edges) + len(plan.dependencies)) as watch:
+        planned = len(edges) + len(plan.dependencies) + len(plan.http.http)
+        with Stopwatch("swap", candidates_in=planned) as watch:
             with self._knowledge.transaction():
                 removed = self._knowledge.delete_edges_by_parser(GLOBAL_PARSER)
                 edges.extend(self._materialize(plan.dependencies))
+                edges.extend(self._materialize_http(plan.http))
                 self._knowledge.add_edges(edges)
                 self._knowledge.gc_orphan_entities()
             watch.candidates_out = len(edges)
@@ -498,6 +511,32 @@ class ReferenceLinker:
             )
             for edge in pending
         ]
+
+    def _materialize_http(self, decided: HttpClaimPlan) -> list[EdgeRecord]:
+        """Intern the shared HTTP nodes a pending fact proved, inside the swap.
+
+        The target is re-checked against its canonical form here for the same reason
+        :meth:`link_file` checks it: a shared node is where repositories meet, and a
+        second spelling of one identity would be a node nothing else reaches.
+        """
+        found: list[EdgeRecord] = []
+        for edge in decided.http:
+            canonical = _HTTP_CANONICAL.get(edge.target.type)
+            if canonical is None or canonical(edge.target.name) is None:
+                continue
+            found.append(
+                EdgeRecord(
+                    src_id=edge.src_id,
+                    dst_id=self._knowledge.intern_entity(edge.target),
+                    type=edge.type,
+                    repo_id=edge.repo_id,
+                    file_id=edge.file_id,
+                    line_start=edge.line_start,
+                    line_end=edge.line_end,
+                    parser=GLOBAL_PARSER,
+                )
+            )
+        return found
 
     def _resolve(
         self,
