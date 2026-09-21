@@ -591,7 +591,9 @@ class TypeScriptParser:
     #    method of that function, and owns the calls made inside it.
     # 6: requests made through a request wrapper this file proves — a helper
     #    forwarding a path to a fetch-like call — become HTTP facts.
-    version = "6"
+    # 7: exported request helpers are declared, and calls through helpers imported
+    #    from relative modules are recorded for the global pass to decide.
+    version = "7"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
@@ -650,6 +652,6 @@ class TypeScriptParser:
             parser=self.name,
             parser_version=self.version,
             symbols=(module, *walker.symbols),
-            references=(*walker.references, *nest.references()),
+            references=(*walker.references, *nest.references(), *wrappers.declarations()),
             diagnostics=diagnostics,
         )
