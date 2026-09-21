@@ -369,6 +369,26 @@ def _index_path(raw: str) -> str:
     return "/".join(parts)
 
 
+def _search_path(raw: str | None, resolution: ContextResolution) -> str | None:
+    """A search's path scope in the spelling the index stores, or ``None``.
+
+    A repository-relative path means nothing across a managed root, so it needs a
+    repository scope — the same refusal, for the same reason, that inspection gives
+    a path target. That keeps it a narrowing of the one repository the caller named
+    rather than a second way of choosing repositories.
+    """
+    if raw is None:
+        return None
+    if resolution.scope is not CapabilityScope.REPOSITORY:
+        raise ContextResolutionError(
+            "a repository-relative path needs a repository scope",
+            detail="Name the repository this path belongs to.",
+            reason=ContextFailure.AMBIGUOUS,
+            candidates=tuple(sorted(repo.slug for repo in resolution.repositories)),
+        )
+    return _index_path(raw)
+
+
 def _whole_or_clamped(padded: LineRange | None, line_count: int) -> LineRange | None:
     """The range to supply from a file whose true length is known."""
     if padded is not None:
@@ -601,6 +621,7 @@ class CapabilityService:
             # Before any investigation exists, so a rejected context leaves no
             # session behind.
             resolution = resolve_context(request.context, registered)
+            path_prefix = _search_path(request.within_path, resolution)
 
             # Derived from the parser and dependency registries, so it is one
             # value for the whole call and cannot differ between two repositories.
@@ -638,6 +659,15 @@ class CapabilityService:
                 # there is nothing here to retry and no contention to report. The
                 # funnel still runs exactly once inside it.
                 with self._workspace.database.read_snapshot():
+                    if path_prefix is not None and not self._workspace.search.has_files_under(
+                        resolution.repository_ids, path_prefix
+                    ):
+                        # Inside the snapshot, so "nothing indexed here" and the
+                        # search it prevents describe the same generation. The
+                        # answer inspect gives any unindexed path, for the same
+                        # reasons: an excluded directory and a misspelt one are
+                        # not RepoAtlas's to tell apart.
+                        raise FileNotIndexedError("no indexed file stands at or beneath that path")
                     outcome = self._workspace.retriever(limits).retrieve_detailed(
                         request.question,
                         to_repository_context(resolution),
@@ -650,6 +680,7 @@ class CapabilityService:
                         # takes `scope: global`, or a relationships walk that says
                         # cross_repository.
                         confined=True,
+                        path_prefix=path_prefix,
                     )
                     shaped = shape_candidates(outcome.evidence.candidates, applied)
                     proposed = self._propose(shaped.items, registered)
@@ -674,6 +705,7 @@ class CapabilityService:
                 outcome=outcome,
                 applied=applied,
                 facts=facts,
+                path_prefix=path_prefix,
             )
 
     def inspect(self, request: InspectRequest) -> InspectResponse:
@@ -1571,6 +1603,7 @@ class CapabilityService:
         outcome: RetrievalOutcome,
         applied: AppliedBudget,
         facts: str,
+        path_prefix: str | None = None,
     ) -> SearchResponse:
         """Assemble the response from **this run's** candidates and the new ids.
 
@@ -1632,6 +1665,7 @@ class CapabilityService:
             entities=self._seed_handles(outcome.seed_entity_ids, in_scope),
             trace=outcome.evidence.trace if request.include_trace else None,
             ledger=session.ledger.summary(),
+            within_path=path_prefix,
         )
 
     def _seed_handles(
