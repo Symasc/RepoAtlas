@@ -82,6 +82,8 @@ Start with `repoatlas_search`. It finds evidence, records it so you can cite it,
 
 Do not open with `repoatlas_inspect` on a guessed path or `repoatlas_relationships` on a guessed key. Do not use `repoatlas_dependencies` as a search.
 
+A path you were given is not a guess. When the task names a file, such as a design document at `docs/ARCHITECTURE.md`, search for that path — an indexed file named by its full path ranks first — or inspect it directly under a repository scope. A document is evidence of what the document says, not of what the code does.
+
 **Scope is a boundary, so choose it for the question you are asking.** A `repository` scope answers out of that repository and out of things that belong to no repository at all — an environment variable, a command, an HTTP operation. It will not quietly return a file from somewhere else, which is what makes "nothing here" a usable scoped answer. When the question is "where does this live?" and you do not already know, ask it with `{"scope": "global"}`.
 
 A scoped search may return a repository-less shared handle such as `env:SERVICE_HOST` or an HTTP endpoint. The handle itself remains visible, but the repository-scope boundary still applies to graph traversal: under `scope: repository` and `cross_repository: false`, a walk rooted at that shared node stays on the repository side named by the context. Use `cross_repository: true` when the question deliberately follows that relationship into another repository, or use `scope: global` when the question itself is global.
@@ -95,6 +97,22 @@ Inspect only when you need source context the search did not already give you, a
 If an evidence id you already hold proves the **specific claim you are evaluating**, do not inspect merely to collect more text. That does not make the whole investigation complete if other parts of the question remain unresolved.
 
 Inspection reads only files already admitted to the index; a path with no indexed file is refused, and that refusal is information.
+
+**A declaration is not source.** A search item with `declaration: true` carries the declaration RepoAtlas recorded — `const EMAIL_LINKS`, `def load_config()` — and no line range. It shows that the entity is declared in that file, not what its source says. To read the definition, pass its `entity.key` to inspect as `target.entity_key`; inspection returns the whole recorded span plus context, as citable lines under new evidence ids:
+
+```json
+{"tool": "repoatlas_inspect", "arguments": {"context": {"scope": "repository", "repository": "python-service"}, "target": {"entity_key": "sym:python-service:src/config.py:load_config:18"}, "investigation_id": "<the id search returned>"}}
+```
+
+Do not read the file some other way to get that text: the inspected lines are the ones you can cite.
+
+**Narrowing and compacting.** When the question is about one part of a repository, say so with `within_path`; every retrieval stage applies it before its limits, so matches elsewhere cannot crowd out the part you asked about. It needs a repository scope and only narrows it.
+
+```json
+{"tool": "repoatlas_search", "arguments": {"context": {"scope": "repository", "repository": "python-service"}, "question": "Where is SERVICE_HOST read?", "within_path": "src", "presentation": "compact"}}
+```
+
+`presentation: "compact"` on search, inspect, relationships or verify_grounding returns the same evidence with repeated metadata written once. Ids, citations, grounding and staleness behave exactly as they do in full.
 
 ## Investigation completeness
 
@@ -348,6 +366,8 @@ Keep your planning to yourself; what the reader needs is the finding, the citati
 | a compound question has several independently provable parts | track and investigate each part separately | let evidence for one part stand in for the rest |
 | you are about to make a repository-wide absence claim | establish adequate category/handle coverage or report the gap | infer absence from one search or one inspected file |
 | you need a definition you already have evidence for | use the evidence you hold | inspect again for more text |
+| a search item has `declaration: true` and you need its source | inspect its `entity.key` | cite the declaration as source lines, or read the file outside RepoAtlas |
+| the question is about one directory of a repository | search with `within_path` | filter a whole-repository search afterwards |
 
 ## Do not
 
