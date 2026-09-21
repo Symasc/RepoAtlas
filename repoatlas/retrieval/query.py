@@ -39,6 +39,46 @@ _SNAKE_NAME = re.compile(r"\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b")
 #: an otherwise answerable question.
 _CAMEL_NAME = re.compile(r"\b[a-z][a-z0-9]*(?:[A-Z][a-z0-9]*)+\b")
 
+#: ``PascalCaseName``: a capitalised run followed by at least one more. English
+#: prose capitalises single words — `Identity`, `Learning`, `API` — and does not
+#: weld two of them together, so a *compound* is code and a lone capitalised word
+#: is not. That one boundary is why this pattern requires the second run.
+#:
+#: It exists because `_CAMEL_NAME` anchors on a lowercase first character, so
+#: `UsersController` and `RubyTooling` matched no literal pattern at all and
+#: reached exact lookup only as ordinary prose identifiers — indistinguishable
+#: from `call` or `now`.
+#:
+#: Searched exactly and **never definitive**, for the same reason `camelCase` is
+#: not: `TypeScript` and `RepoAtlas` have this shape too, and a case-sensitive miss
+#: on one of those must not silence an otherwise answerable question.
+_PASCAL_NAME = re.compile(r"\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+\b")
+
+#: A phrase that names what follows as a symbol: "the method named `detail`".
+#:
+#: Deliberately tiny, and deliberately not an intent classifier. It exists for one
+#: distinction the shape rules cannot draw: "Find the symbol named call." is an
+#: explicit lookup and "How do the apps call the services?" is prose, and the only
+#: thing separating them is that the first one *says* the word is a name.
+#:
+#: The cue repeats, because English stacks them: "the **symbol named** call". One
+#: cue per match would consume ``symbol``, nominate ``named``, and resume past the
+#: word actually being pointed at.
+#:
+#: ``\s+`` after the alternation is what keeps this from firing on a longer word:
+#: "which client **methods** exist" offers ``method`` no following space, so it
+#: matches nothing.
+_NAMING_CUE = re.compile(
+    r"(?:\b(?:named|called|symbol|function|method|class|entity|variable)\s+)+"
+    r"([A-Za-z_][A-Za-z0-9_]*)\b",
+    re.IGNORECASE,
+)
+
+#: The cue words themselves, so `symbol named detail` does not nominate `named`.
+_CUE_WORDS = frozenset(
+    {"named", "called", "symbol", "function", "method", "class", "entity", "variable"}
+)
+
 #: A maximal run of word characters, optionally joined by the connectors that
 #: appear inside real names. ``\w`` is Unicode-aware for ``str`` patterns, so this
 #: matches identifiers and words in every script.
@@ -154,6 +194,14 @@ class QueryAnalysis:
     ambiguous_packages: tuple[str, ...] = ()
     #: A lone non-ASCII token that is the whole question: a pasted literal.
     pasted_literals: tuple[str, ...] = ()
+    #: Tokens the question points at as *names*, without their shape alone saying
+    #: so: compound ``PascalCase``, a token a naming phrase introduces, and the
+    #: token that **is** the whole question.
+    #:
+    #: Deliberately separate from :attr:`literal_terms`. These do not widen the
+    #: content stage, do not name files, and never decide suppression — they only
+    #: qualify a token for exact *entity-name* lookup. See :attr:`symbol_terms`.
+    symbol_names: tuple[str, ...] = ()
     terms: tuple[str, ...] = field(default=())
     #: Exact HTTP route, deployment and endpoint keys the question spells out —
     #: ``GET /users`` is ``http-route:GET:/users`` (see :mod:`repoatlas.models.http`).
@@ -181,6 +229,39 @@ class QueryAnalysis:
             *self.pasted_literals,
             *self.ambiguous_packages,
         ):
+            seen.setdefault(term, None)
+        return tuple(seen)
+
+    @property
+    def symbol_terms(self) -> tuple[str, ...]:
+        """Tokens that may be looked up as an exact entity name *deterministically*.
+
+        The funnel used to offer every word of a question to exact entity-name
+        lookup and mark whatever came back `DETERMINISTIC` — the strongest tier,
+        ahead of every contextual candidate, and a graph seed besides. So "How do
+        the frontend apps call the Learning and Identity services?" was answered
+        with whatever happened to be named ``call`` and ``services``, and "what are
+        the API endpoints in Identity right now?" produced fifteen deterministic
+        matches for ``now``.
+
+        The words were never the problem. Promoting them was. A question can
+        mention ``call`` without asking about a symbol called ``call``, and the
+        difference is observable without understanding the sentence:
+
+        * it is **code-shaped** — everything in :attr:`literal_terms`, plus the
+          compound ``PascalCase`` that `_CAMEL_NAME` cannot see;
+        * a **naming phrase introduces it** — "the symbol named ``call``";
+        * it **is** the whole question, which is a lookup rather than prose. That
+          rule is not new: :attr:`definite_terms` already makes exactly this
+          judgement for a dashed token.
+
+        Everything else is still searched and still returned — a symbol genuinely
+        named ``call`` remains findable — as recall rather than as a fact about
+        what the question named. No word is excluded, and nothing is demoted for
+        being short.
+        """
+        seen: dict[str, None] = {}
+        for term in (*self.literal_terms, *self.symbol_names):
             seen.setdefault(term, None)
         return tuple(seen)
 
@@ -299,6 +380,32 @@ def analyze(question: str) -> QueryAnalysis:
         )
     )
 
+    # Tokens the question points at as names. Three sources, each answering "did
+    # the question mean this as an identifier?" without reading the sentence.
+    #
+    # A cue word is never its own nomination: "the symbol named detail" offers
+    # `detail`, not `named`. Nor is a stopword, which is filler wherever it sits.
+    cued = tuple(
+        dict.fromkeys(
+            token
+            for token in (match.group(1) for match in _NAMING_CUE.finditer(question))
+            if token.lower() not in _CUE_WORDS and token.lower() not in _STOPWORDS
+        )
+    )
+    pascal = tuple(dict.fromkeys(_PASCAL_NAME.findall(question)))
+    # A question that is one token is a lookup, not prose — the judgement
+    # `definite_terms` already makes for a lone dashed token. This is what keeps
+    # `locate config` and `locate UsersController` exact, and it is deliberately
+    # limited to the *whole* query: three words of prose are still prose.
+    #
+    # Its parts come with it. `locate api/config.py` is one token, and `api` and
+    # `config` are pieces of the identifier the user typed rather than words
+    # lifted out of a sentence — the module inside the named file really is
+    # called `config`. Nothing here reaches a multi-word question, where those
+    # same pieces would be prose.
+    lone = (stripped, *identifiers) if stripped and _WORD_RUN.fullmatch(stripped) else ()
+    symbol_names = tuple(dict.fromkeys((*pascal, *cued, *lone)))
+
     return QueryAnalysis(
         text=question,
         quoted=quoted,
@@ -310,6 +417,7 @@ def analyze(question: str) -> QueryAnalysis:
         code_names=code_names,
         ambiguous_packages=ambiguous,
         pasted_literals=pasted,
+        symbol_names=symbol_names,
         terms=terms,
         http_keys=http.query_keys(question),
     )

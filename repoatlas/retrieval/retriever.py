@@ -255,6 +255,7 @@ class Retriever:
             question,
             analysis.terms,
             literal_terms,
+            analysis.symbol_terms,
             scopes,
             stages,
             suppressed=suppressed,
@@ -490,6 +491,7 @@ class Retriever:
         question: str,
         terms: tuple[str, ...],
         literal_terms: list[str],
+        symbol_terms: tuple[str, ...],
         scopes: list[list[int] | None],
         stages: list[StageTiming],
         *,
@@ -515,6 +517,16 @@ class Retriever:
         ARCHITECTURE §10 specifies expansion "from the exact entity hits" for
         exactly this reason.
 
+        **An exact name match is a fact about the index; it is only a fact about
+        the question when the question named it.** Both halves used to treat every
+        word of the question as a name, so an entity called ``call``, ``services``
+        or ``now`` arrived `DETERMINISTIC` — ahead of every contextual candidate,
+        and seeding a walk besides — for a sentence that merely contained the word.
+        ``symbol_terms`` is the set the question named (see
+        :attr:`~repoatlas.retrieval.query.QueryAnalysis.symbol_terms`); everything
+        else resolves exactly as before and returns as recall. Nothing is excluded,
+        and a symbol genuinely named ``call`` is still found — by asking for it.
+
         ``quote_signatures`` supplies the declaration the indexer stored for each
         hit, which is what the graph stage has always done with the same column. A
         caller that turns candidates into citable evidence needs the bytes: the
@@ -523,10 +535,13 @@ class Retriever:
         turns the answer into a location nobody can quote. V1 renders these
         candidates as locations and passes nothing here, so its output is unchanged.
         """
-        exact_names = {term.lower() for term in terms}
+        # Only the spellings the question *named* may promote an entity. A word
+        # lifted out of prose is recall wherever it is found, including here: FTS
+        # finding an entity called `call` does not mean the question asked for one.
+        exact_names = {term.lower() for term in symbol_terms}
         with Stopwatch("symbol") as watch:
             candidates: list[EvidenceCandidate] = []
-            #: Seeds for graph expansion. Exact name matches only.
+            #: Seeds for graph expansion. Named-term matches only.
             entity_ids: list[int] = []
             #: Everything already returned, exact or fuzzy, for deduplication.
             seen_entities: set[int] = set()
@@ -534,11 +549,22 @@ class Retriever:
             # looked up. Words lifted out of the surrounding prose are recall, and
             # an exact-name hit on one of them would enter as DETERMINISTIC — the
             # strongest tier — for a question whose subject does not exist.
-            named = list(literal_terms) if suppressed is not None else [*literal_terms, *terms]
+            named = list(literal_terms) if suppressed is not None else [*symbol_terms, *terms]
             # An HTTP key is an exact identity the question spelled — `GET /users`
             # names one route — so it is looked up under suppression as well. It
             # can only ever match an entity *key*, which is what keeps it exact.
             named.extend(http_keys)
+            # Which of those spellings the question actually *named*, as opposed to
+            # merely containing. Both groups are looked up in one query — same SQL,
+            # same bound, same rows — and the distinction is applied to the rows
+            # that come back. Splitting the query instead would give each group its
+            # own limit and change which candidates survive, which is a retrieval
+            # change rather than the precedence fix this is.
+            explicit = (
+                {*literal_terms, *http_keys}
+                if suppressed is not None
+                else {*symbol_terms, *http_keys}
+            )
             # Under suppression the set to look up is exactly the one already
             # resolved before the decision was made, so the rows are reused rather
             # than fetched twice. When nothing is suppressed the question's own
@@ -558,15 +584,27 @@ class Retriever:
                     )
                 ]
             )
-            #: Split for the trace: an exact entity-name match and a full-text one
-            #: are different claims, and the trace must not blur them.
+            #: Split for the trace: a match on a spelling the question named, a
+            #: match on a word merely present in it, and a full-text hit are three
+            #: different claims, and the trace must not blur them.
             by_name = 0
+            by_recall = 0
             for hit in resolved:
                 if hit.entity_id in seen_entities:
                     continue
                 seen_entities.add(hit.entity_id)
-                entity_ids.append(hit.entity_id)
-                by_name += 1
+                # An empty matched term cannot happen — the store derives it from
+                # the same predicate that selected the row — and if it ever did,
+                # the established reading is that the row was named.
+                spelled = not hit.matched_term or hit.matched_term in explicit
+                if spelled:
+                    # Only a named term seeds expansion. Seeding from a prose word
+                    # would send the walk out from whatever happened to share it,
+                    # and expansion labels everything it reaches DETERMINISTIC.
+                    entity_ids.append(hit.entity_id)
+                    by_name += 1
+                else:
+                    by_recall += 1
                 if hit.path is None or hit.line_start is None:
                     continue
                 candidates.append(
@@ -579,8 +617,8 @@ class Retriever:
                         text=hit.signature if quote_signatures else "",
                         score=hit.score,
                         source=EvidenceSource.SYMBOL,
-                        tier=EvidenceTier.DETERMINISTIC,
-                        match=MatchClass.EXACT_NAME,
+                        tier=(EvidenceTier.DETERMINISTIC if spelled else EvidenceTier.ASSOCIATIVE),
+                        match=MatchClass.EXACT_NAME if spelled else MatchClass.LEXICAL,
                         description=f"defines {hit.name}",
                         entity_id=hit.entity_id,
                         entity_type=hit.type,
@@ -623,7 +661,10 @@ class Retriever:
             watch.detail = (
                 suppressed.message
                 if suppressed is not None
-                else f"{by_name} exact entity name, {len(seen_entities) - by_name} full-text"
+                else (
+                    f"{by_name} exact entity name, {by_recall} name recall, "
+                    f"{len(seen_entities) - by_name - by_recall} full-text"
+                )
             )
         # The exact-name lookup runs before this stage so that suppression can see
         # its answer, but it is still this stage's work and still this stage's
