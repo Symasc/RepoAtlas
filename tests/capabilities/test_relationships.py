@@ -404,10 +404,17 @@ def test_an_untraversable_edge_type_is_refused_not_answered_empty(
     """ "No relationships of that kind" and "that kind is not traversable" differ.
 
     Only the second has a remedy, and only an error can name it.
+
+    Asserted against a containment type, which is the untraversable case that
+    still exists. This test used to name ``CALLS``, from when the relationships
+    capability and automatic search expansion shared one edge set; ``CALLS`` is
+    now explicitly requestable (see ``tests/test_calls_traversal_policy.py``) and
+    containment is what remains off the default policy. The property under test —
+    a refusal rather than an empty answer — is unchanged.
     """
     with pytest.raises(InvalidRelationshipRequestError) as raised:
-        _ask(initialized, CONFIG, edge_types=(EdgeType.CALLS,))
-    assert raised.value.edge_types == ("CALLS",)
+        _ask(initialized, CONFIG, edge_types=(EdgeType.CONTAINS,))
+    assert raised.value.edge_types == ("CONTAINS",)
 
 
 def test_a_containment_type_is_refused_unless_it_was_asked_for(initialized: Workspace) -> None:
