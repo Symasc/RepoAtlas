@@ -25,6 +25,7 @@ from repoatlas.models.parsing import (
     Severity,
 )
 from repoatlas.parsers.http_nestjs import NestDeclarations
+from repoatlas.parsers.http_ts_wrappers import FetchWrappers
 from repoatlas.parsers.http_typescript import TypeScriptHttp
 from repoatlas.parsers.marks import whole_file_span
 from repoatlas.parsers.treesitter import (
@@ -91,11 +92,13 @@ class _Walker:
         language: str,
         http: TypeScriptHttp | None = None,
         nest: NestDeclarations | None = None,
+        wrappers: FetchWrappers | None = None,
     ) -> None:
         self._source = source
         self._language = language
         self._http = http
         self._nest = nest
+        self._wrappers = wrappers
         self.symbols: list[ParsedSymbol] = []
         self.references: list[ParsedReference] = []
         self._scope: list[str] = []
@@ -483,6 +486,8 @@ class _Walker:
             self.references.extend(self._http.call_references(node, self._current))
         if self._nest is not None:
             self.references.extend(self._nest.call_references(node, self._current))
+        if self._wrappers is not None:
+            self.references.extend(self._wrappers.call_references(node, self._current))
         self.references.append(
             ParsedReference(
                 edge_type=EdgeType.CALLS,
@@ -584,7 +589,9 @@ class TypeScriptParser:
     #    proven application serves.
     # 5: a function-valued property of an object a named function returns is a
     #    method of that function, and owns the calls made inside it.
-    version = "5"
+    # 6: requests made through a request wrapper this file proves — a helper
+    #    forwarding a path to a fetch-like call — become HTTP facts.
+    version = "6"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
@@ -614,7 +621,8 @@ class TypeScriptParser:
 
         http = TypeScriptHttp(source, tree.root_node)
         nest = NestDeclarations(source, tree.root_node, http.counts)
-        walker = _Walker(source, grammar, http, nest)
+        wrappers = FetchWrappers(source, tree.root_node, http.counts)
+        walker = _Walker(source, grammar, http, nest, wrappers)
         walker.run(tree.root_node)
 
         whole_file_start, whole_file_last = whole_file_span(content)
