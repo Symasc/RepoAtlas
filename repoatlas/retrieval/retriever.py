@@ -154,6 +154,7 @@ class Retriever:
         literal_phrase: bool = False,
         quote_signatures: bool = False,
         confined: bool = False,
+        path_prefix: str | None = None,
     ) -> RetrievalOutcome:
         """The funnel: one pass, and everything that pass decided.
 
@@ -177,6 +178,14 @@ class Retriever:
         ``relationships`` and ``dependencies`` already enforce. V1's own scope is a
         bias (ARCHITECTURE.md §10), its second pass is untouched, and it passes
         nothing here.
+
+        ``path_prefix`` narrows every scope searched to one normalized
+        repository-relative file or directory. It is handed to each stage's own
+        lookup and applied there, before that lookup's limit — never to the
+        candidates a limited lookup already returned, where files outside the path
+        would have used up the bound first. Graph expansion may walk through nodes
+        outside it; what it reaches is filtered before it becomes a candidate. The
+        capability passes it only with a confined repository scope.
         """
         stages: list[StageTiming] = []
         analysis = analyze(question)
@@ -214,7 +223,7 @@ class Retriever:
             if phrase and phrase not in definite_terms:
                 definite_terms.insert(0, phrase)
 
-        exact = self._stage_exact(literal_terms, scopes, stages)
+        exact = self._stage_exact(literal_terms, scopes, stages, path_prefix=path_prefix)
         if exact:
             ranked_lists.append(exact)
 
@@ -222,7 +231,9 @@ class Retriever:
         # one of the three ways a named term can be proven to exist. Deciding
         # suppression on content alone is what made RepoAtlas answer "no indexed
         # evidence matches" for `src/config.py` while holding that exact file.
-        files, proven = self._stage_files([*literal_terms, *analysis.terms], scopes, stages)
+        files, proven = self._stage_files(
+            [*literal_terms, *analysis.terms], scopes, stages, path_prefix=path_prefix
+        )
         if files:
             ranked_lists.append(files)
 
@@ -241,14 +252,20 @@ class Retriever:
         # the same set the symbol stage looks up under suppression, so the two can
         # never disagree about what was asked for.
         named_exact = [*literal_terms, *analysis.http_keys]
-        entity_hits, proven_names, entity_ms = self._named_entity_hits(named_exact, scopes)
+        entity_hits, proven_names, entity_ms = self._named_entity_hits(
+            named_exact, scopes, path_prefix=path_prefix
+        )
 
         # A question that names something specific and does not find it is not
         # answered by anything associative. Decided once, here, and honoured by
         # every stage that follows. See _suppress_associative.
-        suppressed = self._suppress_associative(definite_terms, exact, proven, proven_names)
+        suppressed = self._suppress_associative(
+            definite_terms, exact, proven, proven_names, path_prefix=path_prefix
+        )
 
-        lexical = self._stage_lexical(question, scopes, stages, suppressed=suppressed)
+        lexical = self._stage_lexical(
+            question, scopes, stages, suppressed=suppressed, path_prefix=path_prefix
+        )
         ranked_lists.extend(lexical)
 
         symbols, entity_ids = self._stage_symbols(
@@ -263,6 +280,7 @@ class Retriever:
             quote_signatures=quote_signatures,
             named_hits=entity_hits,
             named_ms=entity_ms,
+            path_prefix=path_prefix,
         )
         if symbols:
             ranked_lists.append(symbols)
@@ -272,11 +290,14 @@ class Retriever:
             primary_ids if context.scope is not ContextScope.GLOBAL else None,
             stages,
             suppressed=suppressed,
+            path_prefix=path_prefix,
         )
         if semantic:
             ranked_lists.append(semantic)
 
-        graph, visited = self._stage_graph(entity_ids, stages, home_repo_id=home_repo_id)
+        graph, visited = self._stage_graph(
+            entity_ids, stages, home_repo_id=home_repo_id, path_prefix=path_prefix
+        )
         if graph:
             ranked_lists.append(graph)
 
@@ -387,6 +408,8 @@ class Retriever:
         literal_terms: list[str],
         scopes: list[list[int] | None],
         stages: list[StageTiming],
+        *,
+        path_prefix: str | None = None,
     ) -> list[EvidenceCandidate]:
         """Literal terms, verified by substring. Deterministic by construction."""
         with Stopwatch("exact") as watch:
@@ -405,7 +428,9 @@ class Retriever:
                             MatchClass.EXACT_CONTENT,
                             f"contains {term}",
                         )
-                        for hit in self._search.search_literal(term, scope, self._limits.per_source)
+                        for hit in self._search.search_literal(
+                            term, scope, self._limits.per_source, path_prefix=path_prefix
+                        )
                     )
             watch.candidates_out = len(hits)
             watch.detail = f"{len(literal_terms)} literal term(s) in content"
@@ -419,6 +444,7 @@ class Retriever:
         stages: list[StageTiming],
         *,
         suppressed: SuppressionOutcome | None = None,
+        path_prefix: str | None = None,
     ) -> list[list[EvidenceCandidate]]:
         """FTS recall over chunk text. Recall, not proof, so it is associative."""
         lists: list[list[EvidenceCandidate]] = []
@@ -427,7 +453,9 @@ class Retriever:
                 watch.detail = suppressed.message
                 scopes = []
             for scope in scopes:
-                hits = self._search.search_text(question, scope, self._limits.per_source)
+                hits = self._search.search_text(
+                    question, scope, self._limits.per_source, path_prefix=path_prefix
+                )
                 if hits:
                     lists.append(
                         [
@@ -445,7 +473,11 @@ class Retriever:
         return lists
 
     def _named_entity_hits(
-        self, named: list[str], scopes: list[list[int] | None]
+        self,
+        named: list[str],
+        scopes: list[list[int] | None],
+        *,
+        path_prefix: str | None = None,
     ) -> tuple[list[EntityHit], set[str], float]:
         """Exact entity-name lookup, run before suppression is decided.
 
@@ -476,7 +508,7 @@ class Retriever:
         if named:
             for scope in scopes:
                 for hit in self._search.find_entities_by_name(
-                    named, scope, self._limits.per_source
+                    named, scope, self._limits.per_source, path_prefix=path_prefix
                 ):
                     if hit.entity_id in seen:
                         continue
@@ -486,14 +518,22 @@ class Retriever:
                         proven.add(hit.matched_term)
         return hits, proven, (time.perf_counter() - start) * 1000.0
 
-    def _lookup_names(self, names: list[str], scopes: list[list[int] | None]) -> list[EntityHit]:
+    def _lookup_names(
+        self,
+        names: list[str],
+        scopes: list[list[int] | None],
+        *,
+        path_prefix: str | None = None,
+    ) -> list[EntityHit]:
         """Exact entity-name lookup for one group of spellings, in every scope."""
         if not names:
             return []
         return [
             hit
             for scope in scopes
-            for hit in self._search.find_entities_by_name(names, scope, self._limits.per_source)
+            for hit in self._search.find_entities_by_name(
+                names, scope, self._limits.per_source, path_prefix=path_prefix
+            )
         ]
 
     def _stage_symbols(
@@ -510,6 +550,7 @@ class Retriever:
         quote_signatures: bool = False,
         named_hits: list[EntityHit] | None = None,
         named_ms: float = 0.0,
+        path_prefix: str | None = None,
     ) -> tuple[list[EvidenceCandidate], list[int]]:
         """Entity lookup. An exact name match is a fact; a fuzzy one is a lead.
 
@@ -591,11 +632,13 @@ class Retriever:
             resolved = (
                 list(named_hits)
                 if named_hits is not None
-                else self._lookup_names([*literal_terms, *http_keys], scopes)
+                else self._lookup_names(
+                    [*literal_terms, *http_keys], scopes, path_prefix=path_prefix
+                )
             )
             for group in groups:
                 if group:
-                    resolved.extend(self._lookup_names(group, scopes))
+                    resolved.extend(self._lookup_names(group, scopes, path_prefix=path_prefix))
             #: Split for the trace: a match on a spelling the question named, a
             #: match on a word merely present in it, and a full-text hit are three
             #: different claims, and the trace must not blur them.
@@ -640,7 +683,7 @@ class Retriever:
                 )
             for scope in scopes if suppressed is None else []:
                 for hit in self._search.search_entities(
-                    question, scope, None, self._limits.per_source
+                    question, scope, None, self._limits.per_source, path_prefix=path_prefix
                 ):
                     if hit.entity_id in seen_entities:
                         continue
@@ -696,6 +739,8 @@ class Retriever:
         names: list[str],
         scopes: list[list[int] | None],
         stages: list[StageTiming],
+        *,
+        path_prefix: str | None = None,
     ) -> tuple[list[EvidenceCandidate], set[str]]:
         """Files whose own name or path the question spells out.
 
@@ -722,7 +767,9 @@ class Retriever:
         with Stopwatch("file") as watch:
             hits: dict[tuple[str, str], FileHit] = {}
             for scope in scopes:
-                for hit in self._search.find_files_by_path(names, scope, self._limits.per_source):
+                for hit in self._search.find_files_by_path(
+                    names, scope, self._limits.per_source, path_prefix=path_prefix
+                ):
                     key = (hit.repository, hit.path)
                     current = hits.get(key)
                     if current is None or hit.specificity < current.specificity:
@@ -766,6 +813,8 @@ class Retriever:
         exact: list[EvidenceCandidate],
         proven_files: set[str] | None = None,
         proven_names: set[str] | None = None,
+        *,
+        path_prefix: str | None = None,
     ) -> SuppressionOutcome | None:
         """Whether every associative source would be answering a different question.
 
@@ -815,11 +864,14 @@ class Retriever:
         if proven_names and any(term in proven_names for term in literal_terms):
             return None
         named = ", ".join(literal_terms[:3])
+        # Under a path scope the lookups that failed were confined to it, so the
+        # sentence says where they looked rather than claiming absence everywhere.
+        where = f" under {path_prefix}" if path_prefix is not None else ""
         return SuppressionOutcome(
             terms=tuple(literal_terms),
             # Produced here and read from here. The trace renders this sentence; it
             # is never the source anything recovers the decision from.
-            message=f"suppressed: none of the named terms exist ({named})",
+            message=f"suppressed: none of the named terms exist{where} ({named})",
         )
 
     def _stage_semantic(
@@ -829,20 +881,23 @@ class Retriever:
         stages: list[StageTiming],
         *,
         suppressed: SuppressionOutcome | None = None,
+        path_prefix: str | None = None,
     ) -> tuple[list[EvidenceCandidate], bool, str]:
         """Vector neighbours. Always associative — a guess about what was meant."""
         with Stopwatch("semantic") as watch:
             if suppressed is not None:
                 candidates, used, detail = [], False, suppressed.message
             else:
-                candidates, used, detail = self._semantic_candidates(question, repo_ids)
+                candidates, used, detail = self._semantic_candidates(
+                    question, repo_ids, path_prefix=path_prefix
+                )
             watch.candidates_out = len(candidates)
             watch.detail = detail
         stages.append(_recorded(watch))
         return candidates, used, detail
 
     def _semantic_candidates(
-        self, question: str, repo_ids: list[int] | None
+        self, question: str, repo_ids: list[int] | None, *, path_prefix: str | None = None
     ) -> tuple[list[EvidenceCandidate], bool, str]:
         """Vector neighbours, whether the stage ran, and what the trace should say.
 
@@ -882,6 +937,7 @@ class Retriever:
             repo_ids,
             self._limits.semantic_limit,
             self._limits.semantic_floor,
+            path_prefix=path_prefix,
         )
         return (
             [self._vector_candidate(hit) for hit in hits],
@@ -890,17 +946,28 @@ class Retriever:
         )
 
     def _stage_graph(
-        self, entity_ids: list[int], stages: list[StageTiming], *, home_repo_id: int | None = None
+        self,
+        entity_ids: list[int],
+        stages: list[StageTiming],
+        *,
+        home_repo_id: int | None = None,
+        path_prefix: str | None = None,
     ) -> tuple[list[EvidenceCandidate], int]:
         with Stopwatch("graph", candidates_in=len(entity_ids)) as watch:
-            candidates, visited = self._expand(entity_ids, home_repo_id=home_repo_id)
+            candidates, visited = self._expand(
+                entity_ids, home_repo_id=home_repo_id, path_prefix=path_prefix
+            )
             watch.candidates_out = len(candidates)
             watch.detail = f"{visited} node(s) over {self._limits.graph_hops} hop(s)"
         stages.append(_recorded(watch))
         return candidates, visited
 
     def _expand(
-        self, entity_ids: list[int], *, home_repo_id: int | None = None
+        self,
+        entity_ids: list[int],
+        *,
+        home_repo_id: int | None = None,
+        path_prefix: str | None = None,
     ) -> tuple[list[EvidenceCandidate], int]:
         """Bounded traversal from matched entities (ARCHITECTURE.md §10 stage 4).
 
@@ -919,23 +986,46 @@ class Retriever:
         )
         if not walk.reached:
             return [], walk.visited
-        return self._knowledge_candidates(walk.reached, walk.reasons), walk.visited
+        return (
+            self._knowledge_candidates(walk.reached, walk.reasons, path_prefix=path_prefix),
+            walk.visited,
+        )
 
     def _knowledge_candidates(
-        self, entity_ids: list[int], reason: dict[int, str] | None = None
+        self,
+        entity_ids: list[int],
+        reason: dict[int, str] | None = None,
+        *,
+        path_prefix: str | None = None,
     ) -> list[EvidenceCandidate]:
         """Describe reached entities, **preserving traversal order**.
 
         Order is the proximity signal: entities found on the first hop precede
         those found on the second, so rank fusion sees the closer relationship as
         the stronger one. A set-returning query loses that, so it is restored here.
+
+        Under a ``path_prefix`` the walk may have passed through entities declared
+        elsewhere, and those are dropped *before* the ``per_source`` cut: taking the
+        first ``per_source`` reached and then filtering would let entities outside
+        the path use up the bound. Without one, the cut comes first, as it always
+        has.
         """
-        wanted = entity_ids[: self._limits.per_source]
+        if path_prefix is None:
+            wanted = entity_ids[: self._limits.per_source]
+            described = self._knowledge.describe_entities(wanted)
+        else:
+            wanted = list(entity_ids)
+            described = [
+                row
+                for start in range(0, len(wanted), _DESCRIBE_BATCH)
+                for row in self._knowledge.describe_entities(
+                    wanted[start : start + _DESCRIBE_BATCH], path_prefix=path_prefix
+                )
+            ]
         position = {entity_id: index for index, entity_id in enumerate(wanted)}
-        rows = sorted(
-            self._knowledge.describe_entities(wanted),
-            key=lambda row: position.get(row.entity_id, len(position)),
-        )
+        rows = sorted(described, key=lambda row: position.get(row.entity_id, len(position)))
+        if path_prefix is not None:
+            rows = rows[: self._limits.per_source]
         return [
             EvidenceCandidate(
                 repository=row.repository,
@@ -1028,6 +1118,11 @@ class Retriever:
             split_total=hit.split_total,
         )
 
+
+#: Entity ids described per query when a path scope means every reached entity must
+#: be located before the ``per_source`` cut. Well under SQLite's bound-parameter
+#: limit, whatever it was compiled with.
+_DESCRIBE_BATCH = 500
 
 #: ``FileHit.specificity`` as a match class. The search index grades an identity
 #: match 0/1/2 — whole path, trailing sub-path, basename — and this is where that
