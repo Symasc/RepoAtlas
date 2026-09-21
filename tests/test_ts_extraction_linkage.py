@@ -15,8 +15,11 @@ an application's service container — stays unresolved.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
+import pytest
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.services.workspace import Workspace, open_workspace
 from tests.conftest import init_git_repository
@@ -178,12 +181,32 @@ def _index(tmp_path: Path) -> Workspace:
     return workspace
 
 
+Index = Callable[..., Workspace]
+
+
+@pytest.fixture
+def index(tmp_path: Path) -> Iterator[Index]:
+    """``_index`` for one test; every workspace it opens is closed when the test ends."""
+    opened: list[Workspace] = []
+
+    def make(*args: Any, **kwargs: Any) -> Workspace:
+        indexed = _index(tmp_path, *args, **kwargs)
+        opened.append(indexed)
+        return indexed
+
+    try:
+        yield make
+    finally:
+        for workspace in opened:
+            workspace.close()
+
+
 def _repository(slug: str) -> CapabilityContext:
     return CapabilityContext(scope=CapabilityScope.REPOSITORY, repository=slug)
 
 
-def test_a_client_method_and_a_handler_meet_on_one_route_node(tmp_path: Path) -> None:
-    workspace = _index(tmp_path)
+def test_a_client_method_and_a_handler_meet_on_one_route_node(index: Index) -> None:
+    workspace = index()
     route = "http-route:POST:/v1/courses"
     assert edge_set(relationships(workspace, route)) == {
         ("web-client/src/learning-client.ts::createCourse", "CALLS_HTTP_ROUTE", route),
@@ -202,8 +225,8 @@ def test_a_client_method_and_a_handler_meet_on_one_route_node(tmp_path: Path) ->
     }
 
 
-def test_meeting_on_a_route_is_not_a_connection_between_repositories(tmp_path: Path) -> None:
-    workspace = _index(tmp_path)
+def test_meeting_on_a_route_is_not_a_connection_between_repositories(index: Index) -> None:
+    workspace = index()
     # Nothing joins the repositories themselves, and the injected base names no
     # deployment or endpoint for either side to meet on.
     rows = workspace.database.execute(
@@ -216,9 +239,9 @@ def test_meeting_on_a_route_is_not_a_connection_between_repositories(tmp_path: P
 
 
 def test_a_shared_route_node_names_every_provider_and_proves_no_caller_pairing(
-    tmp_path: Path,
+    index: Index,
 ) -> None:
-    workspace = _index(tmp_path)
+    workspace = index()
     route = "http-route:GET:/health"
     # Two services serve GET /health; the client is not thereby calling either one.
     assert edge_set(relationships(workspace, route)) == {
@@ -228,8 +251,8 @@ def test_a_shared_route_node_names_every_provider_and_proves_no_caller_pairing(
     }
 
 
-def test_a_route_no_proven_application_serves_keeps_no_provider(tmp_path: Path) -> None:
-    workspace = _index(tmp_path)
+def test_a_route_no_proven_application_serves_keeps_no_provider(index: Index) -> None:
+    workspace = index()
     route = "http-route:GET:/v1/me/preferences"
     # The client's request is proven; the controller that declares the route is not
     # mounted by any proven application, so it does not meet the client there.
@@ -243,8 +266,8 @@ def test_a_route_no_proven_application_serves_keeps_no_provider(tmp_path: Path) 
     assert [row["target_key"] for row in declared] == ["GET /v1/me/preferences"]
 
 
-def test_a_frontend_call_through_a_service_container_stays_unresolved(tmp_path: Path) -> None:
-    workspace = _index(tmp_path)
+def test_a_frontend_call_through_a_service_container_stays_unresolved(index: Index) -> None:
+    workspace = index()
     # `services.clients.learning.createCourse` reaches the client method only through
     # the application's service container, which static reading does not follow.
     calls = workspace.database.execute(
@@ -262,8 +285,8 @@ def test_a_frontend_call_through_a_service_container_stays_unresolved(tmp_path: 
     assert len(claim) == 1
 
 
-def test_repository_scope_confines_a_hub_to_the_named_repository(tmp_path: Path) -> None:
-    workspace = _index(tmp_path)
+def test_repository_scope_confines_a_hub_to_the_named_repository(index: Index) -> None:
+    workspace = index()
     route = "http-route:POST:/v1/courses"
     scoped = edge_set(relationships(workspace, route, context=_repository("web-client")))
     assert scoped == {
@@ -272,8 +295,8 @@ def test_repository_scope_confines_a_hub_to_the_named_repository(tmp_path: Path)
     assert len(edge_set(relationships(workspace, route, context=GLOBAL))) == 2
 
 
-def test_every_published_http_edge_is_one_this_branch_can_account_for(tmp_path: Path) -> None:
-    workspace = _index(tmp_path)
+def test_every_published_http_edge_is_one_this_branch_can_account_for(index: Index) -> None:
+    workspace = index()
     assert stored_http_edges(workspace) == {
         (f"{WEB}.createCourse:7", "CALLS_HTTP_ROUTE", "http-route:POST:/v1/courses"),
         (f"{WEB}.getPreferences:9", "CALLS_HTTP_ROUTE", "http-route:GET:/v1/me/preferences"),

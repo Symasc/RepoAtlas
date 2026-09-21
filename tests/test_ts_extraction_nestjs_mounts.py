@@ -10,6 +10,7 @@ real sync pipeline over small NestJS repositories and read the stored graph.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -148,6 +149,26 @@ def _index(tmp_path: Path, **kwargs: Any) -> tuple[Workspace, Path]:
     return workspace, root
 
 
+Index = Callable[..., tuple[Workspace, Path]]
+
+
+@pytest.fixture
+def index(tmp_path: Path) -> Iterator[Index]:
+    """``_index`` for one test; every workspace it opens is closed when the test ends."""
+    opened: list[Workspace] = []
+
+    def make(*args: Any, **kwargs: Any) -> tuple[Workspace, Path]:
+        indexed = _index(tmp_path, *args, **kwargs)
+        opened.append(indexed[0])
+        return indexed
+
+    try:
+        yield make
+    finally:
+        for workspace in opened:
+            workspace.close()
+
+
 def _served(workspace: Workspace) -> set[tuple[str, str]]:
     rows = workspace.database.execute(
         "SELECT src.qualified_name AS handler, dst.key AS route FROM edges e "
@@ -194,8 +215,8 @@ def _equals_full_reindex(workspace: Workspace, root: Path, tmp_path: Path, tag: 
 # -- proven -------------------------------------------------------------------------------
 
 
-def test_a_proven_application_publishes_every_route_it_registers(tmp_path: Path) -> None:
-    workspace, _ = _index(tmp_path)
+def test_a_proven_application_publishes_every_route_it_registers(index: Index) -> None:
+    workspace, _ = index()
     assert _served(workspace) == PROVEN
 
     rows = workspace.database.execute(
@@ -220,9 +241,9 @@ def test_a_proven_application_publishes_every_route_it_registers(tmp_path: Path)
 
 
 def test_message_handlers_and_unregistered_controllers_stay_off_the_graph(
-    tmp_path: Path,
+    index: Index,
 ) -> None:
-    workspace, _ = _index(tmp_path)
+    workspace, _ = index()
     handlers = {handler for handler, _ in _served(workspace)}
     assert not handlers & {"HealthController.rpc", "UsersController.byId", "OrphanController.list"}
     # The orphan's declaration is still recorded, and says why it is not a fact.
@@ -232,8 +253,8 @@ def test_message_handlers_and_unregistered_controllers_stay_off_the_graph(
     )
 
 
-def test_registration_entries_become_references(tmp_path: Path) -> None:
-    workspace, _ = _index(tmp_path)
+def test_registration_entries_become_references(index: Index) -> None:
+    workspace, _ = index()
     rows = workspace.database.execute(
         "SELECT src.qualified_name AS src, dst.qualified_name AS dst FROM edges e "
         "JOIN entities src ON src.id = e.src_id JOIN entities dst ON dst.id = e.dst_id "
@@ -247,8 +268,8 @@ def test_registration_entries_become_references(tmp_path: Path) -> None:
     }
 
 
-def test_a_literal_global_prefix_is_composed_into_every_route(tmp_path: Path) -> None:
-    workspace, _ = _index(tmp_path, configure='app.setGlobalPrefix("api");')
+def test_a_literal_global_prefix_is_composed_into_every_route(index: Index) -> None:
+    workspace, _ = index(configure='app.setGlobalPrefix("api");')
     assert _served(workspace) == {
         ("HealthController.check", "http-route:GET:/api/health"),
         ("UsersController.me", "http-route:GET:/api/v1/me"),
@@ -256,16 +277,15 @@ def test_a_literal_global_prefix_is_composed_into_every_route(tmp_path: Path) ->
     }
 
 
-def test_a_package_module_handed_nothing_blocks_nothing(tmp_path: Path) -> None:
-    workspace, _ = _index(
-        tmp_path,
+def test_a_package_module_handed_nothing_blocks_nothing(index: Index) -> None:
+    workspace, _ = index(
         extra_imports='import { MetricsModule } from "@acme/metrics";\n',
         imports="UsersModule, MetricsModule, MetricsModule.forService('api')",
     )
     assert _served(workspace) == PROVEN
 
 
-def test_two_applications_in_one_repository_each_serve_their_own(tmp_path: Path) -> None:
+def test_two_applications_in_one_repository_each_serve_their_own(index: Index) -> None:
     admin = {
         "admin/package.json": json.dumps({"name": "admin"}),
         "admin/src/main.ts": (
@@ -286,7 +306,7 @@ def test_two_applications_in_one_repository_each_serve_their_own(tmp_path: Path)
             '@Controller("audit")\nexport class AuditController {\n  @Get()\n  list() {}\n}\n'
         ),
     }
-    workspace, _ = _index(tmp_path, extra=admin)
+    workspace, _ = index(extra=admin)
     assert _served(workspace) == PROVEN | {("AuditController.list", "http-route:GET:/admin/audit")}
 
 
@@ -302,17 +322,17 @@ def test_two_applications_in_one_repository_each_serve_their_own(tmp_path: Path)
     ],
 )
 def test_an_unproven_prefix_withholds_every_route_of_that_application(
-    tmp_path: Path, configure: str, reason: str
+    index: Index, configure: str, reason: str
 ) -> None:
-    workspace, _ = _index(tmp_path, configure=configure)
+    workspace, _ = index(configure=configure)
     assert _served(workspace) == set()
     assert http_nodes(workspace) == set()
     assert _pending_routes(workspace) == 4
     assert _outcomes(workspace)["UsersController.me"] == reason
 
 
-def test_a_dynamically_registered_root_proves_nothing(tmp_path: Path) -> None:
-    workspace, _ = _index(tmp_path, main_root="AppModule.forRoot()")
+def test_a_dynamically_registered_root_proves_nothing(index: Index) -> None:
+    workspace, _ = index(main_root="AppModule.forRoot()")
     assert _served(workspace) == set()
     assert _outcomes(workspace)["HealthController.check"] == (
         "not registered by a proven application"
@@ -320,10 +340,9 @@ def test_a_dynamically_registered_root_proves_nothing(tmp_path: Path) -> None:
 
 
 def test_an_unresolved_in_repository_import_withholds_the_whole_application(
-    tmp_path: Path,
+    index: Index,
 ) -> None:
-    workspace, _ = _index(
-        tmp_path,
+    workspace, _ = index(
         extra_imports='import { BillingModule } from "./billing/billing.module";\n',
         imports="UsersModule, BillingModule",
     )
@@ -334,15 +353,14 @@ def test_an_unresolved_in_repository_import_withholds_the_whole_application(
 
 
 def test_unreadable_metadata_on_the_path_withholds_the_whole_application(
-    tmp_path: Path,
+    index: Index,
 ) -> None:
-    workspace, _ = _index(tmp_path, users_metadata="{ ...BASE, controllers: [UsersController] }")
+    workspace, _ = index(users_metadata="{ ...BASE, controllers: [UsersController] }")
     assert _served(workspace) == set()
 
 
-def test_a_registered_router_module_withholds_the_whole_application(tmp_path: Path) -> None:
-    workspace, _ = _index(
-        tmp_path,
+def test_a_registered_router_module_withholds_the_whole_application(index: Index) -> None:
+    workspace, _ = index(
         extra_imports='import { RouterModule } from "@nestjs/core";\n',
         imports="UsersModule, RouterModule.register([{ path: 'x', module: UsersModule }])",
     )
@@ -350,10 +368,9 @@ def test_a_registered_router_module_withholds_the_whole_application(tmp_path: Pa
 
 
 def test_a_module_handed_to_a_dynamic_module_withholds_only_its_own_controllers(
-    tmp_path: Path,
+    index: Index,
 ) -> None:
-    workspace, _ = _index(
-        tmp_path,
+    workspace, _ = index(
         extra_imports='import { AuthModule } from "@acme/auth";\n',
         imports="UsersModule, AuthModule.forRootAsync({ imports: [UsersModule] })",
     )
@@ -363,9 +380,8 @@ def test_a_module_handed_to_a_dynamic_module_withholds_only_its_own_controllers(
     )
 
 
-def test_router_module_in_the_package_withholds_its_applications(tmp_path: Path) -> None:
-    workspace, _ = _index(
-        tmp_path,
+def test_router_module_in_the_package_withholds_its_applications(index: Index) -> None:
+    workspace, _ = index(
         extra={"src/routing.ts": ROUTING},
     )
     assert _served(workspace) == set()
@@ -374,9 +390,8 @@ def test_router_module_in_the_package_withholds_its_applications(tmp_path: Path)
     )
 
 
-def test_router_module_in_another_package_does_not_touch_this_one(tmp_path: Path) -> None:
-    workspace, _ = _index(
-        tmp_path,
+def test_router_module_in_another_package_does_not_touch_this_one(index: Index) -> None:
+    workspace, _ = index(
         extra={
             "tools/package.json": json.dumps({"name": "tools"}),
             "tools/src/routing.ts": ROUTING,
@@ -386,10 +401,9 @@ def test_router_module_in_another_package_does_not_touch_this_one(tmp_path: Path
 
 
 def test_application_config_anywhere_in_the_repository_withholds_every_application(
-    tmp_path: Path,
+    index: Index,
 ) -> None:
-    workspace, _ = _index(
-        tmp_path,
+    workspace, _ = index(
         extra={
             "tools/package.json": json.dumps({"name": "tools"}),
             "tools/src/prefix.ts": CONFIGURING,
@@ -402,9 +416,10 @@ def test_application_config_anywhere_in_the_repository_withholds_every_applicati
 
 
 def test_unregistering_a_module_withdraws_its_routes_and_registering_restores_them(
+    index: Index,
     tmp_path: Path,
 ) -> None:
-    workspace, root = _index(tmp_path)
+    workspace, root = index()
     repo = root / "api"
 
     (repo / "src/app.module.ts").write_text(
@@ -428,8 +443,8 @@ def test_unregistering_a_module_withdraws_its_routes_and_registering_restores_th
     _equals_full_reindex(workspace, root, tmp_path, "registered")
 
 
-def test_deleting_a_controller_leaves_no_obsolete_route(tmp_path: Path) -> None:
-    workspace, root = _index(tmp_path)
+def test_deleting_a_controller_leaves_no_obsolete_route(index: Index, tmp_path: Path) -> None:
+    workspace, root = index()
     repo = root / "api"
     git(repo, "rm", "--quiet", "src/users/users.controller.ts")
     _commit(repo, "remove the users controller")
@@ -440,8 +455,8 @@ def test_deleting_a_controller_leaves_no_obsolete_route(tmp_path: Path) -> None:
     _equals_full_reindex(workspace, root, tmp_path, "deleted")
 
 
-def test_changing_the_prefix_moves_every_route(tmp_path: Path) -> None:
-    workspace, root = _index(tmp_path)
+def test_changing_the_prefix_moves_every_route(index: Index, tmp_path: Path) -> None:
+    workspace, root = index()
     repo = root / "api"
     (repo / "src/main.ts").write_text(
         MAIN.format(root="AppModule", configure='app.setGlobalPrefix("v2");')
@@ -461,8 +476,8 @@ def test_changing_the_prefix_moves_every_route(tmp_path: Path) -> None:
 # -- through the public capabilities ------------------------------------------------------
 
 
-def test_a_proven_route_leads_to_its_handler_and_where_it_is_written(tmp_path: Path) -> None:
-    workspace, _ = _index(tmp_path)
+def test_a_proven_route_leads_to_its_handler_and_where_it_is_written(index: Index) -> None:
+    workspace, _ = index()
     response = relationships(workspace, "http-route:GET:/v1/me")
     [edge] = [e for e in response.edges if str(e.type) == "SERVES_HTTP_ROUTE"]
     handler = edge.source
@@ -472,8 +487,8 @@ def test_a_proven_route_leads_to_its_handler_and_where_it_is_written(tmp_path: P
     assert edge.target.key == "http-route:GET:/v1/me"
 
 
-def test_an_unproven_controller_is_found_by_search_and_read_by_inspect(tmp_path: Path) -> None:
-    workspace, _ = _index(tmp_path)
+def test_an_unproven_controller_is_found_by_search_and_read_by_inspect(index: Index) -> None:
+    workspace, _ = index()
     service = CapabilityService(workspace)
     controller = entity_key(workspace, "api", "OrphanController")
     handler = entity_key(workspace, "api", "list")
@@ -493,7 +508,7 @@ def test_an_unproven_controller_is_found_by_search_and_read_by_inspect(tmp_path:
     assert "list() {}" in text
 
 
-def test_an_unproven_handler_has_no_route_among_its_relationships(tmp_path: Path) -> None:
-    workspace, _ = _index(tmp_path)
+def test_an_unproven_handler_has_no_route_among_its_relationships(index: Index) -> None:
+    workspace, _ = index()
     response = relationships(workspace, entity_key(workspace, "api", "list"))
     assert all(str(e.type) != "SERVES_HTTP_ROUTE" for e in response.edges)
