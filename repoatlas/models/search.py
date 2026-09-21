@@ -38,7 +38,13 @@ import enum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from repoatlas.models.capability import AppliedBudget, CapabilityContext, EvidenceBudget
+from repoatlas.models.capability import (
+    PRESENTATION_DESCRIPTION,
+    AppliedBudget,
+    CapabilityContext,
+    EvidenceBudget,
+    Presentation,
+)
 from repoatlas.models.capability_io import ContextView, EntityHandle, EvidenceItem
 from repoatlas.models.evidence import RetrievalTrace
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
@@ -102,6 +108,10 @@ class SearchRequest(BaseModel):
             "no location, so they are not returned under a path scope; search without "
             "one to obtain those handles."
         ),
+    )
+    #: How the response is written out. The capability runs identically either way.
+    presentation: Presentation = Field(
+        default=Presentation.FULL, description=PRESENTATION_DESCRIPTION
     )
 
     @field_validator("question")
