@@ -59,6 +59,7 @@ from mcp.server.stdio import stdio_server
 from pydantic import ValidationError
 
 from repoatlas.capabilities.errors import capability_error
+from repoatlas.capabilities.presentation import present
 from repoatlas.capabilities.service import CapabilityService
 from repoatlas.mcp.tools import TOOLS, TOOLS_BY_NAME, ToolSpec
 from repoatlas.models.capability import CapabilityError, ErrorCategory
@@ -102,7 +103,8 @@ def tool_definitions() -> list[protocol.Tool]:
     return a result object directly, which this one must in order to carry a
     structured error --- so declaring them would spend a large part of a caller's
     context advertising a contract nothing here enforces. The structured content
-    is still exactly ``response.model_dump(mode="json")``.
+    is still exactly ``response.model_dump(mode="json")``, unless the request asked
+    for ``presentation: compact`` (:mod:`repoatlas.capabilities.presentation`).
     """
     return [
         protocol.Tool(
@@ -223,7 +225,9 @@ def invoke(service: CapabilityService, spec: ToolSpec, arguments: dict[str, Any]
     """
     request = spec.request.model_validate(arguments)
     response = getattr(service, spec.capability)(request)
-    return response.model_dump(mode="json")
+    # In full, or in the compact projection the request asked for. Not per-tool
+    # logic: one function decides for every capability, below this layer.
+    return present(request, response)
 
 
 def dispatch(

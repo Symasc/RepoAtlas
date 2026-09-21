@@ -32,7 +32,11 @@ import enum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from repoatlas.models.capability import CapabilityContext
+from repoatlas.models.capability import (
+    PRESENTATION_DESCRIPTION,
+    CapabilityContext,
+    Presentation,
+)
 from repoatlas.models.capability_io import ContextView, EvidenceItem
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
 from repoatlas.models.investigation import EvidenceId, LedgerSummary
@@ -217,6 +221,10 @@ class RelationshipsRequest(BaseModel):
     include_containment: bool = False
     investigation_id: str | None = None
     depth: FreshnessDepth = FreshnessDepth.STORED
+    #: How the response is written out. The capability runs identically either way.
+    presentation: Presentation = Field(
+        default=Presentation.FULL, description=PRESENTATION_DESCRIPTION
+    )
 
     @field_validator("target")
     @classmethod
