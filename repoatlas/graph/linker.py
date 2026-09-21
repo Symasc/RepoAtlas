@@ -409,17 +409,15 @@ class ReferenceLinker:
                     continue
                 resolved += 1
                 edges.append(edge)
-            watch.candidates_out = resolved
-            watch.detail = f"{unresolved} still unresolved"
-        stages.append(_timing(watch))
 
-        with Stopwatch("http", candidates_in=len(pending)) as watch:
+            # Part of resolving claims, not a phase of its own: the pass keeps its
+            # three computing stages and the one that commits.
             decided = plan_http_claims(pending, index, file_rows, producer=GLOBAL_PARSER)
             edges.extend(decided.edges)
             resolved += decided.resolved
             unresolved += decided.unresolved
-            watch.candidates_out = decided.resolved
-            watch.detail = decided.detail
+            watch.candidates_out = resolved
+            watch.detail = f"{unresolved} still unresolved; {decided.detail}"
         stages.append(_timing(watch))
 
         with Stopwatch("dependencies") as watch:
