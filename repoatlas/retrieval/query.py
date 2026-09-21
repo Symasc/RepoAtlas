@@ -14,7 +14,21 @@ from repoatlas.models import http
 _QUOTED = re.compile(r"[\"'`]([^\"'`]{2,})[\"'`]")
 _ENV_VAR = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
 _DOTTED = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b")
-_PATHLIKE = re.compile(r"\b[\w./-]+\.(?:py|ts|tsx|js|sh|rb|sls|ya?ml|json|toml)\b")
+#: A file path the question spells out, recognised by its extension.
+#:
+#: The extensions are every one discovery detects a language for, plus the
+#: documentation a repository keeps beside its code. The list used to stop at a
+#: handful of source formats, so ``docs/ARCHITECTURE.md`` was never read as a path
+#: at all: only its basename reached file lookup, where a basename earns no rank
+#: anchor, and the document the user named came seventh behind files that merely
+#: mention it. Every indexed text file is inspectable whatever its extension; this
+#: only decides which spellings a question is taken to have *named* as a path.
+_PATHLIKE = re.compile(
+    r"\b[\w./-]+\.(?:"
+    r"py|pyi|ts|tsx|mts|cts|js|jsx|mjs|cjs|sh|bash|zsh|rb|rake|gemspec|sls|jinja2?|j2"
+    r"|ya?ml|json|toml|md|markdown|mdx|rst|txt"
+    r")\b"
+)
 _IDENTIFIER = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b")
 
 #: A scoped npm package: `@company/common`. Unambiguous — English prose does not
