@@ -32,9 +32,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
+from repoatlas.graph.http_claims import HttpClaimPlan, plan_http_claims
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
 from repoatlas.models import http
@@ -47,6 +48,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
 )
 from repoatlas.models.telemetry import LinkTrace, StageTiming, Stopwatch
+from repoatlas.parsers.http_facts import PENDING_FACT
 from repoatlas.storage.protocols import (
     EdgeRecord,
     EntityRecord,
@@ -141,6 +143,8 @@ class GlobalPlan:
 
     edges: tuple[EdgeRecord, ...] = ()
     dependencies: tuple[PendingEdge, ...] = ()
+    #: What the pending HTTP facts established, and why each one did or did not.
+    http: HttpClaimPlan = field(default_factory=HttpClaimPlan)
     resolved: int = 0
     unresolved: int = 0
     cross_repository: int = 0
@@ -195,6 +199,13 @@ class ReferenceLinker:
         claims: list[UnresolvedRefRecord] = []
         for reference in parsed.references:
             source_id = symbol_ids.get(reference.source_symbol or "", file_entity_id)
+
+            if reference.meta.get(PENDING_FACT):
+                # A pending fact (repoatlas.parsers.http_facts): only the global pass
+                # can prove it, so it is kept as a claim — never interned here, and
+                # never matched against a local definition by name.
+                claims.append(self._claim(repo_id, file_id, source_id, reference, parsed))
+                continue
 
             if reference.target_kind in _INTERNED_KINDS:
                 line_start: int | None = reference.line_start
@@ -329,7 +340,11 @@ class ReferenceLinker:
             entity_id = self._knowledge.find_file_entity(file_id, key)
             if entity_id is not None:
                 mapping[symbol.qualified_name] = entity_id
-                mapping.setdefault(symbol.name, entity_id)
+                # A returned object's property is reachable only through the object,
+                # never by its bare name: `createCourse()` beside a `createCourse:`
+                # property names whatever `createCourse` is bound to, not the property.
+                if symbol.meta.get("kind") != "property":
+                    mapping.setdefault(symbol.name, entity_id)
         return mapping
 
     # -- global pass ---------------------------------------------------------
@@ -377,8 +392,13 @@ class ReferenceLinker:
             edges: list[EdgeRecord] = []
             resolved = 0
             unresolved = 0
+            pending: list[UnresolvedRefRecord] = []
 
             for claim in claims:
+                if claim_role(claim) is not None:
+                    # Never proven by symbol resolution: decided below, together.
+                    pending.append(claim)
+                    continue
                 origin = by_id.get(claim.file_id)
                 if origin is None:
                     unresolved += 1
@@ -389,8 +409,15 @@ class ReferenceLinker:
                     continue
                 resolved += 1
                 edges.append(edge)
+
+            # Part of resolving claims, not a phase of its own: the pass keeps its
+            # three computing stages and the one that commits.
+            decided = plan_http_claims(pending, index, file_rows, producer=GLOBAL_PARSER)
+            edges.extend(decided.edges)
+            resolved += decided.resolved
+            unresolved += decided.unresolved
             watch.candidates_out = resolved
-            watch.detail = f"{unresolved} still unresolved"
+            watch.detail = f"{unresolved} still unresolved; {decided.detail}"
         stages.append(_timing(watch))
 
         with Stopwatch("dependencies") as watch:
@@ -403,6 +430,7 @@ class ReferenceLinker:
         return GlobalPlan(
             edges=tuple(edges),
             dependencies=tuple(dependencies),
+            http=decided,
             resolved=resolved,
             unresolved=unresolved,
             cross_repository=cross,
@@ -431,10 +459,12 @@ class ReferenceLinker:
         stages = list(plan.stages)
         edges = list(plan.edges)
 
-        with Stopwatch("swap", candidates_in=len(edges) + len(plan.dependencies)) as watch:
+        planned = len(edges) + len(plan.dependencies) + len(plan.http.http)
+        with Stopwatch("swap", candidates_in=planned) as watch:
             with self._knowledge.transaction():
                 removed = self._knowledge.delete_edges_by_parser(GLOBAL_PARSER)
                 edges.extend(self._materialize(plan.dependencies))
+                edges.extend(self._materialize_http(plan.http))
                 self._knowledge.add_edges(edges)
                 self._knowledge.gc_orphan_entities()
             watch.candidates_out = len(edges)
@@ -483,6 +513,32 @@ class ReferenceLinker:
             )
             for edge in pending
         ]
+
+    def _materialize_http(self, decided: HttpClaimPlan) -> list[EdgeRecord]:
+        """Intern the shared HTTP nodes a pending fact proved, inside the swap.
+
+        The target is re-checked against its canonical form here for the same reason
+        :meth:`link_file` checks it: a shared node is where repositories meet, and a
+        second spelling of one identity would be a node nothing else reaches.
+        """
+        found: list[EdgeRecord] = []
+        for edge in decided.http:
+            canonical = _HTTP_CANONICAL.get(edge.target.type)
+            if canonical is None or canonical(edge.target.name) is None:
+                continue
+            found.append(
+                EdgeRecord(
+                    src_id=edge.src_id,
+                    dst_id=self._knowledge.intern_entity(edge.target),
+                    type=edge.type,
+                    repo_id=edge.repo_id,
+                    file_id=edge.file_id,
+                    line_start=edge.line_start,
+                    line_end=edge.line_end,
+                    parser=GLOBAL_PARSER,
+                )
+            )
+        return found
 
     def _resolve(
         self,
@@ -708,6 +764,14 @@ class ReferenceLinker:
             cross_pairs.add((record.repo_id, providers[0][0]))
 
         return planned, len(cross_pairs)
+
+
+def claim_role(claim: UnresolvedRefRecord) -> str | None:
+    """The pending-fact role a claim carries, or ``None`` for an ordinary claim."""
+    if not claim.meta_json:
+        return None
+    role = json.loads(claim.meta_json).get(PENDING_FACT)
+    return role if isinstance(role, str) and role else None
 
 
 def _imported_names(parsed: ParsedFile) -> dict[str, str]:
