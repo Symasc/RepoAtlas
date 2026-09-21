@@ -18,6 +18,7 @@ performance can be measured later without changing anything structural
 
 from __future__ import annotations
 
+import time
 from collections import Counter
 from dataclasses import dataclass, replace
 
@@ -43,7 +44,7 @@ from repoatlas.retrieval.ranking import (
     enforce_precedence,
     fuse,
 )
-from repoatlas.storage.protocols import ChunkHit, FileHit, VectorHit
+from repoatlas.storage.protocols import ChunkHit, EntityHit, FileHit, VectorHit
 from repoatlas.storage.sqlite.search import SqliteSearchIndex
 from repoatlas.storage.sqlite.stores import SqliteKnowledgeStore
 from repoatlas.storage.sqlite.vectors import SqliteVectorIndex
@@ -218,17 +219,34 @@ class Retriever:
             ranked_lists.append(exact)
 
         # File identity is searched *before* suppression is decided, because it is
-        # one of the two ways a named term can be proven to exist. Deciding
+        # one of the three ways a named term can be proven to exist. Deciding
         # suppression on content alone is what made RepoAtlas answer "no indexed
         # evidence matches" for `src/config.py` while holding that exact file.
         files, proven = self._stage_files([*literal_terms, *analysis.terms], scopes, stages)
         if files:
             ranked_lists.append(files)
 
+        # And the third way: an exact indexed entity *name*. This lookup used to
+        # live wholly inside the symbol stage, which runs after the decision below
+        # — so a qualified symbol that exists in entity metadata without appearing
+        # as contiguous text in any file was returned as an exact hit by the same
+        # run that declared its name absent. `CoursesService.detail` is that shape:
+        # the source declares a class and a method, and never those two spellings
+        # joined by a dot.
+        #
+        # Deliberately over `literal_terms` and the HTTP keys only, never over
+        # `analysis.terms`. Words lifted out of prose are not what the question
+        # named, and a config key coincidentally called `retries` must not prove
+        # that "connection pool exhausted after 30 retries" is answerable. That is
+        # the same set the symbol stage looks up under suppression, so the two can
+        # never disagree about what was asked for.
+        named_exact = [*literal_terms, *analysis.http_keys]
+        entity_hits, proven_names, entity_ms = self._named_entity_hits(named_exact, scopes)
+
         # A question that names something specific and does not find it is not
         # answered by anything associative. Decided once, here, and honoured by
         # every stage that follows. See _suppress_associative.
-        suppressed = self._suppress_associative(definite_terms, exact, proven)
+        suppressed = self._suppress_associative(definite_terms, exact, proven, proven_names)
 
         lexical = self._stage_lexical(question, scopes, stages, suppressed=suppressed)
         ranked_lists.extend(lexical)
@@ -237,11 +255,14 @@ class Retriever:
             question,
             analysis.terms,
             literal_terms,
+            analysis.symbol_terms,
             scopes,
             stages,
             suppressed=suppressed,
             http_keys=analysis.http_keys,
             quote_signatures=quote_signatures,
+            named_hits=entity_hits,
+            named_ms=entity_ms,
         )
         if symbols:
             ranked_lists.append(symbols)
@@ -423,17 +444,72 @@ class Retriever:
         stages.append(_recorded(watch))
         return lists
 
+    def _named_entity_hits(
+        self, named: list[str], scopes: list[list[int] | None]
+    ) -> tuple[list[EntityHit], set[str], float]:
+        """Exact entity-name lookup, run before suppression is decided.
+
+        Deliberately records **no stage of its own**. It is the first half of the
+        symbol stage, moved earlier because suppression needs its answer; the trace
+        still shows one ``symbol`` stage, and the time spent here is added to it
+        (see :meth:`_stage_symbols`). A stage that appeared only sometimes, or a
+        tenth stage in a nine-stage funnel, would make the trace describe a
+        pipeline that does not exist.
+
+        The second return value is the set of requested spellings that **exist**.
+        It comes from the store's own matched term rather than being re-derived
+        here, so "this name resolves" means exactly what the lookup's predicate
+        means — including for an interned key such as ``env:SERVICE_HOST``, whose
+        entity is found by key rather than by the spelling the question used.
+
+        Matching is byte-exact: :meth:`SqliteSearchIndex.find_entities_by_name`
+        compares with SQL ``IN`` against columns carrying SQLite's default BINARY
+        collation. That is what keeps a diacritic-folded near-miss such as
+        ``creer_utilisateur`` from proving that ``créer_utilisateur`` was asked
+        for. Adding ``COLLATE NOCASE`` to those columns would silently turn this
+        proof into a guess.
+        """
+        start = time.perf_counter()
+        hits: list[EntityHit] = []
+        seen: set[int] = set()
+        proven: set[str] = set()
+        if named:
+            for scope in scopes:
+                for hit in self._search.find_entities_by_name(
+                    named, scope, self._limits.per_source
+                ):
+                    if hit.entity_id in seen:
+                        continue
+                    seen.add(hit.entity_id)
+                    hits.append(hit)
+                    if hit.matched_term:
+                        proven.add(hit.matched_term)
+        return hits, proven, (time.perf_counter() - start) * 1000.0
+
+    def _lookup_names(self, names: list[str], scopes: list[list[int] | None]) -> list[EntityHit]:
+        """Exact entity-name lookup for one group of spellings, in every scope."""
+        if not names:
+            return []
+        return [
+            hit
+            for scope in scopes
+            for hit in self._search.find_entities_by_name(names, scope, self._limits.per_source)
+        ]
+
     def _stage_symbols(
         self,
         question: str,
         terms: tuple[str, ...],
         literal_terms: list[str],
+        symbol_terms: tuple[str, ...],
         scopes: list[list[int] | None],
         stages: list[StageTiming],
         *,
         suppressed: SuppressionOutcome | None = None,
         http_keys: tuple[str, ...] = (),
         quote_signatures: bool = False,
+        named_hits: list[EntityHit] | None = None,
+        named_ms: float = 0.0,
     ) -> tuple[list[EvidenceCandidate], list[int]]:
         """Entity lookup. An exact name match is a fact; a fuzzy one is a lead.
 
@@ -451,6 +527,17 @@ class Retriever:
         ARCHITECTURE §10 specifies expansion "from the exact entity hits" for
         exactly this reason.
 
+        **An exact name match is a fact about the index; it is only a fact about
+        the question when the question named it.** Both halves used to treat every
+        word of the question as a name, so an entity called ``call``, ``services``
+        or ``now`` arrived `DETERMINISTIC` — ahead of every contextual candidate,
+        and seeding a walk besides — for a sentence that merely contained the word.
+        ``symbol_terms`` is the set the question named (see
+        :attr:`~repoatlas.retrieval.query.QueryAnalysis.symbol_terms`); everything
+        else is still looked up — after the named terms, under a bound of its own,
+        so it cannot crowd them out — and returns as recall. Nothing is excluded,
+        and a symbol genuinely named ``call`` is still found — by asking for it.
+
         ``quote_signatures`` supplies the declaration the indexer stored for each
         hit, which is what the graph stage has always done with the same column. A
         caller that turns candidates into citable evidence needs the bytes: the
@@ -459,53 +546,98 @@ class Retriever:
         turns the answer into a location nobody can quote. V1 renders these
         candidates as locations and passes nothing here, so its output is unchanged.
         """
-        exact_names = {term.lower() for term in terms}
+        # Only the spellings the question *named* may promote an entity. A word
+        # lifted out of prose is recall wherever it is found, including here: FTS
+        # finding an entity called `call` does not mean the question asked for one.
+        exact_names = {term.lower() for term in symbol_terms}
         with Stopwatch("symbol") as watch:
             candidates: list[EvidenceCandidate] = []
-            #: Seeds for graph expansion. Exact name matches only.
+            #: Seeds for graph expansion. Named-term matches only.
             entity_ids: list[int] = []
             #: Everything already returned, exact or fuzzy, for deduplication.
             seen_entities: set[int] = set()
-            # Under suppression only the terms the user actually named may be
-            # looked up. Words lifted out of the surrounding prose are recall, and
-            # an exact-name hit on one of them would enter as DETERMINISTIC — the
-            # strongest tier — for a question whose subject does not exist.
-            named = list(literal_terms) if suppressed is not None else [*literal_terms, *terms]
-            # An HTTP key is an exact identity the question spelled — `GET /users`
-            # names one route — so it is looked up under suppression as well. It
-            # can only ever match an entity *key*, which is what keeps it exact.
-            named.extend(http_keys)
-            #: Split for the trace: an exact entity-name match and a full-text one
-            #: are different claims, and the trace must not blur them.
+            # Which spellings the question actually *named*, as opposed to merely
+            # containing. Under suppression that is only what it spelled literally:
+            # words lifted out of the surrounding prose are recall, and an exact-name
+            # hit on one of them would enter as DETERMINISTIC — the strongest tier —
+            # for a question whose subject does not exist. An HTTP key is an exact
+            # identity the question spelled — `GET /users` names one route — so it
+            # counts under suppression as well; it can only ever match an entity
+            # *key*, which is what keeps it exact.
+            explicit = (
+                {*literal_terms, *http_keys}
+                if suppressed is not None
+                else {*symbol_terms, *http_keys}
+            )
+            # Looked up in order of how exactly the question named them, each group
+            # under its own bound, because a shared bound is a competition the
+            # named term can lose. One `LIMIT` over a qualified symbol and every
+            # prose word beside it is cut by key order, so a question naming
+            # `CoursesService.detail` alongside "record", "course" and "courses"
+            # could come back without the one entity it named — each of those words
+            # matches more entities than the bound holds, and most of their keys
+            # sort first.
+            #
+            # First what the question spelled literally, which is the lookup
+            # suppression was decided on, reused rather than fetched twice; then the
+            # other names it made explicit; then, only when nothing is suppressed,
+            # the words it merely used. The first sighting of an entity stands, so
+            # an entity both named and merely mentioned is counted as named.
+            groups: list[list[str]] = []
+            if suppressed is None:
+                spelled_first = {*literal_terms, *http_keys}
+                groups.append([term for term in symbol_terms if term not in spelled_first])
+                groups.append([term for term in dict.fromkeys(terms) if term not in explicit])
+            resolved = (
+                list(named_hits)
+                if named_hits is not None
+                else self._lookup_names([*literal_terms, *http_keys], scopes)
+            )
+            for group in groups:
+                if group:
+                    resolved.extend(self._lookup_names(group, scopes))
+            #: Split for the trace: a match on a spelling the question named, a
+            #: match on a word merely present in it, and a full-text hit are three
+            #: different claims, and the trace must not blur them.
             by_name = 0
-            for scope in scopes:
-                for hit in self._search.find_entities_by_name(
-                    named, scope, self._limits.per_source
-                ):
-                    if hit.entity_id in seen_entities:
-                        continue
-                    seen_entities.add(hit.entity_id)
+            by_recall = 0
+            for hit in resolved:
+                if hit.entity_id in seen_entities:
+                    continue
+                seen_entities.add(hit.entity_id)
+                # An empty matched term cannot happen — the store derives it from
+                # the same predicate that selected the row — and if it ever did,
+                # the established reading is that the row was named.
+                spelled = not hit.matched_term or hit.matched_term in explicit
+                if spelled:
+                    # Only a named term seeds expansion. Seeding from a prose word
+                    # would send the walk out from whatever happened to share it,
+                    # and expansion labels everything it reaches DETERMINISTIC.
                     entity_ids.append(hit.entity_id)
                     by_name += 1
-                    if hit.path is None or hit.line_start is None:
-                        continue
-                    candidates.append(
-                        EvidenceCandidate(
-                            repository=hit.repository,
-                            repository_slug=hit.repository_slug,
-                            path=hit.path,
-                            line_start=hit.line_start,
-                            line_end=hit.line_end or hit.line_start,
-                            text=hit.signature if quote_signatures else "",
-                            score=hit.score,
-                            source=EvidenceSource.SYMBOL,
-                            tier=EvidenceTier.DETERMINISTIC,
-                            match=MatchClass.EXACT_NAME,
-                            description=f"defines {hit.name}",
-                            entity_id=hit.entity_id,
-                            entity_type=hit.type,
-                        )
+                else:
+                    by_recall += 1
+                if hit.path is None or hit.line_start is None:
+                    continue
+                candidates.append(
+                    EvidenceCandidate(
+                        repository=hit.repository,
+                        repository_slug=hit.repository_slug,
+                        path=hit.path,
+                        line_start=hit.line_start,
+                        line_end=hit.line_end or hit.line_start,
+                        text=hit.signature if quote_signatures else "",
+                        score=hit.score,
+                        source=EvidenceSource.SYMBOL,
+                        tier=(EvidenceTier.DETERMINISTIC if spelled else EvidenceTier.ASSOCIATIVE),
+                        match=MatchClass.EXACT_NAME if spelled else MatchClass.LEXICAL,
+                        description=f"defines {hit.name}",
+                        entity_id=hit.entity_id,
+                        entity_type=hit.type,
+                        # The recorded declaration, not the span's own lines.
+                        declaration=bool(quote_signatures and hit.signature),
                     )
+                )
             for scope in scopes if suppressed is None else []:
                 for hit in self._search.search_entities(
                     question, scope, None, self._limits.per_source
@@ -537,15 +669,26 @@ class Retriever:
                             description=f"defines {hit.name}",
                             entity_id=hit.entity_id,
                             entity_type=hit.type,
+                            declaration=bool(quote_signatures and hit.signature),
                         )
                     )
             watch.candidates_out = len(candidates)
             watch.detail = (
                 suppressed.message
                 if suppressed is not None
-                else f"{by_name} exact entity name, {len(seen_entities) - by_name} full-text"
+                else (
+                    f"{by_name} exact entity name, {by_recall} name recall, "
+                    f"{len(seen_entities) - by_name - by_recall} full-text"
+                )
             )
-        stages.append(_recorded(watch))
+        # The exact-name lookup runs before this stage so that suppression can see
+        # its answer, but it is still this stage's work and still this stage's
+        # cost. Folding the time back in is what keeps the trace a description of
+        # the funnel rather than of the order the code happens to be written in.
+        recorded = _recorded(watch)
+        stages.append(
+            recorded.model_copy(update={"duration_ms": round(recorded.duration_ms + named_ms, 3)})
+        )
         return candidates, entity_ids
 
     def _stage_files(
@@ -622,6 +765,7 @@ class Retriever:
         literal_terms: list[str],
         exact: list[EvidenceCandidate],
         proven_files: set[str] | None = None,
+        proven_names: set[str] | None = None,
     ) -> SuppressionOutcome | None:
         """Whether every associative source would be answering a different question.
 
@@ -643,12 +787,32 @@ class Retriever:
         nothing is suppressed there. One term that *does* exist is likewise enough
         to keep the funnel open: the question is answerable, and the rest of the
         stages are how the surrounding context is found.
+
+        Existence has three proofs, and a term needs only one of them: the literal
+        text of a chunk, the identity of a file, and the name of an entity. They
+        are genuinely different questions about the index, and a term that fails
+        two of them has not been shown to be absent.
+
+        ``proven_names`` carries only spellings the *question* named — never a word
+        lifted out of its prose. That distinction is the whole safety of this
+        function: a config key coincidentally called ``retries`` exists, and it
+        still must not make "connection pool exhausted after 30 retries" look
+        answerable.
         """
         if not literal_terms or exact:
             return None
         # A term the file index resolved exists just as definitely as one found in
         # chunk text. `src/config.py` is not absent because no file *mentions* it.
         if proven_files and any(term in proven_files for term in literal_terms):
+            return None
+        # And a term the entity index resolved exists on the same footing. A
+        # qualified symbol frequently appears in no file as contiguous text —
+        # `CoursesService.detail` is a class declaration and a method declaration,
+        # never those two spellings joined by a dot — so content and file identity
+        # both miss it while the index holds it under `entities.qualified_name`.
+        # Without this, one run returned the entity as an exact match and, in the
+        # same breath, reported its name absent.
+        if proven_names and any(term in proven_names for term in literal_terms):
             return None
         named = ", ".join(literal_terms[:3])
         return SuppressionOutcome(
@@ -789,6 +953,9 @@ class Retriever:
                 description=(reason or {}).get(row.entity_id) or row.description,
                 entity_id=row.entity_id,
                 entity_type=row.entity_type,
+                # What the store describes an entity with is its recorded
+                # declaration, so any text here is that and not source lines.
+                declaration=bool(row.text),
             )
             for row in rows
         ]

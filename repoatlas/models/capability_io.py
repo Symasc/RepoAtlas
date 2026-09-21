@@ -346,6 +346,22 @@ class EvidenceItem(BaseModel):
     #: stronger from an earlier query; that is the ledger's view, not this one's.
     tier: TierField = EvidenceTier.DETERMINISTIC
     match: MatchField = MatchClass.EXACT_CONTENT
+    #: Stated rather than left to be inferred from a line-less ``ref``, because a
+    #: filename match is line-less too and says something different: that one
+    #: supplies no text, and this one supplies text that reads like source and is
+    #: not. Additive, and ``False`` for everything read from the file.
+    declaration: bool = Field(
+        default=False,
+        description=(
+            "True when `text` is the declaration RepoAtlas recorded for an entity "
+            "— such as `def load_config()`, `class ServiceConfig` or a "
+            "configuration key's dotted path — rather than bytes read from the "
+            "file. It may not appear in the file verbatim, so it is supplied as a "
+            "claim about the file and carries no line range: it can show that "
+            "the entity is declared there, not what its source says. To read the "
+            "source, inspect `entity.key`."
+        ),
+    )
 
     #: The entity behind an entity-backed result, when one resolves exactly.
     #: ``None`` is a truthful answer and never a fabricated key.

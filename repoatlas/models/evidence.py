@@ -311,6 +311,21 @@ class EvidenceCandidate(BaseModel):
     #: Excluded from serialization for the reason ``split_total`` is: provenance
     #: the capability layer reads, not a field V1's ``locate --json`` publishes.
     entity_type: EntityType | None = Field(default=None, exclude=True)
+    #: Whether ``text`` is the declaration the indexer recorded for the entity —
+    #: ``def load_config()``, ``class ServiceConfig``, a configuration key's dotted
+    #: path — rather than bytes read from the file.
+    #:
+    #: The two look alike and are not interchangeable. A declaration is assembled
+    #: from facts about the source; it need not appear anywhere in the file, even
+    #: for an entity whose whole span is one line. The line arithmetic that proves
+    #: what a chunk covers cannot see the difference — ``service.host`` is one line
+    #: of text and ``pillar.sls:2`` is one line of source — so this travels as a
+    #: stated fact rather than being inferred from the shape of the text, and no
+    #: line claim is ever offered on its behalf.
+    #:
+    #: Excluded from serialization for the reason ``split_total`` is: provenance
+    #: the capability layer reads, not a field V1's ``locate --json`` publishes.
+    declaration: bool = Field(default=False, exclude=True)
 
     @property
     def is_handle_only(self) -> bool:

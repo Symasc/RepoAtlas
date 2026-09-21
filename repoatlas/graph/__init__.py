@@ -14,6 +14,7 @@ from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.graph.traversal import (
     CROSS_REPOSITORY_EDGES,
     EXPANSION_EDGES,
+    RELATIONSHIP_EDGES,
     TraversalResult,
     expand_from_seeds,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "CROSS_REPOSITORY_EDGES",
     "EXPANSION_EDGES",
     "GLOBAL_PARSER",
+    "RELATIONSHIP_EDGES",
     "GlobalLinkResult",
     "LinkResult",
     "ReferenceLinker",

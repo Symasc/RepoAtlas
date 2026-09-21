@@ -191,6 +191,15 @@ class EntityHit(BaseModel):
     #: The declaration the indexer stored for this entity, empty when it stored
     #: none. It is what lets a name match be quoted rather than merely pointed at.
     signature: str = ""
+    #: Which of the requested names matched, for an exact-name lookup. Empty for a
+    #: full-text hit, which matched no single spelling.
+    #:
+    #: The same thing :attr:`FileHit.term` records, and for the same reason: a
+    #: caller deciding whether the *term it asked about* exists cannot recover that
+    #: from the row. Re-deriving it downstream would mean reimplementing the
+    #: lookup's own predicate — name, qualified name, or interned key — somewhere
+    #: it could drift out of agreement with the query that produced the row.
+    matched_term: str = ""
 
 
 class EntityIdentity(BaseModel):

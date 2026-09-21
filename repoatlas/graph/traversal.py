@@ -50,6 +50,26 @@ EXPANSION_EDGES = (
     EdgeType.CALLS_HTTP_ENDPOINT,
 )
 
+#: Edge types an **explicit** relationship request may name.
+#:
+#: Wider than :data:`EXPANSION_EDGES` by exactly one member, and the difference is
+#: the point. Those two sets answer different questions, and using one tuple for
+#: both is what made ~26,000 indexed ``CALLS`` relationships unreachable: the
+#: relationships capability refused to traverse a type the graph plainly held,
+#: because the set it consulted was the set that governs *automatic* expansion.
+#:
+#: ``CALLS`` belongs here and not there. An agent asking "what calls this?" is
+#: asking for exactly those edges and has said so. Ordinary search has not: it
+#: expands from every exact entity hit, and a call graph that size would generate
+#: large, irrelevant candidate sets for questions that never mentioned calls —
+#: which is the failure :data:`EXPANSION_EDGES` exists to prevent, and why it is
+#: unchanged.
+#:
+#: Being nameable is not being reachable across a boundary. ``CALLS`` is
+#: deliberately absent from :data:`CROSS_REPOSITORY_EDGES` below, so an explicit
+#: request still cannot follow one out of its repository.
+RELATIONSHIP_EDGES = (*EXPANSION_EDGES, EdgeType.CALLS)
+
 #: Edge types a traversal may follow **out of one repository into another**.
 #:
 #: Every one of these is produced by the linker's global pass from an exact match
