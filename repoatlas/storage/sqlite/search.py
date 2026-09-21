@@ -188,6 +188,32 @@ def _repo_scope(
     return f" AND {alias}.repo_id IN ({placeholders})", True
 
 
+def path_scope(alias: str, path_prefix: str | None, params: list[object]) -> str:
+    """Append a repository-relative path scope to ``params``: a file, or a directory.
+
+    ``path_prefix`` arrives normalized — forward slashes, no leading or trailing
+    slash, no ``.`` or ``..`` segment — so it names either one file exactly or
+    everything beneath one directory. The directory form is matched on a segment
+    boundary: ``services/identity`` admits ``services/identity/src/app.ts`` and
+    never ``services/identity-client/app.ts``.
+
+    Compared by BINARY equality and a half-open range rather than by ``LIKE``.
+    SQLite's ``LIKE`` folds ASCII case and treats ``_`` as a wildcard, and a path
+    scope that quietly admitted ``Services/Identity`` or ``services/identity_old``
+    would be a guess about which files were meant. Every path under ``P/`` sorts at
+    or after ``P/`` and before ``P0``, because ``0`` is the character after ``/``;
+    the range form also lets ``idx_files_repo_path`` answer it.
+
+    It is applied inside each query, before its ``LIMIT``. A filter applied to the
+    rows a limited query already returned would let files outside the path use up
+    the bound first — and ordered by path, ``apps/`` precedes ``services/``.
+    """
+    if path_prefix is None:
+        return ""
+    params.extend([path_prefix, f"{path_prefix}/", f"{path_prefix}0"])
+    return f" AND ({alias}.rel_path = ? OR ({alias}.rel_path >= ? AND {alias}.rel_path < ?))"
+
+
 def _matched_name(row: sqlite3.Row, wanted: Sequence[str]) -> str:
     """Which requested spelling this row matched, or ``""``.
 
@@ -235,6 +261,8 @@ class SqliteSearchIndex:
         query: str,
         repo_ids: Sequence[int] | None = None,
         limit: int = 50,
+        *,
+        path_prefix: str | None = None,
     ) -> list[ChunkHit]:
         terms = tokenize_query(query)
         if not terms:
@@ -251,6 +279,7 @@ class SqliteSearchIndex:
             placeholders = ",".join("?" * len(repo_ids))
             scope = f" AND c.repo_id IN ({placeholders})"
             params.extend(repo_ids)
+        scope += path_scope("f", path_prefix, params)
         params.append(limit)
 
         rows = self._db.execute(
@@ -301,6 +330,8 @@ class SqliteSearchIndex:
         term: str,
         repo_ids: Sequence[int] | None = None,
         limit: int = 50,
+        *,
+        path_prefix: str | None = None,
     ) -> list[ChunkHit]:
         """Chunks that literally contain ``term``.
 
@@ -317,16 +348,20 @@ class SqliteSearchIndex:
         if not term:
             return []
 
-        direct = self._literal_chunks(term, repo_ids, limit)
+        direct = self._literal_chunks(term, repo_ids, limit, path_prefix)
         if len(direct) >= limit:
             return direct[:limit]
 
         seen = {hit.chunk_id for hit in direct}
-        seam = self._seam_chunks(term, repo_ids, limit - len(direct), seen)
+        seam = self._seam_chunks(term, repo_ids, limit - len(direct), seen, path_prefix)
         return [*direct, *seam]
 
     def _literal_chunks(
-        self, term: str, repo_ids: Sequence[int] | None, limit: int
+        self,
+        term: str,
+        repo_ids: Sequence[int] | None,
+        limit: int,
+        path_prefix: str | None = None,
     ) -> list[ChunkHit]:
         """Chunks whose own stored text contains ``term``."""
         params: list[object] = [f"%{_like_escape(term)}%"]
@@ -337,6 +372,7 @@ class SqliteSearchIndex:
             placeholders = ",".join("?" * len(repo_ids))
             scope = f" AND c.repo_id IN ({placeholders})"
             params.extend(repo_ids)
+        scope += path_scope("f", path_prefix, params)
         params.append(limit)
 
         rows = self._db.execute(
@@ -379,6 +415,7 @@ class SqliteSearchIndex:
         repo_ids: Sequence[int] | None,
         limit: int,
         exclude: set[int],
+        path_prefix: str | None = None,
     ) -> list[ChunkHit]:
         """Matches that begin in one piece of a split span and end in the next.
 
@@ -414,6 +451,7 @@ class SqliteSearchIndex:
             placeholders = ",".join("?" * len(repo_ids))
             scope = f" AND c.repo_id IN ({placeholders})"
             params.extend(repo_ids)
+        scope += path_scope("f", path_prefix, params)
 
         rows = self._db.execute(
             f"""
@@ -515,6 +553,8 @@ class SqliteSearchIndex:
         terms: Sequence[str],
         repo_ids: Sequence[int] | None = None,
         limit: int = 50,
+        *,
+        path_prefix: str | None = None,
     ) -> list[FileHit]:
         """Indexed files whose own name or path is exactly one of ``terms``.
 
@@ -550,9 +590,9 @@ class SqliteSearchIndex:
 
         found: dict[tuple[str, str], FileHit] = {}
         for hit in (
-            *self._files_by_basename(basenames, repo_ids, limit),
-            *self._files_by_path(paths, repo_ids, limit),
-            *self._files_by_qualified_path(paths, repo_ids, limit),
+            *self._files_by_basename(basenames, repo_ids, limit, path_prefix),
+            *self._files_by_path(paths, repo_ids, limit, path_prefix),
+            *self._files_by_qualified_path(paths, repo_ids, limit, path_prefix),
         ):
             key = (hit.repository, hit.path)
             current = found.get(key)
@@ -565,7 +605,11 @@ class SqliteSearchIndex:
         return ordered[:limit]
 
     def _files_by_basename(
-        self, terms: Sequence[str], repo_ids: Sequence[int] | None, limit: int
+        self,
+        terms: Sequence[str],
+        repo_ids: Sequence[int] | None,
+        limit: int,
+        path_prefix: str | None = None,
     ) -> list[FileHit]:
         if not terms:
             return []
@@ -574,6 +618,7 @@ class SqliteSearchIndex:
         scope, scoped = _repo_scope("f", repo_ids, params)
         if not scoped:
             return []
+        scope += path_scope("f", path_prefix, params)
         params.append(limit)
 
         rows = self._db.execute(
@@ -586,7 +631,11 @@ class SqliteSearchIndex:
         return [_file_hit(row, row["basename"], 2) for row in rows]
 
     def _files_by_path(
-        self, terms: Sequence[str], repo_ids: Sequence[int] | None, limit: int
+        self,
+        terms: Sequence[str],
+        repo_ids: Sequence[int] | None,
+        limit: int,
+        path_prefix: str | None = None,
     ) -> list[FileHit]:
         if not terms:
             return []
@@ -613,6 +662,7 @@ class SqliteSearchIndex:
         scope, scoped = _repo_scope("f", repo_ids, params)
         if not scoped:
             return []
+        scope += path_scope("f", path_prefix, params)
         params.append(limit)
 
         rows = self._db.execute(
@@ -633,7 +683,11 @@ class SqliteSearchIndex:
         return hits
 
     def _files_by_qualified_path(
-        self, terms: Sequence[str], repo_ids: Sequence[int] | None, limit: int
+        self,
+        terms: Sequence[str],
+        repo_ids: Sequence[int] | None,
+        limit: int,
+        path_prefix: str | None = None,
     ) -> list[FileHit]:
         """Files named as ``<repository identity>/<relative path>``.
 
@@ -665,6 +719,7 @@ class SqliteSearchIndex:
         scope, scoped = _repo_scope("f", repo_ids, params)
         if not scoped:
             return []
+        scope += path_scope("f", path_prefix, params)
         params.append(limit)
 
         rows = self._db.execute(
@@ -685,11 +740,31 @@ class SqliteSearchIndex:
             hits.append(_file_hit(row, term, 0))
         return hits
 
+    def has_files_under(self, repo_ids: Sequence[int], path_prefix: str) -> bool:
+        """Whether any indexed file in ``repo_ids`` lies at or beneath ``path_prefix``.
+
+        One index probe. A path scope that covers nothing indexed is a different
+        answer from a search that matched nothing, and the caller needs to be able
+        to say which one it is giving.
+        """
+        if not repo_ids:
+            return False
+        params: list[object] = []
+        scope, _ = _repo_scope("f", repo_ids, params)
+        scope += path_scope("f", path_prefix, params)
+        row = self._db.execute(
+            f"SELECT 1 FROM files f WHERE 1 = 1{scope} LIMIT 1",  # noqa: S608 - bound values
+            tuple(params),
+        ).fetchone()
+        return row is not None
+
     def find_entities_by_name(
         self,
         names: Sequence[str],
         repo_ids: Sequence[int] | None = None,
         limit: int = 50,
+        *,
+        path_prefix: str | None = None,
     ) -> list[EntityHit]:
         """Entities whose name, qualified name or key matches ``names`` exactly.
 
@@ -697,6 +772,11 @@ class SqliteSearchIndex:
         what guarantees that an environment variable, a package name or a symbol
         the question spells out is *found*, rather than left to whether FTS
         happened to tokenize it the same way (V1_SPEC §10, §14).
+
+        Under a ``path_prefix`` only entities declared in a file beneath it are
+        returned. An interned entity — an environment variable, a package, an HTTP
+        operation — has no location, so it is not beneath any path; the path
+        predicate is false for its ``NULL`` file and excludes it.
         """
         wanted = [name for name in names if name]
         if not wanted:
@@ -714,6 +794,7 @@ class SqliteSearchIndex:
             repo_placeholders = ",".join("?" * len(repo_ids))
             scope = f" AND (e.repo_id IN ({repo_placeholders}) OR e.repo_id IS NULL)"
             params.extend(repo_ids)
+        scope += path_scope("f", path_prefix, params)
         params.append(limit)
 
         rows = self._db.execute(
@@ -757,6 +838,8 @@ class SqliteSearchIndex:
         repo_ids: Sequence[int] | None = None,
         types: Sequence[EntityType] | None = None,
         limit: int = 50,
+        *,
+        path_prefix: str | None = None,
     ) -> list[EntityHit]:
         terms = tokenize_query(query)
         if not terms:
@@ -780,6 +863,9 @@ class SqliteSearchIndex:
             type_placeholders = ",".join("?" * len(types))
             scope += f" AND e.type IN ({type_placeholders})"
             params.extend(str(t) for t in types)
+        # A path scope admits only entities declared beneath it, which excludes the
+        # interned ones the repository clause above keeps: they have no location.
+        scope += path_scope("f", path_prefix, params)
         params.append(limit)
 
         rows = self._db.execute(

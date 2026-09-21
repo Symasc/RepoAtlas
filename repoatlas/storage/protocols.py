@@ -409,21 +409,52 @@ class VectorIndex(Protocol):
         repo_ids: Sequence[int] | None,
         limit: int,
         floor: float,
+        *,
+        path_prefix: str | None = None,
     ) -> list[VectorHit]: ...
 
 
 class SearchIndex(Protocol):
+    """Exact and lexical lookups over the index.
+
+    Every lookup takes an optional ``path_prefix``: a normalized
+    repository-relative path naming one file or one directory. It is applied
+    inside the lookup, before its limit, and it admits only facts that have a
+    location beneath it.
+    """
+
     def search_text(
-        self, query: str, repo_ids: Sequence[int] | None, limit: int
+        self,
+        query: str,
+        repo_ids: Sequence[int] | None,
+        limit: int,
+        *,
+        path_prefix: str | None = None,
     ) -> list[ChunkHit]: ...
     def search_literal(
-        self, term: str, repo_ids: Sequence[int] | None, limit: int
+        self,
+        term: str,
+        repo_ids: Sequence[int] | None,
+        limit: int,
+        *,
+        path_prefix: str | None = None,
     ) -> list[ChunkHit]: ...
     def find_files_by_path(
-        self, terms: Sequence[str], repo_ids: Sequence[int] | None, limit: int
+        self,
+        terms: Sequence[str],
+        repo_ids: Sequence[int] | None,
+        limit: int,
+        *,
+        path_prefix: str | None = None,
     ) -> list[FileHit]: ...
+    def has_files_under(self, repo_ids: Sequence[int], path_prefix: str) -> bool: ...
     def find_entities_by_name(
-        self, names: Sequence[str], repo_ids: Sequence[int] | None, limit: int
+        self,
+        names: Sequence[str],
+        repo_ids: Sequence[int] | None,
+        limit: int,
+        *,
+        path_prefix: str | None = None,
     ) -> list[EntityHit]: ...
     def search_entities(
         self,
@@ -431,4 +462,6 @@ class SearchIndex(Protocol):
         repo_ids: Sequence[int] | None,
         types: Sequence[EntityType] | None,
         limit: int,
+        *,
+        path_prefix: str | None = None,
     ) -> list[EntityHit]: ...

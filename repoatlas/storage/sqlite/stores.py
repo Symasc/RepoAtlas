@@ -35,6 +35,7 @@ from repoatlas.storage.protocols import (
     UnresolvedRefRecord,
 )
 from repoatlas.storage.sqlite.database import Database
+from repoatlas.storage.sqlite.search import path_scope
 
 #: Everything an :class:`EntityIdentity` needs, shared by both key lookups.
 #: ``LEFT JOIN`` throughout: an interned entity has no file and no repository row,
@@ -837,16 +838,21 @@ class SqliteKnowledgeStore:
             for row in rows
         ]
 
-    def describe_entities(self, entity_ids: Sequence[int]) -> list[EntityDescription]:
+    def describe_entities(
+        self, entity_ids: Sequence[int], *, path_prefix: str | None = None
+    ) -> list[EntityDescription]:
         """Resolve entity ids to their provenance, for rendering as evidence.
 
         Only file-scoped entities can be cited: an interned entity such as an
         environment variable has no location of its own, so it is skipped rather
-        than given an invented one.
+        than given an invented one. Under a ``path_prefix``, so is every entity
+        declared outside it.
         """
         if not entity_ids:
             return []
         placeholders = ",".join("?" * len(entity_ids))
+        params: list[object] = list(entity_ids)
+        scope = path_scope("f", path_prefix, params)
         rows = self._db.execute(
             f"""
             SELECT e.id, e.type, e.name, e.qualified_name, e.line_start, e.line_end,
@@ -855,9 +861,9 @@ class SqliteKnowledgeStore:
             FROM entities e
             JOIN files        f ON f.id = e.file_id
             JOIN repositories r ON r.id = e.repo_id
-            WHERE e.id IN ({placeholders})
+            WHERE e.id IN ({placeholders}){scope}
             """,  # noqa: S608 - placeholders are a generated count, values are bound
-            tuple(entity_ids),
+            tuple(params),
         ).fetchall()
         return [
             EntityDescription(

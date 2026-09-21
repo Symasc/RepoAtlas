@@ -115,7 +115,7 @@ class InspectTarget(BaseModel):
                 f"got {supplied or ['none']}"
             )
         if self.path is not None:
-            _validate_path_shape(self.path)
+            validate_path_shape(self.path)
         if self.entity_key is not None and not self.entity_key.strip():
             raise ValueError("entity_key must not be blank")
         return self
@@ -129,7 +129,7 @@ class InspectTarget(BaseModel):
         return InspectTargetKind.ENTITY
 
 
-def _validate_path_shape(path: str) -> None:
+def validate_path_shape(path: str) -> None:
     """Refuse anything that is not a repository-relative path.
 
     A first gate, not the gate. The one that matters is the ``files`` row lookup,
