@@ -47,6 +47,15 @@ NESTJS_ROOT = "nestjs-root"
 #: A construct that can change routes from outside the registration it touches.
 NESTJS_MARKER = "nestjs-marker"
 
+#: An exported requester factory: which members forward a path to a fetch-like call.
+HTTP_REQUESTER = "http-requester"
+#: An exported request wrapper, and what it does with its arguments.
+HTTP_WRAPPER = "http-wrapper"
+#: An exported init helper, and the method it sets.
+HTTP_INIT_HELPER = "http-init-helper"
+#: A call through an imported helper, with its arguments as far as the file reads them.
+HTTP_REQUESTER_CALL = "http-requester-call"
+
 
 def pending_reference(
     edge_type: EdgeType,

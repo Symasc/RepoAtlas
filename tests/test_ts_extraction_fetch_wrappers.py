@@ -119,8 +119,9 @@ export function createLearningClient(options: ClientOptions) {
 
 
 def _http(source: str, name: str = "client.ts") -> list[ParsedReference]:
+    """HTTP facts, not the pending claims only the global pass can decide."""
     parsed = TypeScriptParser().parse(Path(name), textwrap.dedent(source))
-    return [r for r in parsed.references if r.target_kind in _HTTP]
+    return [r for r in parsed.references if r.target_kind in _HTTP and "pending_fact" not in r.meta]
 
 
 def _calls(source: str) -> set[tuple[str, str | None]]:
