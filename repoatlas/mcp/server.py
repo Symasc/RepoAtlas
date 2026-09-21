@@ -137,7 +137,7 @@ def _error_result(error: CapabilityError) -> protocol.CallToolResult:
     """
     payload: dict[str, Any] = {"ok": False, "error": error.model_dump(mode="json")}
     return protocol.CallToolResult(
-        content=[protocol.TextContent(type="text", text=json.dumps(payload, indent=2))],
+        content=[protocol.TextContent(type="text", text=_json_text(payload))],
         structuredContent=payload,
         isError=True,
     )
@@ -152,10 +152,25 @@ def _success_result(payload: dict[str, Any]) -> protocol.CallToolResult:
     exactly what the structured field holds.
     """
     return protocol.CallToolResult(
-        content=[protocol.TextContent(type="text", text=json.dumps(payload, indent=2))],
+        content=[protocol.TextContent(type="text", text=_json_text(payload))],
         structuredContent=payload,
         isError=False,
     )
+
+
+def _json_text(payload: dict[str, Any]) -> str:
+    """The text block: ``payload`` as compact JSON.
+
+    Compact because the block is read by a model, not a person, and it is a second
+    copy of everything in ``structuredContent``. Pretty-printing it spent about a
+    sixth of a search's text block on indentation (3.7 KB of 22 KB for a
+    twelve-item answer on LVL), on every call, for a layout no client parses.
+    ``ensure_ascii`` is off for the same reason: an em dash in quoted source is
+    three bytes as itself and seven once escaped and then escaped again inside the
+    JSON-RPC message. The value is unchanged either way, so a caller that parses
+    the text gets exactly what the structured field holds.
+    """
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
 
 def _unknown_tool(name: str) -> CapabilityError:
