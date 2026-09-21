@@ -33,7 +33,7 @@ from dataclasses import dataclass
 
 from repoatlas.capabilities.errors import InvalidRelationshipRequestError
 from repoatlas.graph.keys import is_positional
-from repoatlas.graph.traversal import CONTAINMENT_EDGES, EXPANSION_EDGES
+from repoatlas.graph.traversal import CONTAINMENT_EDGES, EXPANSION_EDGES, RELATIONSHIP_EDGES
 from repoatlas.models.investigation import ProposedEvidence
 from repoatlas.models.parsing import EdgeDirection, EdgeType
 from repoatlas.models.relationships import (
@@ -210,15 +210,32 @@ def graph_limits_for(request: RelationshipsRequest) -> AppliedGraphLimits:
 def admitted_edge_types(request: RelationshipsRequest) -> tuple[EdgeType, ...]:
     """The relationship types this request may traverse.
 
-    The policy is the shared expansion set, plus containment when the caller asked
-    for it. A request naming a type outside that is refused rather than answered
+    **Asking for a type and being given it by default are different questions**,
+    and answering both from one set is what made the index's ``CALLS`` edges
+    unreachable. So there are two sets here:
+
+    * what a caller may *name* is :data:`~repoatlas.graph.traversal.RELATIONSHIP_EDGES`
+      — an explicit request for call relationships is a request the graph can
+      honour, and refusing it hid facts the index already held;
+    * what a caller gets when naming *nothing* stays
+      :data:`~repoatlas.graph.traversal.EXPANSION_EDGES`. Folding ~26,000 call
+      edges into the default would change every existing answer and swamp the
+      neighbourhood a caller actually asked about.
+
+    A request naming a type outside the policy is refused rather than answered
     with nothing: "no relationships of that kind" and "that kind is not
     traversable" are different answers, and only the second one has a remedy worth
-    telling the caller about.
+    telling the caller about. Containment is that case today — it is traversable
+    only on request — so the refusal names the exact remedy.
 
-    Containment is the case where the remedy is exact, so the refusal names it.
+    The returned order follows the policy rather than the request, so two callers
+    asking for the same set in a different order get the same query. It must be
+    built from the same wider set the policy check used: narrowing it to
+    ``EXPANSION_EDGES`` would return an **empty** tuple for a CALLS-only request,
+    and an empty tuple reaches the store as *no type filter at all* — silently
+    turning the narrowest possible request into an unrestricted walk.
     """
-    policy = set(EXPANSION_EDGES)
+    policy = set(RELATIONSHIP_EDGES)
     if request.include_containment:
         policy |= CONTAINMENT_EDGES
     if request.edge_types is None:
@@ -236,10 +253,8 @@ def admitted_edge_types(request: RelationshipsRequest) -> tuple[EdgeType, ...]:
             ),
             edge_types=tuple(sorted(str(edge_type) for edge_type in refused)),
         )
-    # Order follows the policy rather than the request, so two callers asking for
-    # the same set in a different order get the same query.
     requested = set(request.edge_types)
-    admitted = [edge_type for edge_type in EXPANSION_EDGES if edge_type in requested]
+    admitted = [edge_type for edge_type in RELATIONSHIP_EDGES if edge_type in requested]
     admitted += [
         edge_type for edge_type in sorted(CONTAINMENT_EDGES, key=str) if edge_type in requested
     ]

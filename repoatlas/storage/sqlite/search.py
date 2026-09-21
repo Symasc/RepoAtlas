@@ -138,6 +138,43 @@ _FILE_SELECT = """
 """
 
 
+#: Deterministic order for a limited lookup, stated in facts about the
+#: repositories rather than in row ids.
+#:
+#: A ``LIMIT`` with no ``ORDER BY`` returns whatever SQLite reaches first, which is
+#: insertion order — so two indexes built from the same repositories in a different
+#: file order kept *different* candidates, and neither was wrong. The cut has to
+#: fall somewhere stated.
+#:
+#: Ordering by ``file_id`` or ``entities.id`` would not fix it. Those are
+#: allocation order: the same tree reindexed from scratch numbers them differently,
+#: which is exactly the instability being removed. ``repositories.slug`` and
+#: ``files.rel_path`` are what the repository says about itself, and
+#: ``UNIQUE (repo_id, rel_path)`` makes the pair total.
+#:
+#: This is ordering, not ranking. An alphabetical list of irrelevant candidates is
+#: still irrelevant; which candidates are *eligible* and how they are prioritised
+#: is decided by the tiering in the retrieval funnel and by ``fuse``.
+_FILE_ORDER = "r.slug, f.rel_path"
+
+#: The same, for a chunk. ``line_start`` alone is not total — every piece of a span
+#: that was cut to fit the character cap carries that span's line range — so the
+#: span and piece indices finish the ordering.
+_CHUNK_ORDER = f"{_FILE_ORDER}, c.line_start, c.span_index, c.split_index"
+
+#: And for an entity. ``entities.key`` leads because it is the entity's natural
+#: identity — the thing that survives a reindex — but it is **not** on its own
+#: total: the uniqueness index on it is partial (``WHERE file_id IS NULL``), so
+#: interned rows are unique by key and file-scoped ones may legitimately repeat it.
+#: Two declarations of the same symbol in different files are a real ambiguity the
+#: repository contains, and the location breaks the tie without resolving it.
+#:
+#: An interned entity belongs to no repository and no file, so its slug, path and
+#: lines are ``NULL``. SQLite orders ``NULL`` first and consistently, which is all
+#: this needs: the point is that the same index always answers the same way.
+_ENTITY_ORDER = "e.key, r.slug, f.rel_path, e.line_start, e.line_end"
+
+
 def _repo_scope(
     alias: str, repo_ids: Sequence[int] | None, params: list[object]
 ) -> tuple[str, bool]:
@@ -149,6 +186,28 @@ def _repo_scope(
     placeholders = ",".join("?" * len(repo_ids))
     params.extend(repo_ids)
     return f" AND {alias}.repo_id IN ({placeholders})", True
+
+
+def _matched_name(row: sqlite3.Row, wanted: Sequence[str]) -> str:
+    """Which requested spelling this row matched, or ``""``.
+
+    The same predicate the WHERE clause applies — name, qualified name, or the
+    interned key in its three accepted spellings — evaluated over the row that
+    predicate already selected. Written here, beside the query, because the two
+    have to agree: a copy of this rule anywhere else is a copy that can drift.
+
+    The first spelling in request order wins, so one row asked about under two
+    names reports the same one every time.
+    """
+    name = row["name"]
+    qualified = row["qualified_name"]
+    key = row["key"]
+    for term in wanted:
+        if term in (name, qualified):
+            return term
+        if key in (term, f"env:{term}", f"module:{term}"):
+            return term
+    return ""
 
 
 def _file_hit(row: sqlite3.Row, term: str, specificity: int) -> FileHit:
@@ -205,7 +264,7 @@ class SqliteSearchIndex:
             JOIN files        f ON f.id = c.file_id
             JOIN repositories r ON r.id = c.repo_id
             WHERE chunks_fts MATCH ?{scope}
-            ORDER BY rank
+            ORDER BY rank, {_CHUNK_ORDER}
             LIMIT ?
             """,  # noqa: S608 - placeholders are generated counts, values are bound
             tuple(params),
@@ -289,6 +348,7 @@ class SqliteSearchIndex:
             JOIN files        f ON f.id = c.file_id
             JOIN repositories r ON r.id = c.repo_id
             WHERE c.text LIKE ? ESCAPE '\\'{scope}
+            ORDER BY {_CHUNK_ORDER}
             LIMIT ?
             """,  # noqa: S608 - placeholders are generated counts, values are bound
             tuple(params),
@@ -333,6 +393,14 @@ class SqliteSearchIndex:
         Only spans that were actually cut are read (``split_total > 1``), and only
         the two windows of each piece, so an index with no oversized content pays
         one index probe.
+
+        The ordering is load-bearing twice over. ``span_index`` and ``split_index``
+        must stay **last** and in that order, because :func:`_straddling_reach`
+        reads the pieces of a span as a sequence and a shuffled one would stitch a
+        region of the file that does not exist. What leads them used to be
+        ``file_id``, which is allocation order, so which seam matches survived the
+        limit depended on the order the tree happened to be indexed in; it is the
+        file's own identity now.
         """
         width = len(term) - 1
         if width <= 0 or limit <= 0:
@@ -354,8 +422,10 @@ class SqliteSearchIndex:
                    substr(c.text, 1, ?)  AS head,
                    substr(c.text, -(?)) AS tail
             FROM chunks c
+            JOIN files        f ON f.id = c.file_id
+            JOIN repositories r ON r.id = c.repo_id
             WHERE c.split_total > 1{scope}
-            ORDER BY c.file_id, c.span_index, c.split_index
+            ORDER BY {_FILE_ORDER}, c.span_index, c.split_index
             """,  # noqa: S608 - placeholders are generated counts, values are bound
             tuple(params),
         ).fetchall()
@@ -507,7 +577,8 @@ class SqliteSearchIndex:
         params.append(limit)
 
         rows = self._db.execute(
-            f"{_FILE_SELECT} WHERE f.basename IN ({placeholders}){scope} LIMIT ?",
+            f"{_FILE_SELECT} WHERE f.basename IN ({placeholders}){scope}"
+            f" ORDER BY {_FILE_ORDER} LIMIT ?",
             tuple(params),
         ).fetchall()
         # The basename is the least specific exact match there is: it says the file
@@ -545,7 +616,7 @@ class SqliteSearchIndex:
         params.append(limit)
 
         rows = self._db.execute(
-            f"{_FILE_SELECT} WHERE ({clause}){scope} LIMIT ?",
+            f"{_FILE_SELECT} WHERE ({clause}){scope} ORDER BY {_FILE_ORDER} LIMIT ?",
             tuple(params),
         ).fetchall()
 
@@ -597,7 +668,7 @@ class SqliteSearchIndex:
         params.append(limit)
 
         rows = self._db.execute(
-            f"{_FILE_SELECT} WHERE ({clause}){scope} LIMIT ?",
+            f"{_FILE_SELECT} WHERE ({clause}){scope} ORDER BY {_FILE_ORDER} LIMIT ?",
             tuple(params),
         ).fetchall()
 
@@ -647,7 +718,7 @@ class SqliteSearchIndex:
 
         rows = self._db.execute(
             f"""
-            SELECT e.id AS entity_id, e.type, e.name, e.qualified_name,
+            SELECT e.id AS entity_id, e.type, e.name, e.qualified_name, e.key AS key,
                    e.line_start, e.line_end, e.signature,
                    f.rel_path AS path, r.name AS repository, r.slug AS repository_slug
             FROM entities e
@@ -656,6 +727,7 @@ class SqliteSearchIndex:
             WHERE (e.name IN ({name_placeholders})
                    OR e.qualified_name IN ({name_placeholders})
                    OR e.key IN ({key_placeholders})){scope}
+            ORDER BY {_ENTITY_ORDER}
             LIMIT ?
             """,  # noqa: S608 - placeholders are generated counts, values are bound
             tuple(params),
@@ -674,6 +746,7 @@ class SqliteSearchIndex:
                 line_end=row["line_end"],
                 score=100.0,
                 signature=row["signature"] or "",
+                matched_term=_matched_name(row, wanted),
             )
             for row in rows
         ]
@@ -720,7 +793,7 @@ class SqliteSearchIndex:
             LEFT JOIN files        f ON f.id = e.file_id
             LEFT JOIN repositories r ON r.id = e.repo_id
             WHERE entities_fts MATCH ?{scope}
-            ORDER BY rank
+            ORDER BY rank, {_ENTITY_ORDER}
             LIMIT ?
             """,  # noqa: S608 - placeholders are generated counts, values are bound
             tuple(params),
