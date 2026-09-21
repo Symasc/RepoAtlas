@@ -162,7 +162,7 @@ What the results mean:
 - Edges are deterministic indexed facts, not opinions.
 - `incoming` changes which direction the walk travels. It does not reverse the edge: the source and target of each edge still mean what they say.
 - Hops are bounded, and containment edges are excluded unless you ask for them.
-- `cross_repository: false` keeps a repository-scoped walk inside the repository the context names. For a repo-owned target that is also the target's repository. For a repository-less shared target such as `env:SERVICE_HOST` or an HTTP endpoint, the repository context supplies the boundary.
+- `cross_repository: false` keeps a repository-scoped walk inside the repository the context names, even through a shared node such as `env:SERVICE_HOST` or an HTTP endpoint. For a repo-owned target that is also the target's repository. For a repository-less shared target, the repository context supplies the boundary.
 - Under `scope: global`, a walk rooted at a shared node may see every repository that touches it.
 - `cross_repository: true` explicitly allows a repository-scoped walk to cross the repository boundary where graph policy permits.
 - Crossing repositories directly is allowed only for the edge types the policy permits.
