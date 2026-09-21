@@ -223,6 +223,9 @@ class TypeScriptHttp:
     def __init__(self, source: bytes, root: Node) -> None:
         self._source = source
         counts = _binding_counts(source, root)
+        #: How often each name is bound anywhere in the file, shared with the other
+        #: readers of the same file so every one proves a binding by the same rule.
+        self.counts = counts
         self._express: set[str] = set()
         self._router_factories: set[str] = set()
         self._axios: set[str] = set()
