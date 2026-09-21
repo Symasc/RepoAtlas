@@ -57,6 +57,18 @@ version measures, not a guarantee; the decision is the tradeoff, not the number.
 There is no hand-maintained copy of any schema to drift from the models, and a
 test asserts that what the transport advertises is exactly `model_json_schema()`.
 
+### What a response costs
+
+Every result is sent twice, as MCP requires: as structured content, and as a
+text block holding the same JSON for clients that read only content blocks. The
+text block is compact JSON. Which of the two a host forwards to its model is the
+host's choice.
+
+`repoatlas_search`, `repoatlas_inspect`, `repoatlas_relationships` and
+`repoatlas_verify_grounding` also accept `presentation: "compact"`, which writes
+each repeated fact once instead of per evidence item. The default, `full`, is
+unchanged, and the capability does the same work either way.
+
 ## 3. Load the skill
 
 Give the agent the canonical skill. It is vendor-neutral and lives at the
