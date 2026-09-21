@@ -23,6 +23,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
     Severity,
 )
+from repoatlas.parsers.http_nestjs import NestDeclarations
 from repoatlas.parsers.http_typescript import TypeScriptHttp
 from repoatlas.parsers.marks import whole_file_span
 from repoatlas.parsers.treesitter import (
@@ -65,10 +66,17 @@ def _relative(specifier: str) -> bool:
 class _Walker:
     """Recursive descent that keeps a scope stack for qualified names."""
 
-    def __init__(self, source: bytes, language: str, http: TypeScriptHttp | None = None) -> None:
+    def __init__(
+        self,
+        source: bytes,
+        language: str,
+        http: TypeScriptHttp | None = None,
+        nest: NestDeclarations | None = None,
+    ) -> None:
         self._source = source
         self._language = language
         self._http = http
+        self._nest = nest
         self.symbols: list[ParsedSymbol] = []
         self.references: list[ParsedReference] = []
         self._scope: list[str] = []
@@ -354,6 +362,8 @@ class _Walker:
 
         if self._http is not None:
             self.references.extend(self._http.call_references(node, self._current))
+        if self._nest is not None:
+            self.references.extend(self._nest.call_references(node, self._current))
         self.references.append(
             ParsedReference(
                 edge_type=EdgeType.CALLS,
@@ -435,7 +445,10 @@ class TypeScriptParser:
     #    classic-Mac (CR-only) file is no longer collapsed into one line.
     # 3: routes a proven Express application serves, and requests `fetch` and
     #    `axios` provably make, become HTTP facts.
-    version = "3"
+    # 4: NestJS controller routes, modules, application roots and routing markers
+    #    are recorded as pending claims; the global pass decides which route a
+    #    proven application serves.
+    version = "4"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
@@ -463,7 +476,9 @@ class TypeScriptParser:
                 ),
             )
 
-        walker = _Walker(source, grammar, TypeScriptHttp(source, tree.root_node))
+        http = TypeScriptHttp(source, tree.root_node)
+        nest = NestDeclarations(source, tree.root_node, http.counts)
+        walker = _Walker(source, grammar, http, nest)
         walker.run(tree.root_node)
 
         whole_file_start, whole_file_last = whole_file_span(content)
@@ -491,6 +506,6 @@ class TypeScriptParser:
             parser=self.name,
             parser_version=self.version,
             symbols=(module, *walker.symbols),
-            references=tuple(walker.references),
+            references=(*walker.references, *nest.references()),
             diagnostics=diagnostics,
         )
