@@ -151,6 +151,28 @@ def _repo_scope(
     return f" AND {alias}.repo_id IN ({placeholders})", True
 
 
+def _matched_name(row: sqlite3.Row, wanted: Sequence[str]) -> str:
+    """Which requested spelling this row matched, or ``""``.
+
+    The same predicate the WHERE clause applies — name, qualified name, or the
+    interned key in its three accepted spellings — evaluated over the row that
+    predicate already selected. Written here, beside the query, because the two
+    have to agree: a copy of this rule anywhere else is a copy that can drift.
+
+    The first spelling in request order wins, so one row asked about under two
+    names reports the same one every time.
+    """
+    name = row["name"]
+    qualified = row["qualified_name"]
+    key = row["key"]
+    for term in wanted:
+        if term in (name, qualified):
+            return term
+        if key in (term, f"env:{term}", f"module:{term}"):
+            return term
+    return ""
+
+
 def _file_hit(row: sqlite3.Row, term: str, specificity: int) -> FileHit:
     return FileHit(
         file_id=row["file_id"],
@@ -647,7 +669,7 @@ class SqliteSearchIndex:
 
         rows = self._db.execute(
             f"""
-            SELECT e.id AS entity_id, e.type, e.name, e.qualified_name,
+            SELECT e.id AS entity_id, e.type, e.name, e.qualified_name, e.key AS key,
                    e.line_start, e.line_end, e.signature,
                    f.rel_path AS path, r.name AS repository, r.slug AS repository_slug
             FROM entities e
@@ -674,6 +696,7 @@ class SqliteSearchIndex:
                 line_end=row["line_end"],
                 score=100.0,
                 signature=row["signature"] or "",
+                matched_term=_matched_name(row, wanted),
             )
             for row in rows
         ]
