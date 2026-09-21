@@ -47,11 +47,6 @@ NESTJS_ROOT = "nestjs-root"
 #: A construct that can change routes from outside the registration it touches.
 NESTJS_MARKER = "nestjs-marker"
 
-#: Roles that describe what a file *is* rather than claim something about another
-#: file. They are inputs to the global pass, so they are never counted as
-#: unresolved references.
-DECLARATION_ROLES = frozenset({NESTJS_MODULE, NESTJS_MARKER})
-
 
 def pending_reference(
     edge_type: EdgeType,
