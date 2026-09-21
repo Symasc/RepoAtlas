@@ -44,20 +44,34 @@ method, path or chain yields nothing. Nothing is inferred from a function's name
 function declaration or destructured ``const`` that binds it directly in an
 enclosing function (or the file), and only when that is its only binding there.
 Wrappers are followed at most :data:`_MAX_DEPTH` deep and never around a cycle.
-Nothing crosses a file here: an imported helper is left to the global pass.
+
+**Across files, nothing is decided here.** A file declares what its exported
+functions are — a requester factory, a wrapper, an init helper — and a call
+through a helper imported from a relative module is recorded as a pending claim
+with its arguments read as far as this file can read them. The global pass
+(:mod:`repoatlas.graph.http_claims`) joins the two across exactly one import.
 
 Parsed, never executed (V1_SPEC §17).
 """
 
 from __future__ import annotations
 
+import json
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedReference
-from repoatlas.parsers.http_facts import http_reference
+from repoatlas.parsers.http_facts import (
+    HTTP_INIT_HELPER,
+    HTTP_REQUESTER,
+    HTTP_REQUESTER_CALL,
+    HTTP_WRAPPER,
+    http_reference,
+    pending_reference,
+)
 from repoatlas.parsers.http_typescript import binding_counts, fetch_method, static_string
 from repoatlas.parsers.treesitter import line_range, node_text, string_literal, walk
 
@@ -70,6 +84,8 @@ SOURCE = "fetch-wrapper"
 _MAX_DEPTH = 3
 #: How many aliases deep a fetch-like value is followed.
 _MAX_ALIAS = 8
+#: How much of an unreadable template path a claim keeps, for inspection only.
+_MAX_TEMPLATE = 200
 
 _FUNCTIONS = frozenset(
     {
@@ -246,7 +262,7 @@ class FetchWrappers:
             return self.facts(node, _ALIAS, source_symbol, source="fetch")
         wrapper = self.resolve_callee(node)
         if wrapper is None:
-            return []
+            return self.imported_call(node, source_symbol)
         return self.facts(node, wrapper, source_symbol)
 
     def resolve_callee(self, call: Node) -> Wrapper | None:
@@ -353,56 +369,223 @@ class FetchWrappers:
 
     def init_method(self, init: Node) -> Method | None:
         """The method an init object at a call site provably carries, or ``None``."""
+        entries = self.init_entries(init)
+        return evaluate(entries, lambda _: None) if entries is not None else None
+
+    def init_entries(self, init: Node) -> list[dict[str, Any]] | None:
+        """An init object as data: what each entry does to the method, in order.
+
+        ``{"method": m, "in_call": b}`` sets it, ``{"unknown": why}`` makes it
+        unknowable, ``{"helper": …}`` is a spread of an imported helper for the
+        global pass to read. Entries that cannot touch the method are left out.
+        """
         init = operand(init)
         if init.type != "object":
             return None
-        method = Method(GET, in_call=True)
+        entries: list[dict[str, Any]] = []
         for entry in init.named_children:
             if entry.type == "comment":
                 continue
             if entry.type == "pair":
                 key = self.key(entry)
                 if key is None:
-                    return None  # a computed key may be `method`
-                if key != "method":
-                    continue
-                value = entry.child_by_field_name("value")
-                raw = static_string(self._source, value) if value is not None else None
-                normalized = fetch_method(raw) if raw is not None else None
-                if normalized is None:
-                    return None
-                method = Method(normalized, in_call=True)
+                    entries.append({"unknown": "a computed key"})
+                elif key == "method":
+                    value = entry.child_by_field_name("value")
+                    raw = static_string(self._source, value) if value is not None else None
+                    normalized = fetch_method(raw) if raw is not None else None
+                    entries.append(
+                        {"method": normalized, "in_call": True}
+                        if normalized is not None
+                        else {"unknown": "a method that is not a literal"}
+                    )
             elif entry.type == "shorthand_property_identifier":
                 if node_text(self._source, entry) == "method":
-                    return None
+                    entries.append({"unknown": "a method that is not a literal"})
             elif entry.type == "spread_element":
-                spread = self.spread_method(entry)
-                if spread is None:
-                    return None
-                if isinstance(spread, Method):
-                    method = spread
+                entries.append(self._spread(entry))
             elif entry.type == "method_definition":
                 name = entry.child_by_field_name("name")
                 if name is None or node_text(self._source, name) == "method":
-                    return None
+                    entries.append({"unknown": "a method that is not a literal"})
             else:
-                return None
-        return method
+                entries.append({"unknown": entry.type})
+        return entries
 
-    def spread_method(self, spread: Node) -> Method | Silent | None:
-        """What ``...helper(args)`` does to the method: a method, nothing, or unknown."""
+    def _spread(self, spread: Node) -> dict[str, Any]:
+        """What ``...helper(args)`` does to the method, as far as this file can say."""
         inner = next((c for c in spread.named_children if c.type != "comment"), None)
         call = operand(inner) if inner is not None else None
         if call is None or call.type != "call_expression":
-            return None
+            return {"unknown": "a spread of something that is not a helper call"}
         callee = call.child_by_field_name("function")
         if callee is None or operand(callee).type != "identifier":
-            return None
-        function = self.function_of(self.lookup(node_text(self._source, operand(callee)), call))
+            return {"unknown": "a spread of something that is not a helper call"}
+        binding = self.lookup(node_text(self._source, operand(callee)), call)
+        arguments = arguments_of(call)
+        values = [static_string(self._source, a) for a in arguments] if arguments else []
+        if isinstance(binding, Imported) and is_relative(binding.specifier):
+            return {
+                "helper": {
+                    "specifier": binding.specifier,
+                    "imported": binding.imported,
+                    "arguments": values if arguments is not None else None,
+                }
+            }
+        function = self.function_of(binding)
         helper = self.init_helper(function) if function is not None else None
-        if helper is None:
-            return None
-        return apply_helper(self._source, helper, arguments_of(call))
+        effect = apply_helper(helper, values if arguments is not None else None) if helper else None
+        if isinstance(effect, Method):
+            return {"method": effect.value, "in_call": effect.in_call}
+        if isinstance(effect, Silent):
+            return {"silent": True}
+        return {"unknown": "a spread helper this file cannot read"}
+
+    # -- across files --------------------------------------------------------------------
+
+    def declarations(self) -> list[ParsedReference]:
+        """What this file's exported functions are, for callers in other files."""
+        found: list[ParsedReference] = []
+        for name, function in self._exported_functions():
+            start, end = line_range(function)
+            members = self.factory(function)
+            if members:
+                found.append(
+                    pending_reference(
+                        EdgeType.REFERENCES,
+                        EntityType.SYMBOL,
+                        name,
+                        start,
+                        end,
+                        role=HTTP_REQUESTER,
+                        source_symbol=name,
+                        members=json.dumps(
+                            {member: wrapper_meta(w) for member, w in sorted(members.items())}
+                        ),
+                    )
+                )
+            wrapper = self.wrapper(function)
+            if wrapper is not None:
+                found.append(
+                    pending_reference(
+                        EdgeType.REFERENCES,
+                        EntityType.SYMBOL,
+                        name,
+                        start,
+                        end,
+                        role=HTTP_WRAPPER,
+                        source_symbol=name,
+                        wrapper=json.dumps(wrapper_meta(wrapper)),
+                    )
+                )
+            helper = self.init_helper(function)
+            if helper is not None and not helper.silent:
+                found.append(
+                    pending_reference(
+                        EdgeType.REFERENCES,
+                        EntityType.SYMBOL,
+                        name,
+                        start,
+                        end,
+                        role=HTTP_INIT_HELPER,
+                        source_symbol=name,
+                        helper=json.dumps(helper_meta(helper)),
+                    )
+                )
+        return found
+
+    def _exported_functions(self) -> list[tuple[str, Node]]:
+        """``export function f`` and ``export const f = …``: nothing re-exported."""
+        found: list[tuple[str, Node]] = []
+        for statement in self._root.children:
+            declaration = (
+                statement.child_by_field_name("declaration")
+                if statement.type == "export_statement"
+                else None
+            )
+            if declaration is None:
+                continue
+            if declaration.type == "function_declaration":
+                name = declaration.child_by_field_name("name")
+                if name is not None:
+                    found.append((node_text(self._source, name), declaration))
+            elif declaration.type == "lexical_declaration":
+                for declarator in declaration.named_children:
+                    name = declarator.child_by_field_name("name")
+                    value = declarator.child_by_field_name("value")
+                    if (
+                        name is not None
+                        and value is not None
+                        and name.type == "identifier"
+                        and operand(value).type in _FUNCTION_VALUES
+                    ):
+                        found.append((node_text(self._source, name), operand(value)))
+        return found
+
+    def imported_call(self, call: Node, source_symbol: str | None) -> list[ParsedReference]:
+        """A call through a helper imported from a relative module, as a pending claim.
+
+        Recorded only when some argument is written as a path — a literal, or a
+        template, starting with ``/`` — so an ordinary call to an imported function is
+        not turned into a claim about HTTP it never makes. A template is recorded so
+        the request stays visible as unresolved; its path is never guessed.
+        """
+        callee = call.child_by_field_name("function")
+        if callee is None or operand(callee).type != "identifier":
+            return []
+        binding = self.lookup(node_text(self._source, operand(callee)), call)
+        target: dict[str, str] = {}
+        if isinstance(binding, Imported) and is_relative(binding.specifier):
+            target = {"specifier": binding.specifier, "wrapper": binding.imported}
+        elif isinstance(binding, Member):
+            factory_call = operand(binding.value)
+            factory = (
+                factory_call.child_by_field_name("function")
+                if factory_call.type == "call_expression"
+                else None
+            )
+            if factory is None or operand(factory).type != "identifier":
+                return []
+            origin = self.lookup(node_text(self._source, operand(factory)), factory)
+            if not isinstance(origin, Imported) or not is_relative(origin.specifier):
+                return []
+            target = {
+                "specifier": origin.specifier,
+                "factory": origin.imported,
+                "member": binding.member,
+            }
+        else:
+            return []
+        arguments = arguments_of(call)
+        if arguments is None:
+            return []
+        summaries = [self._argument(argument) for argument in arguments]
+        if not any(str(s.get("string", "")).startswith("/") or "template" in s for s in summaries):
+            return []
+        start, end = line_range(call)
+        return [
+            pending_reference(
+                EdgeType.CALLS_HTTP_ROUTE,
+                EntityType.HTTP_ROUTE,
+                node_text(self._source, operand(callee)),
+                start,
+                end,
+                role=HTTP_REQUESTER_CALL,
+                source_symbol=source_symbol,
+                arguments=json.dumps(summaries),
+                **target,
+            )
+        ]
+
+    def _argument(self, node: Node) -> dict[str, Any]:
+        value = static_string(self._source, node)
+        if value is not None:
+            return {"string": value}
+        text = node_text(self._source, operand(node))
+        if operand(node).type == "template_string" and text.startswith("`/"):
+            return {"template": text[:_MAX_TEMPLATE]}
+        entries = self.init_entries(node)
+        return {"init": entries} if entries is not None else {}
 
     # -- names ---------------------------------------------------------------------------
 
@@ -900,10 +1083,42 @@ _INJECTED = "injected"
 _ALIAS = Wrapper(path=0, init=1, method=None, base=None, relative=True)
 
 
-def apply_helper(
-    source: bytes, helper: InitHelper, arguments: list[Node] | None
-) -> Method | Silent | None:
-    """What a call to an init helper with ``arguments`` does to the method."""
+def is_relative(specifier: str) -> bool:
+    """A module the linker can resolve inside the importing repository."""
+    return specifier.startswith(("./", "../"))
+
+
+def evaluate(
+    entries: list[dict[str, Any]], helper: Callable[[dict[str, Any]], Method | Silent | None]
+) -> Method | None:
+    """The method an init object's entries leave, reading them in order.
+
+    ``helper`` reads an imported helper's entry; returning ``None`` means unknown.
+    """
+    method = Method(GET, in_call=True)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return None
+        if "unknown" in entry:
+            return None
+        if "method" in entry:
+            value = entry["method"]
+            if not isinstance(value, str) or fetch_method(value) != value:
+                return None
+            method = Method(value, in_call=bool(entry.get("in_call")))
+        elif "helper" in entry:
+            effect = helper(entry["helper"])
+            if effect is None:
+                return None
+            if isinstance(effect, Method):
+                method = effect
+        elif not entry.get("silent"):
+            return None
+    return method
+
+
+def apply_helper(helper: InitHelper, arguments: list[str | None] | None) -> Method | Silent | None:
+    """What a call to an init helper does to the method, given its literal arguments."""
     if helper.silent:
         return Silent()
     if helper.method is not None:
@@ -911,13 +1126,65 @@ def apply_helper(
     if helper.parameter is None or arguments is None:
         return None
     if len(arguments) > helper.parameter:
-        raw = static_string(source, arguments[helper.parameter])
+        raw = arguments[helper.parameter]
         method = fetch_method(raw) if raw is not None else None
         return Method(method, in_call=True) if method is not None else None
     if helper.default is None:
         return None
     method = fetch_method(helper.default)
     return Method(method, in_call=False) if method is not None else None
+
+
+def wrapper_meta(wrapper: Wrapper) -> dict[str, Any]:
+    return {
+        "path": wrapper.path,
+        "init": wrapper.init,
+        "method": wrapper.method,
+        "base": wrapper.base,
+        "relative": wrapper.relative,
+    }
+
+
+def wrapper_from(meta: object) -> Wrapper | None:
+    """A wrapper summary read back from a claim, or ``None`` if it is malformed."""
+    if not isinstance(meta, dict):
+        return None
+    path, init, method = meta.get("path"), meta.get("init"), meta.get("method")
+    base, relative = meta.get("base"), meta.get("relative")
+    if (
+        not isinstance(path, int)
+        or not (init is None or isinstance(init, int))
+        or not (method is None or isinstance(method, str))
+        or not (base is None or isinstance(base, str))
+        or not isinstance(relative, bool)
+        or (init is None) == (method is None)
+    ):
+        return None
+    return Wrapper(path, init, method, base, relative)
+
+
+def helper_meta(helper: InitHelper) -> dict[str, Any]:
+    return {
+        "method": helper.method,
+        "parameter": helper.parameter,
+        "default": helper.default,
+        "silent": helper.silent,
+    }
+
+
+def helper_from(meta: object) -> InitHelper | None:
+    if not isinstance(meta, dict):
+        return None
+    method, parameter = meta.get("method"), meta.get("parameter")
+    default, silent = meta.get("default"), meta.get("silent")
+    if (
+        not (method is None or isinstance(method, str))
+        or not (parameter is None or isinstance(parameter, int))
+        or not (default is None or isinstance(default, str))
+        or not isinstance(silent, bool)
+    ):
+        return None
+    return InitHelper(method, parameter, default, silent=silent)
 
 
 def _enclosing_function(node: Node) -> Node | None:

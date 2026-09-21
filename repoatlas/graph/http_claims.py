@@ -34,6 +34,17 @@ cannot name them, so it blocks nothing. A package that changes routing at run ti
 is outside what static reading can see; that boundary is documented, not assumed
 away.
 
+**Requests through imported helpers.** A client file records a call through a
+helper imported from a relative module — ``const { request } =
+createRequester(options)`` with ``createRequester`` from ``./http`` — as a pending
+claim, and the helper's file declares what its exported functions do
+(:mod:`repoatlas.parsers.http_ts_wrappers`). The two are joined across **exactly
+one import**: the declaration must be in the module the import resolves to,
+and must be the only one of its name there. A re-export, a package, a module
+that does not resolve, or an argument the client file could not read yields
+nothing. A call to an imported function that turns out to be no request helper
+is not an HTTP claim at all, so it is not counted as unresolved.
+
 A route that is not proven stays exactly what it was: a claim that records the
 declaration and the limitation. The resolved registration entries also become
 ordinary ``REFERENCES`` edges — module to controller, module to module, bootstrap
@@ -58,6 +69,10 @@ from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.parsers.http_facts import (
     EXACT,
+    HTTP_INIT_HELPER,
+    HTTP_REQUESTER,
+    HTTP_REQUESTER_CALL,
+    HTTP_WRAPPER,
     NESTJS_CONTROLLER,
     NESTJS_IMPORT,
     NESTJS_MARKER,
@@ -75,12 +90,25 @@ from repoatlas.parsers.http_nestjs import (
     ROUTER_MARKER,
     nest_path,
 )
+from repoatlas.parsers.http_ts_wrappers import (
+    GET,
+    Method,
+    Silent,
+    Wrapper,
+    apply_helper,
+    evaluate,
+    helper_from,
+    is_relative,
+    wrapper_from,
+)
 from repoatlas.storage.protocols import EdgeRecord, EntityRecord, FileRow, UnresolvedRefRecord
 
 #: More modules than any application registers; a bound on adversarial input.
 _MAX_MODULES = 4096
 
 PROMOTED = "promoted"
+#: A call to an imported function that is no request helper: not an HTTP claim.
+NOT_HTTP = "no request helper of that name is declared in the imported module"
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,11 +138,17 @@ class HttpClaimPlan:
     routes: dict[int, str] = field(default_factory=dict)
     #: Root claim id → ``proven`` or why not.
     roots: dict[int, str] = field(default_factory=dict)
+    #: Imported-helper call claim id → ``promoted`` or why not.
+    requests: dict[int, str] = field(default_factory=dict)
 
     @property
     def detail(self) -> str:
         promoted = sum(1 for outcome in self.routes.values() if outcome == PROMOTED)
-        return f"{promoted} of {len(self.routes)} declared route(s) proven"
+        requests = sum(1 for outcome in self.requests.values() if outcome == PROMOTED)
+        return (
+            f"{promoted} of {len(self.routes)} declared route(s) proven, "
+            f"{requests} request(s) through imported helpers"
+        )
 
 
 @dataclass(slots=True)
@@ -184,6 +218,12 @@ class _Resolver:
         target = self._index.resolve_module(origin, specifier, "node")
         found = self.local_class(target.file_id, imported) if target is not None else None
         return ("class", found) if found is not None else ("unresolved", None)
+
+    def module(self, origin: FileRow, specifier: str) -> FileRow | None:
+        """The module a relative import names, when it resolves to an indexed file."""
+        if not is_relative(specifier):
+            return None
+        return self._index.resolve_module(origin, specifier, "node")
 
     def module_file(self, origin: FileRow, specifier: str) -> bool:
         return self._index.resolve_module(origin, specifier, "node") is not None
@@ -333,6 +373,23 @@ def plan_http_claims(
                     controller, "not registered by a proven application"
                 )
 
+    # -- requests through imported helpers ---------------------------------------------
+    declared: dict[tuple[int, str, str], list[UnresolvedRefRecord]] = defaultdict(list)
+    for role in (HTTP_REQUESTER, HTTP_WRAPPER, HTTP_INIT_HELPER):
+        for claim in grouped[role]:
+            declared[(claim.file_id, role, claim.target_key)].append(claim)
+    request_outcomes: dict[int, str] = {}
+    for claim in grouped[HTTP_REQUESTER_CALL]:
+        outcome, found = _requester_call(claim, resolver, declared)
+        for edge in found:
+            pending.setdefault((edge.src_id, f"{edge.type}:{edge.target.key}"), edge)
+        if outcome == PROMOTED:
+            resolved += 1
+        elif outcome != NOT_HTTP:
+            unresolved += 1
+        if claim.id is not None:
+            request_outcomes[claim.id] = outcome
+
     return HttpClaimPlan(
         edges=tuple(edges),
         http=tuple(pending.values()),
@@ -340,6 +397,122 @@ def plan_http_claims(
         unresolved=unresolved,
         routes=route_outcomes,
         roots=root_outcomes,
+        requests=request_outcomes,
+    )
+
+
+def _requester_call(
+    claim: UnresolvedRefRecord,
+    resolver: _Resolver,
+    declared: dict[tuple[int, str, str], list[UnresolvedRefRecord]],
+) -> tuple[str, list[PendingHttpEdge]]:
+    """Decide one call through an imported helper: ``(outcome, edges)``."""
+    meta = _meta(claim)
+    origin = resolver.origin(claim)
+    target = resolver.module(origin, meta.get("specifier", "")) if origin else None
+    if origin is None or target is None:
+        return "import does not resolve", []
+    if "factory" in meta:
+        role, name = HTTP_REQUESTER, meta["factory"]
+    else:
+        role, name = HTTP_WRAPPER, meta.get("wrapper", "")
+    matches = declared.get((target.file_id, role, name), [])
+    if not matches:
+        return NOT_HTTP, []
+    if len(matches) != 1:
+        return "more than one declaration of that name", []
+    declaration = _meta(matches[0])
+    wrapper: Wrapper | None
+    if role == HTTP_REQUESTER:
+        members = json.loads(declaration.get("members", "{}"))
+        if meta.get("member") not in members:
+            return NOT_HTTP, []
+        wrapper = wrapper_from(members[meta["member"]])
+    else:
+        wrapper = wrapper_from(json.loads(declaration.get("wrapper", "null")))
+    if wrapper is None:
+        return "the declaration cannot be read", []
+
+    arguments = json.loads(meta.get("arguments", "[]"))
+    if not isinstance(arguments, list) or len(arguments) <= wrapper.path:
+        return "the path is not a literal", []
+    path = (
+        arguments[wrapper.path].get("string") if isinstance(arguments[wrapper.path], dict) else None
+    )
+    if not isinstance(path, str) or not path.startswith("/"):
+        return "the path is not a literal", []
+
+    def helper(entry: dict[str, object]) -> Method | Silent | None:
+        specifier, imported = entry.get("specifier"), entry.get("imported")
+        if not isinstance(specifier, str) or not isinstance(imported, str):
+            return None
+        module = resolver.module(origin, specifier)
+        found = declared.get((module.file_id, HTTP_INIT_HELPER, imported), []) if module else []
+        if len(found) != 1:
+            return None
+        summary = helper_from(json.loads(_meta(found[0]).get("helper", "null")))
+        values = entry.get("arguments")
+        if summary is None or not (values is None or isinstance(values, list)):
+            return None
+        return apply_helper(summary, values)
+
+    method: Method | None
+    if wrapper.init is None:
+        method = Method(wrapper.method or GET, in_call=False)
+    elif len(arguments) <= wrapper.init:
+        method = Method(GET, in_call=True)
+    else:
+        init = arguments[wrapper.init]
+        entries = init.get("init") if isinstance(init, dict) else None
+        method = evaluate(entries, helper) if isinstance(entries, list) else None
+    if method is None:
+        return "the method cannot be read", []
+
+    url = http.client_target(f"{wrapper.base}{path}" if wrapper.base else path)
+    if url is None:
+        return "the request names no route", []
+    exact = method.in_call and wrapper.base is None
+    lines = (claim.line_start, claim.line_end) if exact else (None, None)
+    found = [
+        _pending(
+            claim,
+            origin,
+            EdgeType.CALLS_HTTP_ROUTE,
+            EntityType.HTTP_ROUTE,
+            http.route_body(method.value, url.path),
+            lines,
+        )
+    ]
+    if url.url is not None:
+        found.append(
+            _pending(
+                claim,
+                origin,
+                EdgeType.CALLS_HTTP_ENDPOINT,
+                EntityType.HTTP_ENDPOINT,
+                http.endpoint_body(method.value, url.url),
+                lines,
+            )
+        )
+    return PROMOTED, found
+
+
+def _pending(
+    claim: UnresolvedRefRecord,
+    origin: FileRow,
+    edge: EdgeType,
+    kind: EntityType,
+    body: str,
+    lines: tuple[int | None, int | None],
+) -> PendingHttpEdge:
+    return PendingHttpEdge(
+        src_id=claim.src_id,
+        target=EntityRecord(type=kind, key=global_key(kind, body), name=body, qualified_name=body),
+        type=edge,
+        repo_id=origin.repo_id,
+        file_id=origin.file_id,
+        line_start=lines[0],
+        line_end=lines[1],
     )
 
 
