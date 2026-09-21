@@ -486,6 +486,16 @@ class Retriever:
                         proven.add(hit.matched_term)
         return hits, proven, (time.perf_counter() - start) * 1000.0
 
+    def _lookup_names(self, names: list[str], scopes: list[list[int] | None]) -> list[EntityHit]:
+        """Exact entity-name lookup for one group of spellings, in every scope."""
+        if not names:
+            return []
+        return [
+            hit
+            for scope in scopes
+            for hit in self._search.find_entities_by_name(names, scope, self._limits.per_source)
+        ]
+
     def _stage_symbols(
         self,
         question: str,
@@ -524,7 +534,8 @@ class Retriever:
         and seeding a walk besides — for a sentence that merely contained the word.
         ``symbol_terms`` is the set the question named (see
         :attr:`~repoatlas.retrieval.query.QueryAnalysis.symbol_terms`); everything
-        else resolves exactly as before and returns as recall. Nothing is excluded,
+        else is still looked up — after the named terms, under a bound of its own,
+        so it cannot crowd them out — and returns as recall. Nothing is excluded,
         and a symbol genuinely named ``call`` is still found — by asking for it.
 
         ``quote_signatures`` supplies the declaration the indexer stored for each
@@ -545,45 +556,46 @@ class Retriever:
             entity_ids: list[int] = []
             #: Everything already returned, exact or fuzzy, for deduplication.
             seen_entities: set[int] = set()
-            # Under suppression only the terms the user actually named may be
-            # looked up. Words lifted out of the surrounding prose are recall, and
-            # an exact-name hit on one of them would enter as DETERMINISTIC — the
-            # strongest tier — for a question whose subject does not exist.
-            named = list(literal_terms) if suppressed is not None else [*symbol_terms, *terms]
-            # An HTTP key is an exact identity the question spelled — `GET /users`
-            # names one route — so it is looked up under suppression as well. It
-            # can only ever match an entity *key*, which is what keeps it exact.
-            named.extend(http_keys)
-            # Which of those spellings the question actually *named*, as opposed to
-            # merely containing. Both groups are looked up in one query — same SQL,
-            # same bound, same rows — and the distinction is applied to the rows
-            # that come back. Splitting the query instead would give each group its
-            # own limit and change which candidates survive, which is a retrieval
-            # change rather than the precedence fix this is.
+            # Which spellings the question actually *named*, as opposed to merely
+            # containing. Under suppression that is only what it spelled literally:
+            # words lifted out of the surrounding prose are recall, and an exact-name
+            # hit on one of them would enter as DETERMINISTIC — the strongest tier —
+            # for a question whose subject does not exist. An HTTP key is an exact
+            # identity the question spelled — `GET /users` names one route — so it
+            # counts under suppression as well; it can only ever match an entity
+            # *key*, which is what keeps it exact.
             explicit = (
                 {*literal_terms, *http_keys}
                 if suppressed is not None
                 else {*symbol_terms, *http_keys}
             )
-            # Under suppression the set to look up is exactly the one already
-            # resolved before the decision was made, so the rows are reused rather
-            # than fetched twice. When nothing is suppressed the question's own
-            # words widen the set, and the wider lookup is the one that runs — the
-            # narrower result is a prefix of it in every respect that matters, but
-            # it was drawn under a different limit, and quietly merging two
-            # differently-bounded cuts would make the answer depend on which half
-            # filled up first.
+            # Looked up in order of how exactly the question named them, each group
+            # under its own bound, because a shared bound is a competition the
+            # named term can lose. One `LIMIT` over a qualified symbol and every
+            # prose word beside it is cut by key order, so a question naming
+            # `CoursesService.detail` alongside "record", "course" and "courses"
+            # could come back without the one entity it named — each of those words
+            # matches more entities than the bound holds, and most of their keys
+            # sort first.
+            #
+            # First what the question spelled literally, which is the lookup
+            # suppression was decided on, reused rather than fetched twice; then the
+            # other names it made explicit; then, only when nothing is suppressed,
+            # the words it merely used. The first sighting of an entity stands, so
+            # an entity both named and merely mentioned is counted as named.
+            groups: list[list[str]] = []
+            if suppressed is None:
+                spelled_first = {*literal_terms, *http_keys}
+                groups.append([term for term in symbol_terms if term not in spelled_first])
+                groups.append([term for term in dict.fromkeys(terms) if term not in explicit])
             resolved = (
-                named_hits
-                if suppressed is not None and named_hits is not None
-                else [
-                    hit
-                    for scope in scopes
-                    for hit in self._search.find_entities_by_name(
-                        named, scope, self._limits.per_source
-                    )
-                ]
+                list(named_hits)
+                if named_hits is not None
+                else self._lookup_names([*literal_terms, *http_keys], scopes)
             )
+            for group in groups:
+                if group:
+                    resolved.extend(self._lookup_names(group, scopes))
             #: Split for the trace: a match on a spelling the question named, a
             #: match on a word merely present in it, and a full-text hit are three
             #: different claims, and the trace must not blur them.
