@@ -71,6 +71,7 @@ def compact_search(response: SearchResponse) -> CompactSearchResponse:
         sources=sources,
         evidence=_evidence(response.evidence),
         entities=tuple(handle.key for handle in response.entities),
+        terms=response.terms,
         suppressed=response.suppressed,
         truncated=response.truncated,
         budget_clamped=response.budget.clamped or None,

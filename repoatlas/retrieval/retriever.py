@@ -33,9 +33,15 @@ from repoatlas.models.evidence import (
     EvidenceTier,
     MatchClass,
 )
-from repoatlas.models.retrieval import RetrievalOutcome, SuppressionOutcome
+from repoatlas.models.retrieval import (
+    RetrievalOutcome,
+    SuppressionOutcome,
+    TermLookup,
+    TermMatch,
+    TermState,
+)
 from repoatlas.models.telemetry import RetrievalTrace, StageTiming, Stopwatch
-from repoatlas.retrieval.query import analyze
+from repoatlas.retrieval.query import QueryAnalysis, analyze
 from repoatlas.retrieval.ranking import (
     NoopReranker,
     Reranker,
@@ -223,7 +229,9 @@ class Retriever:
             if phrase and phrase not in definite_terms:
                 definite_terms.insert(0, phrase)
 
-        exact = self._stage_exact(literal_terms, scopes, stages, path_prefix=path_prefix)
+        exact, text_found = self._stage_exact(
+            literal_terms, scopes, stages, path_prefix=path_prefix
+        )
         if exact:
             ranked_lists.append(exact)
 
@@ -268,6 +276,8 @@ class Retriever:
         )
         ranked_lists.extend(lexical)
 
+        #: The spellings the symbol stage resolved to an entity by exact name.
+        symbols_found: set[str] = set()
         symbols, entity_ids = self._stage_symbols(
             question,
             analysis.terms,
@@ -281,9 +291,20 @@ class Retriever:
             named_hits=entity_hits,
             named_ms=entity_ms,
             path_prefix=path_prefix,
+            named_found=symbols_found,
         )
         if symbols:
             ranked_lists.append(symbols)
+
+        # What the exact lookups found for each term the question named. Every
+        # proof here was already made by a stage above; nothing is looked up for it.
+        term_matches = _term_matches(
+            analysis,
+            text_found=text_found,
+            files_found=proven,
+            names_found=proven_names | symbols_found,
+            names_looked_up=suppressed is None,
+        )
 
         semantic, semantic_used, semantic_detail = self._stage_semantic(
             question,
@@ -319,6 +340,7 @@ class Retriever:
                 ),
                 suppression=suppressed,
                 seed_entity_ids=tuple(entity_ids),
+                term_matches=term_matches,
             )
 
         with Stopwatch("fuse", candidates_in=incoming) as watch:
@@ -399,6 +421,7 @@ class Retriever:
             evidence=evidence,
             suppression=suppressed,
             seed_entity_ids=tuple(entity_ids),
+            term_matches=term_matches,
         )
 
     # -- stages --------------------------------------------------------------
@@ -410,12 +433,18 @@ class Retriever:
         stages: list[StageTiming],
         *,
         path_prefix: str | None = None,
-    ) -> list[EvidenceCandidate]:
-        """Literal terms, verified by substring. Deterministic by construction."""
+    ) -> tuple[list[EvidenceCandidate], set[str]]:
+        """Literal terms, verified by substring. Deterministic by construction.
+
+        Also returns the terms that matched, which is a fact about each term the
+        candidate list alone cannot carry once the terms share it.
+        """
+        found: set[str] = set()
         with Stopwatch("exact") as watch:
             hits: list[EvidenceCandidate] = []
             for term in literal_terms:
                 for scope in scopes:
+                    before = len(hits)
                     hits.extend(
                         self._chunk_candidate(
                             hit,
@@ -432,10 +461,12 @@ class Retriever:
                             term, scope, self._limits.per_source, path_prefix=path_prefix
                         )
                     )
+                    if len(hits) > before:
+                        found.add(term)
             watch.candidates_out = len(hits)
             watch.detail = f"{len(literal_terms)} literal term(s) in content"
         stages.append(_recorded(watch))
-        return hits
+        return hits, found
 
     def _stage_lexical(
         self,
@@ -551,6 +582,7 @@ class Retriever:
         named_hits: list[EntityHit] | None = None,
         named_ms: float = 0.0,
         path_prefix: str | None = None,
+        named_found: set[str] | None = None,
     ) -> tuple[list[EvidenceCandidate], list[int]]:
         """Entity lookup. An exact name match is a fact; a fuzzy one is a lead.
 
@@ -658,6 +690,8 @@ class Retriever:
                     # and expansion labels everything it reaches DETERMINISTIC.
                     entity_ids.append(hit.entity_id)
                     by_name += 1
+                    if named_found is not None and hit.matched_term:
+                        named_found.add(hit.matched_term)
                 else:
                     by_recall += 1
                 if hit.path is None or hit.line_start is None:
@@ -1146,6 +1180,82 @@ def _file_reason(hit: FileHit) -> str:
     if hit.specificity == 1:
         return f"file path ends with {hit.term}"
     return f"file name is {hit.term}"
+
+
+def _term_matches(
+    analysis: QueryAnalysis,
+    *,
+    text_found: set[str],
+    files_found: set[str],
+    names_found: set[str],
+    names_looked_up: bool,
+) -> tuple[TermMatch, ...]:
+    """What the exact lookups established for each term the question named.
+
+    Three groups, each reported with exactly the lookups it went through:
+
+    * a **literal term** was searched in text, as a file path and as an entity
+      name, all before suppression was decided;
+    * an **HTTP key** was looked up as an entity key;
+    * any **other name** the question spelled as one — a compound ``PascalCase``
+      token, a word a naming phrase introduced, a one-token question — was
+      looked up as an entity name by the symbol stage, which does not run under
+      suppression, and as a file name when it was among the words file lookup took.
+
+    Prose words the question merely used are not reported: they were never
+    claimed to be names, and "not found" would be a claim about them.
+    """
+    terms = set(analysis.terms)
+    matches: list[TermMatch] = []
+    seen: set[str] = set()
+
+    for term in analysis.literal_terms:
+        seen.add(term)
+        if term in files_found or term in names_found:
+            state = TermState.EXACT
+        elif term in text_found:
+            state = TermState.TEXT_ONLY
+        else:
+            state = TermState.NOT_FOUND
+        matches.append(
+            TermMatch(
+                term=term,
+                state=state,
+                lookups=(TermLookup.TEXT, TermLookup.FILE_PATH, TermLookup.ENTITY_NAME),
+            )
+        )
+
+    for key in analysis.http_keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        matches.append(
+            TermMatch(
+                term=key,
+                state=TermState.EXACT if key in names_found else TermState.NOT_FOUND,
+                lookups=(TermLookup.ENTITY_KEY,),
+            )
+        )
+
+    if names_looked_up:
+        for name in analysis.symbol_names:
+            if name in seen:
+                continue
+            seen.add(name)
+            by_file = name in terms
+            exact = name in names_found or (by_file and name in files_found)
+            matches.append(
+                TermMatch(
+                    term=name,
+                    state=TermState.EXACT if exact else TermState.NOT_FOUND,
+                    lookups=(
+                        (TermLookup.FILE_PATH, TermLookup.ENTITY_NAME)
+                        if by_file
+                        else (TermLookup.ENTITY_NAME,)
+                    ),
+                )
+            )
+    return tuple(matches)
 
 
 def _recorded(watch: Stopwatch) -> StageTiming:
