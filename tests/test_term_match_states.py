@@ -224,6 +224,32 @@ def test_the_agents_question_answers_every_named_term_and_no_prose_word(
     assert "table" not in terms and "credentials" not in terms
 
 
+@pytest.mark.parametrize(
+    ("within_path", "suppressed", "reset_password"),
+    [
+        (None, False, TermState.EXACT),
+        # Only `resetPasswordAllowed` is under docs, and that text keeps it open.
+        ("docs", False, TermState.TEXT_ONLY),
+        # Nothing it named is under apps, and every lookup that says so finished.
+        ("apps", True, TermState.NOT_FOUND),
+    ],
+)
+def test_the_agents_question_is_suppressed_only_on_completed_negatives(
+    identity: Workspace, within_path: str | None, suppressed: bool, reset_password: TermState
+) -> None:
+    question = (
+        "password_resets table resetPassword logoutUser credentials createdDate "
+        "reset-requests reset-completions"
+    )
+    response = _search(identity, question, within_path=within_path)
+    assert (response.suppressed is not None) is suppressed
+    terms = {m.term: m for m in response.terms}
+    assert terms["resetPassword"].state is reset_password
+    for term in ("password_resets", "logoutUser", "createdDate", "reset-requests"):
+        assert terms[term].checks == NOWHERE
+    assert all(INCOMPLETE not in m.checks.values() for m in response.terms)
+
+
 # -- text, and a lookup that never ran ---------------------------------------
 
 
@@ -357,8 +383,9 @@ def crowded(workspace: Workspace, tmp_path: Path) -> Iterator[Workspace]:
     Every lookup a term state reads is bounded, and three of them are shared by
     every term in the question. Each package here holds an ``index.ts`` (a basename
     35 files share), a ``handle_event`` (an entity name 35 declarations share) and
-    a lowercase ``api_key`` (which a case-insensitive text prefilter cannot tell
-    from ``API_KEY``). The rare names live in ``src/`` and ``zzz/``, behind them.
+    a lowercase ``api_key`` (a case variant of ``API_KEY``, which a text lookup
+    bounded before it checks case would fill its limit with). The rare names live
+    in ``src/`` and ``zzz/``, behind them.
     """
     root = tmp_path / "repos"
     repo = root / CROWDED
@@ -406,16 +433,20 @@ def test_a_file_name_crowded_out_of_a_shared_lookup_is_still_exact(crowded: Work
     assert terms["target.md"].state is TermState.EXACT
 
 
-def test_a_text_lookup_cut_off_by_its_limit_establishes_nothing(crowded: Workspace) -> None:
-    """``API_KEY`` is in ``zzz/NOTES.md``; the rows the lookup read held ``api_key``.
+def test_a_text_lookup_reaches_the_exact_spelling_behind_its_near_misses(
+    crowded: Workspace,
+) -> None:
+    """``API_KEY`` is in ``zzz/NOTES.md``, behind 35 chunks that hold ``api_key``.
 
-    The text lookup stops at its limit before case-exact verification, so here it
-    read 30 case-insensitive near misses and never reached the real occurrence.
-    That is an incomplete lookup, and the state must not call the term absent.
+    The text lookup used to bound a case-insensitive prefilter and check case
+    afterwards, so it read 30 near misses, never reached the real occurrence, and
+    could only report itself incomplete. It bounds exact matches now, and finds
+    it. A lookup that does stop short still establishes nothing; that, and the
+    suppression it must not decide, is held in ``test_exact_text_lookup``.
     """
     match = _crowded_terms(crowded, "API_KEY")["API_KEY"]
-    assert match.checks[TEXT] is INCOMPLETE
-    assert match.state is TermState.NOT_ESTABLISHED
+    assert match.checks == {TEXT: MATCH, FILE_PATH: NO_MATCH, ENTITY_NAME: NO_MATCH}
+    assert match.state is TermState.TEXT_ONLY
 
 
 # -- presentation -------------------------------------------------------------

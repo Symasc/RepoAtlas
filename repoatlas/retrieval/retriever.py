@@ -276,9 +276,12 @@ class Retriever:
 
         # A question that names something specific and does not find it is not
         # answered by anything associative. Decided once, here, and honoured by
-        # every stage that follows. See _suppress_associative.
+        # every stage that follows. See _suppress_associative. A definite term a
+        # full shared lookup crowded out is asked alone first, because the
+        # decision may rest only on lookups that finished.
+        self._settle_crowded(proofs, set(definite_terms), scopes, path_prefix=path_prefix)
         suppressed = self._suppress_associative(
-            definite_terms, exact, proven, proven_names, path_prefix=path_prefix
+            definite_terms, exact, proven, proven_names, path_prefix=path_prefix, proofs=proofs
         )
 
         lexical = self._stage_lexical(
@@ -891,14 +894,20 @@ class Retriever:
         entity tables — no source text is read — and they run only for a term that
         a *full* lookup left without a match, so a question whose lookups came back
         short of their limits asks nothing more.
+
+        A term asked here is no longer crowded: its answer is complete either way.
+        Suppression settles the definite terms before it decides, and the per-term
+        answer settles the rest afterwards, so no term is asked twice.
         """
         for term in sorted((proofs.files_crowded & reported) - proofs.files_found):
+            proofs.files_crowded.discard(term)
             if any(
                 self._search.find_files_by_path([term], scope, 1, path_prefix=path_prefix)
                 for scope in scopes
             ):
                 proofs.files_found.add(term)
         for term in sorted((proofs.names_crowded & reported) - proofs.names_found):
+            proofs.names_crowded.discard(term)
             if any(
                 self._search.find_entities_by_name([term], scope, 1, path_prefix=path_prefix)
                 for scope in scopes
@@ -913,6 +922,7 @@ class Retriever:
         proven_names: set[str] | None = None,
         *,
         path_prefix: str | None = None,
+        proofs: _TermProofs | None = None,
     ) -> SuppressionOutcome | None:
         """Whether every associative source would be answering a different question.
 
@@ -945,6 +955,13 @@ class Retriever:
         function: a config key coincidentally called ``retries`` exists, and it
         still must not make "connection pool exhausted after 30 retries" look
         answerable.
+
+        And absence has one proof only: every lookup of the term ran to completion
+        and matched nothing. ``proofs`` says which did. A text lookup that stopped
+        at its bound, or a shared lookup that filled before it reached the term, has
+        not shown the term absent, and one such term keeps the question open — its
+        per-term state then reports what was not established, rather than this
+        sentence reporting it absent.
         """
         if not literal_terms or exact:
             return None
@@ -960,6 +977,8 @@ class Retriever:
         # Without this, one run returned the entity as an exact match and, in the
         # same breath, reported its name absent.
         if proven_names and any(term in proven_names for term in literal_terms):
+            return None
+        if proofs is not None and not all(proofs.absent(term) for term in literal_terms):
             return None
         named = ", ".join(literal_terms[:3])
         # Under a path scope the lookups that failed were confined to it, so the
@@ -1324,6 +1343,22 @@ class _TermProofs:
         self.names_found |= found
         if len(hits) >= limit:
             self.names_crowded.update(term for term in asked if term not in found)
+
+    def absent(self, term: str) -> bool:
+        """Whether every lookup of ``term`` ran to completion and matched nothing.
+
+        Read from the same records as the per-term answer, so suppression and the
+        term's state cannot disagree. A lookup never asked, one cut off at its
+        limit, and one a full shared lookup crowded out that has not been asked
+        alone since, each establish nothing.
+        """
+        outcomes = (
+            _text_outcome(term, self),
+            _outcome(term, self.files_asked, self.files_found),
+            _outcome(term, self.names_asked, self.names_found),
+        )
+        unsettled = term in self.files_crowded or term in self.names_crowded
+        return not unsettled and all(outcome is LookupOutcome.NO_MATCH for outcome in outcomes)
 
 
 def _reported_terms(analysis: QueryAnalysis) -> set[str]:
