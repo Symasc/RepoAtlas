@@ -127,6 +127,7 @@ from repoatlas.capabilities.sync import (
 )
 from repoatlas.capabilities.verification import (
     CitationOutcome,
+    neutralized,
     projected_answer,
     resolve_citation,
     sanitized_answer,
@@ -1219,6 +1220,36 @@ class CapabilityService:
                         detail="a claim with no citation has no provenance to check",
                     )
                 )
+
+        # A claim whose citations every one resolved, and which V1 removed anyway.
+        # The adapter handed V1 that claim with resolvable evidence at coordinates
+        # it had already verified, so the prose rule is the only thing left that
+        # can have removed it: the statement named a repository object — a file, a
+        # line or a route — this investigation was never supplied. Which claim it
+        # was is the whole value of the finding, so it carries its index; not a
+        # word of the statement is repeated, for the same reason the count below
+        # quotes nothing.
+        surviving: dict[str, int] = {}
+        for hypothesis in report.answer.hypotheses:
+            surviving[hypothesis.statement] = surviving.get(hypothesis.statement, 0) + 1
+        for claim_index, claim in enumerate(answer.claims):
+            decided = [outcomes[(claim_index, index)] for index in range(len(claim.citations))]
+            if not decided or not all(outcome.admitted for outcome in decided):
+                continue
+            projected = neutralized(claim.statement, routes)
+            if surviving.get(projected, 0):
+                surviving[projected] -= 1
+                continue
+            findings.append(
+                GroundingFinding(
+                    code=GroundingFindingCode.PROSE_REFERENCE_NOT_SUPPLIED,
+                    claim_index=claim_index,
+                    detail=(
+                        "the statement named a repository, file, line or route this "
+                        "investigation never supplied"
+                    ),
+                )
+            )
 
         # Everything V1 removed that was not a claim: the summary, an unknown, or
         # the next check, each because it named a repository object nobody
