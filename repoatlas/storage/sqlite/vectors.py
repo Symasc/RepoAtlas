@@ -19,6 +19,7 @@ import numpy as np
 
 from repoatlas.storage.protocols import VectorHit
 from repoatlas.storage.sqlite.database import Database
+from repoatlas.storage.sqlite.search import path_scope
 
 #: Vectors are stored as float16 — half the space, and the precision loss is far
 #: below the resolution at which cosine ranks differ.
@@ -139,8 +140,14 @@ class SqliteVectorIndex:
         repo_ids: Sequence[int] | None = None,
         limit: int = 30,
         floor: float = 0.0,
+        *,
+        path_prefix: str | None = None,
     ) -> list[VectorHit]:
-        """Nearest chunks by cosine similarity, scoped before scoring."""
+        """Nearest chunks by cosine similarity, scoped before scoring.
+
+        A ``path_prefix`` is part of that scope: chunks outside it are never scored,
+        so a nearer neighbour elsewhere cannot take a place in the top ``limit``.
+        """
         if not len(vector):
             return []
 
@@ -162,6 +169,7 @@ class SqliteVectorIndex:
             placeholders = ",".join("?" * len(repo_ids))
             sql += f" AND c.repo_id IN ({placeholders})"
             params.extend(repo_ids)
+        sql += path_scope("f", path_prefix, params)
 
         rows = self._db.execute(sql, tuple(params)).fetchall()
         if not rows:

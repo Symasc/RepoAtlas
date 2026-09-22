@@ -14,7 +14,21 @@ from repoatlas.models import http
 _QUOTED = re.compile(r"[\"'`]([^\"'`]{2,})[\"'`]")
 _ENV_VAR = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
 _DOTTED = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b")
-_PATHLIKE = re.compile(r"\b[\w./-]+\.(?:py|ts|tsx|js|sh|rb|sls|ya?ml|json|toml)\b")
+#: A file path the question spells out, recognised by its extension.
+#:
+#: The extensions are every one discovery detects a language for, plus the
+#: documentation a repository keeps beside its code. The list used to stop at a
+#: handful of source formats, so ``docs/ARCHITECTURE.md`` was never read as a path
+#: at all: only its basename reached file lookup, where a basename earns no rank
+#: anchor, and the document the user named came seventh behind files that merely
+#: mention it. Every indexed text file is inspectable whatever its extension; this
+#: only decides which spellings a question is taken to have *named* as a path.
+_PATHLIKE = re.compile(
+    r"\b[\w./-]+\.(?:"
+    r"py|pyi|ts|tsx|mts|cts|js|jsx|mjs|cjs|sh|bash|zsh|rb|rake|gemspec|sls|jinja2?|j2"
+    r"|ya?ml|json|toml|md|markdown|mdx|rst|txt"
+    r")\b"
+)
 _IDENTIFIER = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b")
 
 #: A scoped npm package: `@company/common`. Unambiguous — English prose does not
@@ -202,6 +216,11 @@ class QueryAnalysis:
     #: content stage, do not name files, and never decide suppression — they only
     #: qualify a token for exact *entity-name* lookup. See :attr:`symbol_terms`.
     symbol_names: tuple[str, ...] = ()
+    #: The pieces of a one-token question that :attr:`symbol_names` carries only
+    #: *because* the question is one token — ``api`` and ``config`` of
+    #: ``api/config.py``. They are looked up as entity names like any other symbol
+    #: name; they are not names the question gave, so nothing reports them as such.
+    token_parts: tuple[str, ...] = ()
     terms: tuple[str, ...] = field(default=())
     #: Exact HTTP route, deployment and endpoint keys the question spells out —
     #: ``GET /users`` is ``http-route:GET:/users`` (see :mod:`repoatlas.models.http`).
@@ -405,6 +424,9 @@ def analyze(question: str) -> QueryAnalysis:
     # same pieces would be prose.
     lone = (stripped, *identifiers) if stripped and _WORD_RUN.fullmatch(stripped) else ()
     symbol_names = tuple(dict.fromkeys((*pascal, *cued, *lone)))
+    token_parts = tuple(
+        dict.fromkeys(part for part in lone[1:] if part not in (stripped, *pascal, *cued))
+    )
 
     return QueryAnalysis(
         text=question,
@@ -418,6 +440,7 @@ def analyze(question: str) -> QueryAnalysis:
         ambiguous_packages=ambiguous,
         pasted_literals=pasted,
         symbol_names=symbol_names,
+        token_parts=token_parts,
         terms=terms,
         http_keys=http.query_keys(question),
     )

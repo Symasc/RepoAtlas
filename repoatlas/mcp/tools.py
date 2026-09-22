@@ -95,7 +95,19 @@ SEARCH = ToolSpec(
         "record every supplied span in an investigation so that it can be cited "
         "afterwards. Returns source text already admitted to the index; it consults "
         "no model, reaches no network, and invents nothing. Omit investigation_id to "
-        "begin an investigation; echo the one that comes back to continue it."
+        "begin an investigation; echo the one that comes back to continue it. An item "
+        "with declaration true is the declaration RepoAtlas recorded, not source, and "
+        "has no line range; to read that definition's source with citable lines, pass "
+        "its entity.key to repoatlas_inspect as target.entity_key. A file item with "
+        "empty text is inspected the same way. terms says, for each identifier or path "
+        "the question names, what each exact lookup established in the scope searched: "
+        "checks maps text, file_path and entity_name (entity_key for an HTTP route) to "
+        "match, no_match, incomplete or not_checked. state is not_found only when every "
+        "relevant lookup ran to completion and found nothing, and not_established when "
+        "one did not run or did not finish; not_found describes that indexed scope, not "
+        "the whole repository. Set within_path to search one directory or file of the "
+        "repository, and presentation to compact to receive the same evidence with "
+        "repeated metadata written once."
     ),
     request=SearchRequest,
     capability="search",
@@ -109,7 +121,10 @@ INSPECT = ToolSpec(
         "Progressively inspect source that RepoAtlas already admitted to its index, "
         "and record what is handed over in an investigation. A path with no indexed "
         "file is refused rather than read from disk, so files the admission policy "
-        "excludes stay excluded."
+        "excludes stay excluded. Target an entity key from search to receive that "
+        "definition's whole recorded span plus context_lines on each side, as citable "
+        "lines; target a repository-relative path you were given or found, such as a "
+        "document like docs/ARCHITECTURE.md, to read that file."
     ),
     request=InspectRequest,
     capability="inspect",

@@ -36,14 +36,21 @@ from __future__ import annotations
 
 import enum
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from repoatlas.models.capability import AppliedBudget, CapabilityContext, EvidenceBudget
+from repoatlas.models.capability import (
+    PRESENTATION_DESCRIPTION,
+    AppliedBudget,
+    CapabilityContext,
+    EvidenceBudget,
+    Presentation,
+)
 from repoatlas.models.capability_io import ContextView, EntityHandle, EvidenceItem
 from repoatlas.models.evidence import RetrievalTrace
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
+from repoatlas.models.inspection import validate_path_shape
 from repoatlas.models.investigation import LedgerSummary
-from repoatlas.models.retrieval import SuppressionOutcome
+from repoatlas.models.retrieval import SuppressionOutcome, TermMatch
 
 
 class SearchMode(enum.StrEnum):
@@ -82,12 +89,56 @@ class SearchRequest(BaseModel):
     #: read per repository; ``LIVE`` adds a git invocation per repository, which a
     #: retrieval call should not pay for unless asked.
     depth: FreshnessDepth = FreshnessDepth.STORED
+    #: A path scope inside the one repository the context names. Published with a
+    #: description because an agent choosing whether to narrow a search reads the
+    #: schema, not this comment, and the two properties that matter — it is applied
+    #: before any candidate limit, and it never widens the repository scope — are
+    #: exactly what it would otherwise have to guess.
+    within_path: str | None = Field(
+        default=None,
+        description=(
+            "Search only at or beneath this repository-relative path: a directory "
+            "such as `services/identity` (a trailing slash is optional) or one file. "
+            "It matches whole path segments, so `services/identity` never matches "
+            "`services/identity-client`. Requires `scope: repository`; it narrows that "
+            "repository and never reaches another. Every retrieval stage applies it "
+            "before its candidate limits, so matches elsewhere cannot crowd out matches "
+            "here. A path with no indexed file at or beneath it is refused with "
+            "FILE_NOT_INDEXED. Environment variables, packages and HTTP operations have "
+            "no location, so they are not returned under a path scope; search without "
+            "one to obtain those handles."
+        ),
+    )
+    #: How the response is written out. The capability runs identically either way.
+    presentation: Presentation = Field(
+        default=Presentation.FULL, description=PRESENTATION_DESCRIPTION
+    )
 
     @field_validator("question")
     @classmethod
     def _question_is_not_blank(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("question must not be empty")
+        return value
+
+    @field_validator("within_path")
+    @classmethod
+    def _within_path_is_repository_relative(cls, value: str | None) -> str | None:
+        """Refuse a path that is not inside a repository, before anything is searched.
+
+        The same first gate inspection applies to a path target: absolute paths,
+        drive letters, ``..`` segments and NUL are malformed requests rather than
+        lookups that find nothing. A path that reduces to nothing (``.``, ``./``)
+        names the whole repository, which is what omitting the field already means.
+        """
+        if value is None:
+            return None
+        validate_path_shape(value)
+        if not [part for part in value.replace("\\", "/").split("/") if part not in ("", ".")]:
+            raise ValueError(
+                "within_path must name a file or directory inside the repository; "
+                "omit it to search the whole repository"
+            )
         return value
 
 
@@ -147,3 +198,21 @@ class SearchResponse(BaseModel):
     entities: tuple[EntityHandle, ...] = ()
     #: The investigation's ledger after this call.
     ledger: LedgerSummary
+    #: The path scope this search was confined to, in the spelling the index
+    #: stores (``services/identity``), or ``None`` when the whole repository scope
+    #: was searched. Echoed so that a response read without its request still says
+    #: that "nothing matched" meant "nothing matched *here*".
+    within_path: str | None = None
+    #: For each identifier, path or key the question named, what the exact
+    #: lookups established about it in the coverage searched: per lookup in
+    #: ``checks`` (``match``, ``no_match``, ``incomplete`` or ``not_checked``), and
+    #: summarised in ``state``.
+    #:
+    #: The answer an existence question needs and the evidence list cannot give:
+    #: evidence is ranked and budgeted, so a term's absence from twelve items says
+    #: nothing. A negative here is only ever one a lookup established — ``not_found``
+    #: needs every relevant lookup to have run to completion, and anything less is
+    #: ``not_established``. They are still claims about the *index* — see
+    #: :class:`~repoatlas.models.retrieval.TermMatch`. Words the question merely used
+    #: are not listed.
+    terms: tuple[TermMatch, ...] = ()
