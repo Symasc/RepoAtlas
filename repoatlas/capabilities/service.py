@@ -50,6 +50,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
+from repoatlas.capabilities import http_inventory
 from repoatlas.capabilities.budget import (
     BudgetCeiling,
     apply_budget_policy,
@@ -144,6 +145,7 @@ from repoatlas.errors import (
 )
 from repoatlas.freshness import index_freshness
 from repoatlas.graph.keys import is_positional
+from repoatlas.graph.linker import plan_repository_http
 from repoatlas.graph.traversal import CROSS_REPOSITORY_EDGES, WalkResult, WalkStep, walk
 from repoatlas.grounding import GroundingReport, ground_answer
 from repoatlas.indexing.chunking import chunk_hash
@@ -171,6 +173,12 @@ from repoatlas.models.dependency_inventory import (
 )
 from repoatlas.models.evidence import EvidenceSource, EvidenceTier, MatchClass
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
+from repoatlas.models.http_inventory import (
+    HttpOperation,
+    HttpOperationsRequest,
+    HttpOperationsResponse,
+    OperationBasis,
+)
 from repoatlas.models.inspection import (
     Coverage,
     InspectedFile,
@@ -953,6 +961,104 @@ class CapabilityService:
                 limits=limits,
             )
 
+    def http_operations(self, request: HttpOperationsRequest) -> HttpOperationsResponse:
+        """The HTTP operations one repository's indexed source makes or serves.
+
+        A static inventory, and deliberately nothing more. Each row is a request the
+        source writes or a route it serves or declares, with its location and a
+        status measured against **this repository's indexed facts only**: whether
+        a route indexed as served here has the request's method and shape. That is
+        route compatibility. It is not which host a client is configured for, not
+        which deployment answers, and not who owns the data — none of which static
+        reading establishes — and ``basis`` says so in every response.
+
+        The repository is replanned from its standing claims on every call rather
+        than read from stored outcomes, with the same function the global link pass
+        uses: every rule that pass applies to HTTP claims is repository-local, so
+        the replan is exactly that repository's share of it. A replan that disagrees
+        with the stored graph is still answered, and marked.
+
+        Filters narrow the rows returned, never what is known: the whole repository
+        is planned first, so a path filter cannot make a call look unhandled by
+        hiding the route it matches.
+        """
+        with self._operation():
+            registered = self._workspace.repositories.list_all()
+            # Before any investigation exists, so a rejected context or a
+            # malformed request leaves no session behind.
+            resolution = resolve_context(request.context, registered)
+            if (
+                resolution.scope is not CapabilityScope.REPOSITORY
+                or len(resolution.repositories) != 1
+            ):
+                raise ContextResolutionError(
+                    "the HTTP inventory needs a repository scope",
+                    detail=(
+                        "Name the one repository to list: every status in it speaks "
+                        "for that repository's indexed source only."
+                    ),
+                    reason=ContextFailure.AMBIGUOUS,
+                    candidates=tuple(sorted(repo.slug for repo in resolution.repositories)),
+                )
+            repository = resolution.repositories[0]
+            prefix = _search_path(request.within_path, resolution)
+            limits = http_inventory.page_limits_for(request)
+
+            existing = request.investigation_id is not None
+            session = (
+                self._sessions.get(request.investigation_id)
+                if request.investigation_id is not None
+                else self._sessions.create()
+            )
+
+            try:
+                # The claims, the replan, the edges and the chunks any evidence is
+                # quoted from are one indexed snapshot or nothing: a sync landing
+                # mid-call could otherwise pair a decision from before it with a
+                # location from after.
+                with self._workspace.database.read_snapshot():
+                    if prefix is not None and not self._workspace.search.has_files_under(
+                        resolution.repository_ids, prefix
+                    ):
+                        raise FileNotIndexedError("no indexed file stands at or beneath that path")
+                    inventory = self._http_inventory(repository)
+                    chosen = http_inventory.selected(inventory.drafts, request, prefix)
+                    page = http_inventory.cut_page(
+                        chosen,
+                        request.cursor,
+                        identity=http_inventory.request_digest(request, repository.slug, prefix),
+                        inventory=http_inventory.inventory_digest(chosen),
+                        limits=limits,
+                    )
+                    supplies = (
+                        self._http_operation_supplies(repository, page.rows)
+                        if request.include_provenance
+                        else []
+                    )
+                # The single atomic point. A capacity refusal raises here having
+                # allocated nothing and strengthened nothing.
+                entries = session.ledger.record([supply.proposed for supply in supplies])
+            except BaseException:
+                # A session this call invented, which never got to hold anything,
+                # is not left behind as a ghost an agent could be handed the id of.
+                if not existing and len(session.ledger) == 0:
+                    self._sessions.drop(session.id)
+                raise
+
+            return self._http_operations_response(
+                request=request,
+                resolution=resolution,
+                session=session,
+                repository=repository,
+                inventory=inventory,
+                chosen=chosen,
+                page=page,
+                supplies=supplies,
+                entries=entries,
+                limits=limits,
+                prefix=prefix,
+            )
+
     def verify_grounding(self, request: VerifyGroundingRequest) -> VerifyGroundingResponse:
         """Check an answer's citations against the evidence this investigation supplied.
 
@@ -1463,6 +1569,168 @@ class CapabilityService:
                     after=package_key(page.packages[-1]),
                 )
                 if page.has_more and page.packages
+                else None
+            ),
+            has_more=page.has_more,
+            limits=limits,
+            ledger=session.ledger.summary(),
+        )
+
+    def _http_inventory(self, repository: Repository) -> http_inventory.Inventory:
+        """Replan one repository and read what its rows need. Inside the snapshot."""
+        assert repository.id is not None
+        knowledge = self._workspace.knowledge
+        planned = plan_repository_http(knowledge, repository.id)
+        edges = knowledge.list_http_edges(repository.id)
+        wanted = {claim.src_id for claim in planned.claims}
+        return http_inventory.build_inventory(
+            plan=planned.plan,
+            claims=planned.claims,
+            entities=knowledge.keys_for_entities(sorted(wanted)),
+            files=planned.files,
+            index=planned.index,
+            edges=edges,
+            parsers=dict(knowledge.list_file_parsers(repository.id)),
+        )
+
+    def _http_operation_supplies(
+        self, repository: Repository, rows: Sequence[HttpOperation]
+    ) -> list[ProvenanceSupply]:
+        """Supply each returned row's own lines, whole or not at all.
+
+        The lines where the request is written or the route declared, reconstructed
+        from indexed chunks and never from the working tree, because the row was
+        planned from the indexed snapshot. A span the chunks do not cover in full
+        is not quoted: a prefix of a call could cut off the very path it names.
+        What the lines do not show — a helper default, a prefix, the server's
+        spelling — is not in them, and the row's ``composed`` says so.
+        """
+        assert repository.id is not None
+        wanted: dict[str, list[tuple[int, int]]] = {}
+        for row in rows:
+            if row.path is None or row.line_start is None or row.line_end is None:
+                continue
+            spans = wanted.setdefault(row.path, [])
+            if (row.line_start, row.line_end) not in spans:
+                spans.append((row.line_start, row.line_end))
+        supplies: list[ProvenanceSupply] = []
+        states = self._workspace.files.states_for(repository.id, sorted(wanted))
+        for path in sorted(wanted):
+            state = states.get(path)
+            if state is None:
+                continue
+            chunks = self._workspace.knowledge.chunks_for_file(state.file_id, 1, WHOLE_FILE_END)
+            available = indexed_line_map(chunks) if chunks else {}
+            for line_start, line_end in sorted(wanted[path]):
+                numbers = range(line_start, line_end + 1)
+                if line_end < line_start or any(n not in available for n in numbers):
+                    continue
+                text = LINE_SEPARATOR.join(available[number] for number in numbers)
+                supplies.append(
+                    ProvenanceSupply(
+                        proposed=ProposedEvidence(
+                            ref=EvidenceRef(
+                                repository_slug=repository.slug,
+                                path=path,
+                                line_start=line_start,
+                                line_end=line_end,
+                                span_digest=chunk_hash(text),
+                                file_content_hash=state.content_hash,
+                                indexed_facts_version=state.parser_version,
+                            ),
+                            repository_name=repository.name,
+                            tier=EvidenceTier.DETERMINISTIC,
+                            # Reached by structure from the repository the caller
+                            # named, not by matching any text of the question.
+                            match=MatchClass.RELATED,
+                            origin=EvidenceSource.HTTP_OPERATION,
+                            reason=(
+                                f"HTTP operation as written at "
+                                f"{repository.slug}/{path}:{line_start}-{line_end}"
+                            ),
+                            text_length=len(text),
+                        ),
+                        text=text,
+                    )
+                )
+        return supplies
+
+    def _http_operations_response(
+        self,
+        *,
+        request: HttpOperationsRequest,
+        resolution: ContextResolution,
+        session: InvestigationSession,
+        repository: Repository,
+        inventory: http_inventory.Inventory,
+        chosen: Sequence[http_inventory.Draft],
+        page: http_inventory.Page,
+        supplies: Sequence[ProvenanceSupply],
+        entries: tuple[LedgerEntry, ...],
+        limits: AppliedPageLimits,
+        prefix: str | None,
+    ) -> HttpOperationsResponse:
+        """Bind recorded evidence to the rows whose lines it is, then answer."""
+        ids: dict[tuple[str, int, int], str] = {}
+        items: list[EvidenceItem] = []
+        for rank, (supply, entry) in enumerate(zip(supplies, entries, strict=True), start=1):
+            ref = supply.proposed.ref
+            assert ref.line_start is not None and ref.line_end is not None
+            ids[(ref.path, ref.line_start, ref.line_end)] = entry.id
+            items.append(
+                EvidenceItem(
+                    id=entry.id,
+                    # Supply order only: nothing was searched, so nothing is ranked.
+                    rank=rank,
+                    ref=ref,
+                    repository_name=supply.proposed.repository_name,
+                    location=ref.location,
+                    text=supply.text,
+                    why=supply.proposed.reason,
+                    tier=supply.proposed.tier,
+                    match=supply.proposed.match,
+                    status=entry.status,
+                )
+            )
+        rows = [
+            row.model_copy(update={"evidence_id": evidence_id})
+            if row.path is not None
+            and row.line_start is not None
+            and row.line_end is not None
+            and (evidence_id := ids.get((row.path, row.line_start, row.line_end)))
+            else row
+            for row in page.rows
+        ]
+        facts = current_facts_version(self._workspace)
+        freshness = index_freshness(
+            [
+                repository_freshness_for(self._workspace, repo, depth=request.depth, facts=facts)
+                for repo in resolution.repositories
+            ],
+            depth=request.depth,
+        )
+        return HttpOperationsResponse(
+            investigation_id=session.id,
+            context=ContextView(
+                context=request.context,
+                scope=resolution.scope,
+                repositories=tuple(sorted(repo.slug for repo in resolution.repositories)),
+                primary=resolution.primary.slug if resolution.primary else None,
+                reason=resolution.reason,
+            ),
+            basis=OperationBasis(repository=repository.slug),
+            summary=http_inventory.summarize(chosen),
+            operations=tuple(rows),
+            coverage=http_inventory.coverage(
+                inventory, http_inventory.in_scope(inventory.drafts, prefix), prefix
+            ),
+            evidence=tuple(items),
+            freshness=freshness,
+            next_cursor=(
+                http_inventory.encode_cursor(
+                    request=page.identity, inventory=page.inventory, after=page.after
+                )
+                if page.has_more and page.after is not None
                 else None
             ),
             has_more=page.has_more,

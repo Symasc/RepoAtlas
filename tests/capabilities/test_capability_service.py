@@ -300,6 +300,7 @@ def test_the_public_callable_surface_is_only_the_intended_operations() -> None:
         "inspect",
         "relationships",
         "dependencies",
+        "http_operations",
         "verify_grounding",
         "sync",
     }

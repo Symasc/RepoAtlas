@@ -190,6 +190,10 @@ class CallDecision:
     composed: bool = False
     #: The route template read from the source, when the path had a shape.
     template: http.RouteTemplate | None = None
+    #: Route bodies this call has an edge to. A literal path always has one — its
+    #: route node exists whether or not anything here serves it — so this can
+    #: hold more than ``matched``; a shape links only where it matched.
+    linked: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,6 +335,11 @@ class _Resolver:
             if (f"{base}/package.json" if base else "package.json") in files:
                 return origin.repo_id, base
         return origin.repo_id, ""
+
+
+def package_of(index: ResolutionIndex, origin: FileRow) -> str:
+    """The directory of the nearest indexed ``package.json`` above a file, ``""`` for the root."""
+    return _Resolver(index, {}).package_of(origin)[1]
 
 
 def plan_http_claims(
@@ -783,6 +792,7 @@ def _decide(
                     candidates=tuple(route for route in under if route != body),
                     composed=not exact,
                     template=option,
+                    linked=(body,),
                 )
             )
             continue
@@ -831,6 +841,7 @@ def _decide(
                 candidates=tuple(route for route in compatible if route not in mine),
                 composed=True,
                 template=shape,
+                linked=tuple(mine),
             )
         )
     return (PROMOTED if edges else _outcome(decisions)), edges, tuple(decisions)

@@ -1,4 +1,4 @@
-"""The eight capabilities, as tool declarations. No repository intelligence.
+"""The nine capabilities, as tool declarations. No repository intelligence.
 
 Every entry here is four facts: a protocol name, a description an agent reads
 before choosing, the V2 request model that validates its arguments, and the
@@ -29,6 +29,7 @@ from pydantic import BaseModel
 
 from repoatlas.models.capability_io import RepositoriesRequest, StatusRequest
 from repoatlas.models.dependency_inventory import DependenciesRequest
+from repoatlas.models.http_inventory import HttpOperationsRequest
 from repoatlas.models.inspection import InspectRequest
 from repoatlas.models.relationships import RelationshipsRequest
 from repoatlas.models.search import SearchRequest
@@ -55,7 +56,7 @@ class ToolSpec:
     #: to a function, so this module never holds a callable that could acquire a
     #: wrapper with behaviour of its own.
     capability: str
-    #: Whether the capability may change the index. True for seven of eight;
+    #: Whether the capability may change the index. True for eight of nine;
     #: ``sync`` is the exception and is the whole of Slice I.
     read_only: bool
 
@@ -159,6 +160,25 @@ DEPENDENCIES = ToolSpec(
     read_only=True,
 )
 
+HTTP_OPERATIONS = ToolSpec(
+    name=f"{NAMESPACE}_http_operations",
+    title="List one repository's HTTP operations",
+    description=(
+        "List the HTTP operations RepoAtlas statically indexed in one repository: the "
+        "requests its source makes and the routes it serves or declares, each with its "
+        "location and a status. Statuses describe indexed facts in that repository "
+        "only: no_indexed_handler and no_indexed_caller are not proof that no "
+        "implementation or caller exists, and other repositories, unsupported syntax, "
+        "unproven mounts and unrecorded constructs are reported under coverage. A "
+        "route match shows route compatibility only, never service configuration, "
+        "deployment identity or data ownership. Reads the local index; paged, with "
+        "optional evidence."
+    ),
+    request=HttpOperationsRequest,
+    capability="http_operations",
+    read_only=True,
+)
+
 VERIFY_GROUNDING = ToolSpec(
     name=f"{NAMESPACE}_verify_grounding",
     title="Verify citations against supplied evidence",
@@ -199,6 +219,7 @@ TOOLS: tuple[ToolSpec, ...] = (
     INSPECT,
     RELATIONSHIPS,
     DEPENDENCIES,
+    HTTP_OPERATIONS,
     VERIFY_GROUNDING,
     SYNC,
 )

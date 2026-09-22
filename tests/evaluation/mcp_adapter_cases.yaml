@@ -101,6 +101,18 @@ capabilities:
       Every repository in the ecosystem declares dependencies, and a limit of 3
       is smaller than the inventory, so a page comes back full.
 
+  - id: http_operations
+    tool: repoatlas_http_operations
+    arguments: {context: {scope: repository, repository: ts-service}, limit: 3}
+    expect:
+      fields: [investigation_id, context, basis, summary, operations, coverage, limits, ledger]
+      non_empty: [basis, coverage]
+      investigation: minted
+    notes: >-
+      A repository-scoped inventory. It mints an investigation because rows can be
+      supplied as evidence, and it always carries basis and coverage, which say
+      what its statuses rest on and what could not be read.
+
   - id: verify_grounding
     tool: repoatlas_verify_grounding
     arguments: {}          # filled in from the search that precedes it
@@ -165,6 +177,14 @@ errors:
     notes: >-
       The admission policy is the capability's and the transport does not widen
       it. A secret file has no indexed row, so there is nothing to read.
+
+  - id: inventory-without-a-repository
+    tool: repoatlas_http_operations
+    arguments: {context: {scope: global}}
+    expect: {code: REPOSITORY_AMBIGUOUS, category: context, retryable: false}
+    notes: >-
+      Every status it returns speaks for one repository, so a global scope is a
+      question it cannot answer rather than one it answers across the root.
 
   - id: unknown-tool
     tool: repoatlas_ask
