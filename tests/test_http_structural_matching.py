@@ -411,6 +411,74 @@ def test_one_caller_reaching_a_route_exactly_and_by_shape_keeps_the_lines(
     }
 
 
+CHOICE = """\
+import { createRequester } from "./http";
+
+export function createLearningClient(options: ClientOptions) {
+  const { request } = createRequester(options);
+  return {
+    list: (courseId?: string) =>
+      request(schema, courseId ? `/v1/announcements?courseId=${courseId}` : "/v1/announcements"),
+  };
+}
+"""
+
+
+def test_two_spellings_of_one_route_are_one_request_through_an_imported_helper(
+    index: Index,
+) -> None:
+    """A query is not part of which route is named, so this is one call, not two.
+
+    A file that can decide such a call for itself already reads it this way. The
+    global pass decides the same call when the helper is imported, and the two
+    must not disagree — the inventory counts what the pass decided, so a second
+    decision here is a second operation an agent would go looking for.
+    """
+    workspace, _ = index({"web": {"src/http.ts": HELPER, "src/client.ts": CHOICE}})
+    [decisions] = _decisions(workspace).values()
+    assert [(d.method, d.route, d.status) for d in decisions] == [
+        ("GET", "/v1/announcements", NO_INDEXED_HANDLER)
+    ]
+
+
+EITHER = """\
+import { createRequester } from "./http";
+
+export function createCourseClient(options: ClientOptions) {
+  const { request } = createRequester(options);
+  return {
+    either: (courseId?: string) =>
+      request(schema, courseId ? `/v1/courses/${courseId}/roster` : "/v1/unserved"),
+  };
+}
+"""
+
+
+def test_two_different_paths_in_one_choice_are_each_decided_on_their_own(
+    index: Index,
+) -> None:
+    """The other half of collapsing: two routes must not become one.
+
+    Folding the alternatives together would answer the whole call with whichever
+    one happened to be read first — here, reporting a served roster and losing
+    the request that nothing serves, which is the finding worth having.
+    """
+    workspace, _ = index(
+        {
+            "courses": {
+                "src/http.ts": HELPER,
+                "src/client.ts": EITHER,
+                "src/server.ts": SERVER,
+            }
+        }
+    )
+    [decisions] = _decisions(workspace).values()
+    assert [(d.method, d.route, d.status) for d in decisions] == [
+        ("GET", "/v1/courses/${courseId}/roster", MATCHED),
+        ("GET", "/v1/unserved", NO_INDEXED_HANDLER),
+    ]
+
+
 def test_a_claim_an_older_parser_recorded_is_unresolved_rather_than_an_error(
     index: Index,
 ) -> None:
