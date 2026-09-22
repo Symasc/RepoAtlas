@@ -89,7 +89,7 @@ INSTRUCTIONS = (
 
 
 def tool_definitions() -> list[protocol.Tool]:
-    """The eight tools, with schemas derived from the request models themselves.
+    """The nine tools, with schemas derived from the request models themselves.
 
     ``model_json_schema()`` rather than a hand-written declaration, so enum
     members, numeric bounds, defaults and which fields are optional are stated
@@ -98,7 +98,7 @@ def tool_definitions() -> list[protocol.Tool]:
     accepting.
 
     No ``outputSchema`` is declared. The response models schematize cleanly, but
-    the eight of them come to roughly 124 KB against 28 KB for the inputs, and
+    all of them together come to roughly 124 KB against 28 KB for the inputs, and
     every byte of that is repeated into the tool list an agent reads before it
     asks anything. The SDK also skips its output validation for handlers that
     return a result object directly, which this one must in order to carry a
@@ -264,7 +264,7 @@ def dispatch(
 
 
 def build_server(service: CapabilityService) -> Server[object, object]:
-    """Bind the eight tools to one already-open service.
+    """Bind the nine tools to one already-open service.
 
     Exactly two handlers are registered, which is also how the handshake comes to
     advertise tools and nothing else: the SDK derives server capabilities from the

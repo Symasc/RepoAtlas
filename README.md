@@ -27,7 +27,7 @@ validated; see the checklist in [docs/V1_SPEC.md §23](docs/V1_SPEC.md#23-implem
 | Python, TypeScript/JavaScript, Bash, Salt, Jinja, YAML/JSON, Dockerfile | Ruby structure (text search and gem dependencies only) |
 | Dependency detection across pypi, npm and gem — declared *and* resolved versions | — |
 | Cross-file imports and cross-repository relationships | — |
-| HTTP routes, declared deployments and endpoints shared across repositories (OpenAPI 3, Swagger 2, FastAPI, Flask, Express, fetch, requests, httpx, axios) | route-pattern matching, OpenAPI server variables, infrastructure manifests |
+| HTTP routes, declared deployments and endpoints shared across repositories (OpenAPI 3, Swagger 2, FastAPI, Flask, Express, NestJS, fetch and request wrappers, requests, httpx, axios); client path templates matched by shape to routes served in their own repository | cross-repository template matching, direct `fetch` template matching, OpenAPI server variables, infrastructure manifests |
 | Exact search, semantic search, bounded graph expansion, rank fusion | — |
 | Docker image and compose stack, read-only repository mounts | — |
 
@@ -155,8 +155,8 @@ RepoAtlas serves its capabilities to an agent over the Model Context Protocol on
 repoatlas mcp
 ```
 
-Eight tools, all deterministic and local: `repositories`, `status`, `search`, `inspect`, `relationships`,
-`dependencies`, `verify_grounding` and `sync`. No model runs behind them and no resource or prompt is exposed, so
+Nine tools, all deterministic and local: `repositories`, `status`, `search`, `inspect`, `relationships`,
+`dependencies`, `http_operations`, `verify_grounding` and `sync`. No model runs behind them and no resource or prompt is exposed, so
 repository source is reachable only through the evidence path that records what it supplies. The agent is the
 reasoner; RepoAtlas supplies evidence and checks citations against it.
 

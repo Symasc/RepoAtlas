@@ -320,6 +320,7 @@ class EvidenceLedger:
                 allocated_at=now,
                 text_length=item.text_length,
                 declares=item.declares,
+                routes=tuple(sorted(set(item.routes))),
             )
             if current is not None:
                 plan.supersessions[current.id] = evidence_id
@@ -452,6 +453,7 @@ def _strengthen(entry: LedgerEntry, item: ProposedEvidence) -> LedgerEntry:
             "match": MatchClass(min(entry.match, item.match)),
             "origins": _sorted_origins(entry.origins, item.origin),
             "reasons": _sorted_reasons(entry.reasons, item.reason),
+            "routes": tuple(sorted({*entry.routes, *item.routes})),
         }
     )
 

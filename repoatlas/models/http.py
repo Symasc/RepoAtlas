@@ -32,6 +32,7 @@ outright rather than approximated.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -92,7 +93,9 @@ def route_path(value: str) -> str | None:
     or ``#``. Everything else is kept as written — case, a trailing slash, ``//``,
     percent-encoding, and parameter templates such as ``{id}``, ``:id`` or
     ``<int:id>``, which are literal text here and match only an identical
-    spelling. Matching a template against a concrete path is a separate feature.
+    spelling. A route key is never a pattern; matching a client's path *template*
+    against declared routes is the separate, narrower rule of
+    :func:`template_matches`.
     """
     if not value.startswith("/") or len(value) > MAX_IDENTITY_LENGTH:
         return None
@@ -279,6 +282,288 @@ def canonical_endpoint(body: str) -> str | None:
     if parsed is None or parsed.trailing or f"{parsed.origin}{parsed.path}" != url:
         return None
     return body
+
+
+# -- route templates -----------------------------------------------------------
+#
+# A client often writes its path as a template — ``/v1/courses/${courseId}/roster``
+# — which names no route key at all. What it does name is a *shape*: fixed
+# segments, and positions one value fills. Matching that shape against the routes
+# a server declares is structural and deliberately narrow:
+#
+# * a substitution is a dynamic segment only when it is the whole segment, and it
+#   fills exactly one segment. That is what "structural" means here, stated rather
+#   than hidden: a value containing ``/`` is invisible to static reading;
+# * a dynamic segment matches only a whole server parameter — ``:id``, ``{id}``,
+#   ``<id>``, ``<int:id>`` — never a literal, so ``/users/42`` still does not
+#   become ``/users/:id``, and a wildcard, a regex or an optional parameter matches
+#   nothing;
+# * literal segments compare byte for byte, like every route here.
+#
+# A template that cannot be read this way is refused with a reason code, which a
+# caller reports rather than approximates.
+
+#: Kinds of template part, as parsers serialize them: literal text, and a
+#: substitution with its (bounded) source text.
+TEMPLATE_LITERAL = "l"
+TEMPLATE_SUBSTITUTION = "s"
+#: A substitution the parser proved is empty or begins a query string —
+#: ``${params ? `?${params}` : ""}`` — so it ends the path and adds nothing to it.
+TEMPLATE_QUERY = "q"
+
+#: Why a template was refused. Stable codes: callers surface them verbatim.
+NOT_A_PATH = "not_a_path"
+MIXED_SEGMENT = "mixed_segment"
+GLUED_SUBSTITUTION = "glued_substitution"
+NO_LITERAL_SEGMENT = "no_literal_segment"
+ESCAPE_SEQUENCE = "escape_sequence"
+TRUNCATED = "truncated"
+
+#: A whole server parameter segment, in the spellings the supported frameworks
+#: and OpenAPI declare. Anything with a modifier (``:id?``, ``:id(\\d+)``) or a
+#: wildcard is not one: it may match more, or less, than one value.
+_PARAMETER = re.compile(r":[A-Za-z_$][\w$]*|\{[A-Za-z_][\w.\-]*\}|<(?:[A-Za-z_]\w*:)?[A-Za-z_]\w*>")
+
+
+def is_parameter_segment(segment: str) -> bool:
+    """Whether one path segment is exactly a declared route parameter."""
+    return _PARAMETER.fullmatch(segment) is not None
+
+
+@dataclass(frozen=True, slots=True)
+class RouteTemplate:
+    """A request path read as segments, some of which one value fills.
+
+    ``segments`` holds each segment after the leading ``/``: its literal text, or
+    ``None`` where a substitution fills it. ``expressions`` holds the source text
+    of those substitutions in order — for display only, never for matching.
+    """
+
+    segments: tuple[str | None, ...]
+    expressions: tuple[str, ...] = ()
+    #: Whether a query string, or a tail proven empty-or-query, followed the path.
+    query: bool = False
+
+    @property
+    def dynamic(self) -> bool:
+        return any(segment is None for segment in self.segments)
+
+    @property
+    def path(self) -> str | None:
+        """The literal path when no segment is dynamic, else ``None``."""
+        literal: list[str] = []
+        for segment in self.segments:
+            if segment is None:
+                return None
+            literal.append(segment)
+        return "/" + "/".join(literal)
+
+    @property
+    def display(self) -> str:
+        """``/v1/courses/${courseId}/roster``: what the source wrote, path only."""
+        expressions = iter(self.expressions)
+        return "/" + "/".join(
+            segment if segment is not None else "${" + next(expressions, "") + "}"
+            for segment in self.segments
+        )
+
+
+def _cut(text: str) -> int | None:
+    """Where a query or fragment begins in literal text, if it does."""
+    found = [index for index in (text.find("?"), text.find("#")) if index >= 0]
+    return min(found) if found else None
+
+
+def route_template(
+    parts: Sequence[Sequence[str]], *, truncated: bool = False
+) -> RouteTemplate | str:
+    """Read a template's parts as a route shape, or return why it cannot be read.
+
+    ``parts`` is the parser-neutral form: ``[kind, text]`` pairs of kinds
+    :data:`TEMPLATE_LITERAL`, :data:`TEMPLATE_SUBSTITUTION` and
+    :data:`TEMPLATE_QUERY`. The rules, each a refusal rather than a guess:
+
+    * the path starts with one literal ``/``: a leading substitution is a base
+      being composed, and ``//`` names a host (:data:`NOT_A_PATH`);
+    * a literal ``?`` or ``#`` ends the path, and so does a proven query tail; a
+      trailing substitution that is *not* proven is glued to the last segment
+      (:data:`GLUED_SUBSTITUTION`), as ``roster${query(f)}`` is;
+    * a substitution sharing its segment with anything else is
+      :data:`MIXED_SEGMENT` — ``x-${y}``, ``${a}.csv``, ``${a}${b}``;
+    * a template with no literal segment constrains nothing
+      (:data:`NO_LITERAL_SEGMENT`);
+    * an escape sequence would need decoding to be read (:data:`ESCAPE_SEQUENCE`),
+      and a template the parser had to cut short (:data:`TRUNCATED`) could match a
+      route it does not name.
+    """
+    if truncated:
+        return TRUNCATED
+    if not parts or parts[0][0] != TEMPLATE_LITERAL:
+        return NOT_A_PATH
+    head = parts[0][1] if len(parts[0]) > 1 else ""
+    if not head.startswith("/") or head.startswith("//"):
+        return NOT_A_PATH
+
+    # One entry per segment, the text before the first "/" included; each piece is
+    # literal text, or None for a substitution.
+    segments: list[list[str | None]] = [[]]
+    expressions: list[str] = []
+    query = False
+    for index, part in enumerate(parts):
+        kind = part[0]
+        value = part[1] if len(part) > 1 else ""
+        if kind == TEMPLATE_LITERAL:
+            if "\\" in value:
+                return ESCAPE_SEQUENCE
+            cut = _cut(value)
+            text = value if cut is None else value[:cut]
+            if any(char not in _PRINTABLE for char in text):
+                return NOT_A_PATH
+            pieces = text.split("/")
+            if pieces[0]:
+                segments[-1].append(pieces[0])
+            segments.extend([piece] if piece else [] for piece in pieces[1:])
+            if cut is not None:
+                query = value[cut] == "?"
+                break
+        elif kind == TEMPLATE_QUERY:
+            for rest in parts[index + 1 :]:
+                if rest[0] != TEMPLATE_LITERAL or (len(rest) > 1 and rest[1]):
+                    return GLUED_SUBSTITUTION
+            query = True
+            break
+        elif kind == TEMPLATE_SUBSTITUTION:
+            segments[-1].append(None)
+            expressions.append(value)
+        else:
+            return NOT_A_PATH
+
+    shaped: list[str | None] = []
+    real = segments[1:]
+    for position, pieces in enumerate(real):
+        if not pieces:
+            shaped.append("")
+        elif pieces == [None]:
+            shaped.append(None)
+        elif all(piece is not None for piece in pieces):
+            shaped.append("".join(piece for piece in pieces if piece is not None))
+        else:
+            tail = position == len(real) - 1 and pieces[-1] is None
+            glued = tail and all(piece is not None for piece in pieces[:-1])
+            return GLUED_SUBSTITUTION if glued else MIXED_SEGMENT
+
+    template = RouteTemplate(segments=tuple(shaped), expressions=tuple(expressions), query=query)
+    if template.dynamic and not any(segment for segment in shaped):
+        return NO_LITERAL_SEGMENT
+    if len(template.display) > MAX_IDENTITY_LENGTH:
+        return NOT_A_PATH
+    literal = template.path
+    if literal is not None and route_path(literal) != literal:
+        return NOT_A_PATH
+    return template
+
+
+def template_matches(template: RouteTemplate, path: str) -> bool:
+    """Whether a declared route ``path`` has ``template``'s shape.
+
+    Same number of segments; every literal segment byte-equal; every dynamic
+    segment against a whole declared parameter. Nothing else matches — above all
+    not a literal against a parameter, in either direction.
+    """
+    if not path.startswith("/"):
+        return False
+    declared = path[1:].split("/")
+    if len(declared) != len(template.segments):
+        return False
+    for mine, theirs in zip(template.segments, declared, strict=True):
+        if mine is None:
+            if not is_parameter_segment(theirs):
+                return False
+        elif mine != theirs:
+            return False
+    return True
+
+
+# -- routes named in prose -----------------------------------------------------
+
+#: One segment as a sentence may write it: literal text, a declared parameter in
+#: any of the four spellings, or a client template's substitution.
+_MENTION_SEGMENT = r"(?:\$\{[^/{}\s]*\}|\{[^/{}\s]+\}|<[^/<>\s]+>|:[A-Za-z_$][\w$]*|[\w.\-~%]+)"
+#: An optional method, then a rooted path of such segments.
+_MENTION = re.compile(rf"(?:\b({'|'.join(HTTP_METHODS)})\s+)?((?:/{_MENTION_SEGMENT})+)")
+#: Sentence punctuation that may end a mention without belonging to it.
+_MENTION_TRAILING = ".,;:!?)]'\"`"
+
+
+@dataclass(frozen=True, slots=True)
+class RouteMention:
+    """A route a sentence names, and where its path sits in that sentence.
+
+    The span is the **path** alone, because the method carries no character the
+    file-path reading could trip over. ``shape`` is what anchoring compares: a
+    segment is either the literal text written, or ``None`` where one value fills
+    it — which is the same reading :func:`template_matches` applies to a declared
+    route, so a mention, a client template and a handler's path are all compared
+    as the same kind of thing.
+    """
+
+    method: str | None
+    path: str
+    start: int
+    end: int
+
+    @property
+    def shape(self) -> tuple[str | None, ...]:
+        return route_shape(self.path)
+
+
+def route_shape(path: str) -> tuple[str | None, ...]:
+    """``/v1/courses/:id/roster`` → ``("v1", "courses", None, "roster")``.
+
+    A literal never becomes ``None`` and ``None`` never becomes a literal, so
+    ``/v1/users/42`` and ``/v1/users/:id`` are different shapes — the distinction
+    a supplied route must keep to be worth anchoring against.
+    """
+    if not path.startswith("/"):
+        return ()
+    segments: list[str | None] = []
+    for segment in path[1:].split("/"):
+        substitution = segment.startswith("${") and segment.endswith("}")
+        segments.append(None if substitution or is_parameter_segment(segment) else segment)
+    return tuple(segments)
+
+
+def route_mentions(text: str) -> tuple[RouteMention, ...]:
+    """Every route ``text`` names, in the order it names them.
+
+    Detection only: that a sentence *names* a route says nothing about whether the
+    route was supplied, which is a separate question with a separate answer. A
+    mention may carry a method or not, and trailing sentence punctuation is left
+    to the sentence.
+    """
+    found: list[RouteMention] = []
+    for match in _MENTION.finditer(text):
+        path, start = match.group(2), match.start(2)
+        trimmed = path.rstrip(_MENTION_TRAILING)
+        # A path that was only punctuation after its slash is not a route.
+        if not trimmed or trimmed.endswith("/"):
+            continue
+        method = match.group(1)
+        found.append(
+            RouteMention(
+                method=method.upper() if method else None,
+                path=trimmed,
+                start=start,
+                end=start + len(trimmed),
+            )
+        )
+    return tuple(found)
+
+
+def same_shape(mention: str, supplied: str) -> bool:
+    """Whether two route paths are the same shape, parameter names ignored."""
+    shape = route_shape(mention)
+    return bool(shape) and shape == route_shape(supplied)
 
 
 # -- query analysis ------------------------------------------------------------

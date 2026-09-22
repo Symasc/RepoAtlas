@@ -1,6 +1,7 @@
 """The HTTP linkage workflow through the real MCP server (brief §81).
 
-Everything the feature adds is reached through the eight existing tools and
+Everything the feature adds is reached through the existing tools, the HTTP
+inventory, and
 nothing else. An agent starts a real ``repoatlas mcp`` process and runs the flow:
 1. search for an operation;
 2. take the exact handle search returns;
@@ -109,7 +110,7 @@ def test_an_agent_walks_from_search_to_a_grounded_claim(corpus_state: Path) -> N
 
     outcome = over_stdio(corpus_state, body)
 
-    assert len(outcome["tools"]) == 8
+    assert len(outcome["tools"]) == 9
     assert outcome["handle"] == ENDPOINT
     sides = {
         (edge["source"]["repository_slug"], edge["type"]) for edge in outcome["related"]["edges"]
