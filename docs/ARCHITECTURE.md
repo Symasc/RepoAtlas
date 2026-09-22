@@ -3222,6 +3222,34 @@ Removals are reported as a **count**, never by quoting the removed claim back. R
 under RepoAtlas's own heading would put the fabrication back on screen with better credentials than it started
 with. The text stays in the `GroundingReport` for diagnostics.
 
+### A supplied route is not a file path (V2 adapter)
+
+Rule 3 reads a slashed token in prose as a repository object, which is why an agent that correctly reported
+`GET /v1/courses/${courseId}/guardian` lost the claim: the route has a path's shape. Exempting route-shaped tokens
+by *form* would be the fabrication hole the rule exists to close — `GET /etc/shadow` would walk straight through
+it — so the exemption is anchored the same way file names already are.
+
+Prose may name a file the investigation **supplied**. It may likewise name a route the investigation **supplied**,
+as an HTTP row with its lines, through `include_provenance`. `ProposedEvidence` and `LedgerEntry` therefore carry
+`routes`: the `METHOD route` each span was supplied for, merged by sorted set union like `origins`, never part of
+evidence identity and never text. The supplied set is the union over **this** investigation's ledger, whatever each
+entry's status — the same latitude a supplied file gets when its citation goes stale.
+
+An index-only check would not do. A route nothing serves has no node to look up, and that is exactly the case
+worth reporting; only the supplied row names it.
+
+A mention is anchored only when it **structurally equals** a supplied route: same segment count, literal segments
+byte-equal, parameters in the same positions with names ignored, and — when the mention carries a method — the same
+method, unless the supplied row's own method could not be read. So `/v1/users/42` is not covered by a supplied
+`/v1/users/:id`, and each mention is decided on its own, which leaves an unsupplied path beside an anchored route
+condemning its claim exactly as before.
+
+**V1 is not touched.** `ground_answer` is frozen and adversarially pinned, so the adapter does the work: before
+handing the answer over, every anchored mention's separators are written with two characters V1's path pattern
+cannot read, and written back afterwards. The transform is injective — a text already containing one of those
+characters is passed through unchanged — and `sanitized_answer` and `verdict_for` match statements through the same
+transform, because they identify claims by text.
+
 ### Citations resolve to a source, not to a name
 
 A citation carrying `repository_slug` names one supplied source exactly. A citation carrying only a display name is
@@ -3885,3 +3913,4 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | Pre-marker indexes are recognized by full schema shape | Accept "it has a `repositories` table" as proof | Another application may have one, and blessing an unproven database with the marker is worse than refusing it — it converts a refusal into permission to migrate someone else's tables (§3) |
 | A legacy index is marked by the first **write**, never at open | Stamp on first open, whoever opened it | `status` would rewrite the database in order to report that nothing changed, and a read-only historical index would be reported as foreign because the marker could not be written. Recognition first, write second (§3, §6) |
 | A marked database below the current version still has its shape checked | Trust the marker and migrate | A marker proves ownership, not schema correctness. Where a write is imminent anyway, inspecting the schema is strictly cheaper than migrating it blind; on the hot path (marked, current) nothing is inspected at all (§3) |
+| A route named in prose is honest when the investigation supplied it | Exempt any token with an uppercase method in front of it; or check the route against the index | Supplied routes are honest route mentions for the same reason supplied files are honest file mentions — the agent was shown them. Exempting by form lets `GET /etc/shadow` through, and an index check cannot cover the case worth reporting: a route nothing serves has no node (§11) |

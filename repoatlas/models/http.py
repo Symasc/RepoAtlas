@@ -484,6 +484,88 @@ def template_matches(template: RouteTemplate, path: str) -> bool:
     return True
 
 
+# -- routes named in prose -----------------------------------------------------
+
+#: One segment as a sentence may write it: literal text, a declared parameter in
+#: any of the four spellings, or a client template's substitution.
+_MENTION_SEGMENT = r"(?:\$\{[^/{}\s]*\}|\{[^/{}\s]+\}|<[^/<>\s]+>|:[A-Za-z_$][\w$]*|[\w.\-~%]+)"
+#: An optional method, then a rooted path of such segments.
+_MENTION = re.compile(rf"(?:\b({'|'.join(HTTP_METHODS)})\s+)?((?:/{_MENTION_SEGMENT})+)")
+#: Sentence punctuation that may end a mention without belonging to it.
+_MENTION_TRAILING = ".,;:!?)]'\"`"
+
+
+@dataclass(frozen=True, slots=True)
+class RouteMention:
+    """A route a sentence names, and where its path sits in that sentence.
+
+    The span is the **path** alone, because the method carries no character the
+    file-path reading could trip over. ``shape`` is what anchoring compares: a
+    segment is either the literal text written, or ``None`` where one value fills
+    it — which is the same reading :func:`template_matches` applies to a declared
+    route, so a mention, a client template and a handler's path are all compared
+    as the same kind of thing.
+    """
+
+    method: str | None
+    path: str
+    start: int
+    end: int
+
+    @property
+    def shape(self) -> tuple[str | None, ...]:
+        return route_shape(self.path)
+
+
+def route_shape(path: str) -> tuple[str | None, ...]:
+    """``/v1/courses/:id/roster`` → ``("v1", "courses", None, "roster")``.
+
+    A literal never becomes ``None`` and ``None`` never becomes a literal, so
+    ``/v1/users/42`` and ``/v1/users/:id`` are different shapes — the distinction
+    a supplied route must keep to be worth anchoring against.
+    """
+    if not path.startswith("/"):
+        return ()
+    segments: list[str | None] = []
+    for segment in path[1:].split("/"):
+        substitution = segment.startswith("${") and segment.endswith("}")
+        segments.append(None if substitution or is_parameter_segment(segment) else segment)
+    return tuple(segments)
+
+
+def route_mentions(text: str) -> tuple[RouteMention, ...]:
+    """Every route ``text`` names, in the order it names them.
+
+    Detection only: that a sentence *names* a route says nothing about whether the
+    route was supplied, which is a separate question with a separate answer. A
+    mention may carry a method or not, and trailing sentence punctuation is left
+    to the sentence.
+    """
+    found: list[RouteMention] = []
+    for match in _MENTION.finditer(text):
+        path, start = match.group(2), match.start(2)
+        trimmed = path.rstrip(_MENTION_TRAILING)
+        # A path that was only punctuation after its slash is not a route.
+        if not trimmed or trimmed.endswith("/"):
+            continue
+        method = match.group(1)
+        found.append(
+            RouteMention(
+                method=method.upper() if method else None,
+                path=trimmed,
+                start=start,
+                end=start + len(trimmed),
+            )
+        )
+    return tuple(found)
+
+
+def same_shape(mention: str, supplied: str) -> bool:
+    """Whether two route paths are the same shape, parameter names ignored."""
+    shape = route_shape(mention)
+    return bool(shape) and shape == route_shape(supplied)
+
+
 # -- query analysis ------------------------------------------------------------
 
 _METHOD_ALTERNATION = "|".join(HTTP_METHODS)

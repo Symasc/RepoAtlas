@@ -242,7 +242,7 @@ Every response repeats this in `basis`, and `coverage` says what was read and wh
 
 **Keep three questions apart.** A route match is a static shape match. Which service a client actually reaches is configuration — read it with `repoatlas_search` and `repoatlas_inspect` on the client's base URL and the service's port and environment variables — and who owns the data behind a route is neither; no tool here establishes it. Label each finding as route, configuration or ownership.
 
-A row is a handle, not evidence. Pass `include_provenance: true` for the rows you intend to cite: it supplies each row's own lines. A row marked `composed: true` had its method or route decided somewhere other than those lines — a helper's default, a base URL, a controller prefix, the server's spelling of a parameter — so cite it only for what the lines show.
+A row is a handle, not evidence. Pass `include_provenance: true` for the rows you intend to cite: it supplies each row's own lines, and it is also what lets you name that route in a claim you verify — a route named in a claim survives only when this investigation was supplied the row that says so. A row marked `composed: true` had its method or route decided somewhere other than those lines — a helper's default, a base URL, a controller prefix, the server's spelling of a parameter — so cite it only for what the lines show.
 
 ## Dependencies
 
