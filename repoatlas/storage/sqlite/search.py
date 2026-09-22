@@ -24,7 +24,7 @@ import sqlite3
 from collections.abc import Sequence
 
 from repoatlas.models.parsing import EntityType
-from repoatlas.storage.protocols import ChunkHit, EntityHit, FileHit
+from repoatlas.storage.protocols import ChunkHit, EntityHit, FileHit, LiteralMatches
 from repoatlas.storage.sqlite.database import Database
 
 #: What counts as one searchable token, and it must agree with the tokenizer that
@@ -345,16 +345,37 @@ class SqliteSearchIndex:
         findable: a marker straddling offset 8000 lived in no single chunk, and
         exact search reported it absent from a file that contained it.
         """
-        if not term:
-            return []
+        return self.find_literal(term, repo_ids, limit, path_prefix=path_prefix).hits
 
-        direct = self._literal_chunks(term, repo_ids, limit, path_prefix)
+    def find_literal(
+        self,
+        term: str,
+        repo_ids: Sequence[int] | None = None,
+        limit: int = 50,
+        *,
+        path_prefix: str | None = None,
+    ) -> LiteralMatches:
+        """:meth:`search_literal`, and whether an empty answer is a proof of absence.
+
+        The direct pass filters with SQL ``LIKE``, which is case-insensitive for
+        ASCII, bounds that with ``LIMIT``, and only then checks case exactly. When
+        the bound fills, the rows it admitted may every one be a near miss —
+        ``api_key`` for ``API_KEY`` — and the rows it did not admit were never read.
+        Such a lookup has not examined the coverage, and says so; the hits are the
+        same either way. The seam pass reads every cut span, and stops early only
+        after it has found something.
+        """
+        if not term:
+            return LiteralMatches(hits=[], exhaustive=True)
+
+        direct, read = self._literal_chunks(term, repo_ids, limit, path_prefix)
+        exhaustive = read < limit
         if len(direct) >= limit:
-            return direct[:limit]
+            return LiteralMatches(hits=direct[:limit], exhaustive=exhaustive)
 
         seen = {hit.chunk_id for hit in direct}
         seam = self._seam_chunks(term, repo_ids, limit - len(direct), seen, path_prefix)
-        return [*direct, *seam]
+        return LiteralMatches(hits=[*direct, *seam], exhaustive=exhaustive)
 
     def _literal_chunks(
         self,
@@ -362,13 +383,18 @@ class SqliteSearchIndex:
         repo_ids: Sequence[int] | None,
         limit: int,
         path_prefix: str | None = None,
-    ) -> list[ChunkHit]:
-        """Chunks whose own stored text contains ``term``."""
+    ) -> tuple[list[ChunkHit], int]:
+        """Chunks whose own stored text contains ``term``, and how many rows were read.
+
+        The count is of rows the bounded ``LIKE`` admitted, before the case-exact
+        check discards near misses; it reaching ``limit`` is what makes an empty
+        result inconclusive.
+        """
         params: list[object] = [f"%{_like_escape(term)}%"]
         scope = ""
         if repo_ids is not None:
             if not repo_ids:
-                return []
+                return [], 0
             placeholders = ",".join("?" * len(repo_ids))
             scope = f" AND c.repo_id IN ({placeholders})"
             params.extend(repo_ids)
@@ -390,7 +416,7 @@ class SqliteSearchIndex:
             tuple(params),
         ).fetchall()
 
-        return [
+        hits = [
             ChunkHit(
                 chunk_id=row["chunk_id"],
                 file_id=row["file_id"],
@@ -408,6 +434,7 @@ class SqliteSearchIndex:
             for row in rows
             if term in row["text"]
         ]
+        return hits, len(rows)
 
     def _seam_chunks(
         self,

@@ -155,7 +155,14 @@ search using the domain term and likely operation names, inspect plausible retur
 
 Do not mistake one inspected file for repository-wide coverage. A file can prove what **that path** does or does not do; it does not prove that no other path does the thing.
 
-Search's `terms` answers the narrower question exactly. For each identifier, path or key the question names, it reports `exact` (an indexed entity or file is named that), `text_only` (it occurs in indexed text, perhaps inside a longer word, but nothing is named it) or `not_found` (none of the lookups it lists found it), with the lookups that were made. `not_found` is a statement about the indexed scope you searched — excluded, unreadable and unsynced files are outside it — so report it as "not in the indexed scope searched". `exact` for a bare name can come from an unrelated declaration elsewhere: to ask whether a class has a method, name it qualified, such as `KeycloakAdminClient.resetPassword`.
+Search's `terms` answers the narrower question exactly. For each identifier, path or key the question names, `checks` says what each relevant lookup established — `text`, `file_path`, `entity_name`, or `entity_key` for an HTTP route — as `match`, `no_match` (it ran over the whole indexed scope and found nothing), `incomplete` (it stopped at its limit first) or `not_checked` (it never ran). `state` summarises them:
+
+- `exact`: an indexed entity or file is named that;
+- `text_only`: it occurs in indexed text, perhaps inside a longer word, and nothing is named it;
+- `not_found`: every relevant lookup ran to completion and found nothing;
+- `not_established`: no lookup found it, but one did not run or did not finish, so absence is not shown.
+
+A `PascalCase` name or a plain word such as `architecture` is looked up as a name and never as text, so it is `exact` or `not_established` and never `not_found`. Read `checks.entity_name` to answer "is there an entity called this", and search a camelCase, snake_case or quoted spelling when you need its text checked too. `not_found` is a statement about the indexed scope you searched — excluded, unreadable and unsynced files are outside it — so report it as "not in the indexed scope searched". `exact` for a bare name can come from an unrelated declaration elsewhere: to ask whether a class has a method, name it qualified, such as `KeycloakAdminClient.resetPassword`, and ask the bare name separately (a bare name that also appears inside a dotted one in the same question is not a separate term).
 
 If coverage is still incomplete, report one of these instead of asserting a repository-wide absence:
 
@@ -368,6 +375,7 @@ Keep your planning to yourself; what the reader needs is the finding, the citati
 | a compound question has several independently provable parts | track and investigate each part separately | let evidence for one part stand in for the rest |
 | you are about to make a repository-wide absence claim | establish adequate category/handle coverage or report the gap | infer absence from one search or one inspected file |
 | search reports a named term `not_found` | say it is not in the indexed scope you searched, and name that scope | say the repository has no such thing |
+| search reports a named term `not_established` | say which checks came back `no_match` and which were `not_checked` or `incomplete`, and search a spelling that is checked as text if you need more | report it as absent |
 | you need a definition you already have evidence for | use the evidence you hold | inspect again for more text |
 | a search item has `declaration: true` and you need its source | inspect its `entity.key` | cite the declaration as source lines, or read the file outside RepoAtlas |
 | the question is about one directory of a repository | search with `within_path` | filter a whole-repository search afterwards |
