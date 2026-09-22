@@ -48,10 +48,11 @@ class LookupOutcome(enum.StrEnum):
     #: The lookup ran over the whole indexed coverage searched and nothing matched.
     NO_MATCH = "no_match"
     #: The lookup ran, found no match, and stopped at its limit before it could
-    #: have seen every candidate — so it establishes nothing about absence. The
-    #: text lookup is the one that can end this way: it bounds a case-insensitive
-    #: prefilter before checking case exactly, so its limit can fill with near
-    #: misses such as ``api_key`` for ``API_KEY``.
+    #: have seen every candidate — so it establishes nothing about absence, and
+    #: never decides suppression. The text lookup is the one that can end this
+    #: way, when its store reports that it did not read everything it could; a
+    #: lookup whose limit admitted near misses before checking them exactly, such
+    #: as ``api_key`` for ``API_KEY``, is that shape.
     INCOMPLETE = "incomplete"
     #: The lookup never ran for this term.
     NOT_CHECKED = "not_checked"

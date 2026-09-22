@@ -132,10 +132,10 @@ class LiteralMatches(BaseModel):
 
     ``hits`` is exactly what :meth:`SearchIndex.search_literal` returns.
     ``exhaustive`` is whether every indexed chunk that could contain the term was
-    examined. It is false only when the lookup's limit filled before verification
-    was done — the prefilter is case-insensitive and the check is not, so the rows
-    the limit admitted can all be near misses — and then an empty ``hits`` is not a
-    proof that the term is absent.
+    examined. A store that stops at its limit before it has verified what it read
+    must say so here, and then an empty ``hits`` is not a proof that the term is
+    absent. The SQLite store bounds only rows that already contain the term
+    exactly, so it is never both empty and incomplete.
     """
 
     model_config = ConfigDict(frozen=True)

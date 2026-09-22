@@ -64,16 +64,6 @@ def tokenize_query(text: str) -> list[str]:
     return sorted(seen, key=len, reverse=True)
 
 
-#: Escapes for a LIKE pattern. `_` matches any character in LIKE, and it is the
-#: most common character in the identifiers this search exists to find exactly, so
-#: leaving it unescaped turned a precise lookup into a wildcard one.
-_LIKE_ESCAPE = str.maketrans({"\\": "\\\\", "%": "\\%", "_": "\\_"})
-
-
-def _like_escape(term: str) -> str:
-    return term.translate(_LIKE_ESCAPE)
-
-
 def _normalize_path_term(term: str) -> str:
     """The spelling of a path a user may reasonably type, reduced to one form.
 
@@ -357,13 +347,12 @@ class SqliteSearchIndex:
     ) -> LiteralMatches:
         """:meth:`search_literal`, and whether an empty answer is a proof of absence.
 
-        The direct pass filters with SQL ``LIKE``, which is case-insensitive for
-        ASCII, bounds that with ``LIMIT``, and only then checks case exactly. When
-        the bound fills, the rows it admitted may every one be a near miss —
-        ``api_key`` for ``API_KEY`` — and the rows it did not admit were never read.
-        Such a lookup has not examined the coverage, and says so; the hits are the
-        same either way. The seam pass reads every cut span, and stops early only
-        after it has found something.
+        The direct pass bounds with ``LIMIT`` only rows that already contain the
+        term exactly, so it stops early only once it has found as many as the
+        limit; the seam pass reads every cut span and likewise stops early only
+        after it has found something. An empty answer from this store is therefore
+        complete. ``exhaustive`` is reported all the same, because the funnel reads
+        it and must not depend on how one store happens to bound its reads.
         """
         if not term:
             return LiteralMatches(hits=[], exhaustive=True)
@@ -386,11 +375,20 @@ class SqliteSearchIndex:
     ) -> tuple[list[ChunkHit], int]:
         """Chunks whose own stored text contains ``term``, and how many rows were read.
 
-        The count is of rows the bounded ``LIKE`` admitted, before the case-exact
-        check discards near misses; it reaching ``limit`` is what makes an empty
-        result inconclusive.
+        The predicate is ``instr``, and it has to be: it is the one SQLite string
+        test that agrees with ``term in text`` — case-sensitive, code-point exact,
+        no wildcards, and unaffected by an embedded NUL. It used to be ``LIKE``,
+        which folds ASCII case and stops reading at a NUL, with the ``LIMIT``
+        applied to what *that* admitted. Thirty-five chunks holding ``api_key``
+        then filled a limit of thirty ahead of the one note that says ``API_KEY``,
+        the case-exact check below discarded every one of them, and the lookup
+        returned nothing for a term the index held.
+
+        The repository and path restrictions sit beside the predicate, before
+        ``ORDER BY`` and ``LIMIT``, so the bound only ever counts genuine matches
+        in scope. The Python check stays, as the statement of the contract.
         """
-        params: list[object] = [f"%{_like_escape(term)}%"]
+        params: list[object] = [term]
         scope = ""
         if repo_ids is not None:
             if not repo_ids:
@@ -409,7 +407,7 @@ class SqliteSearchIndex:
             FROM chunks c
             JOIN files        f ON f.id = c.file_id
             JOIN repositories r ON r.id = c.repo_id
-            WHERE c.text LIKE ? ESCAPE '\\'{scope}
+            WHERE instr(c.text, ?) > 0{scope}
             ORDER BY {_CHUNK_ORDER}
             LIMIT ?
             """,  # noqa: S608 - placeholders are generated counts, values are bound
