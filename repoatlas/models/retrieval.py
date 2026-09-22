@@ -16,17 +16,18 @@ from __future__ import annotations
 import enum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from repoatlas.models.evidence import EvidenceSet
 
 
 class TermLookup(enum.StrEnum):
-    """One exhaustive exact lookup a named term was put through.
+    """One exact lookup a named term can be put through.
 
-    Each is exhaustive over the indexed coverage searched — the repository scope
-    and any ``within_path`` — and none is a ranking: a term either matches in it or
-    does not, whatever the result budget later keeps.
+    Each asks the indexed coverage searched — the repository scope and any
+    ``within_path`` — and none is a ranking: what it establishes about a term is
+    independent of what the result budget later keeps. Whether a given lookup ran,
+    and ran to completion, is recorded per term in :attr:`TermMatch.checks`.
     """
 
     #: The term occurs verbatim in indexed text, possibly inside a longer token.
@@ -39,35 +40,74 @@ class TermLookup(enum.StrEnum):
     ENTITY_KEY = "entity_key"
 
 
+class LookupOutcome(enum.StrEnum):
+    """What one lookup established about one term."""
+
+    #: An indexed entity, file or text matches the term exactly.
+    MATCH = "match"
+    #: The lookup ran over the whole indexed coverage searched and nothing matched.
+    NO_MATCH = "no_match"
+    #: The lookup ran, found no match, and stopped at its limit before it could
+    #: have seen every candidate — so it establishes nothing about absence. The
+    #: text lookup is the one that can end this way: it bounds a case-insensitive
+    #: prefilter before checking case exactly, so its limit can fill with near
+    #: misses such as ``api_key`` for ``API_KEY``.
+    INCOMPLETE = "incomplete"
+    #: The lookup never ran for this term.
+    NOT_CHECKED = "not_checked"
+
+
 class TermState(enum.StrEnum):
-    """What the lookups found for one named term, strongest first."""
+    """What the checks establish about one named term, as one word.
+
+    Derived from :attr:`TermMatch.checks` and never from the evidence list, a
+    ranking or a candidate budget. A negative state is only ever the conjunction
+    of negatives that were actually established.
+    """
 
     #: An indexed entity or file is named exactly this.
     EXACT = "exact"
-    #: It occurs verbatim in indexed text, but no indexed entity or file is named it.
-    #: ``resetPassword`` inside ``resetPasswordAllowed`` is this, and nothing more.
+    #: It occurs verbatim in indexed text, and the file and entity lookups ran to
+    #: completion without a match. ``resetPassword`` inside ``resetPasswordAllowed``
+    #: is this, and nothing more.
     TEXT_ONLY = "text_only"
-    #: Every lookup in ``lookups`` came back empty in the indexed coverage searched.
+    #: Every lookup relevant to the term ran to completion and matched nothing in
+    #: the indexed coverage searched.
     NOT_FOUND = "not_found"
+    #: No lookup matched, and at least one relevant lookup did not run or did not
+    #: finish, so neither presence nor absence is established. ``checks`` says what
+    #: was: ``architecture`` asked of ``docs`` is no file's name and no entity's,
+    #: and whether the document's text contains it was never asked.
+    NOT_ESTABLISHED = "not_established"
 
 
 class TermMatch(BaseModel):
-    """Whether one term the question named is in the indexed coverage searched.
+    """What the exact lookups established about one term the question named.
 
-    A statement about the index, never about the repository at large. ``not_found``
-    means the lookups listed in ``lookups`` found nothing in what was searched: the
-    repository scope, narrowed by ``within_path`` when one was given, as indexed at
-    the response's freshness. A file the index excludes, cannot read, holds as
-    binary, or has not synced since it changed is outside that coverage, and a
-    lookup not listed was not made — a ``PascalCase`` name, for instance, is looked
-    up as an entity name but not searched for as text.
+    A statement about the index, never about the repository at large, and only
+    about the lookups that ran. Everything is relative to the coverage searched:
+    the repository scope, narrowed by ``within_path`` when one was given, as indexed
+    at the response's freshness. A file the index excludes, cannot read, holds as
+    binary, or has not synced since it changed is outside that coverage.
+
+    Which lookups are relevant depends on what kind of term it is. A term the
+    question spelled as a literal — camelCase, snake_case, a dotted, quoted or
+    dashed name, a path — is searched as text, as a file path and as an entity
+    name. A ``PascalCase`` or otherwise named word is looked up as a file path and
+    an entity name only, so its text is ``not_checked`` and it can be ``exact`` or
+    ``not_established`` but never ``not_found``. An HTTP key is looked up as an
+    entity key and nothing else.
     """
 
     model_config = ConfigDict(frozen=True)
 
     term: str
     state: TermState
+    #: The lookups that ran for this term: every key of ``checks`` whose outcome is
+    #: not ``not_checked``, in the same order.
     lookups: tuple[TermLookup, ...] = ()
+    #: Every lookup relevant to this term, and what it established.
+    checks: dict[TermLookup, LookupOutcome] = Field(default_factory=dict)
 
 
 class SuppressionOutcome(BaseModel):
@@ -104,6 +144,8 @@ class RetrievalOutcome(BaseModel):
     #: process boundary must resolve these to natural keys first.
     seed_entity_ids: tuple[int, ...] = ()
     #: For each term the question named — every literal term, every HTTP key, and
-    #: every other name it spelled as a name — what the exact lookups found. Built
-    #: from the proofs the funnel already made; no lookup runs for it alone.
+    #: every other name it spelled as a name — what the exact lookups established.
+    #: Built from the lookups the funnel already made; the only lookup that runs for
+    #: it alone is a term's own exact file or entity lookup, asked when a lookup
+    #: shared with other terms filled its limit before that term matched.
     term_matches: tuple[TermMatch, ...] = ()

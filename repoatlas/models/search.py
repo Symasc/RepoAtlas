@@ -203,13 +203,16 @@ class SearchResponse(BaseModel):
     #: was searched. Echoed so that a response read without its request still says
     #: that "nothing matched" meant "nothing matched *here*".
     within_path: str | None = None
-    #: For each identifier, path or key the question named, whether an indexed
-    #: entity, file or text matches it exactly in the coverage searched.
+    #: For each identifier, path or key the question named, what the exact
+    #: lookups established about it in the coverage searched: per lookup in
+    #: ``checks`` (``match``, ``no_match``, ``incomplete`` or ``not_checked``), and
+    #: summarised in ``state``.
     #:
     #: The answer an existence question needs and the evidence list cannot give:
     #: evidence is ranked and budgeted, so a term's absence from twelve items says
-    #: nothing, while these lookups are exhaustive over what was searched. They are
-    #: still claims about the *index* — see
-    #: :class:`~repoatlas.models.retrieval.TermMatch` for what ``not_found`` does and
-    #: does not establish. Words the question merely used are not listed.
+    #: nothing. A negative here is only ever one a lookup established — ``not_found``
+    #: needs every relevant lookup to have run to completion, and anything less is
+    #: ``not_established``. They are still claims about the *index* — see
+    #: :class:`~repoatlas.models.retrieval.TermMatch`. Words the question merely used
+    #: are not listed.
     terms: tuple[TermMatch, ...] = ()
