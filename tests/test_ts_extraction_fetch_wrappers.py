@@ -10,6 +10,7 @@ neither does a name like ``createCourse``.
 
 from __future__ import annotations
 
+import json
 import textwrap
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -324,6 +325,159 @@ def test_a_call_whose_path_or_method_cannot_be_read_yields_nothing(call: str) ->
     }}
     """
     assert _http(source) == []
+
+
+def _claims(source: str, name: str = "client.ts") -> list[ParsedReference]:
+    """The requests a file made but could not decide, kept for the global pass."""
+    parsed = TypeScriptParser().parse(Path(name), textwrap.dedent(source))
+    return [r for r in parsed.references if r.meta.get("pending_fact") == "http-local-call"]
+
+
+@pytest.mark.parametrize(
+    ("call", "recorded"),
+    [
+        ("request(`/v1/courses/${id}`)", True),
+        ("request(path)", False),
+        ("request('v1/relative')", False),
+        ("request('/v1/x', options)", True),
+        ("request('/v1/x', { ...options })", True),
+        ("request('/v1/x', { method: verb })", True),
+        ("request('/v1/x', { method })", True),
+        ("request('/v1/x', { [key]: 'POST' })", True),
+        ("request('/v1/x', { ...unknownHelper(), auth })", True),
+        ("request(...args)", False),
+    ],
+)
+def test_what_one_file_cannot_decide_is_left_to_the_global_pass_or_not_recorded(
+    call: str, recorded: bool
+) -> None:
+    """A rooted template and a route with an unread method stay visible; nothing else."""
+    source = f"""\
+    function request(path: string, init?: RequestInit) {{
+      return fetch(path, init);
+    }}
+    export function load(id: string, path: string, options: object, verb: string, key: string) {{
+      return {call};
+    }}
+    """
+    claims = _claims(source)
+    assert (len(claims) == 1) is recorded
+    for claim in claims:
+        assert claim.meta["transport"] == "wrapper"
+        assert claim.target_key == "request"
+        assert claim.source_symbol == "load"
+
+
+def test_a_template_through_a_wrapper_is_recorded_as_its_parts_without_the_query() -> None:
+    source = IDENTITY.replace(
+        "  return {\n",
+        "  return {\n"
+        "    async listStudents(auth: Auth, courseId: string, params?: string) {\n"
+        '      return request(`/v1/courses/${courseId}/roster${params ? `?${params}` : ""}`, '
+        "{ auth });\n"
+        "    },\n",
+        1,
+    )
+    claims = {claim.source_symbol: claim for claim in _claims(source)}
+    roster = claims["createIdentityClient.listStudents"]
+    assert json.loads(roster.meta["path"]) == {
+        "parts": [["l", "/v1/courses/"], ["s", "courseId"], ["l", "/roster"], ["q", ""]],
+        "truncated": False,
+    }
+    assert (roster.meta["method"], roster.meta["in_call"]) == ("GET", "true")
+    assert "base" not in roster.meta
+    # The literal calls are still decided here and never become claims.
+    assert set(claims) == {"createIdentityClient.getCourse", "createIdentityClient.listStudents"}
+
+
+def test_a_suffix_that_is_not_proven_empty_or_a_query_stays_a_substitution() -> None:
+    """``${query(filters)}`` could add a segment; only a proven tail ends the path."""
+    source = """\
+    function request(path: string, init?: RequestInit) {
+      return fetch(path, init);
+    }
+    export function events(filters: Filters) {
+      return request(`/v1/access-events${query(filters)}`);
+    }
+    export function page(params?: string) {
+      return request(`/v1/access-events${params ? `?${params}` : ""}`);
+    }
+    """
+    parts = {c.source_symbol: json.loads(c.meta["path"])["parts"] for c in _claims(source)}
+    assert parts == {"events": [["l", "/v1/access-events"], ["s", "query(filters)"]]}
+    # The proven tail leaves a literal path, decided in its own file.
+    assert _calls(source) == {("GET /v1/access-events", "page")}
+
+
+def test_a_named_path_is_recorded_only_when_bound_outside_every_function() -> None:
+    """A parameter or a local is a forwarded path; a module constant names one value."""
+    source = """\
+    import { PATHS } from "./paths";
+    const LOCAL = { verify: "/v1/verify" };
+    function request(path: string, init?: RequestInit) {
+      return fetch(path, init);
+    }
+    function send(path: string) {
+      return request(path);
+    }
+    export function verify() {
+      return request(PATHS.verify, { method: "POST" });
+    }
+    export function local() {
+      return request(LOCAL.verify);
+    }
+    export function inner() {
+      const target = "/v1/inner";
+      return request(target);
+    }
+    """
+    named = {claim.source_symbol: json.loads(claim.meta["path"]) for claim in _claims(source)}
+    assert named == {
+        "verify": {"named": "PATHS.verify"},
+        "local": {"named": "LOCAL.verify"},
+    }
+
+
+def test_the_wrappers_own_calls_record_nothing() -> None:
+    """``requestFetch(url, …)`` and ``${base}${path}`` are plumbing, not requests."""
+    source = """\
+    export function createClient({ baseUrl, fetch: suppliedFetch }: Options) {
+      const requestFetch = suppliedFetch ?? globalThis.fetch;
+      async function request(path: string, init?: RequestInit) {
+        const url = `${baseUrl}${path}`;
+        await requestFetch(`${baseUrl}${path}`, init);
+        return requestFetch(url, init);
+      }
+      return {
+        me: () => request("/v1/me"),
+      };
+    }
+    """
+    assert _claims(source) == []
+    assert _calls(source) == set()
+
+
+def test_a_choice_of_paths_is_decided_here_when_both_name_one_route() -> None:
+    source = """\
+    function request(path: string, init?: RequestInit) {
+      return fetch(path, init);
+    }
+    export function announcements(courseId?: string) {
+      return request(courseId ? `/v1/announcements?courseId=${courseId}` : "/v1/announcements");
+    }
+    export function either(flag: boolean, id: string) {
+      return request(flag ? "/v1/a" : `/v1/b/${id}`);
+    }
+    """
+    assert _calls(source) == {("GET /v1/announcements", "announcements")}
+    [choice] = _claims(source)
+    assert choice.source_symbol == "either"
+    assert json.loads(choice.meta["path"]) == {
+        "alternatives": [
+            {"string": "/v1/a"},
+            {"parts": [["l", "/v1/b/"], ["s", "id"]], "truncated": False},
+        ]
+    }
 
 
 def test_a_method_is_never_inferred_from_a_name() -> None:

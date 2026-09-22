@@ -181,6 +181,11 @@ class ProposedEvidence(BaseModel):
     #: would supersede the first. They are two different facts, and the entity
     #: they declare is what tells them apart.
     declares: str | None = None
+    #: The HTTP operations these lines were supplied for, each ``METHOD route`` —
+    #: or the route alone where the method could not be read. Route *context*, not
+    #: text and not identity: the same span supplied again for another route adds
+    #: one, and two spans supplied for one route each record it.
+    routes: tuple[str, ...] = ()
 
 
 class LedgerEntry(BaseModel):
@@ -222,6 +227,10 @@ class LedgerEntry(BaseModel):
     #: text read from the file. Part of the identity: see
     #: :attr:`ProposedEvidence.declares`.
     declares: str | None = None
+    #: Every HTTP operation this evidence has been supplied for, sorted and
+    #: unique. Accumulated like :attr:`origins`, and never part of the identity:
+    #: which operation a span was fetched for does not change which bytes it is.
+    routes: tuple[str, ...] = ()
 
     @property
     def number(self) -> int:

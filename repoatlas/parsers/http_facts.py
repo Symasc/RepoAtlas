@@ -14,8 +14,10 @@ everywhere. The linker reads exactly two things from ``meta``:
   inspection and never used to decide identity.
 
 **Pending facts.** Some HTTP facts cannot be proven from one file: a NestJS
-controller serves nothing until an application registers it, and a request made
-through an imported helper is only a request once the helper is read. A parser
+controller serves nothing until an application registers it, a request made
+through an imported helper is only a request once the helper is read, and a
+request whose path is a template names a route only once it is matched against
+the routes its repository serves. A parser
 records such a fact with :func:`pending_reference`, which tags it with the role it
 plays under ``pending_fact``. The linker keeps every such reference as a claim —
 never interning it and never resolving it as a symbol — and the global pass
@@ -25,6 +27,8 @@ declaration, not a fact on a shared node.
 """
 
 from __future__ import annotations
+
+import json
 
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedReference
 
@@ -55,6 +59,18 @@ HTTP_WRAPPER = "http-wrapper"
 HTTP_INIT_HELPER = "http-init-helper"
 #: A call through an imported helper, with its arguments as far as the file reads them.
 HTTP_REQUESTER_CALL = "http-requester-call"
+#: A request this file makes whose route one file cannot decide. ``transport`` says
+#: how: ``wrapper`` for a call through a proven same-file wrapper whose path is a
+#: template, a conditional or a named value, or whose method cannot be read — the
+#: global pass matches it against the routes its own repository serves; ``fetch``
+#: for a direct ``fetch`` (or alias) with a template URL, which is recorded so the
+#: request stays visible and is never matched, because transport code forwards
+#: whole paths through ``fetch``.
+HTTP_LOCAL_CALL = "http-local-call"
+
+#: ``transport`` values of :data:`HTTP_LOCAL_CALL`.
+TRANSPORT_WRAPPER = "wrapper"
+TRANSPORT_FETCH = "fetch"
 
 
 def pending_reference(
@@ -77,6 +93,44 @@ def pending_reference(
         line_end=max(line_start, line_end),
         source_symbol=source_symbol,
         meta={PENDING_FACT: role, **meta},
+    )
+
+
+def local_call_reference(
+    callee: str,
+    line_start: int,
+    line_end: int,
+    *,
+    transport: str,
+    path: dict[str, object],
+    method: str | None,
+    in_call: bool,
+    base: str | None,
+    source: str,
+    source_symbol: str | None,
+) -> ParsedReference:
+    """An :data:`HTTP_LOCAL_CALL` claim: a request whose route one file cannot decide.
+
+    ``path`` is the parser-neutral path spec — ``{"string"}``, ``{"parts"}``,
+    ``{"alternatives"}`` or ``{"named"}``. The target key is the callee as written,
+    as for a call through an imported helper: it names no route, because none is
+    known yet.
+    """
+    meta = {"transport": transport, "path": json.dumps(path, sort_keys=True), "source": source}
+    if method is not None:
+        meta["method"] = method
+        meta["in_call"] = "true" if in_call else "false"
+    if base is not None:
+        meta["base"] = base
+    return pending_reference(
+        EdgeType.CALLS_HTTP_ROUTE,
+        EntityType.HTTP_ROUTE,
+        callee,
+        line_start,
+        line_end,
+        role=HTTP_LOCAL_CALL,
+        source_symbol=source_symbol,
+        **meta,
     )
 
 
