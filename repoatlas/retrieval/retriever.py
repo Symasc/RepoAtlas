@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import time
 from collections import Counter
-from dataclasses import dataclass, replace
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 
 from repoatlas.config.settings import RetrievalSettings
 from repoatlas.embeddings.protocol import EmbeddingModel, EmbeddingUnavailable
@@ -33,9 +34,16 @@ from repoatlas.models.evidence import (
     EvidenceTier,
     MatchClass,
 )
-from repoatlas.models.retrieval import RetrievalOutcome, SuppressionOutcome
+from repoatlas.models.retrieval import (
+    LookupOutcome,
+    RetrievalOutcome,
+    SuppressionOutcome,
+    TermLookup,
+    TermMatch,
+    TermState,
+)
 from repoatlas.models.telemetry import RetrievalTrace, StageTiming, Stopwatch
-from repoatlas.retrieval.query import analyze
+from repoatlas.retrieval.query import QueryAnalysis, analyze
 from repoatlas.retrieval.ranking import (
     NoopReranker,
     Reranker,
@@ -154,6 +162,7 @@ class Retriever:
         literal_phrase: bool = False,
         quote_signatures: bool = False,
         confined: bool = False,
+        path_prefix: str | None = None,
     ) -> RetrievalOutcome:
         """The funnel: one pass, and everything that pass decided.
 
@@ -177,6 +186,14 @@ class Retriever:
         ``relationships`` and ``dependencies`` already enforce. V1's own scope is a
         bias (ARCHITECTURE.md §10), its second pass is untouched, and it passes
         nothing here.
+
+        ``path_prefix`` narrows every scope searched to one normalized
+        repository-relative file or directory. It is handed to each stage's own
+        lookup and applied there, before that lookup's limit — never to the
+        candidates a limited lookup already returned, where files outside the path
+        would have used up the bound first. Graph expansion may walk through nodes
+        outside it; what it reaches is filtered before it becomes a candidate. The
+        capability passes it only with a confined repository scope.
         """
         stages: list[StageTiming] = []
         analysis = analyze(question)
@@ -214,7 +231,13 @@ class Retriever:
             if phrase and phrase not in definite_terms:
                 definite_terms.insert(0, phrase)
 
-        exact = self._stage_exact(literal_terms, scopes, stages)
+        #: What each exact lookup establishes about each named term, recorded by
+        #: the stages below as they run. Read once, for ``term_matches``.
+        proofs = _TermProofs()
+
+        exact = self._stage_exact(
+            literal_terms, scopes, stages, path_prefix=path_prefix, proofs=proofs
+        )
         if exact:
             ranked_lists.append(exact)
 
@@ -222,7 +245,13 @@ class Retriever:
         # one of the three ways a named term can be proven to exist. Deciding
         # suppression on content alone is what made RepoAtlas answer "no indexed
         # evidence matches" for `src/config.py` while holding that exact file.
-        files, proven = self._stage_files([*literal_terms, *analysis.terms], scopes, stages)
+        files, proven = self._stage_files(
+            [*literal_terms, *analysis.terms],
+            scopes,
+            stages,
+            path_prefix=path_prefix,
+            proofs=proofs,
+        )
         if files:
             ranked_lists.append(files)
 
@@ -241,14 +270,23 @@ class Retriever:
         # the same set the symbol stage looks up under suppression, so the two can
         # never disagree about what was asked for.
         named_exact = [*literal_terms, *analysis.http_keys]
-        entity_hits, proven_names, entity_ms = self._named_entity_hits(named_exact, scopes)
+        entity_hits, proven_names, entity_ms = self._named_entity_hits(
+            named_exact, scopes, path_prefix=path_prefix, proofs=proofs
+        )
 
         # A question that names something specific and does not find it is not
         # answered by anything associative. Decided once, here, and honoured by
-        # every stage that follows. See _suppress_associative.
-        suppressed = self._suppress_associative(definite_terms, exact, proven, proven_names)
+        # every stage that follows. See _suppress_associative. A definite term a
+        # full shared lookup crowded out is asked alone first, because the
+        # decision may rest only on lookups that finished.
+        self._settle_crowded(proofs, set(definite_terms), scopes, path_prefix=path_prefix)
+        suppressed = self._suppress_associative(
+            definite_terms, exact, proven, proven_names, path_prefix=path_prefix, proofs=proofs
+        )
 
-        lexical = self._stage_lexical(question, scopes, stages, suppressed=suppressed)
+        lexical = self._stage_lexical(
+            question, scopes, stages, suppressed=suppressed, path_prefix=path_prefix
+        )
         ranked_lists.extend(lexical)
 
         symbols, entity_ids = self._stage_symbols(
@@ -263,20 +301,31 @@ class Retriever:
             quote_signatures=quote_signatures,
             named_hits=entity_hits,
             named_ms=entity_ms,
+            path_prefix=path_prefix,
+            proofs=proofs,
         )
         if symbols:
             ranked_lists.append(symbols)
+
+        # What the exact lookups established for each term the question named.
+        # The stages above made those lookups; a term a full shared lookup may have
+        # crowded out is asked again alone, and nothing else is looked up for it.
+        self._settle_crowded(proofs, _reported_terms(analysis), scopes, path_prefix=path_prefix)
+        term_matches = _term_matches(analysis, proofs)
 
         semantic, semantic_used, semantic_detail = self._stage_semantic(
             question,
             primary_ids if context.scope is not ContextScope.GLOBAL else None,
             stages,
             suppressed=suppressed,
+            path_prefix=path_prefix,
         )
         if semantic:
             ranked_lists.append(semantic)
 
-        graph, visited = self._stage_graph(entity_ids, stages, home_repo_id=home_repo_id)
+        graph, visited = self._stage_graph(
+            entity_ids, stages, home_repo_id=home_repo_id, path_prefix=path_prefix
+        )
         if graph:
             ranked_lists.append(graph)
 
@@ -298,6 +347,7 @@ class Retriever:
                 ),
                 suppression=suppressed,
                 seed_entity_ids=tuple(entity_ids),
+                term_matches=term_matches,
             )
 
         with Stopwatch("fuse", candidates_in=incoming) as watch:
@@ -378,6 +428,7 @@ class Retriever:
             evidence=evidence,
             suppression=suppressed,
             seed_entity_ids=tuple(entity_ids),
+            term_matches=term_matches,
         )
 
     # -- stages --------------------------------------------------------------
@@ -387,12 +438,25 @@ class Retriever:
         literal_terms: list[str],
         scopes: list[list[int] | None],
         stages: list[StageTiming],
+        *,
+        path_prefix: str | None = None,
+        proofs: _TermProofs | None = None,
     ) -> list[EvidenceCandidate]:
-        """Literal terms, verified by substring. Deterministic by construction."""
+        """Literal terms, verified by substring. Deterministic by construction.
+
+        Also records, in ``proofs``, which terms matched and which lookups stopped
+        at their limit without a match: facts about each term that the candidate
+        list alone cannot carry once the terms share it.
+        """
         with Stopwatch("exact") as watch:
             hits: list[EvidenceCandidate] = []
             for term in literal_terms:
                 for scope in scopes:
+                    found = self._search.find_literal(
+                        term, scope, self._limits.per_source, path_prefix=path_prefix
+                    )
+                    if proofs is not None:
+                        proofs.text(term, found.hits, exhaustive=found.exhaustive)
                     hits.extend(
                         self._chunk_candidate(
                             hit,
@@ -405,7 +469,7 @@ class Retriever:
                             MatchClass.EXACT_CONTENT,
                             f"contains {term}",
                         )
-                        for hit in self._search.search_literal(term, scope, self._limits.per_source)
+                        for hit in found.hits
                     )
             watch.candidates_out = len(hits)
             watch.detail = f"{len(literal_terms)} literal term(s) in content"
@@ -419,6 +483,7 @@ class Retriever:
         stages: list[StageTiming],
         *,
         suppressed: SuppressionOutcome | None = None,
+        path_prefix: str | None = None,
     ) -> list[list[EvidenceCandidate]]:
         """FTS recall over chunk text. Recall, not proof, so it is associative."""
         lists: list[list[EvidenceCandidate]] = []
@@ -427,7 +492,9 @@ class Retriever:
                 watch.detail = suppressed.message
                 scopes = []
             for scope in scopes:
-                hits = self._search.search_text(question, scope, self._limits.per_source)
+                hits = self._search.search_text(
+                    question, scope, self._limits.per_source, path_prefix=path_prefix
+                )
                 if hits:
                     lists.append(
                         [
@@ -445,7 +512,12 @@ class Retriever:
         return lists
 
     def _named_entity_hits(
-        self, named: list[str], scopes: list[list[int] | None]
+        self,
+        named: list[str],
+        scopes: list[list[int] | None],
+        *,
+        path_prefix: str | None = None,
+        proofs: _TermProofs | None = None,
     ) -> tuple[list[EntityHit], set[str], float]:
         """Exact entity-name lookup, run before suppression is decided.
 
@@ -475,9 +547,12 @@ class Retriever:
         proven: set[str] = set()
         if named:
             for scope in scopes:
-                for hit in self._search.find_entities_by_name(
-                    named, scope, self._limits.per_source
-                ):
+                found = self._search.find_entities_by_name(
+                    named, scope, self._limits.per_source, path_prefix=path_prefix
+                )
+                if proofs is not None:
+                    proofs.names(named, found, self._limits.per_source)
+                for hit in found:
                     if hit.entity_id in seen:
                         continue
                     seen.add(hit.entity_id)
@@ -486,15 +561,26 @@ class Retriever:
                         proven.add(hit.matched_term)
         return hits, proven, (time.perf_counter() - start) * 1000.0
 
-    def _lookup_names(self, names: list[str], scopes: list[list[int] | None]) -> list[EntityHit]:
+    def _lookup_names(
+        self,
+        names: list[str],
+        scopes: list[list[int] | None],
+        *,
+        path_prefix: str | None = None,
+        proofs: _TermProofs | None = None,
+    ) -> list[EntityHit]:
         """Exact entity-name lookup for one group of spellings, in every scope."""
         if not names:
             return []
-        return [
-            hit
-            for scope in scopes
-            for hit in self._search.find_entities_by_name(names, scope, self._limits.per_source)
-        ]
+        hits: list[EntityHit] = []
+        for scope in scopes:
+            found = self._search.find_entities_by_name(
+                names, scope, self._limits.per_source, path_prefix=path_prefix
+            )
+            if proofs is not None:
+                proofs.names(names, found, self._limits.per_source)
+            hits.extend(found)
+        return hits
 
     def _stage_symbols(
         self,
@@ -510,6 +596,8 @@ class Retriever:
         quote_signatures: bool = False,
         named_hits: list[EntityHit] | None = None,
         named_ms: float = 0.0,
+        path_prefix: str | None = None,
+        proofs: _TermProofs | None = None,
     ) -> tuple[list[EvidenceCandidate], list[int]]:
         """Entity lookup. An exact name match is a fact; a fuzzy one is a lead.
 
@@ -591,11 +679,23 @@ class Retriever:
             resolved = (
                 list(named_hits)
                 if named_hits is not None
-                else self._lookup_names([*literal_terms, *http_keys], scopes)
+                else self._lookup_names(
+                    [*literal_terms, *http_keys], scopes, path_prefix=path_prefix
+                )
             )
-            for group in groups:
+            for index, group in enumerate(groups):
                 if group:
-                    resolved.extend(self._lookup_names(group, scopes))
+                    # The first group is the names the question gave; what their
+                    # lookup establishes is part of the per-term answer. The second
+                    # is words it merely used, which that answer never reports.
+                    resolved.extend(
+                        self._lookup_names(
+                            group,
+                            scopes,
+                            path_prefix=path_prefix,
+                            proofs=proofs if index == 0 else None,
+                        )
+                    )
             #: Split for the trace: a match on a spelling the question named, a
             #: match on a word merely present in it, and a full-text hit are three
             #: different claims, and the trace must not blur them.
@@ -640,7 +740,7 @@ class Retriever:
                 )
             for scope in scopes if suppressed is None else []:
                 for hit in self._search.search_entities(
-                    question, scope, None, self._limits.per_source
+                    question, scope, None, self._limits.per_source, path_prefix=path_prefix
                 ):
                     if hit.entity_id in seen_entities:
                         continue
@@ -696,6 +796,9 @@ class Retriever:
         names: list[str],
         scopes: list[list[int] | None],
         stages: list[StageTiming],
+        *,
+        path_prefix: str | None = None,
+        proofs: _TermProofs | None = None,
     ) -> tuple[list[EvidenceCandidate], set[str]]:
         """Files whose own name or path the question spells out.
 
@@ -718,11 +821,24 @@ class Retriever:
         The second return value is the set of terms this stage *proved to exist*.
         Suppression consumes it, which is the whole reason the stage runs this
         early — see :meth:`_suppress_associative`.
+
+        What each term established is recorded in ``proofs``, and it can say more
+        than the second return value: the store keeps one hit per file, the most
+        specific, so when ``docs/ARCHITECTURE.md`` and ``ARCHITECTURE.md`` both name
+        one file only the exact-path hit comes back, and ``ARCHITECTURE.md`` has no
+        hit of its own. It names that file all the same, by the store's own rule —
+        see :func:`_names_file`. Suppression needs one proof and reads the return
+        value; a per-term answer needs each term's own.
         """
         with Stopwatch("file") as watch:
             hits: dict[tuple[str, str], FileHit] = {}
             for scope in scopes:
-                for hit in self._search.find_files_by_path(names, scope, self._limits.per_source):
+                found = self._search.find_files_by_path(
+                    names, scope, self._limits.per_source, path_prefix=path_prefix
+                )
+                if proofs is not None:
+                    proofs.files(names, found, self._limits.per_source)
+                for hit in found:
                     key = (hit.repository, hit.path)
                     current = hits.get(key)
                     if current is None or hit.specificity < current.specificity:
@@ -760,12 +876,53 @@ class Retriever:
         stages.append(_recorded(watch))
         return candidates, {hit.term for hit in ordered}
 
+    def _settle_crowded(
+        self,
+        proofs: _TermProofs,
+        reported: set[str],
+        scopes: list[list[int] | None],
+        *,
+        path_prefix: str | None = None,
+    ) -> None:
+        """Ask again, alone, each reported term a full shared lookup left unmatched.
+
+        The file and entity lookups take every term of the question in one query
+        under one limit, so a name that thirty-five declarations share can fill it
+        and leave a rarer one unanswered. That is not a negative. Asked alone with a
+        limit of one, the same exact lookup is complete: one row proves the term and
+        none shows it absent. These are equality lookups against the file and
+        entity tables — no source text is read — and they run only for a term that
+        a *full* lookup left without a match, so a question whose lookups came back
+        short of their limits asks nothing more.
+
+        A term asked here is no longer crowded: its answer is complete either way.
+        Suppression settles the definite terms before it decides, and the per-term
+        answer settles the rest afterwards, so no term is asked twice.
+        """
+        for term in sorted((proofs.files_crowded & reported) - proofs.files_found):
+            proofs.files_crowded.discard(term)
+            if any(
+                self._search.find_files_by_path([term], scope, 1, path_prefix=path_prefix)
+                for scope in scopes
+            ):
+                proofs.files_found.add(term)
+        for term in sorted((proofs.names_crowded & reported) - proofs.names_found):
+            proofs.names_crowded.discard(term)
+            if any(
+                self._search.find_entities_by_name([term], scope, 1, path_prefix=path_prefix)
+                for scope in scopes
+            ):
+                proofs.names_found.add(term)
+
     @staticmethod
     def _suppress_associative(
         literal_terms: list[str],
         exact: list[EvidenceCandidate],
         proven_files: set[str] | None = None,
         proven_names: set[str] | None = None,
+        *,
+        path_prefix: str | None = None,
+        proofs: _TermProofs | None = None,
     ) -> SuppressionOutcome | None:
         """Whether every associative source would be answering a different question.
 
@@ -798,6 +955,13 @@ class Retriever:
         function: a config key coincidentally called ``retries`` exists, and it
         still must not make "connection pool exhausted after 30 retries" look
         answerable.
+
+        And absence has one proof only: every lookup of the term ran to completion
+        and matched nothing. ``proofs`` says which did. A text lookup that stopped
+        at its bound, or a shared lookup that filled before it reached the term, has
+        not shown the term absent, and one such term keeps the question open — its
+        per-term state then reports what was not established, rather than this
+        sentence reporting it absent.
         """
         if not literal_terms or exact:
             return None
@@ -814,12 +978,17 @@ class Retriever:
         # same breath, reported its name absent.
         if proven_names and any(term in proven_names for term in literal_terms):
             return None
+        if proofs is not None and not all(proofs.absent(term) for term in literal_terms):
+            return None
         named = ", ".join(literal_terms[:3])
+        # Under a path scope the lookups that failed were confined to it, so the
+        # sentence says where they looked rather than claiming absence everywhere.
+        where = f" under {path_prefix}" if path_prefix is not None else ""
         return SuppressionOutcome(
             terms=tuple(literal_terms),
             # Produced here and read from here. The trace renders this sentence; it
             # is never the source anything recovers the decision from.
-            message=f"suppressed: none of the named terms exist ({named})",
+            message=f"suppressed: none of the named terms exist{where} ({named})",
         )
 
     def _stage_semantic(
@@ -829,20 +998,23 @@ class Retriever:
         stages: list[StageTiming],
         *,
         suppressed: SuppressionOutcome | None = None,
+        path_prefix: str | None = None,
     ) -> tuple[list[EvidenceCandidate], bool, str]:
         """Vector neighbours. Always associative — a guess about what was meant."""
         with Stopwatch("semantic") as watch:
             if suppressed is not None:
                 candidates, used, detail = [], False, suppressed.message
             else:
-                candidates, used, detail = self._semantic_candidates(question, repo_ids)
+                candidates, used, detail = self._semantic_candidates(
+                    question, repo_ids, path_prefix=path_prefix
+                )
             watch.candidates_out = len(candidates)
             watch.detail = detail
         stages.append(_recorded(watch))
         return candidates, used, detail
 
     def _semantic_candidates(
-        self, question: str, repo_ids: list[int] | None
+        self, question: str, repo_ids: list[int] | None, *, path_prefix: str | None = None
     ) -> tuple[list[EvidenceCandidate], bool, str]:
         """Vector neighbours, whether the stage ran, and what the trace should say.
 
@@ -882,6 +1054,7 @@ class Retriever:
             repo_ids,
             self._limits.semantic_limit,
             self._limits.semantic_floor,
+            path_prefix=path_prefix,
         )
         return (
             [self._vector_candidate(hit) for hit in hits],
@@ -890,17 +1063,28 @@ class Retriever:
         )
 
     def _stage_graph(
-        self, entity_ids: list[int], stages: list[StageTiming], *, home_repo_id: int | None = None
+        self,
+        entity_ids: list[int],
+        stages: list[StageTiming],
+        *,
+        home_repo_id: int | None = None,
+        path_prefix: str | None = None,
     ) -> tuple[list[EvidenceCandidate], int]:
         with Stopwatch("graph", candidates_in=len(entity_ids)) as watch:
-            candidates, visited = self._expand(entity_ids, home_repo_id=home_repo_id)
+            candidates, visited = self._expand(
+                entity_ids, home_repo_id=home_repo_id, path_prefix=path_prefix
+            )
             watch.candidates_out = len(candidates)
             watch.detail = f"{visited} node(s) over {self._limits.graph_hops} hop(s)"
         stages.append(_recorded(watch))
         return candidates, visited
 
     def _expand(
-        self, entity_ids: list[int], *, home_repo_id: int | None = None
+        self,
+        entity_ids: list[int],
+        *,
+        home_repo_id: int | None = None,
+        path_prefix: str | None = None,
     ) -> tuple[list[EvidenceCandidate], int]:
         """Bounded traversal from matched entities (ARCHITECTURE.md §10 stage 4).
 
@@ -919,23 +1103,46 @@ class Retriever:
         )
         if not walk.reached:
             return [], walk.visited
-        return self._knowledge_candidates(walk.reached, walk.reasons), walk.visited
+        return (
+            self._knowledge_candidates(walk.reached, walk.reasons, path_prefix=path_prefix),
+            walk.visited,
+        )
 
     def _knowledge_candidates(
-        self, entity_ids: list[int], reason: dict[int, str] | None = None
+        self,
+        entity_ids: list[int],
+        reason: dict[int, str] | None = None,
+        *,
+        path_prefix: str | None = None,
     ) -> list[EvidenceCandidate]:
         """Describe reached entities, **preserving traversal order**.
 
         Order is the proximity signal: entities found on the first hop precede
         those found on the second, so rank fusion sees the closer relationship as
         the stronger one. A set-returning query loses that, so it is restored here.
+
+        Under a ``path_prefix`` the walk may have passed through entities declared
+        elsewhere, and those are dropped *before* the ``per_source`` cut: taking the
+        first ``per_source`` reached and then filtering would let entities outside
+        the path use up the bound. Without one, the cut comes first, as it always
+        has.
         """
-        wanted = entity_ids[: self._limits.per_source]
+        if path_prefix is None:
+            wanted = entity_ids[: self._limits.per_source]
+            described = self._knowledge.describe_entities(wanted)
+        else:
+            wanted = list(entity_ids)
+            described = [
+                row
+                for start in range(0, len(wanted), _DESCRIBE_BATCH)
+                for row in self._knowledge.describe_entities(
+                    wanted[start : start + _DESCRIBE_BATCH], path_prefix=path_prefix
+                )
+            ]
         position = {entity_id: index for index, entity_id in enumerate(wanted)}
-        rows = sorted(
-            self._knowledge.describe_entities(wanted),
-            key=lambda row: position.get(row.entity_id, len(position)),
-        )
+        rows = sorted(described, key=lambda row: position.get(row.entity_id, len(position)))
+        if path_prefix is not None:
+            rows = rows[: self._limits.per_source]
         return [
             EvidenceCandidate(
                 repository=row.repository,
@@ -1029,6 +1236,11 @@ class Retriever:
         )
 
 
+#: Entity ids described per query when a path scope means every reached entity must
+#: be located before the ``per_source`` cut. Well under SQLite's bound-parameter
+#: limit, whatever it was compiled with.
+_DESCRIBE_BATCH = 500
+
 #: ``FileHit.specificity`` as a match class. The search index grades an identity
 #: match 0/1/2 — whole path, trailing sub-path, basename — and this is where that
 #: grade becomes part of the candidate rather than only part of its description.
@@ -1051,6 +1263,224 @@ def _file_reason(hit: FileHit) -> str:
     if hit.specificity == 1:
         return f"file path ends with {hit.term}"
     return f"file name is {hit.term}"
+
+
+def _names_file(term: str, hit: FileHit) -> bool:
+    """Whether ``term`` names the file ``hit`` found, by the file store's rule.
+
+    The whole relative path, a trailing sub-path on a segment boundary (the
+    basename is the shortest), or the path qualified by the repository's slug —
+    exactly the shapes :meth:`SqliteSearchIndex.find_files_by_path` matches, and
+    nothing looser: ``onfig.py`` does not name ``src/config.py``.
+    """
+    path = hit.path
+    return term == path or path.endswith(f"/{term}") or term == f"{hit.repository_slug}/{path}"
+
+
+def _answers_to(hit: EntityHit, asked: Sequence[str]) -> set[str]:
+    """Every requested spelling this entity answers to, not only the first.
+
+    The store records one ``matched_term`` per row — the first requested spelling
+    it matched — which is all ranking needs. A per-term answer needs every one:
+    asked for ``"markEmailVerified"`` and ``KeycloakAdminClient.markEmailVerified``
+    together, the method's one row used to prove the bare name and leave the
+    qualified name of a method that exists reported ``not_found``. The name and
+    qualified name are compared exactly as the store's predicate compares them; a
+    key match is known only through ``matched_term``.
+    """
+    answered = {term for term in asked if term in (hit.name, hit.qualified_name)}
+    if hit.matched_term:
+        answered.add(hit.matched_term)
+    return answered
+
+
+@dataclass
+class _TermProofs:
+    """What the exact lookups established about each term, gathered as they ran.
+
+    The stages that make those lookups record here as a side effect of work they
+    do anyway, and :func:`_term_matches` reads it once. Nothing here ranks, admits
+    or budgets a candidate.
+
+    A term a lookup was *asked* about and did not match is a negative only when
+    the lookup examined everything it could have. Each shared lookup takes every
+    term of the question under one limit, so when it comes back full, a term it
+    did not match may simply have been crowded out; such terms are kept in the
+    ``*_crowded`` sets until :meth:`Retriever._settle_crowded` has asked each alone.
+    The text lookup cannot be settled that cheaply and is recorded as cut instead.
+    """
+
+    text_asked: set[str] = field(default_factory=set)
+    text_found: set[str] = field(default_factory=set)
+    #: Terms whose text lookup stopped at its limit without a case-exact match.
+    text_cut: set[str] = field(default_factory=set)
+    files_asked: set[str] = field(default_factory=set)
+    files_found: set[str] = field(default_factory=set)
+    files_crowded: set[str] = field(default_factory=set)
+    names_asked: set[str] = field(default_factory=set)
+    names_found: set[str] = field(default_factory=set)
+    names_crowded: set[str] = field(default_factory=set)
+
+    def text(self, term: str, hits: Sequence[ChunkHit], *, exhaustive: bool) -> None:
+        self.text_asked.add(term)
+        if hits:
+            self.text_found.add(term)
+        elif not exhaustive:
+            self.text_cut.add(term)
+
+    def files(self, asked: Sequence[str], hits: Sequence[FileHit], limit: int) -> None:
+        self.files_asked.update(asked)
+        found = {hit.term for hit in hits} | {
+            term for term in asked if any(_names_file(term, hit) for hit in hits)
+        }
+        self.files_found |= found
+        if len(hits) >= limit:
+            self.files_crowded.update(term for term in asked if term not in found)
+
+    def names(self, asked: Sequence[str], hits: Sequence[EntityHit], limit: int) -> None:
+        self.names_asked.update(asked)
+        found = {term for hit in hits for term in _answers_to(hit, asked)}
+        self.names_found |= found
+        if len(hits) >= limit:
+            self.names_crowded.update(term for term in asked if term not in found)
+
+    def absent(self, term: str) -> bool:
+        """Whether every lookup of ``term`` ran to completion and matched nothing.
+
+        Read from the same records as the per-term answer, so suppression and the
+        term's state cannot disagree. A lookup never asked, one cut off at its
+        limit, and one a full shared lookup crowded out that has not been asked
+        alone since, each establish nothing.
+        """
+        outcomes = (
+            _text_outcome(term, self),
+            _outcome(term, self.files_asked, self.files_found),
+            _outcome(term, self.names_asked, self.names_found),
+        )
+        unsettled = term in self.files_crowded or term in self.names_crowded
+        return not unsettled and all(outcome is LookupOutcome.NO_MATCH for outcome in outcomes)
+
+
+def _reported_terms(analysis: QueryAnalysis) -> set[str]:
+    """The terms :func:`_term_matches` reports on — the only ones worth settling."""
+    parts = set(analysis.token_parts)
+    return {
+        *analysis.literal_terms,
+        *analysis.http_keys,
+        *(name for name in analysis.symbol_names if name not in parts),
+    }
+
+
+def _outcome(term: str, asked: set[str], found: set[str]) -> LookupOutcome:
+    if term not in asked:
+        return LookupOutcome.NOT_CHECKED
+    return LookupOutcome.MATCH if term in found else LookupOutcome.NO_MATCH
+
+
+def _text_outcome(term: str, proofs: _TermProofs) -> LookupOutcome:
+    if term not in proofs.text_asked:
+        return LookupOutcome.NOT_CHECKED
+    if term in proofs.text_found:
+        return LookupOutcome.MATCH
+    return LookupOutcome.INCOMPLETE if term in proofs.text_cut else LookupOutcome.NO_MATCH
+
+
+def _state(checks: dict[TermLookup, LookupOutcome]) -> TermState:
+    """The one-word summary of ``checks``: only ever what they establish.
+
+    ``exact`` needs one identity lookup to have matched. ``text_only`` needs the
+    text to have matched and every identity lookup to have run to completion
+    without a match. ``not_found`` needs every relevant lookup to have run to
+    completion without a match. Anything short of those — a lookup that never ran,
+    or one cut off at its limit — is ``not_established``, however many of the other
+    lookups came back empty.
+    """
+    identity = [outcome for lookup, outcome in checks.items() if lookup is not TermLookup.TEXT]
+    if LookupOutcome.MATCH in identity:
+        return TermState.EXACT
+    if checks.get(TermLookup.TEXT) is LookupOutcome.MATCH and all(
+        outcome is LookupOutcome.NO_MATCH for outcome in identity
+    ):
+        return TermState.TEXT_ONLY
+    if all(outcome is LookupOutcome.NO_MATCH for outcome in checks.values()):
+        return TermState.NOT_FOUND
+    return TermState.NOT_ESTABLISHED
+
+
+def _term_match(term: str, checks: dict[TermLookup, LookupOutcome]) -> TermMatch:
+    return TermMatch(
+        term=term,
+        state=_state(checks),
+        lookups=tuple(
+            lookup for lookup, outcome in checks.items() if outcome is not LookupOutcome.NOT_CHECKED
+        ),
+        checks=checks,
+    )
+
+
+def _term_matches(analysis: QueryAnalysis, proofs: _TermProofs) -> tuple[TermMatch, ...]:
+    """What the exact lookups established for each term the question named.
+
+    Every term is reported with every lookup relevant to its kind, and what each
+    established:
+
+    * a **literal term** is searched in text, as a file path and as an entity name,
+      all before suppression is decided;
+    * an **HTTP key** is looked up as an entity key, and nothing else is relevant;
+    * any **other name** the question spelled as one — a compound ``PascalCase``
+      token, a word a naming phrase introduced, a one-token question — is looked up
+      as a file name when it was among the words file lookup took, and as an entity
+      name by the symbol stage, which does not run under suppression. It is never
+      searched as text, and its text is reported ``not_checked`` rather than
+      assumed absent.
+
+    Prose words the question merely used are not reported: they were never
+    claimed to be names, and "not found" would be a claim about them. Nor are the
+    pieces of a one-token question — ``docs`` of ``docs/ARCHITECTURE.md`` is a
+    directory the question passed through, and "docs: not_found" would read as a
+    claim that it does not exist.
+    """
+    matches: list[TermMatch] = []
+    seen: set[str] = set(analysis.token_parts)
+
+    for term in analysis.literal_terms:
+        seen.add(term)
+        matches.append(
+            _term_match(
+                term,
+                {
+                    TermLookup.TEXT: _text_outcome(term, proofs),
+                    TermLookup.FILE_PATH: _outcome(term, proofs.files_asked, proofs.files_found),
+                    TermLookup.ENTITY_NAME: _outcome(term, proofs.names_asked, proofs.names_found),
+                },
+            )
+        )
+
+    for key in analysis.http_keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        matches.append(
+            _term_match(
+                key, {TermLookup.ENTITY_KEY: _outcome(key, proofs.names_asked, proofs.names_found)}
+            )
+        )
+
+    for name in analysis.symbol_names:
+        if name in seen:
+            continue
+        seen.add(name)
+        matches.append(
+            _term_match(
+                name,
+                {
+                    TermLookup.TEXT: LookupOutcome.NOT_CHECKED,
+                    TermLookup.FILE_PATH: _outcome(name, proofs.files_asked, proofs.files_found),
+                    TermLookup.ENTITY_NAME: _outcome(name, proofs.names_asked, proofs.names_found),
+                },
+            )
+        )
+    return tuple(matches)
 
 
 def _recorded(watch: Stopwatch) -> StageTiming:

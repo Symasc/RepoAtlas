@@ -59,6 +59,7 @@ from mcp.server.stdio import stdio_server
 from pydantic import ValidationError
 
 from repoatlas.capabilities.errors import capability_error
+from repoatlas.capabilities.presentation import present
 from repoatlas.capabilities.service import CapabilityService
 from repoatlas.mcp.tools import TOOLS, TOOLS_BY_NAME, ToolSpec
 from repoatlas.models.capability import CapabilityError, ErrorCategory
@@ -77,7 +78,8 @@ INSTRUCTIONS = (
     "call for that same task, including verify_grounding. Do not reuse an "
     "investigation_id for an unrelated task. Verification checks that citations "
     "resolve to evidence supplied in that investigation; it does not check whether "
-    "a statement is true."
+    "a statement is true. A search item marked declaration is RepoAtlas's record of "
+    "a definition, not its source: inspect its entity key to read the source."
 )
 
 
@@ -102,7 +104,8 @@ def tool_definitions() -> list[protocol.Tool]:
     return a result object directly, which this one must in order to carry a
     structured error --- so declaring them would spend a large part of a caller's
     context advertising a contract nothing here enforces. The structured content
-    is still exactly ``response.model_dump(mode="json")``.
+    is still exactly ``response.model_dump(mode="json")``, unless the request asked
+    for ``presentation: compact`` (:mod:`repoatlas.capabilities.presentation`).
     """
     return [
         protocol.Tool(
@@ -137,7 +140,7 @@ def _error_result(error: CapabilityError) -> protocol.CallToolResult:
     """
     payload: dict[str, Any] = {"ok": False, "error": error.model_dump(mode="json")}
     return protocol.CallToolResult(
-        content=[protocol.TextContent(type="text", text=json.dumps(payload, indent=2))],
+        content=[protocol.TextContent(type="text", text=_json_text(payload))],
         structuredContent=payload,
         isError=True,
     )
@@ -152,10 +155,25 @@ def _success_result(payload: dict[str, Any]) -> protocol.CallToolResult:
     exactly what the structured field holds.
     """
     return protocol.CallToolResult(
-        content=[protocol.TextContent(type="text", text=json.dumps(payload, indent=2))],
+        content=[protocol.TextContent(type="text", text=_json_text(payload))],
         structuredContent=payload,
         isError=False,
     )
+
+
+def _json_text(payload: dict[str, Any]) -> str:
+    """The text block: ``payload`` as compact JSON.
+
+    Compact because the block is read by a model, not a person, and it is a second
+    copy of everything in ``structuredContent``. Pretty-printing it spent about a
+    sixth of a search's text block on indentation (3.7 KB of 22 KB for a
+    twelve-item answer on LVL), on every call, for a layout no client parses.
+    ``ensure_ascii`` is off for the same reason: an em dash in quoted source is
+    three bytes as itself and seven once escaped and then escaped again inside the
+    JSON-RPC message. The value is unchanged either way, so a caller that parses
+    the text gets exactly what the structured field holds.
+    """
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
 
 def _unknown_tool(name: str) -> CapabilityError:
@@ -208,7 +226,9 @@ def invoke(service: CapabilityService, spec: ToolSpec, arguments: dict[str, Any]
     """
     request = spec.request.model_validate(arguments)
     response = getattr(service, spec.capability)(request)
-    return response.model_dump(mode="json")
+    # In full, or in the compact projection the request asked for. Not per-tool
+    # logic: one function decides for every capability, below this layer.
+    return present(request, response)
 
 
 def dispatch(
