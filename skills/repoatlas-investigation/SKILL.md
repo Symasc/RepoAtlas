@@ -20,7 +20,7 @@ Ask for the smallest evidence set that lets you make the next decision. You almo
 
 ## The tools
 
-Eight, and no others:
+Nine, and no others:
 
 | Tool | Use it to |
 |---|---|
@@ -30,12 +30,13 @@ Eight, and no others:
 | `repoatlas_inspect` | read a narrow range of source already in the index |
 | `repoatlas_relationships` | walk indexed graph facts from one exact entity |
 | `repoatlas_dependencies` | read declared, resolved and provided package facts |
+| `repoatlas_http_operations` | list one repository's HTTP requests and served or declared routes, with coverage |
 | `repoatlas_verify_grounding` | check that your citations resolve to supplied evidence |
 | `repoatlas_sync` | update the index from local working trees |
 
 There is no tool that initializes an index, answers a question for you, reads an arbitrary file, or runs anything. Indexing a workspace for the first time is an operator action outside this tool surface; if nothing is indexed, say so.
 
-Do not call all eight on every question. Most questions need two or three.
+Do not call all nine on every question. Most questions need two or three.
 
 ## Investigations
 
@@ -63,7 +64,7 @@ Keep evidence ids visible in your answer where the host allows it, written as Re
 
 1. Establish scope only if it matters: `repoatlas_repositories` or `repoatlas_status`.
 2. Search the question. Keep the `investigation_id`, the evidence ids, and any exact entity handles that came back.
-3. Decide what is actually missing, and get only that: `repoatlas_inspect` for more source, `repoatlas_relationships` for graph facts, `repoatlas_dependencies` for package facts.
+3. Decide what is actually missing, and get only that: `repoatlas_inspect` for more source, `repoatlas_relationships` for graph facts, `repoatlas_dependencies` for package facts, `repoatlas_http_operations` for what one repository requests and serves over HTTP.
 4. Repeat only the step you need, passing the same `investigation_id`.
 5. Draft an answer using only evidence you actually obtained.
 6. Verify it with `repoatlas_verify_grounding` before presenting it as grounded in RepoAtlas.
@@ -217,6 +218,31 @@ Say what the index shows, qualified:
 If several repositories serve or expose the same node, they are all candidates. Name them and do not pick one. A route match alone says nothing about which deployment a caller reaches. `GET /users/{id}` does not match `GET /users/42`.
 
 An endpoint a specification composes from a server URL and a path has no single source span, so its edge is not citable. Cite the server and route lines, which are separately citable.
+
+## HTTP inventory and coverage
+
+`repoatlas_http_operations` lists one repository's HTTP operations: the requests its source makes and the routes it serves or declares. Use it when the question is "which of these calls has a handler?", "which handlers has nothing calling them?" or "what does this client request?" — not as a search.
+
+```json
+{"tool": "repoatlas_http_operations", "arguments": {"context": {"scope": "repository", "repository": "lvl"}, "role": "caller", "owner": "createLearningClient", "investigation_id": "<the id search returned>"}}
+```
+
+It answers for one repository, so it needs a repository scope. Filter with `within_path`, `owner` (a factory's methods, without needing an edge to them), `method`, `route_prefix` and `status`; page with `limit` and the `cursor` it returns.
+
+**Read the statuses as what they are: facts in this repository's index.**
+
+- `matched` — a route indexed as served here has this request's method and shape. That is route compatibility, nothing else.
+- `ambiguous` — the path is established, the method is not; the compatible routes are listed as candidates.
+- `no_indexed_handler` — **not** "the backend has no implementation". It means nothing indexed in *this* repository matches. Before reporting a gap, check the row's `declared_matches` (a handler whose mount is not proven), `coverage.limitations` (constructs not extracted at all), and the `unresolved` rows (requests whose path could not be read, any of which could be the one you are looking for). Then say "no indexed handler in `<repository>`", and walk the row's route key with `repoatlas_relationships` and `cross_repository: true` if another repository might serve it.
+- `unresolved` — the path could not be established; `detail` says why.
+- `called` / `no_indexed_caller` — the same rule on the provider side: `no_indexed_caller` is absence in this repository's index, not proof that nothing calls the route.
+- `declared` — the route is declared but no proven application mounts it.
+
+Every response repeats this in `basis`, and `coverage` says what was read and what could not be. Quote them rather than working around them.
+
+**Keep three questions apart.** A route match is a static shape match. Which service a client actually reaches is configuration — read it with `repoatlas_search` and `repoatlas_inspect` on the client's base URL and the service's port and environment variables — and who owns the data behind a route is neither; no tool here establishes it. Label each finding as route, configuration or ownership.
+
+A row is a handle, not evidence. Pass `include_provenance: true` for the rows you intend to cite: it supplies each row's own lines. A row marked `composed: true` had its method or route decided somewhere other than those lines — a helper's default, a base URL, a controller prefix, the server's spelling of a parameter — so cite it only for what the lines show.
 
 ## Dependencies
 

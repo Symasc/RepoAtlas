@@ -124,6 +124,9 @@ def test_defaults_survive_the_transport(service: Any) -> None:
     assert schemas["repoatlas_search"]["properties"]["include_trace"]["default"] is False
     assert schemas["repoatlas_inspect"]["properties"]["allow_worktree"]["default"] is True
     assert schemas["repoatlas_dependencies"]["properties"]["include_provenance"]["default"] is True
+    operations = schemas["repoatlas_http_operations"]["properties"]
+    assert operations["include_provenance"]["default"] is False
+    assert operations["role"]["default"] == "both"
 
 
 def test_investigation_semantics_survive_the_transport(service: Any) -> None:
@@ -139,6 +142,7 @@ def test_investigation_semantics_survive_the_transport(service: Any) -> None:
         "repoatlas_inspect",
         "repoatlas_relationships",
         "repoatlas_dependencies",
+        "repoatlas_http_operations",
     ):
         assert "investigation_id" not in schemas[name].get("required", ())
         assert "investigation_id" in schemas[name]["properties"]
@@ -185,7 +189,7 @@ def test_the_exactly_one_target_rule_is_still_enforced_behind_the_schema(service
 def test_no_tool_advertises_an_output_schema(service: Any) -> None:
     """Recorded as a decision, and pinned so it stays one.
 
-    Output schemas are omitted deliberately: the eight response models come to
+    Output schemas are omitted deliberately: the nine response models come to
     several times the size of the inputs, every byte of it lands in the tool list
     an agent reads before asking anything, and the SDK skips output validation for
     a handler that returns a result object directly --- which this one must, to

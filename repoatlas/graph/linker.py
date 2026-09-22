@@ -771,6 +771,43 @@ class ReferenceLinker:
         return planned, len(cross_pairs)
 
 
+@dataclass(frozen=True, slots=True)
+class RepositoryHttp:
+    """One repository's HTTP plan, with the inputs it was computed from."""
+
+    plan: HttpClaimPlan
+    files: list[FileRow]
+    claims: list[UnresolvedRefRecord]
+    index: ResolutionIndex
+
+
+def plan_repository_http(knowledge: SqliteKnowledgeStore, repo_id: int) -> RepositoryHttp:
+    """One repository's HTTP decisions, computed exactly as the global pass computes them.
+
+    Every rule the global pass applies to HTTP claims is repository-local: module
+    resolution stays inside the importing repository, markers are keyed by package
+    or repository, a controller resolves in its own file, and template calls are
+    matched only against their own repository's served routes. So planning one
+    repository's claims alone reproduces its share of the global plan — the same
+    function over the same inputs, narrowed by repository and nothing else. Only
+    classes are loaded as symbols, because a class is the only symbol a decision
+    reads.
+
+    Writes nothing, and never reads a ``linker:global`` edge as an input.
+    """
+    files = knowledge.list_file_rows(repo_id)
+    symbols = knowledge.list_symbols([EntityType.CLASS], repo_id)
+    claims = [
+        claim
+        for claim in knowledge.list_unresolved_refs(repo_id, pending_only=True)
+        if claim_role(claim) is not None
+    ]
+    served = knowledge.list_served_routes(exclude_parser=GLOBAL_PARSER, repo_id=repo_id)
+    index = ResolutionIndex.build(files, symbols)
+    plan = plan_http_claims(claims, index, files, producer=GLOBAL_PARSER, served_routes=served)
+    return RepositoryHttp(plan=plan, files=files, claims=claims, index=index)
+
+
 def claim_role(claim: UnresolvedRefRecord) -> str | None:
     """The pending-fact role a claim carries, or ``None`` for an ordinary claim."""
     if not claim.meta_json:
