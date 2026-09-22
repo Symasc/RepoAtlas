@@ -676,7 +676,10 @@ def _options(spec: object) -> list[http.RouteTemplate | str]:
     found: dict[str, http.RouteTemplate | str] = {}
     for choice in choices:
         option = _option(choice)
-        key = option if isinstance(option, str) else f"{option.display}?{option.query}"
+        # Keyed on the path alone. Whether a query followed is not part of which
+        # route is named, so `/x?id=1` and `/x` are one request written two ways,
+        # exactly as a file that can decide such a call for itself reads them.
+        key = option if isinstance(option, str) else option.display
         found.setdefault(key, option)
     return list(found.values())
 
