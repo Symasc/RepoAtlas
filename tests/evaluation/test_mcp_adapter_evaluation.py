@@ -56,6 +56,7 @@ EXPECTED_INVENTORY = (
     "repoatlas_inspect",
     "repoatlas_relationships",
     "repoatlas_dependencies",
+    "repoatlas_http_operations",
     "repoatlas_verify_grounding",
     "repoatlas_sync",
 )

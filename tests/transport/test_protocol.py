@@ -32,7 +32,7 @@ from tests.transport.conftest import (
 from mcp import ClientSession
 
 #: Exactly the capabilities §1 names. Written out rather than derived from the
-#: package, so that exposing a ninth tool has to be a decision made twice.
+#: package, so that exposing a tenth tool has to be a decision made twice.
 EXPECTED_TOOLS = (
     "repoatlas_repositories",
     "repoatlas_status",
@@ -40,6 +40,7 @@ EXPECTED_TOOLS = (
     "repoatlas_inspect",
     "repoatlas_relationships",
     "repoatlas_dependencies",
+    "repoatlas_http_operations",
     "repoatlas_verify_grounding",
     "repoatlas_sync",
 )
@@ -50,7 +51,7 @@ EXPECTED_TOOLS = (
 NEVER_EXPOSED = ("repoatlas_init", "repoatlas_ask", "repoatlas_debug", "repoatlas_locate")
 
 
-def test_the_server_exposes_exactly_the_eight_completed_capabilities(service: object) -> None:
+def test_the_server_exposes_exactly_the_nine_completed_capabilities(service: object) -> None:
     async def body(session: ClientSession) -> tuple[str, ...]:
         listed = await session.list_tools()
         return tuple(tool.name for tool in listed.tools)

@@ -42,7 +42,7 @@ Every tool call states its own repository scope.
 
 ### What `tools/list` costs
 
-The eight tool input schemas are advertised in full and are derived directly from
+The nine tool input schemas are advertised in full and are derived directly from
 the V2 Pydantic request models, so the schema a client validates against is the
 one the capability actually accepts. That costs roughly 28 KB of context at
 handshake as currently measured, which is the price of a contract a client can
@@ -92,14 +92,15 @@ is one source of behavioural truth.
 
 ## 4. What the agent gets
 
-Eight tools, and no resources or prompts:
+Nine tools, and no resources or prompts:
 
 ```
-repoatlas_repositories   repoatlas_status         repoatlas_search    repoatlas_inspect
-repoatlas_relationships  repoatlas_dependencies   repoatlas_verify_grounding   repoatlas_sync
+repoatlas_repositories   repoatlas_status         repoatlas_search             repoatlas_inspect
+repoatlas_relationships  repoatlas_dependencies   repoatlas_http_operations    repoatlas_verify_grounding
+repoatlas_sync
 ```
 
-Seven read. `repoatlas_sync` is the only one that changes anything, and what it
+Eight read. `repoatlas_sync` is the only one that changes anything, and what it
 changes is the index, never repository source.
 
 Repository source is reachable only through the evidence-producing tools, which

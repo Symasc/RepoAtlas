@@ -21,10 +21,12 @@ class EvidenceSource(enum.StrEnum):
     """How a piece of evidence was reached. Used by rank fusion and by --verbose.
 
     The first six are retrieval stages, and they are the only ones fusion ever
-    sees. :attr:`INSPECT`, :attr:`RELATIONSHIP` and :attr:`DEPENDENCY` are not
-    stages: they name evidence that was *addressed* rather than searched for — the
-    source of a file, entity or span a caller named exactly, the lines that assert
-    a graph edge reached from one, and the manifest line stating a package fact.
+    sees. :attr:`INSPECT`, :attr:`RELATIONSHIP`, :attr:`DEPENDENCY` and
+    :attr:`HTTP_OPERATION` are not stages: they name evidence that was *addressed*
+    rather than searched for — the source of a file, entity or span a caller named
+    exactly, the lines that assert a graph edge reached from one, the manifest line
+    stating a package fact, and the lines where an HTTP request is written or a
+    route declared.
 
     They share this enum rather than getting ones of their own because the ledger
     records a route for every piece of evidence it holds, and two vocabularies for
@@ -48,6 +50,13 @@ class EvidenceSource(enum.StrEnum):
     #: read what the file actually says rather than trust a parsed field. Never
     #: ranked.
     DEPENDENCY = "dependency"
+    #: The lines where an HTTP request is written or a route declared, as written.
+    #: They show what the source states at that place — the call, or the decorator
+    #: — and nothing decided elsewhere: not a helper's default method, a wrapper's
+    #: base, a controller prefix, or the server's spelling of a parameter. Distinct
+    #: from :attr:`RELATIONSHIP` because many of these rows assert no graph edge at
+    #: all. Never ranked.
+    HTTP_OPERATION = "http_operation"
 
 
 class EvidenceTier(enum.IntEnum):

@@ -1748,6 +1748,25 @@ linker stores its edge with no lines. The fact is in the graph, but it is not ci
 
 Stitching the two into one "span" would cite text that was never written together.
 
+**The inventory is replanned, not stored.** `http_operations` answers from one repository's standing claims,
+run through the same `plan_http_claims` the global pass uses, rather than from a second store of outcomes. That is
+sound because every rule the pass applies to HTTP claims is repository-local — resolution, package lookup, markers,
+controllers and edge deduplication all stay inside one `repo_id` — so a repository's own plan is exactly its share
+of the global one, which a test pins. It also means there is no stored answer to go stale: a reading that disagrees
+with the stored graph, because an older parser built it or a link pass failed, is still returned and marked with
+the `stored_graph_differs` limitation. Filters apply to rows after the whole repository is planned, so narrowing
+what is *returned* can never narrow what was *known* when a row was decided.
+
+**Three questions the inventory keeps apart.** A row states route compatibility: a request's method and path have
+the shape of a route this repository's indexed source serves. It is not which host a client is configured to reach
+— that is configuration, read with search and inspect — and it is not which service owns the data, which nothing
+static establishes. Every response carries a fixed `basis` block saying so, and the negative statuses are named for
+what they are: `no_indexed_handler` and `no_indexed_caller` are absence **in this repository's index**, not absence
+in the source. The handler may be in another repository, behind an unproven mount (the row's `declared_matches`
+names it), or in a construct not extracted at all — direct fetch, member-call clients, injected fetch
+implementations, concatenated paths, constant decorator paths. `coverage.limitations` lists each of those, counted
+from the rows where it can be counted and merely declared possible where it cannot.
+
 **Search** generates the exact keys a question spells, then feeds them to the existing exact-name lookup. A key hit
 is a seed, and its handle is published like `env:` handles, so no tier, match class or ranking changed. The spellings
 it reads:

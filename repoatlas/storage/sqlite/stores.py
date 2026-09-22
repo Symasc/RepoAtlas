@@ -30,6 +30,7 @@ from repoatlas.storage.protocols import (
     EntityRecord,
     FileFacts,
     FileRow,
+    HttpEdgeRow,
     NeighborEdge,
     SymbolRow,
     SyncCompletion,
@@ -74,6 +75,10 @@ def _json_list(raw: str | None) -> tuple[str, ...]:
 
 def _parse_dt(raw: str | None) -> datetime | None:
     return datetime.fromisoformat(raw) if raw else None
+
+
+#: What every shared HTTP node's key starts with: routes, endpoints, deployments.
+_HTTP_KEY_PREFIX = "http-"
 
 
 def _after(prefix: str) -> str:
@@ -630,15 +635,33 @@ class SqliteKnowledgeStore:
                 ],
             )
 
-    def list_unresolved_refs(self) -> list[UnresolvedRefRecord]:
-        rows = self._db.execute(
-            """
-            SELECT id, repo_id, file_id, src_id, edge_type, target_kind, target_key,
-                   line_start, line_end, confidence, meta_json
-            FROM unresolved_refs
-            ORDER BY id
-            """
-        ).fetchall()
+    def list_unresolved_refs(
+        self, repo_id: int | None = None, *, pending_only: bool = False
+    ) -> list[UnresolvedRefRecord]:
+        """Standing claims, optionally one repository's, optionally pending facts only.
+
+        A repository's claims are the ones its files assert, reached through
+        ``files`` (indexed on ``repo_id``) rather than a column ``unresolved_refs``
+        has no index for. ``pending_only`` is a cheap prefilter on the recorded
+        role; callers that need the exact rule still apply it.
+        """
+        sql = """
+            SELECT u.id, u.repo_id, u.file_id, u.src_id, u.edge_type, u.target_kind,
+                   u.target_key, u.line_start, u.line_end, u.confidence, u.meta_json
+            FROM unresolved_refs u
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        if repo_id is not None:
+            sql += " JOIN files f ON f.id = u.file_id"
+            clauses.append("f.repo_id = ?")
+            params.append(repo_id)
+        if pending_only:
+            clauses.append("u.meta_json LIKE ?")
+            params.append('%"pending_fact"%')
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        rows = self._db.execute(sql + " ORDER BY u.id", tuple(params)).fetchall()
         return [
             UnresolvedRefRecord(
                 id=row["id"],
@@ -668,18 +691,21 @@ class SqliteKnowledgeStore:
             cursor = conn.execute("DELETE FROM edges WHERE parser = ?", (parser,))
         return cursor.rowcount or 0
 
-    def list_file_rows(self) -> list[FileRow]:
-        """Every indexed file joined to its repository and its file entity."""
-        rows = self._db.execute(
-            """
+    def list_file_rows(self, repo_id: int | None = None) -> list[FileRow]:
+        """Every indexed file — or one repository's — joined to its repository and entity."""
+        sql = """
             SELECT f.id AS file_id, e.id AS file_entity_id, f.repo_id AS repo_id,
                    r.name AS repo_name, r.slug AS repo_slug, r.path AS repo_path,
                    f.rel_path AS rel_path
             FROM files f
             JOIN repositories r ON r.id = f.repo_id
             JOIN entities e ON e.file_id = f.id AND e.type = 'file'
-            """
-        ).fetchall()
+        """
+        params: tuple[object, ...] = ()
+        if repo_id is not None:
+            sql += " WHERE f.repo_id = ?"
+            params = (repo_id,)
+        rows = self._db.execute(sql, params).fetchall()
         return [
             FileRow(
                 file_id=row["file_id"],
@@ -693,7 +719,9 @@ class SqliteKnowledgeStore:
             for row in rows
         ]
 
-    def list_symbols(self, types: Sequence[EntityType] | None = None) -> list[SymbolRow]:
+    def list_symbols(
+        self, types: Sequence[EntityType] | None = None, repo_id: int | None = None
+    ) -> list[SymbolRow]:
         """File-scoped definitions, for cross-file and cross-repository resolution."""
         sql = """
             SELECT id, file_id, repo_id, type, name, qualified_name, line_start
@@ -707,6 +735,9 @@ class SqliteKnowledgeStore:
             placeholders = ",".join("?" * len(types))
             sql += f" AND type IN ({placeholders})"
             params = tuple(str(t) for t in types)
+        if repo_id is not None:
+            sql += " AND repo_id = ?"
+            params = (*params, repo_id)
         rows = self._db.execute(sql, params).fetchall()
         return [
             SymbolRow(
@@ -721,7 +752,9 @@ class SqliteKnowledgeStore:
             for row in rows
         ]
 
-    def list_served_routes(self, *, exclude_parser: str) -> dict[int, list[str]]:
+    def list_served_routes(
+        self, *, exclude_parser: str, repo_id: int | None = None
+    ) -> dict[int, list[str]]:
         """Per repository, the route bodies its files serve, minus one producer's edges.
 
         Reached through the route nodes (a key range on ``idx_entities_key``, then
@@ -739,6 +772,7 @@ class SqliteKnowledgeStore:
               AND e.type = ?
               AND e.repo_id IS NOT NULL
               AND (e.parser IS NULL OR e.parser <> ?)
+              AND (? IS NULL OR e.repo_id = ?)
             ORDER BY e.repo_id, t.name
             """,
             (
@@ -747,12 +781,69 @@ class SqliteKnowledgeStore:
                 str(EntityType.HTTP_ROUTE),
                 str(EdgeType.SERVES_HTTP_ROUTE),
                 exclude_parser,
+                repo_id,
+                repo_id,
             ),
         ).fetchall()
         served: dict[int, list[str]] = {}
         for row in rows:
             served.setdefault(row["repo_id"], []).append(row["body"])
         return served
+
+    def list_http_edges(self, repo_id: int) -> list[HttpEdgeRow]:
+        """Every edge one repository asserts to a shared HTTP route or endpoint.
+
+        Reached through the HTTP nodes (a key range on ``idx_entities_key``, then
+        ``idx_edges_dst``) and narrowed to the asserting repository, which is the
+        edge's own ``repo_id``: the other repositories meeting on the same node are
+        not this repository's facts.
+        """
+        rows = self._db.execute(
+            """
+            SELECT e.type, e.parser, e.src_id, s.key AS src_key, s.name AS src_name,
+                   s.qualified_name AS src_qualified_name, t.key AS target_key,
+                   t.name AS target_name, f.rel_path AS path, e.line_start, e.line_end
+            FROM entities t
+            JOIN edges e ON e.dst_id = t.id
+            JOIN entities s ON s.id = e.src_id
+            LEFT JOIN files f ON f.id = e.file_id
+            WHERE t.key >= ? AND t.key < ?
+              AND e.repo_id = ?
+              AND e.type IN (?, ?, ?)
+            ORDER BY f.rel_path, e.line_start, t.key, s.key
+            """,
+            (
+                _HTTP_KEY_PREFIX,
+                _after(_HTTP_KEY_PREFIX),
+                repo_id,
+                str(EdgeType.CALLS_HTTP_ROUTE),
+                str(EdgeType.SERVES_HTTP_ROUTE),
+                str(EdgeType.CALLS_HTTP_ENDPOINT),
+            ),
+        ).fetchall()
+        return [
+            HttpEdgeRow(
+                type=EdgeType(row["type"]),
+                parser=row["parser"],
+                src_id=row["src_id"],
+                src_key=row["src_key"],
+                src_name=row["src_name"],
+                src_qualified_name=row["src_qualified_name"],
+                target_key=row["target_key"],
+                target_name=row["target_name"],
+                path=row["path"],
+                line_start=row["line_start"],
+                line_end=row["line_end"],
+            )
+            for row in rows
+        ]
+
+    def list_file_parsers(self, repo_id: int) -> list[tuple[str, str | None]]:
+        """``(path, parser)`` for every indexed file of one repository."""
+        rows = self._db.execute(
+            "SELECT rel_path, parser FROM files WHERE repo_id = ? ORDER BY rel_path", (repo_id,)
+        ).fetchall()
+        return [(row["rel_path"], row["parser"]) for row in rows]
 
     def neighbors(
         self,

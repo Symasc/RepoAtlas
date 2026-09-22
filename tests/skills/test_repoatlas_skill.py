@@ -33,7 +33,7 @@ from tests.skills.conftest import (
     sections,
 )
 
-#: Exactly the eight tools Slice J exposes.
+#: Exactly the tools the transport exposes.
 EXPECTED_TOOLS = frozenset(spec.name for spec in TOOLS)
 
 #: Names an agent might plausibly be told about that do not exist. Teaching any of
@@ -94,7 +94,7 @@ def test_the_frontmatter_names_the_skill_and_says_when_to_use_it(skill: str) -> 
 # == C, D. the tool vocabulary =============================================
 
 
-def test_the_skill_names_all_eight_tools(skill: str) -> None:
+def test_the_skill_names_every_tool(skill: str) -> None:
     named = set(re.findall(r"repoatlas_[a-z_]+", skill))
     missing = EXPECTED_TOOLS - named
     assert not missing, f"the skill never mentions: {sorted(missing)}"
@@ -373,7 +373,7 @@ def test_verification_is_taught_as_a_step_before_answering(skill: str) -> None:
 
 def test_the_skill_does_not_require_every_tool_on_every_task(skill: str) -> None:
     text = skill.lower()
-    assert "do not call all eight on every question" in text
+    assert "do not call all nine on every question" in text
     assert contains_all(text, "most questions need two or three")
     assert "skipping a step you do not need is correct" in sections(skill)["workflow"]
 

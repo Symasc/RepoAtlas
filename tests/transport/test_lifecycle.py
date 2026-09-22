@@ -92,6 +92,9 @@ def _arguments_for(tool: str) -> dict[str, Any]:
         return {"context": GLOBAL, "target": "env:SERVICE_HOST"}
     if tool == "repoatlas_dependencies":
         return {"context": GLOBAL, "limit": 2}
+    if tool == "repoatlas_http_operations":
+        # Every status it returns speaks for one repository, so it takes one.
+        return {"context": {"scope": "repository", "repository": "python-service"}, "limit": 2}
     return {"context": GLOBAL}
 
 
