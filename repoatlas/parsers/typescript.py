@@ -593,7 +593,11 @@ class TypeScriptParser:
     #    forwarding a path to a fetch-like call — become HTTP facts.
     # 7: exported request helpers are declared, and calls through helpers imported
     #    from relative modules are recorded for the global pass to decide.
-    version = "7"
+    # 8: a request whose path one file cannot decide — a rooted template, a choice
+    #    of rooted paths, a named value, or a route with an unread method — is
+    #    recorded as a pending claim, and template arguments are recorded as parts
+    #    rather than text, so the global pass can match them against served routes.
+    version = "8"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:

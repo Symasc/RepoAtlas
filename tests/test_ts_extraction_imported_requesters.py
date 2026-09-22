@@ -195,11 +195,41 @@ def test_where_each_deciding_literal_is_written_decides_citability(index: Index)
 
 
 def test_a_template_path_stays_unresolved_and_is_counted(index: Index) -> None:
+    """Nothing in its repository serves the shape, so the call links nowhere."""
     workspace, _ = _learning(index)
     assert all(caller != "createLearningClient.getOrganization" for caller, _ in _calls(workspace))
     assert _outcomes(workspace)["createLearningClient.getOrganization"] == (
-        "the path is not a literal"
+        "no route served in this repository matches the path"
     )
+
+
+SERVER = """\
+import express from "express";
+const app = express();
+app.get("/v1/organizations/:organizationId", (req, res) => res.json({}));
+app.post("/v1/organizations/:organizationId", (req, res) => res.json({}));
+"""
+
+
+def test_a_template_path_links_to_the_route_shape_its_own_repository_serves(
+    index: Index,
+) -> None:
+    """Same method, same shape, same repository: linked, with the server's spelling."""
+    workspace, _ = _learning(index, **{"src/server.ts": SERVER})
+    route = "http-route:GET:/v1/organizations/:organizationId"
+    assert ("createLearningClient.getOrganization", route) in _calls(workspace)
+    assert ("createLearningClient.getOrganization", route.replace("GET", "POST")) not in _calls(
+        workspace
+    )
+    row = workspace.database.execute(
+        "SELECT e.line_start, e.line_end, e.parser FROM edges e "
+        "JOIN entities src ON src.id = e.src_id JOIN entities dst ON dst.id = e.dst_id "
+        "WHERE src.qualified_name = ? AND dst.key = ?",
+        ("createLearningClient.getOrganization", route),
+    ).fetchone()
+    # The parameter's spelling is the server's, not the call's: nothing to cite here.
+    assert (row["line_start"], row["line_end"], row["parser"]) == (None, None, "linker:global")
+    assert _outcomes(workspace)["createLearningClient.getOrganization"] == "promoted"
 
 
 def test_an_imported_wrapper_function_is_read_too(index: Index) -> None:
