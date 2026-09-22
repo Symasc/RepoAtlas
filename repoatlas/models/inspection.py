@@ -43,9 +43,11 @@ import enum
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from repoatlas.models.capability import (
+    PRESENTATION_DESCRIPTION,
     AppliedBudget,
     CapabilityContext,
     EvidenceBudget,
+    Presentation,
 )
 from repoatlas.models.capability_io import ContextView, EvidenceItem, LineRange
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
@@ -115,7 +117,7 @@ class InspectTarget(BaseModel):
                 f"got {supplied or ['none']}"
             )
         if self.path is not None:
-            _validate_path_shape(self.path)
+            validate_path_shape(self.path)
         if self.entity_key is not None and not self.entity_key.strip():
             raise ValueError("entity_key must not be blank")
         return self
@@ -129,7 +131,7 @@ class InspectTarget(BaseModel):
         return InspectTargetKind.ENTITY
 
 
-def _validate_path_shape(path: str) -> None:
+def validate_path_shape(path: str) -> None:
     """Refuse anything that is not a repository-relative path.
 
     A first gate, not the gate. The one that matters is the ``files`` row lookup,
@@ -241,6 +243,10 @@ class InspectRequest(BaseModel):
     #: an evidence id has no meaning outside the investigation that minted it.
     investigation_id: str | None = None
     depth: FreshnessDepth = FreshnessDepth.STORED
+    #: How the response is written out. The capability runs identically either way.
+    presentation: Presentation = Field(
+        default=Presentation.FULL, description=PRESENTATION_DESCRIPTION
+    )
 
     @model_validator(mode="after")
     def _range_is_coherent(self) -> InspectRequest:

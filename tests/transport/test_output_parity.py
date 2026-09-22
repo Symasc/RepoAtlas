@@ -288,3 +288,51 @@ def test_the_text_block_carries_the_same_object_as_the_structured_field(
     text_payload, structured_payload = over_protocol(service, body)
     assert text_payload == structured_payload
     assert text_payload["evidence"][0]["id"] == "E1"
+
+
+def test_a_compact_search_is_the_projection_of_the_direct_call(
+    service: CapabilityService,
+) -> None:
+    """``presentation: compact`` is chosen below the transport, not inside it."""
+    from repoatlas.capabilities.presentation import present
+    from repoatlas.models.capability import Presentation
+
+    mcp = over(
+        service,
+        "repoatlas_search",
+        {"question": QUESTION, "context": GLOBAL, "presentation": "compact"},
+    )
+    request = SearchRequest(question=QUESTION, context=CONTEXT, presentation=Presentation.COMPACT)
+    direct = present(request, service.search(request))
+    assert_parity(mcp, direct)
+    assert mcp["presentation"] == "compact"
+    assert mcp["evidence"] and "ref" not in mcp["evidence"][0]
+
+
+def test_the_text_block_is_compact_json_for_results_and_refusals(
+    service: CapabilityService,
+) -> None:
+    """The text block is a second copy of the response, so it carries no layout.
+
+    Pretty-printing it spent about a sixth of a search's text on indentation, on
+    every call, for a reader that is a model and a parser rather than a person.
+    Compact JSON is the same value: nothing a client parses changes.
+    """
+    import json
+
+    async def body(session: ClientSession) -> list[tuple[str, Any]]:
+        answered = await session.call_tool(
+            "repoatlas_search", {"question": QUESTION, "context": GLOBAL}
+        )
+        refused = await session.call_tool("repoatlas_no_such_tool", {})
+        return [
+            (result.content[0].text, result.structuredContent)  # type: ignore[union-attr]
+            for result in (answered, refused)
+        ]
+
+    for text, payload in over_protocol(service, body):
+        assert json.loads(text) == payload
+        assert text == json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        # No raw newline can survive outside a string in compact JSON, and inside
+        # one it is escaped, so a single line is the whole contract.
+        assert "\n" not in text

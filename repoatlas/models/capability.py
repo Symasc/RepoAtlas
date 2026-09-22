@@ -170,6 +170,39 @@ class AppliedBudget(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Presentation
+# ---------------------------------------------------------------------------
+
+
+class Presentation(enum.StrEnum):
+    """How a response is written out, never what the capability does.
+
+    The capability runs identically either way: the same retrieval, the same
+    ledger records, the same verification. ``COMPACT`` is a projection of the
+    finished response that writes each repeated fact once — the facts version,
+    a file's content hash, the reason every segment of one inspection shares —
+    and leaves span digests in the ledger, where grounding reads them.
+    """
+
+    FULL = "full"
+    COMPACT = "compact"
+
+
+#: The published description of every ``presentation`` request field. One text,
+#: because the four capabilities that take it make one promise about it.
+PRESENTATION_DESCRIPTION = (
+    "`full` (the default) returns the complete response. `compact` returns the same "
+    "result with repeated metadata written once: every evidence item keeps its id, "
+    "rank, location, text, tier, match, declaration flag, reason, entity key, "
+    "truncation flag and status; the indexed facts version appears once per response "
+    "and each source file's content hash once per file; span digests stay in the "
+    "investigation's ledger, which is what grounding checks against; freshness covers "
+    "only the repositories the result draws on. Null fields are omitted. Evidence ids, "
+    "citations, grounding and staleness behave identically in both."
+)
+
+
+# ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
 
