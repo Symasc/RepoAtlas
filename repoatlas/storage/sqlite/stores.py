@@ -19,6 +19,7 @@ from repoatlas.models.dependencies import (
     DependencyRole,
     DependencyScope,
 )
+from repoatlas.models.http import ROUTE_KEY_PREFIX
 from repoatlas.models.parsing import EdgeDirection, EdgeType, EntityType, NeighborOrder
 from repoatlas.models.repository import FileState, IndexedFile, Repository, SyncStatus
 from repoatlas.storage.protocols import (
@@ -73,6 +74,11 @@ def _json_list(raw: str | None) -> tuple[str, ...]:
 
 def _parse_dt(raw: str | None) -> datetime | None:
     return datetime.fromisoformat(raw) if raw else None
+
+
+def _after(prefix: str) -> str:
+    """The smallest string greater than every string starting with ``prefix``."""
+    return prefix[:-1] + chr(ord(prefix[-1]) + 1)
 
 
 class SqliteRepositoryStore:
@@ -714,6 +720,39 @@ class SqliteKnowledgeStore:
             )
             for row in rows
         ]
+
+    def list_served_routes(self, *, exclude_parser: str) -> dict[int, list[str]]:
+        """Per repository, the route bodies its files serve, minus one producer's edges.
+
+        Reached through the route nodes (a key range on ``idx_entities_key``, then
+        ``idx_edges_dst``) rather than by scanning every edge. The global pass
+        excludes its own previous output, so what it decides never depends on what
+        it decided last time.
+        """
+        rows = self._db.execute(
+            """
+            SELECT DISTINCT e.repo_id AS repo_id, t.name AS body
+            FROM entities t
+            JOIN edges e ON e.dst_id = t.id
+            WHERE t.key >= ? AND t.key < ?
+              AND t.type = ?
+              AND e.type = ?
+              AND e.repo_id IS NOT NULL
+              AND (e.parser IS NULL OR e.parser <> ?)
+            ORDER BY e.repo_id, t.name
+            """,
+            (
+                ROUTE_KEY_PREFIX,
+                _after(ROUTE_KEY_PREFIX),
+                str(EntityType.HTTP_ROUTE),
+                str(EdgeType.SERVES_HTTP_ROUTE),
+                exclude_parser,
+            ),
+        ).fetchall()
+        served: dict[int, list[str]] = {}
+        for row in rows:
+            served.setdefault(row["repo_id"], []).append(row["body"])
+        return served
 
     def neighbors(
         self,

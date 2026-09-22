@@ -411,8 +411,13 @@ class ReferenceLinker:
                 edges.append(edge)
 
             # Part of resolving claims, not a phase of its own: the pass keeps its
-            # three computing stages and the one that commits.
-            decided = plan_http_claims(pending, index, file_rows, producer=GLOBAL_PARSER)
+            # three computing stages and the one that commits. Template calls are
+            # matched against what each repository's files serve on their own —
+            # never this pass's previous output.
+            served = self._knowledge.list_served_routes(exclude_parser=GLOBAL_PARSER)
+            decided = plan_http_claims(
+                pending, index, file_rows, producer=GLOBAL_PARSER, served_routes=served
+            )
             edges.extend(decided.edges)
             resolved += decided.resolved
             unresolved += decided.unresolved

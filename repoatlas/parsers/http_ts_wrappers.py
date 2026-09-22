@@ -33,12 +33,21 @@ A **requester factory** returns an object whose members are wrappers; a call thr
 member. An **init helper** returns ``{ method, … }`` with ``method`` a literal or a
 parameter with a literal default, so ``{ ...jsonBody(input, "PUT") }`` says PUT.
 
-**At the call site** the path must be a literal starting with ``/``: a template
-with a substitution names no route this could spell, and identity here is
-byte-exact, so ``/v1/courses/${id}`` is not ``/v1/courses/:id``. The method is
-read from the init object in order — later entries override earlier ones — and any
-entry that could carry a method this cannot read makes it unknown. An unknown
-method, path or chain yields nothing. Nothing is inferred from a function's name.
+**At the call site** a literal path starting with ``/`` is a route here and now.
+The method is read from the init object in order — later entries override earlier
+ones — and any entry that could carry a method this cannot read makes it unknown.
+Nothing is inferred from a function's name.
+
+A path one file cannot decide is recorded as a pending claim
+(:data:`~repoatlas.parsers.http_facts.HTTP_LOCAL_CALL`, ``transport: wrapper``) for
+the global pass, which matches it only against routes its own repository serves:
+a rooted template (``/v1/courses/${id}``, never ``${base}/x``), a choice between
+rooted paths, a named value bound outside every enclosing function (a module
+constant or an import — never a parameter or a local, which is how wrappers
+forward paths), or a literal path whose method cannot be read. A template whose
+substitutions are all in its query is decided here, as a literal. Anything else
+yields nothing. A direct call through a ``fetch`` alias records only a rooted
+template (``transport: fetch``), which is never matched.
 
 **Resolution is lexical and bounded.** A name resolves to the parameter, ``const``,
 function declaration or destructured ``const`` that binds it directly in an
@@ -69,10 +78,20 @@ from repoatlas.parsers.http_facts import (
     HTTP_REQUESTER,
     HTTP_REQUESTER_CALL,
     HTTP_WRAPPER,
+    TRANSPORT_FETCH,
+    TRANSPORT_WRAPPER,
     http_reference,
+    local_call_reference,
     pending_reference,
 )
-from repoatlas.parsers.http_typescript import binding_counts, fetch_method, static_string
+from repoatlas.parsers.http_typescript import (
+    alternatives_spec,
+    binding_counts,
+    decided_path,
+    fetch_method,
+    static_string,
+    template_spec,
+)
 from repoatlas.parsers.treesitter import line_range, node_text, string_literal, walk
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -84,8 +103,8 @@ SOURCE = "fetch-wrapper"
 _MAX_DEPTH = 3
 #: How many aliases deep a fetch-like value is followed.
 _MAX_ALIAS = 8
-#: How much of an unreadable template path a claim keeps, for inspection only.
-_MAX_TEMPLATE = 200
+#: How much of a named path value's source text a claim keeps, for display only.
+_MAX_NAMED = 80
 
 _FUNCTIONS = frozenset(
     {
@@ -304,9 +323,16 @@ class FetchWrappers:
             return []
         path_node = arguments[wrapper.path]
         path = static_string(self._source, path_node)
+        spec: dict[str, Any] | None = None
+        if path is None:
+            spec = self._undecided_path(call, path_node, wrapper)
+            if spec is None:
+                return []
+            path = decided_path(spec)
+            spec = None if path is not None else spec
         # A wrapper appends the path to a base, so only a path is meaningful there; a
         # `fetch` alias takes a whole URL, as `fetch` itself does.
-        if path is None or (wrapper is not _ALIAS and not path.startswith("/")):
+        if path is not None and wrapper is not _ALIAS and not path.startswith("/"):
             return []
         end = line_range(path_node)[1]
         if wrapper.init is None:
@@ -316,9 +342,74 @@ class FetchWrappers:
         else:
             method = self.init_method(arguments[wrapper.init])
             end = max(end, line_range(arguments[wrapper.init])[1])
-        if method is None:
+        if path is not None:
+            if method is not None:
+                return self.request(call, method, path, wrapper, end, source_symbol, source)
+            if wrapper is _ALIAS:
+                return []
+            # A route whose method this file cannot read: visible, never guessed.
+            spec = {"string": path}
+        if spec is None:
             return []
-        return self.request(call, method, path, wrapper, end, source_symbol, source)
+        callee = call.child_by_field_name("function")
+        start, stop = line_range(call)
+        return [
+            local_call_reference(
+                node_text(self._source, operand(callee)) if callee is not None else "",
+                start,
+                stop,
+                transport=TRANSPORT_FETCH if wrapper is _ALIAS else TRANSPORT_WRAPPER,
+                path=spec,
+                method=method.value if method is not None else None,
+                in_call=method.in_call if method is not None else False,
+                base=wrapper.base,
+                source=source,
+                source_symbol=source_symbol,
+            )
+        ]
+
+    def _undecided_path(self, call: Node, node: Node, wrapper: Wrapper) -> dict[str, Any] | None:
+        """A path argument one file cannot decide, as a claim records it, or ``None``.
+
+        Through a ``fetch`` alias only a rooted template is recorded; through a
+        proven wrapper also a choice of rooted paths and a named value.
+        """
+        spec = template_spec(self._source, node)
+        if spec is not None or wrapper is _ALIAS:
+            return spec
+        spec = alternatives_spec(self._source, node)
+        if spec is not None:
+            return spec
+        named = self._named(operand(node), call)
+        return {"named": named} if named is not None else None
+
+    def _named(self, node: Node, at: Node) -> str | None:
+        """``PATHS.request``: a value bound outside every enclosing function, or ``None``.
+
+        A parameter or a local is how a wrapper forwards a path it was given, so it
+        says nothing about which path; a module constant or an import names one
+        value this file cannot read, which is worth keeping visible as unresolved.
+        """
+        if node.type not in {"identifier", "member_expression"}:
+            return None
+        root = node
+        while root.type == "member_expression":
+            owner = root.child_by_field_name("object")
+            if owner is None:
+                return None
+            root = operand(owner)
+        if root.type != "identifier":
+            return None
+        binding = self.lookup(node_text(self._source, root), at)
+        if isinstance(binding, (Imported, Global)):
+            outside = True
+        elif isinstance(binding, (Const, Member, Rest)):
+            outside = _enclosing_function(binding.value) is None
+        elif isinstance(binding, Func):
+            outside = _enclosing_function(binding.function) is None
+        else:
+            outside = False
+        return node_text(self._source, node)[:_MAX_NAMED] if outside else None
 
     def request(
         self,
@@ -525,10 +616,11 @@ class FetchWrappers:
     def imported_call(self, call: Node, source_symbol: str | None) -> list[ParsedReference]:
         """A call through a helper imported from a relative module, as a pending claim.
 
-        Recorded only when some argument is written as a path — a literal, or a
-        template, starting with ``/`` — so an ordinary call to an imported function is
-        not turned into a claim about HTTP it never makes. A template is recorded so
-        the request stays visible as unresolved; its path is never guessed.
+        Recorded only when some argument is written as a path — a literal, a
+        template or a choice of them, starting with ``/`` — so an ordinary call to an
+        imported function is not turned into a claim about HTTP it never makes. A
+        template is recorded as its parts, never as a guessed route: the global pass
+        matches it only against routes the repository serves.
         """
         callee = call.child_by_field_name("function")
         if callee is None or operand(callee).type != "identifier":
@@ -560,7 +652,10 @@ class FetchWrappers:
         if arguments is None:
             return []
         summaries = [self._argument(argument) for argument in arguments]
-        if not any(str(s.get("string", "")).startswith("/") or "template" in s for s in summaries):
+        if not any(
+            str(s.get("string", "")).startswith("/") or "parts" in s or "alternatives" in s
+            for s in summaries
+        ):
             return []
         start, end = line_range(call)
         return [
@@ -581,9 +676,11 @@ class FetchWrappers:
         value = static_string(self._source, node)
         if value is not None:
             return {"string": value}
-        text = node_text(self._source, operand(node))
-        if operand(node).type == "template_string" and text.startswith("`/"):
-            return {"template": text[:_MAX_TEMPLATE]}
+        spec = template_spec(self._source, operand(node)) or alternatives_spec(
+            self._source, operand(node)
+        )
+        if spec is not None:
+            return spec
         entries = self.init_entries(node)
         return {"init": entries} if entries is not None else {}
 
