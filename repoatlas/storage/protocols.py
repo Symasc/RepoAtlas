@@ -127,6 +127,23 @@ class ChunkHit(BaseModel):
     split_total: int = 1
 
 
+class LiteralMatches(BaseModel):
+    """What one exact text lookup returned, and whether it read everything it could.
+
+    ``hits`` is exactly what :meth:`SearchIndex.search_literal` returns.
+    ``exhaustive`` is whether every indexed chunk that could contain the term was
+    examined. It is false only when the lookup's limit filled before verification
+    was done — the prefilter is case-insensitive and the check is not, so the rows
+    the limit admitted can all be near misses — and then an empty ``hits`` is not a
+    proof that the term is absent.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    hits: list[ChunkHit]
+    exhaustive: bool
+
+
 class FileHit(BaseModel):
     """An indexed file matched by its own name or path — not by its content.
 
@@ -439,6 +456,14 @@ class SearchIndex(Protocol):
         *,
         path_prefix: str | None = None,
     ) -> list[ChunkHit]: ...
+    def find_literal(
+        self,
+        term: str,
+        repo_ids: Sequence[int] | None,
+        limit: int,
+        *,
+        path_prefix: str | None = None,
+    ) -> LiteralMatches: ...
     def find_files_by_path(
         self,
         terms: Sequence[str],
