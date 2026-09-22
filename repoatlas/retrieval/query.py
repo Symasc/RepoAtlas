@@ -216,6 +216,11 @@ class QueryAnalysis:
     #: content stage, do not name files, and never decide suppression — they only
     #: qualify a token for exact *entity-name* lookup. See :attr:`symbol_terms`.
     symbol_names: tuple[str, ...] = ()
+    #: The pieces of a one-token question that :attr:`symbol_names` carries only
+    #: *because* the question is one token — ``api`` and ``config`` of
+    #: ``api/config.py``. They are looked up as entity names like any other symbol
+    #: name; they are not names the question gave, so nothing reports them as such.
+    token_parts: tuple[str, ...] = ()
     terms: tuple[str, ...] = field(default=())
     #: Exact HTTP route, deployment and endpoint keys the question spells out —
     #: ``GET /users`` is ``http-route:GET:/users`` (see :mod:`repoatlas.models.http`).
@@ -419,6 +424,9 @@ def analyze(question: str) -> QueryAnalysis:
     # same pieces would be prose.
     lone = (stripped, *identifiers) if stripped and _WORD_RUN.fullmatch(stripped) else ()
     symbol_names = tuple(dict.fromkeys((*pascal, *cued, *lone)))
+    token_parts = tuple(
+        dict.fromkeys(part for part in lone[1:] if part not in (stripped, *pascal, *cued))
+    )
 
     return QueryAnalysis(
         text=question,
@@ -432,6 +440,7 @@ def analyze(question: str) -> QueryAnalysis:
         ambiguous_packages=ambiguous,
         pasted_literals=pasted,
         symbol_names=symbol_names,
+        token_parts=token_parts,
         terms=terms,
         http_keys=http.query_keys(question),
     )
