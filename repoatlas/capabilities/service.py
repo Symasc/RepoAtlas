@@ -1666,6 +1666,7 @@ class CapabilityService:
             trace=outcome.evidence.trace if request.include_trace else None,
             ledger=session.ledger.summary(),
             within_path=path_prefix,
+            terms=outcome.term_matches,
         )
 
     def _seed_handles(

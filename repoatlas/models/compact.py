@@ -39,7 +39,7 @@ from repoatlas.models.freshness import FreshnessDepth, FreshnessState
 from repoatlas.models.inspection import Coverage, InspectedFile
 from repoatlas.models.investigation import EvidenceId, EvidenceStatus, LedgerSummary
 from repoatlas.models.relationships import AppliedGraphLimits, EntityRef, GraphEdge, GraphPath
-from repoatlas.models.retrieval import SuppressionOutcome
+from repoatlas.models.retrieval import SuppressionOutcome, TermMatch
 from repoatlas.models.verification import (
     AgentAnswer,
     CitationVerdict,
@@ -130,6 +130,7 @@ class CompactSearchResponse(BaseModel):
     evidence: tuple[CompactEvidence, ...] = ()
     #: Exact entity handles that seeded graph expansion, by key.
     entities: tuple[str, ...] = ()
+    terms: tuple[TermMatch, ...] = ()
     suppressed: SuppressionOutcome | None = None
     #: Something was omitted or shortened for budget. The full response's
     #: ``has_more`` is always equal to this.

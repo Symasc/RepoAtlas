@@ -99,9 +99,12 @@ SEARCH = ToolSpec(
         "with declaration true is the declaration RepoAtlas recorded, not source, and "
         "has no line range; to read that definition's source with citable lines, pass "
         "its entity.key to repoatlas_inspect as target.entity_key. A file item with "
-        "empty text is inspected the same way. Set within_path to search one directory "
-        "or file of the repository, and presentation to compact to receive the same "
-        "evidence with repeated metadata written once."
+        "empty text is inspected the same way. terms says, for each identifier or path "
+        "the question names, whether an indexed entity, file or text matches it exactly "
+        "in the scope searched; not_found describes that indexed scope, not the whole "
+        "repository. Set within_path to search one directory or file of the "
+        "repository, and presentation to compact to receive the same evidence with "
+        "repeated metadata written once."
     ),
     request=SearchRequest,
     capability="search",
