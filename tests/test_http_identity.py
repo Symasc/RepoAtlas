@@ -86,7 +86,11 @@ def test_trailing_slash_and_case_are_distinct_routes() -> None:
 
 
 def test_parameter_templates_are_not_canonicalized_into_one_pattern() -> None:
-    """``{id}``, ``:id`` and ``42`` are three routes until a route-pattern feature exists."""
+    """``{id}``, ``:id``, ``<id>`` and ``42`` are four routes, and stay four.
+
+    A client template is matched to routes by shape (``test_http_templates``); no
+    route key is ever folded into a pattern.
+    """
     keys = {
         http.route_key(http.route_body("GET", path))
         for path in ("/users/{id}", "/users/:id", "/users/<id>", "/users/42")
