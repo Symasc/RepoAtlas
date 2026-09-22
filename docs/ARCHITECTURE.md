@@ -1656,8 +1656,14 @@ Five edge types, every one oriented *repository-owned fact → shared node*:
 | `EXPOSES_HTTP_ENDPOINT` | specification file | each operation under each applicable base |
 | `CALLS_HTTP_ENDPOINT` | calling symbol or file | absolute client calls |
 
-**Sources and their limits.** Parsers extract local facts and the linker interns them. There is no global-pass work,
-because two sides meet by key equality alone.
+**Sources and their limits.** Parsers extract local facts and the linker interns them, and most sides meet by key
+equality alone. Three kinds of fact need the global pass, because one file cannot prove them
+(`repoatlas/graph/http_claims.py`):
+- a NestJS route, proven only under an application that registers it;
+- a request through a helper imported from another file, joined across exactly one import;
+- a request whose path is a template, matched against its own repository's served routes (below).
+
+Until the pass proves one, it stays a pending claim that records the declaration and why it is not proven.
 
 - **OpenAPI 3.0/3.1** is recognized only by an `openapi: 3.x` signature, never by the shape of a `paths:` key.
   - It reads root, path-item and operation `servers`; the most specific level that declares any wins, and is never
@@ -1681,6 +1687,18 @@ because two sides meet by key equality alone.
   - With no options the method is GET.
   - With options, the method must be a literal in an object literal with no spread, shorthand or computed key.
   - The Fetch standard's case normalization is applied: `"patch"` is not `PATCH`.
+- **Request wrappers** (`repoatlas/parsers/http_ts_wrappers.py`): a call through a helper the file proves — a
+  function forwarding a path to a fetch-like call — is a route when its path is a literal. A path one file cannot
+  decide is recorded as a pending claim:
+  - a rooted template (`/v1/courses/${id}`, never `${base}/x`);
+  - a choice between rooted paths;
+  - a named value bound outside every enclosing function (a module constant or an import, never a parameter or a
+    local, which is how wrappers forward paths);
+  - a literal path whose method cannot be read.
+
+  A direct `fetch` (or alias) with a rooted template is recorded too, and never matched: transport code forwards
+  whole paths through `fetch`. A template whose substitutions are all in its query is decided in its own file, as a
+  literal.
 - **requests and httpx**: module-level functions with absolute URLs only.
 - **axios**: the default export's method aliases with absolute URLs only. A relative axios URL is combined with a
   `baseURL` any file may set.
@@ -1701,8 +1719,21 @@ therefore agree on it byte for byte.
 - Composition is literal append after removing one trailing slash from the base. `urljoin` would resolve
   `/users` against `https://x/v1` to `https://x/users`, which OpenAPI does not mean.
 
-**Parameters are literal.** `GET /users/{id}` matches `GET /users/{id}` and nothing else. In particular it does not
-match `GET /users/42`, and it does not match Express's `/users/:id`. Pattern matching is a separate feature.
+**Parameters are literal in keys; templates match by shape.** As a key, `GET /users/{id}` matches `GET /users/{id}`
+and nothing else: never `GET /users/42`, and never Express's `/users/:id`. A client path *template* is different.
+`request(`/users/${id}`)` names a shape, and the global pass links it to every route of the same method that its
+**own repository** serves with that shape (`template_matches` in `repoatlas/models/http.py`):
+- a substitution is a dynamic segment only as a whole segment, and it fills exactly one segment;
+- a dynamic segment matches only a whole declared parameter (`:id`, `{id}`, `<id>`, `<int:id>`): never a literal,
+  a wildcard, a regex or an optional parameter;
+- literal segments compare byte for byte, and the query is ignored;
+- another repository's routes are never matched, the pass never reads its own previous edges, and a method that
+  cannot be read never links.
+
+The edge has no lines, because the parameter's spelling is the server's. A template matching an OpenAPI `{id}` and
+a handler's `:id` links to both: the spellings differ, the shape does not. Every decision — matched, ambiguous, no
+indexed handler, unresolved, with its reason — is kept per claim, and describes indexed static facts in that one
+repository, never source-wide absence.
 
 **Multiple providers stay multiple.** Two specifications exposing one endpoint produce one node with two
 `EXPOSES_HTTP_ENDPOINT` edges, and nothing chooses between them. This is the rule dependency providers follow (§5).
@@ -1716,6 +1747,25 @@ linker stores its edge with no lines. The fact is in the graph, but it is not ci
 - the path-key-to-operation-key span that declares the route
 
 Stitching the two into one "span" would cite text that was never written together.
+
+**The inventory is replanned, not stored.** `http_operations` answers from one repository's standing claims,
+run through the same `plan_http_claims` the global pass uses, rather than from a second store of outcomes. That is
+sound because every rule the pass applies to HTTP claims is repository-local — resolution, package lookup, markers,
+controllers and edge deduplication all stay inside one `repo_id` — so a repository's own plan is exactly its share
+of the global one, which a test pins. It also means there is no stored answer to go stale: a reading that disagrees
+with the stored graph, because an older parser built it or a link pass failed, is still returned and marked with
+the `stored_graph_differs` limitation. Filters apply to rows after the whole repository is planned, so narrowing
+what is *returned* can never narrow what was *known* when a row was decided.
+
+**Three questions the inventory keeps apart.** A row states route compatibility: a request's method and path have
+the shape of a route this repository's indexed source serves. It is not which host a client is configured to reach
+— that is configuration, read with search and inspect — and it is not which service owns the data, which nothing
+static establishes. Every response carries a fixed `basis` block saying so, and the negative statuses are named for
+what they are: `no_indexed_handler` and `no_indexed_caller` are absence **in this repository's index**, not absence
+in the source. The handler may be in another repository, behind an unproven mount (the row's `declared_matches`
+names it), or in a construct not extracted at all — direct fetch, member-call clients, injected fetch
+implementations, concatenated paths, constant decorator paths. `coverage.limitations` lists each of those, counted
+from the rows where it can be counted and merely declared possible where it cannot.
 
 **Search** generates the exact keys a question spells, then feeds them to the existing exact-name lookup. A key hit
 is a seed, and its handle is published like `env:` handles, so no tier, match class or ranking changed. The spellings
@@ -2382,9 +2432,10 @@ transaction. `SyncEngine.run` is the boundary that guarantees old complete state
 
 `ReferenceLinker` splits the pass in two:
 
-1. **`prepare_global()`** reads every file row, symbol, standing claim and dependency record, resolves them, and
-   returns a `GlobalPlan` — the complete replacement graph, in memory. It **writes nothing**, including no interned
-   entities: planned endpoints are carried as natural keys, not row ids.
+1. **`prepare_global()`** reads every file row, symbol, standing claim and dependency record, and the HTTP routes
+   files serve on their own (never a `linker:global` edge, so the pass does not depend on its own previous output),
+   resolves them, and returns a `GlobalPlan` — the complete replacement graph, in memory. It **writes nothing**,
+   including no interned entities: planned endpoints are carried as natural keys, not row ids.
 2. **`commit_global(plan)`** opens one transaction and, inside it, deletes every `linker:global` edge, interns the
    planned endpoints, inserts the complete new set, and collects orphans.
 
@@ -3171,6 +3222,34 @@ Removals are reported as a **count**, never by quoting the removed claim back. R
 under RepoAtlas's own heading would put the fabrication back on screen with better credentials than it started
 with. The text stays in the `GroundingReport` for diagnostics.
 
+### A supplied route is not a file path (V2 adapter)
+
+Rule 3 reads a slashed token in prose as a repository object, which is why an agent that correctly reported
+`GET /v1/courses/${courseId}/guardian` lost the claim: the route has a path's shape. Exempting route-shaped tokens
+by *form* would be the fabrication hole the rule exists to close — `GET /etc/shadow` would walk straight through
+it — so the exemption is anchored the same way file names already are.
+
+Prose may name a file the investigation **supplied**. It may likewise name a route the investigation **supplied**,
+as an HTTP row with its lines, through `include_provenance`. `ProposedEvidence` and `LedgerEntry` therefore carry
+`routes`: the `METHOD route` each span was supplied for, merged by sorted set union like `origins`, never part of
+evidence identity and never text. The supplied set is the union over **this** investigation's ledger, whatever each
+entry's status — the same latitude a supplied file gets when its citation goes stale.
+
+An index-only check would not do. A route nothing serves has no node to look up, and that is exactly the case
+worth reporting; only the supplied row names it.
+
+A mention is anchored only when it **structurally equals** a supplied route: same segment count, literal segments
+byte-equal, parameters in the same positions with names ignored, and — when the mention carries a method — the same
+method, unless the supplied row's own method could not be read. So `/v1/users/42` is not covered by a supplied
+`/v1/users/:id`, and each mention is decided on its own, which leaves an unsupplied path beside an anchored route
+condemning its claim exactly as before.
+
+**V1 is not touched.** `ground_answer` is frozen and adversarially pinned, so the adapter does the work: before
+handing the answer over, every anchored mention's separators are written with two characters V1's path pattern
+cannot read, and written back afterwards. The transform is injective — a text already containing one of those
+characters is passed through unchanged — and `sanitized_answer` and `verdict_for` match statements through the same
+transform, because they identify claims by text.
+
 ### Citations resolve to a source, not to a name
 
 A citation carrying `repository_slug` names one supplied source exactly. A citation carrying only a display name is
@@ -3834,3 +3913,4 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | Pre-marker indexes are recognized by full schema shape | Accept "it has a `repositories` table" as proof | Another application may have one, and blessing an unproven database with the marker is worse than refusing it — it converts a refusal into permission to migrate someone else's tables (§3) |
 | A legacy index is marked by the first **write**, never at open | Stamp on first open, whoever opened it | `status` would rewrite the database in order to report that nothing changed, and a read-only historical index would be reported as foreign because the marker could not be written. Recognition first, write second (§3, §6) |
 | A marked database below the current version still has its shape checked | Trust the marker and migrate | A marker proves ownership, not schema correctness. Where a write is imminent anyway, inspecting the schema is strictly cheaper than migrating it blind; on the hot path (marked, current) nothing is inspected at all (§3) |
+| A route named in prose is honest when the investigation supplied it | Exempt any token with an uppercase method in front of it; or check the route against the index | Supplied routes are honest route mentions for the same reason supplied files are honest file mentions — the agent was shown them. Exempting by form lets `GET /etc/shadow` through, and an index check cannot cover the case worth reporting: a route nothing serves has no node (§11) |

@@ -297,6 +297,28 @@ class SymbolRow(BaseModel):
     line_start: int | None
 
 
+class HttpEdgeRow(BaseModel):
+    """One edge to a shared HTTP node, with what a reader needs to locate it.
+
+    The asserting file and lines are the edge's own, so a composed edge — stored
+    with no lines — stays a row without a span rather than borrowing one.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    type: EdgeType
+    parser: str | None = None
+    src_id: int
+    src_key: str
+    src_name: str
+    src_qualified_name: str | None = None
+    target_key: str
+    target_name: str
+    path: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+
+
 class NeighborEdge(BaseModel):
     """An edge reached by graph expansion, with both endpoints' repositories."""
 
@@ -373,10 +395,19 @@ class KnowledgeStore(Protocol):
     def intern_entity(self, entity: EntityRecord) -> int: ...
     def add_edges(self, edges: Sequence[EdgeRecord]) -> None: ...
     def add_unresolved_refs(self, refs: Sequence[UnresolvedRefRecord]) -> None: ...
-    def list_unresolved_refs(self) -> list[UnresolvedRefRecord]: ...
+    def list_unresolved_refs(
+        self, repo_id: int | None = None, *, pending_only: bool = False
+    ) -> list[UnresolvedRefRecord]: ...
     def delete_edges_by_parser(self, parser: str) -> int: ...
-    def list_file_rows(self) -> list[FileRow]: ...
-    def list_symbols(self, types: Sequence[EntityType] | None) -> list[SymbolRow]: ...
+    def list_file_rows(self, repo_id: int | None = None) -> list[FileRow]: ...
+    def list_symbols(
+        self, types: Sequence[EntityType] | None, repo_id: int | None = None
+    ) -> list[SymbolRow]: ...
+    def list_served_routes(
+        self, *, exclude_parser: str, repo_id: int | None = None
+    ) -> dict[int, list[str]]: ...
+    def list_http_edges(self, repo_id: int) -> list[HttpEdgeRow]: ...
+    def list_file_parsers(self, repo_id: int) -> list[tuple[str, str | None]]: ...
     def neighbors(
         self,
         entity_ids: Sequence[int],

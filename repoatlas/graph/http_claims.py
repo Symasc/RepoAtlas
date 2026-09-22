@@ -45,6 +45,27 @@ that does not resolve, or an argument the client file could not read yields
 nothing. A call to an imported function that turns out to be no request helper
 is not an HTTP claim at all, so it is not counted as unresolved.
 
+**Requests whose path is a template.** A call whose path is a rooted template —
+through an imported helper, or through a same-file wrapper
+(:data:`~repoatlas.parsers.http_facts.HTTP_LOCAL_CALL`) — names a route *shape*, not
+a route key. It is matched only against the routes **its own repository** serves:
+per-file ``SERVES_HTTP_ROUTE`` edges, and the NestJS routes this same plan proves.
+Never the previous run's output, which would make the pass depend on itself, and
+never another repository's routes, which would be a cross-repository relationship
+nobody wrote. The shape rule is :func:`repoatlas.models.http.template_matches`:
+
+* a known method links to **every** route key of that method with the shape.
+  Those can differ only in parameter spelling — an OpenAPI ``{id}`` beside a
+  handler's ``:id`` — so multiple providers stay multiple rather than one being
+  chosen; the edge has no lines, because the spelling is the server's;
+* a method this file cannot read never links: the compatible routes are recorded
+  as candidates, and the call is *ambiguous* or has *no indexed handler*;
+* a direct ``fetch`` template is recorded and never matched, and a template that
+  cannot be read as a shape keeps its refusal code.
+
+Every decision is kept per claim (:attr:`HttpClaimPlan.calls`), in terms that
+describe indexed static facts in one repository — never source-wide absence.
+
 A route that is not proven stays exactly what it was: a claim that records the
 declaration and the limitation. The resolved registration entries also become
 ordinary ``REFERENCES`` edges — module to controller, module to module, bootstrap
@@ -59,7 +80,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
@@ -70,6 +91,7 @@ from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.parsers.http_facts import (
     EXACT,
     HTTP_INIT_HELPER,
+    HTTP_LOCAL_CALL,
     HTTP_REQUESTER,
     HTTP_REQUESTER_CALL,
     HTTP_WRAPPER,
@@ -80,6 +102,8 @@ from repoatlas.parsers.http_facts import (
     NESTJS_ROOT,
     NESTJS_ROUTE,
     PENDING_FACT,
+    TRANSPORT_FETCH,
+    TRANSPORT_WRAPPER,
 )
 from repoatlas.parsers.http_nestjs import (
     DYNAMIC,
@@ -101,6 +125,7 @@ from repoatlas.parsers.http_ts_wrappers import (
     is_relative,
     wrapper_from,
 )
+from repoatlas.parsers.http_typescript import template_parts
 from repoatlas.storage.protocols import EdgeRecord, EntityRecord, FileRow, UnresolvedRefRecord
 
 #: More modules than any application registers; a bound on adversarial input.
@@ -109,6 +134,66 @@ _MAX_MODULES = 4096
 PROMOTED = "promoted"
 #: A call to an imported function that is no request helper: not an HTTP claim.
 NOT_HTTP = "no request helper of that name is declared in the imported module"
+NOT_LITERAL = "the path is not a literal"
+METHOD_UNREAD = "the method cannot be read"
+NO_ROUTE = "no route served in this repository matches the path"
+UNREADABLE_TEMPLATE = "the path template cannot be read"
+NAMED_VALUE = "the path is a named value this file cannot read"
+DIRECT_FETCH = "a direct fetch template is recorded, never matched"
+OLDER_PARSER = "recorded by an older parser; the next sync of its repository re-reads it"
+
+# -- call decisions -------------------------------------------------------------------
+#
+# What a client call is, measured against the routes indexed as served in its own
+# repository. Each status describes indexed static facts in that one repository:
+# "no indexed handler" is not "the backend has no implementation", only that
+# nothing this repository's indexed source declares matches.
+
+#: Path and method established; at least one route served in the repository matches.
+MATCHED = "matched"
+#: The path is established, the method cannot be read, and compatible routes exist.
+AMBIGUOUS = "ambiguous"
+#: The path is established and no route indexed as served in the repository matches.
+NO_INDEXED_HANDLER = "no_indexed_handler"
+#: The path cannot be established.
+UNRESOLVED = "unresolved"
+
+#: Reason codes, stable: the inventory surfaces them verbatim.
+REASON_EXACT = "exact"
+REASON_STRUCTURAL = "structural"
+REASON_NO_ROUTE = "no_served_route"
+REASON_METHOD_UNREAD = "method_unread"
+REASON_NOT_LITERAL = "not_literal"
+REASON_NAMED_VALUE = "named_value"
+REASON_DIRECT_FETCH = "direct_fetch_template"
+REASON_OLDER_PARSER = "recorded_by_older_parser"
+
+
+@dataclass(frozen=True, slots=True)
+class CallDecision:
+    """What the global pass decided about one path a client call requests."""
+
+    status: str
+    reason: str
+    #: The method, or ``None`` when it cannot be read.
+    method: str | None
+    #: What the source wrote: a literal path, a template with ``${…}`` segments, or
+    #: a named value. Path only — never a query.
+    route: str
+    #: Route bodies a route indexed as served in this repository matches.
+    matched: tuple[str, ...] = ()
+    #: Compatible routes it does not link to: under another method, or under any
+    #: method when its own cannot be read.
+    candidates: tuple[str, ...] = ()
+    #: Whether something outside the call's own lines decided the method or the
+    #: route: a helper default, a wrapper base, the server's parameter spelling.
+    composed: bool = False
+    #: The route template read from the source, when the path had a shape.
+    template: http.RouteTemplate | None = None
+    #: Route bodies this call has an edge to. A literal path always has one — its
+    #: route node exists whether or not anything here serves it — so this can
+    #: hold more than ``matched``; a shape links only where it matched.
+    linked: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,14 +225,28 @@ class HttpClaimPlan:
     roots: dict[int, str] = field(default_factory=dict)
     #: Imported-helper call claim id → ``promoted`` or why not.
     requests: dict[int, str] = field(default_factory=dict)
+    #: Client call claim id (imported helper or local) → one decision per path it
+    #: requests. Diagnostics and inventory, never identity.
+    calls: dict[int, tuple[CallDecision, ...]] = field(default_factory=dict)
+    #: Route declaration claim id → the route bodies it was proven to serve.
+    promoted: dict[int, tuple[str, ...]] = field(default_factory=dict)
+    #: Route declaration claim id → its controller-relative route body, for every
+    #: declaration whose mount is not proven. A hint for readers; never an edge.
+    declared: dict[int, str] = field(default_factory=dict)
 
     @property
     def detail(self) -> str:
         promoted = sum(1 for outcome in self.routes.values() if outcome == PROMOTED)
         requests = sum(1 for outcome in self.requests.values() if outcome == PROMOTED)
+        shaped = sum(
+            1
+            for decisions in self.calls.values()
+            if any(d.reason == REASON_STRUCTURAL and d.status == MATCHED for d in decisions)
+        )
         return (
             f"{promoted} of {len(self.routes)} declared route(s) proven, "
-            f"{requests} request(s) through imported helpers"
+            f"{requests} request(s) through imported helpers, "
+            f"{shaped} call(s) matched by route shape"
         )
 
 
@@ -238,17 +337,26 @@ class _Resolver:
         return origin.repo_id, ""
 
 
+def package_of(index: ResolutionIndex, origin: FileRow) -> str:
+    """The directory of the nearest indexed ``package.json`` above a file, ``""`` for the root."""
+    return _Resolver(index, {}).package_of(origin)[1]
+
+
 def plan_http_claims(
     claims: Sequence[UnresolvedRefRecord],
     index: ResolutionIndex,
     files: Iterable[FileRow],
     *,
     producer: str,
+    served_routes: Mapping[int, Iterable[str]] | None = None,
 ) -> HttpClaimPlan:
     """Decide every pending HTTP fact at once. Writes nothing.
 
     ``producer`` is recorded on every edge, so the pass that owns them can delete
-    exactly its own output and rebuild it.
+    exactly its own output and rebuild it. ``served_routes`` is, per repository,
+    the route bodies its files serve on their own — per-file facts, never this
+    pass's previous output — which template calls are matched against together
+    with the routes this plan proves.
     """
     by_id = {row.file_id: row for row in files}
     resolver = _Resolver(index, by_id)
@@ -322,6 +430,8 @@ def plan_http_claims(
     # -- routes -------------------------------------------------------------------------
     pending: dict[tuple[int, str], PendingHttpEdge] = {}
     route_outcomes: dict[int, str] = {}
+    promoted_routes: dict[int, tuple[str, ...]] = {}
+    declared_routes: dict[int, str] = {}
     for claim in grouped[NESTJS_ROUTE]:
         meta = _meta(claim)
         origin = resolver.origin(claim)
@@ -332,6 +442,7 @@ def plan_http_claims(
         )
         prefixes = served.get(controller, set()) if controller is not None else set()
         promoted = False
+        bodies: list[str] = []
         for prefix in sorted(prefixes):
             path = nest_path(prefix, meta.get("controller_path", ""), meta.get("method_path", ""))
             body = http.route_body(meta.get("method", ""), path) if path is not None else ""
@@ -359,11 +470,19 @@ def plan_http_claims(
                 ),
             )
             promoted = True
+            bodies.append(body)
         if promoted:
             resolved += 1
         else:
             unresolved += 1
         if claim.id is not None:
+            if promoted:
+                promoted_routes[claim.id] = tuple(bodies)
+            else:
+                relative = nest_path(meta.get("controller_path", ""), meta.get("method_path", ""))
+                body = http.route_body(meta.get("method", ""), relative) if relative else ""
+                if body and http.canonical_route(body) is not None:
+                    declared_routes[claim.id] = body
             if promoted:
                 route_outcomes[claim.id] = PROMOTED
             elif controller is None:
@@ -373,22 +492,48 @@ def plan_http_claims(
                     controller, "not registered by a proven application"
                 )
 
+    # -- what each repository serves ----------------------------------------------------
+    # Per-file routes and the routes proven above, and nothing else: template calls
+    # are matched within their own repository only.
+    serving: dict[int, dict[str, set[str]]] = {}
+    for repo_id, served_bodies in (served_routes or {}).items():
+        for served_body in served_bodies:
+            _serve(serving, repo_id, served_body)
+    for edge in pending.values():
+        if edge.type is EdgeType.SERVES_HTTP_ROUTE and edge.target.name:
+            _serve(serving, edge.repo_id, edge.target.name)
+
     # -- requests through imported helpers ---------------------------------------------
     declared: dict[tuple[int, str, str], list[UnresolvedRefRecord]] = defaultdict(list)
     for role in (HTTP_REQUESTER, HTTP_WRAPPER, HTTP_INIT_HELPER):
         for claim in grouped[role]:
             declared[(claim.file_id, role, claim.target_key)].append(claim)
     request_outcomes: dict[int, str] = {}
+    call_decisions: dict[int, tuple[CallDecision, ...]] = {}
     for claim in grouped[HTTP_REQUESTER_CALL]:
-        outcome, found = _requester_call(claim, resolver, declared)
+        outcome, found, decisions = _requester_call(claim, resolver, declared, serving)
         for edge in found:
-            pending.setdefault((edge.src_id, f"{edge.type}:{edge.target.key}"), edge)
+            _keep(pending, (edge.src_id, f"{edge.type}:{edge.target.key}"), edge)
         if outcome == PROMOTED:
             resolved += 1
         elif outcome != NOT_HTTP:
             unresolved += 1
         if claim.id is not None:
             request_outcomes[claim.id] = outcome
+            if decisions:
+                call_decisions[claim.id] = decisions
+
+    # -- requests this file makes but cannot decide --------------------------------------
+    for claim in grouped[HTTP_LOCAL_CALL]:
+        outcome, found, decisions = _local_call(claim, resolver, serving)
+        for edge in found:
+            _keep(pending, (edge.src_id, f"{edge.type}:{edge.target.key}"), edge)
+        if outcome == PROMOTED:
+            resolved += 1
+        else:
+            unresolved += 1
+        if claim.id is not None and decisions:
+            call_decisions[claim.id] = decisions
 
     return HttpClaimPlan(
         edges=tuple(edges),
@@ -398,49 +543,68 @@ def plan_http_claims(
         routes=route_outcomes,
         roots=root_outcomes,
         requests=request_outcomes,
+        calls=call_decisions,
+        promoted=promoted_routes,
+        declared=declared_routes,
     )
+
+
+def _serve(serving: dict[int, dict[str, set[str]]], repo_id: int, body: str) -> None:
+    method, _, path = body.partition(" ")
+    if http.canonical_route(body) is not None:
+        serving.setdefault(repo_id, {}).setdefault(method, set()).add(path)
+
+
+def _keep(
+    pending: dict[tuple[int, str], PendingHttpEdge], key: tuple[int, str], edge: PendingHttpEdge
+) -> None:
+    """Plan ``edge`` once per source and target; an edge with lines beats one without.
+
+    The same caller can reach one route both exactly and by shape. The lines are
+    the citable half of that, so they must not depend on which call was read first.
+    """
+    current = pending.get(key)
+    if current is None or (current.line_start is None and edge.line_start is not None):
+        pending[key] = edge
 
 
 def _requester_call(
     claim: UnresolvedRefRecord,
     resolver: _Resolver,
     declared: dict[tuple[int, str, str], list[UnresolvedRefRecord]],
-) -> tuple[str, list[PendingHttpEdge]]:
-    """Decide one call through an imported helper: ``(outcome, edges)``."""
+    serving: dict[int, dict[str, set[str]]],
+) -> tuple[str, list[PendingHttpEdge], tuple[CallDecision, ...]]:
+    """Decide one call through an imported helper: ``(outcome, edges, decisions)``."""
     meta = _meta(claim)
     origin = resolver.origin(claim)
     target = resolver.module(origin, meta.get("specifier", "")) if origin else None
     if origin is None or target is None:
-        return "import does not resolve", []
+        return "import does not resolve", [], ()
     if "factory" in meta:
         role, name = HTTP_REQUESTER, meta["factory"]
     else:
         role, name = HTTP_WRAPPER, meta.get("wrapper", "")
     matches = declared.get((target.file_id, role, name), [])
     if not matches:
-        return NOT_HTTP, []
+        return NOT_HTTP, [], ()
     if len(matches) != 1:
-        return "more than one declaration of that name", []
+        return "more than one declaration of that name", [], ()
     declaration = _meta(matches[0])
     wrapper: Wrapper | None
     if role == HTTP_REQUESTER:
         members = json.loads(declaration.get("members", "{}"))
         if meta.get("member") not in members:
-            return NOT_HTTP, []
+            return NOT_HTTP, [], ()
         wrapper = wrapper_from(members[meta["member"]])
     else:
         wrapper = wrapper_from(json.loads(declaration.get("wrapper", "null")))
     if wrapper is None:
-        return "the declaration cannot be read", []
+        return "the declaration cannot be read", [], ()
 
     arguments = json.loads(meta.get("arguments", "[]"))
     if not isinstance(arguments, list) or len(arguments) <= wrapper.path:
-        return "the path is not a literal", []
-    path = (
-        arguments[wrapper.path].get("string") if isinstance(arguments[wrapper.path], dict) else None
-    )
-    if not isinstance(path, str) or not path.startswith("/"):
-        return "the path is not a literal", []
+        return NOT_LITERAL, [], ()
+    spec = arguments[wrapper.path]
 
     def helper(entry: dict[str, object]) -> Method | Silent | None:
         specifier, imported = entry.get("specifier"), entry.get("imported")
@@ -465,36 +629,242 @@ def _requester_call(
         init = arguments[wrapper.init]
         entries = init.get("init") if isinstance(init, dict) else None
         method = evaluate(entries, helper) if isinstance(entries, list) else None
-    if method is None:
-        return "the method cannot be read", []
+    return _decide(claim, origin, method, spec, wrapper.base, serving.get(origin.repo_id, {}))
 
-    url = http.client_target(f"{wrapper.base}{path}" if wrapper.base else path)
-    if url is None:
-        return "the request names no route", []
-    exact = method.in_call and wrapper.base is None
-    lines = (claim.line_start, claim.line_end) if exact else (None, None)
-    found = [
-        _pending(
-            claim,
-            origin,
-            EdgeType.CALLS_HTTP_ROUTE,
-            EntityType.HTTP_ROUTE,
-            http.route_body(method.value, url.path),
-            lines,
+
+def _local_call(
+    claim: UnresolvedRefRecord,
+    resolver: _Resolver,
+    serving: dict[int, dict[str, set[str]]],
+) -> tuple[str, list[PendingHttpEdge], tuple[CallDecision, ...]]:
+    """Decide one request a file made but could not decide on its own."""
+    meta = _meta(claim)
+    origin = resolver.origin(claim)
+    if origin is None:
+        return "the file is not indexed", [], ()
+    try:
+        spec: object = json.loads(meta.get("path", "null"))
+    except ValueError:
+        spec = None
+    value = meta.get("method")
+    method = Method(value, in_call=meta.get("in_call") == "true") if value else None
+    if meta.get("transport") == TRANSPORT_FETCH:
+        options = _options(spec)
+        shape = next((option for option in options if not isinstance(option, str)), None)
+        decision = CallDecision(
+            status=UNRESOLVED,
+            reason=REASON_DIRECT_FETCH,
+            method=method.value if method else None,
+            route=shape.display if shape is not None else "",
+            template=shape,
         )
-    ]
-    if url.url is not None:
-        found.append(
-            _pending(
-                claim,
-                origin,
-                EdgeType.CALLS_HTTP_ENDPOINT,
-                EntityType.HTTP_ENDPOINT,
-                http.endpoint_body(method.value, url.url),
-                lines,
+        return DIRECT_FETCH, [], (decision,)
+    if meta.get("transport") != TRANSPORT_WRAPPER:
+        return NOT_LITERAL, [], ()
+    served = serving.get(origin.repo_id, {})
+    return _decide(claim, origin, method, spec, meta.get("base"), served)
+
+
+def _options(spec: object) -> list[http.RouteTemplate | str]:
+    """Each path a spec can name, as a route template, or the code for why not.
+
+    Alternatives that read as the same path collapse into one: a choice between two
+    spellings of one route is one request.
+    """
+    raw = spec.get("alternatives") if isinstance(spec, dict) else None
+    choices: list[object] = raw if isinstance(raw, list) and raw else [spec]
+    found: dict[str, http.RouteTemplate | str] = {}
+    for choice in choices:
+        option = _option(choice)
+        # Keyed on the path alone. Whether a query followed is not part of which
+        # route is named, so `/x?id=1` and `/x` are one request written two ways,
+        # exactly as a file that can decide such a call for itself reads them.
+        key = option if isinstance(option, str) else option.display
+        found.setdefault(key, option)
+    return list(found.values())
+
+
+def _option(spec: object) -> http.RouteTemplate | str:
+    if not isinstance(spec, dict):
+        return REASON_NOT_LITERAL
+    if "string" in spec:
+        value = spec["string"]
+        if not isinstance(value, str) or not value.startswith("/"):
+            return REASON_NOT_LITERAL
+        return http.route_template([[http.TEMPLATE_LITERAL, value]])
+    if "parts" in spec:
+        parts = template_parts(spec["parts"])
+        if parts is None:
+            return http.NOT_A_PATH
+        return http.route_template(parts, truncated=spec.get("truncated") is True)
+    if "named" in spec:
+        return REASON_NAMED_VALUE
+    if "template" in spec:
+        return REASON_OLDER_PARSER
+    return REASON_NOT_LITERAL
+
+
+def _under(template: http.RouteTemplate, base: str | None) -> http.RouteTemplate | str:
+    """``template`` below a literal wrapper base's path, or why it cannot be."""
+    if not base:
+        return template
+    target = http.client_target(base)
+    if target is None:
+        return http.NOT_A_PATH
+    prefix = tuple(segment for segment in target.path.rstrip("/").split("/")[1:])
+    return http.RouteTemplate(
+        segments=prefix + template.segments,
+        expressions=template.expressions,
+        query=template.query,
+    )
+
+
+def _decide(
+    claim: UnresolvedRefRecord,
+    origin: FileRow,
+    method: Method | None,
+    spec: object,
+    base: str | None,
+    served: dict[str, set[str]],
+) -> tuple[str, list[PendingHttpEdge], tuple[CallDecision, ...]]:
+    """Edges, decisions and the outcome for one call's path, within its repository.
+
+    A literal path keeps the rule it always had: an edge to its route, with an
+    endpoint when a literal base makes it absolute, and lines only when the call
+    itself states the method and nothing is prepended. A path with a dynamic
+    segment links, with no lines and never to an endpoint, to every route of its
+    method this repository serves with its shape. An unread method never links.
+    """
+    edges: list[PendingHttpEdge] = []
+    decisions: list[CallDecision] = []
+    verb = method.value if method is not None else None
+    for option in _options(spec):
+        if isinstance(option, str):
+            named = spec.get("named") if isinstance(spec, dict) else None
+            route = named if option == REASON_NAMED_VALUE and isinstance(named, str) else ""
+            decisions.append(CallDecision(UNRESOLVED, option, verb, route))
+            continue
+        literal = option.path
+        if literal is not None:
+            url = http.client_target(f"{base}{literal}" if base else literal)
+            if url is None:
+                decisions.append(CallDecision(UNRESOLVED, http.NOT_A_PATH, verb, literal))
+                continue
+            under = [f"{m} {url.path}" for m in sorted(served) if url.path in served[m]]
+            if method is None:
+                status = AMBIGUOUS if under else NO_INDEXED_HANDLER
+                decisions.append(
+                    CallDecision(
+                        status,
+                        REASON_METHOD_UNREAD,
+                        None,
+                        literal,
+                        candidates=tuple(under),
+                        composed=base is not None,
+                        template=option,
+                    )
+                )
+                continue
+            exact = method.in_call and base is None
+            lines = (claim.line_start, claim.line_end) if exact else (None, None)
+            body = http.route_body(method.value, url.path)
+            edges.append(
+                _pending(
+                    claim, origin, EdgeType.CALLS_HTTP_ROUTE, EntityType.HTTP_ROUTE, body, lines
+                )
+            )
+            if url.url is not None:
+                endpoint = http.endpoint_body(method.value, url.url)
+                edges.append(
+                    _pending(
+                        claim,
+                        origin,
+                        EdgeType.CALLS_HTTP_ENDPOINT,
+                        EntityType.HTTP_ENDPOINT,
+                        endpoint,
+                        lines,
+                    )
+                )
+            decisions.append(
+                CallDecision(
+                    MATCHED if body in under else NO_INDEXED_HANDLER,
+                    REASON_EXACT,
+                    method.value,
+                    literal,
+                    matched=(body,) if body in under else (),
+                    candidates=tuple(route for route in under if route != body),
+                    composed=not exact,
+                    template=option,
+                    linked=(body,),
+                )
+            )
+            continue
+        shape = _under(option, base)
+        if isinstance(shape, str):
+            decisions.append(CallDecision(UNRESOLVED, shape, verb, option.display))
+            continue
+        compatible = [
+            http.route_body(m, path)
+            for m in sorted(served)
+            for path in sorted(served[m])
+            if http.template_matches(shape, path)
+        ]
+        if method is None:
+            decisions.append(
+                CallDecision(
+                    AMBIGUOUS if compatible else NO_INDEXED_HANDLER,
+                    REASON_METHOD_UNREAD,
+                    None,
+                    option.display,
+                    candidates=tuple(compatible),
+                    composed=True,
+                    template=shape,
+                )
+            )
+            continue
+        mine = [route for route in compatible if route.partition(" ")[0] == method.value]
+        for route in mine:
+            edges.append(
+                _pending(
+                    claim,
+                    origin,
+                    EdgeType.CALLS_HTTP_ROUTE,
+                    EntityType.HTTP_ROUTE,
+                    route,
+                    (None, None),
+                )
+            )
+        decisions.append(
+            CallDecision(
+                MATCHED if mine else NO_INDEXED_HANDLER,
+                REASON_STRUCTURAL if mine else REASON_NO_ROUTE,
+                method.value,
+                option.display,
+                matched=tuple(mine),
+                candidates=tuple(route for route in compatible if route not in mine),
+                composed=True,
+                template=shape,
+                linked=tuple(mine),
             )
         )
-    return PROMOTED, found
+    return (PROMOTED if edges else _outcome(decisions)), edges, tuple(decisions)
+
+
+def _outcome(decisions: Sequence[CallDecision]) -> str:
+    """Why a call that links nowhere links nowhere, in words."""
+    reasons = {decision.reason for decision in decisions}
+    for reason, words in (
+        (REASON_NOT_LITERAL, NOT_LITERAL),
+        (REASON_OLDER_PARSER, OLDER_PARSER),
+        (REASON_NAMED_VALUE, NAMED_VALUE),
+        (REASON_METHOD_UNREAD, METHOD_UNREAD),
+        (REASON_NO_ROUTE, NO_ROUTE),
+    ):
+        if reason in reasons:
+            return words
+    if any(decision.status == UNRESOLVED for decision in decisions):
+        return f"{UNREADABLE_TEMPLATE} ({decisions[0].reason})"
+    return "the request names no route"
 
 
 def _pending(

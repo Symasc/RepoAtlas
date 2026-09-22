@@ -27,6 +27,13 @@ A URL or path is read by :func:`static_string`: a string literal, a template
 literal with no substitution, or a ``+`` concatenation of those. An escape
 sequence is refused rather than decoded, because the raw text is not the value.
 
+A template with substitutions names no route this file can spell. When it is
+rooted — its first fragment starts with one ``/`` — :func:`template_spec` records
+its parts, the path only and never a query. A template whose substitutions are all
+in its query is an ordinary route and is decided here; anything dynamic in a direct
+``fetch`` is recorded as a pending claim (``http-local-call``, ``transport:
+fetch``) so the request stays visible, and is never matched against a route.
+
 Parsed, never executed: tree-sitter reads the syntax tree only (V1_SPEC §17).
 """
 
@@ -38,7 +45,7 @@ from typing import TYPE_CHECKING
 
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedReference
-from repoatlas.parsers.http_facts import http_reference
+from repoatlas.parsers.http_facts import TRANSPORT_FETCH, http_reference, local_call_reference
 from repoatlas.parsers.treesitter import line_range, node_text, string_literal, walk
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -139,6 +146,183 @@ def static_string(source: bytes, node: Node | None, depth: int = 0) -> str | Non
         right = static_string(source, node.child_by_field_name("right"), depth + 1)
         return None if right is None else left + right
     return None
+
+
+#: How much literal text of a template path a claim keeps. A longer template is
+#: recorded as truncated, which forbids matching it: a cut template could match a
+#: route it does not name.
+MAX_TEMPLATE_CHARS = 200
+#: How many parts a template may have before it is recorded as truncated.
+MAX_TEMPLATE_PARTS = 32
+#: How much of one substitution's source text is kept, for display only.
+MAX_EXPRESSION_CHARS = 60
+#: What a template string's content is made of.
+_TEMPLATE_CONTENT = frozenset({"string_fragment", "escape_sequence", "template_substitution"})
+
+
+def _unwrap(node: Node) -> Node:
+    while node.type == "parenthesized_expression":
+        inner = [child for child in node.named_children if child.type != "comment"]
+        if len(inner) != 1:
+            break
+        node = inner[0]
+    return node
+
+
+def _rooted(value: str) -> bool:
+    return value.startswith("/") and not value.startswith("//")
+
+
+def template_spec(source: bytes, node: Node | None) -> dict[str, object] | None:
+    """A rooted template path as parser-neutral parts, or ``None``.
+
+    Only a template whose first fragment starts with one ``/`` is read: one that
+    starts with a substitution is composing a base (``${base}${path}``), which is
+    transport plumbing rather than a request. Nothing after a literal ``?`` or
+    ``#`` is kept — a query can carry a token — so the parts end at the marker. A
+    substitution the source proves is empty or a query string
+    (``${params ? `?${params}` : ""}``) becomes a query tail, kept without its text.
+    An escape sequence is kept raw, so the template model refuses it.
+    """
+    if node is None:
+        return None
+    node = _unwrap(node)
+    if node.type != "template_string":
+        return None
+    content = [child for child in node.children if child.type in _TEMPLATE_CONTENT]
+    if not content or content[0].type != "string_fragment":
+        return None
+    if not _rooted(node_text(source, content[0])):
+        return None
+    parts: list[list[str]] = []
+    chars = 0
+    truncated = False
+    for child in content:
+        if child.type == "template_substitution":
+            inner = next((c for c in child.named_children if c.type != "comment"), None)
+            if inner is not None and _empty_or_query_tail(source, inner):
+                parts.append([http.TEMPLATE_QUERY, ""])
+            else:
+                text = node_text(source, inner) if inner is not None else ""
+                parts.append([http.TEMPLATE_SUBSTITUTION, text[:MAX_EXPRESSION_CHARS]])
+        else:
+            text = node_text(source, child)
+            cut = min((i for i in (text.find("?"), text.find("#")) if i >= 0), default=None)
+            if cut is not None:
+                text = text[: cut + 1]
+            if chars + len(text) > MAX_TEMPLATE_CHARS:
+                text = text[: MAX_TEMPLATE_CHARS - chars]
+                truncated = True
+            if parts and parts[-1][0] == http.TEMPLATE_LITERAL:
+                parts[-1][1] += text
+            else:
+                parts.append([http.TEMPLATE_LITERAL, text])
+            chars += len(text)
+            if cut is not None or truncated:
+                break
+        if len(parts) > MAX_TEMPLATE_PARTS:
+            truncated = True
+            break
+    return {"parts": parts, "truncated": truncated}
+
+
+def _empty_or_query_tail(source: bytes, node: Node) -> bool:
+    """``cond ? `?${q}` : ""``: a value that is empty or begins a query string."""
+    node = _unwrap(node)
+    if node.type != "ternary_expression":
+        return False
+    branches = (node.child_by_field_name("consequence"), node.child_by_field_name("alternative"))
+    return all(branch is not None and _empty_or_query(source, branch) for branch in branches)
+
+
+def _empty_or_query(source: bytes, node: Node) -> bool:
+    node = _unwrap(node)
+    if node.type not in {"string", "template_string"}:
+        return False
+    content = [child for child in node.children if child.type in _TEMPLATE_CONTENT]
+    if not content:
+        return True
+    return content[0].type == "string_fragment" and node_text(source, content[0]).startswith("?")
+
+
+def alternatives_spec(source: bytes, node: Node | None) -> dict[str, object] | None:
+    """``cond ? "/a" : `/b/${id}```: each branch as a rooted path of its own, or ``None``.
+
+    Only one level, and every branch must be a rooted literal or template; a
+    branch that is anything else makes the whole choice unreadable. A literal
+    branch keeps its path only, never its query.
+    """
+    if node is None:
+        return None
+    node = _unwrap(node)
+    if node.type != "ternary_expression":
+        return None
+    specs: list[dict[str, object]] = []
+    for name in ("consequence", "alternative"):
+        branch = node.child_by_field_name(name)
+        if branch is None:
+            return None
+        value = static_string(source, branch)
+        if value is not None:
+            if not _rooted(value):
+                return None
+            cut = min((i for i in (value.find("?"), value.find("#")) if i >= 0), default=None)
+            specs.append({"string": value if cut is None else value[:cut]})
+            continue
+        spec = template_spec(source, branch)
+        if spec is None:
+            return None
+        specs.append(spec)
+    return {"alternatives": specs}
+
+
+def decided_path(spec: dict[str, object]) -> str | None:
+    """The one literal path a spec names, when nothing about it is dynamic.
+
+    A template whose substitutions are all in its query, or a choice whose
+    branches all name the same literal path, is an ordinary route: no server has
+    to be consulted to spell it.
+    """
+    options = spec.get("alternatives", [spec])
+    if not isinstance(options, list) or not options:
+        return None
+    paths: set[str] = set()
+    for option in options:
+        if not isinstance(option, dict):
+            return None
+        if "string" in option:
+            value = option["string"]
+            target = http.client_target(value) if isinstance(value, str) else None
+            if target is None or target.url is not None:
+                return None
+            paths.add(target.path)
+        elif "parts" in option:
+            parts = template_parts(option.get("parts"))
+            if parts is None:
+                return None
+            template = http.route_template(parts, truncated=option.get("truncated") is True)
+            if isinstance(template, str) or template.path is None:
+                return None
+            paths.add(template.path)
+        else:
+            return None
+    return paths.pop() if len(paths) == 1 else None
+
+
+def template_parts(value: object) -> list[list[str]] | None:
+    """Template parts read back from a claim, or ``None`` if they are malformed."""
+    if not isinstance(value, list):
+        return None
+    parts: list[list[str]] = []
+    for part in value:
+        if (
+            not isinstance(part, list)
+            or len(part) != 2
+            or not all(isinstance(item, str) for item in part)
+        ):
+            return None
+        parts.append([part[0], part[1]])
+    return parts
 
 
 def fetch_method(value: str) -> str | None:
@@ -439,17 +623,38 @@ class TypeScriptHttp:
         if arguments is None or not 1 <= len(arguments) <= 2:
             return []
         url = static_string(self._source, arguments[0])
+        spec = template_spec(self._source, arguments[0]) if url is None else None
+        if spec is not None:
+            url = decided_path(spec)
+            spec = None if url is not None else spec
         _, end = line_range(arguments[0])
         method: str | None = "GET"
         if len(arguments) == 2:
             options = _plain_object(self._source, arguments[1])
+            method_node = options.get("method") if options is not None else None
             if options is None:
-                return []
-            method_node = options.get("method")
-            if method_node is not None:
+                method = None
+            elif method_node is not None:
                 raw = static_string(self._source, method_node)
                 method = fetch_method(raw) if raw is not None else None
                 end = max(end, line_range(method_node)[1])
+        if spec is not None:
+            # Recorded so the request is visible; never matched (see the module doc).
+            start, stop = line_range(node)
+            return [
+                local_call_reference(
+                    "fetch",
+                    start,
+                    stop,
+                    transport=TRANSPORT_FETCH,
+                    path=spec,
+                    method=method,
+                    in_call=True,
+                    base=None,
+                    source="fetch",
+                    source_symbol=source_symbol,
+                )
+            ]
         if url is None or method is None:
             return []
         return self._client(node, "fetch", method, url, end, source_symbol, relative=True)

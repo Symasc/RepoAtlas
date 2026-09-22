@@ -10,6 +10,7 @@ carefully as what is found.
 
 from __future__ import annotations
 
+import json
 import textwrap
 from pathlib import Path
 
@@ -28,7 +29,16 @@ def _parse(source: str, name: str = "api.ts") -> ParsedFile:
 
 
 def _http(source: str, name: str = "api.ts") -> list[ParsedReference]:
-    return [r for r in _parse(source, name).references if r.target_kind in _HTTP_KINDS]
+    """HTTP facts, not the pending claims only the global pass can decide."""
+    return [
+        r
+        for r in _parse(source, name).references
+        if r.target_kind in _HTTP_KINDS and "pending_fact" not in r.meta
+    ]
+
+
+def _claims(source: str, name: str = "api.ts") -> list[ParsedReference]:
+    return [r for r in _parse(source, name).references if "pending_fact" in r.meta]
 
 
 def _pairs(source: str, name: str = "api.ts") -> set[tuple[str, str]]:
@@ -230,6 +240,46 @@ def test_a_fetch_method_is_read_from_a_literal_options_object(
 )
 def test_a_fetch_that_proves_no_request_yields_nothing(call: str) -> None:
     assert _http(f"{call};\n") == []
+    # Only a rooted template is kept, and only as a claim that is never matched.
+    kept = {"fetch(`/users/${id}`)"}
+    assert (_claims(f"{call};\n") != []) == (call in kept)
+
+
+def test_a_fetch_template_is_recorded_as_a_claim_that_is_never_a_route() -> None:
+    """The request stays visible as unresolved; nothing spells a route for it."""
+    [claim] = _claims(
+        "export function load(id: string) {\n  return fetch(`/users/${id}?x=${id}`);\n}\n"
+    )
+    assert claim.meta["pending_fact"] == "http-local-call"
+    assert claim.meta["transport"] == "fetch"
+    assert claim.meta["method"] == "GET"
+    assert claim.target_key == "fetch"
+    assert claim.source_symbol == "load"
+    # The path only, cut at the query marker: a query value never reaches a claim.
+    assert json.loads(claim.meta["path"]) == {
+        "parts": [["l", "/users/"], ["s", "id"], ["l", "?"]],
+        "truncated": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        "fetch(`${base}/users/${id}`)",
+        "fetch(`//api.example.com/${id}`)",
+        "fetch(`users/${id}`)",
+        "fetch(`https://api.example.com/users/${id}`)",
+    ],
+)
+def test_a_fetch_template_that_is_not_a_rooted_path_is_not_recorded(call: str) -> None:
+    """A leading substitution composes a base: transport plumbing, not a request."""
+    assert _claims(f"{call};\n") == []
+    assert _http(f"{call};\n") == []
+
+
+def test_a_fetch_template_with_only_a_dynamic_query_is_an_ordinary_route() -> None:
+    assert _pairs("fetch(`/users?page=${page}`);\n") == {("CALLS_HTTP_ROUTE", "GET /users")}
+    assert _claims("fetch(`/users?page=${page}`);\n") == []
 
 
 @pytest.mark.parametrize(
