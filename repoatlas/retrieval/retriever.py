@@ -239,7 +239,7 @@ class Retriever:
         # one of the three ways a named term can be proven to exist. Deciding
         # suppression on content alone is what made RepoAtlas answer "no indexed
         # evidence matches" for `src/config.py` while holding that exact file.
-        files, proven = self._stage_files(
+        files, proven, files_matched = self._stage_files(
             [*literal_terms, *analysis.terms], scopes, stages, path_prefix=path_prefix
         )
         if files:
@@ -301,7 +301,7 @@ class Retriever:
         term_matches = _term_matches(
             analysis,
             text_found=text_found,
-            files_found=proven,
+            files_found=files_matched,
             names_found=proven_names | symbols_found,
             names_looked_up=suppressed is None,
         )
@@ -775,7 +775,7 @@ class Retriever:
         stages: list[StageTiming],
         *,
         path_prefix: str | None = None,
-    ) -> tuple[list[EvidenceCandidate], set[str]]:
+    ) -> tuple[list[EvidenceCandidate], set[str], set[str]]:
         """Files whose own name or path the question spells out.
 
         A file's path is a deterministic fact about the repository, so a match is
@@ -797,6 +797,14 @@ class Retriever:
         The second return value is the set of terms this stage *proved to exist*.
         Suppression consumes it, which is the whole reason the stage runs this
         early — see :meth:`_suppress_associative`.
+
+        The third is every term that names *some* returned file, which the second
+        understates: the store keeps one hit per file, the most specific, so when
+        ``docs/ARCHITECTURE.md`` and ``ARCHITECTURE.md`` both name one file only the
+        exact-path hit comes back, and ``ARCHITECTURE.md`` has no hit of its own.
+        It names that file all the same, by the store's own rule — see
+        :func:`_names_file`. Suppression needs one proof and reads the second; a
+        per-term answer needs each term's own, and reads the third.
         """
         with Stopwatch("file") as watch:
             hits: dict[tuple[str, str], FileHit] = {}
@@ -839,7 +847,11 @@ class Retriever:
                 f"{graded[0]} exact path, {graded[1]} exact sub-path, {graded[2]} exact basename"
             )
         stages.append(_recorded(watch))
-        return candidates, {hit.term for hit in ordered}
+        proven = {hit.term for hit in ordered}
+        matched = proven | {
+            name for name in names if any(_names_file(name, hit) for hit in ordered)
+        }
+        return candidates, proven, matched
 
     @staticmethod
     def _suppress_associative(
@@ -1182,6 +1194,18 @@ def _file_reason(hit: FileHit) -> str:
     return f"file name is {hit.term}"
 
 
+def _names_file(term: str, hit: FileHit) -> bool:
+    """Whether ``term`` names the file ``hit`` found, by the file store's rule.
+
+    The whole relative path, a trailing sub-path on a segment boundary (the
+    basename is the shortest), or the path qualified by the repository's slug —
+    exactly the shapes :meth:`SqliteSearchIndex.find_files_by_path` matches, and
+    nothing looser: ``onfig.py`` does not name ``src/config.py``.
+    """
+    path = hit.path
+    return term == path or path.endswith(f"/{term}") or term == f"{hit.repository_slug}/{path}"
+
+
 def _term_matches(
     analysis: QueryAnalysis,
     *,
@@ -1203,11 +1227,14 @@ def _term_matches(
       suppression, and as a file name when it was among the words file lookup took.
 
     Prose words the question merely used are not reported: they were never
-    claimed to be names, and "not found" would be a claim about them.
+    claimed to be names, and "not found" would be a claim about them. Nor are the
+    pieces of a one-token question — ``docs`` of ``docs/ARCHITECTURE.md`` is a
+    directory the question passed through, and "docs: not_found" would read as a
+    claim that it does not exist.
     """
     terms = set(analysis.terms)
     matches: list[TermMatch] = []
-    seen: set[str] = set()
+    seen: set[str] = set(analysis.token_parts)
 
     for term in analysis.literal_terms:
         seen.add(term)

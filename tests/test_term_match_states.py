@@ -183,6 +183,27 @@ def test_an_http_key_is_looked_up_as_a_key(identity: Workspace) -> None:
     assert match.lookups == (TermLookup.ENTITY_KEY,)
 
 
+def test_a_path_and_its_basename_are_both_exact(identity: Workspace) -> None:
+    """Two terms naming one file each get the file's proof, not only the closer one."""
+    terms = _terms(identity, "docs/realm.md")
+    assert terms["docs/realm.md"].state is TermState.EXACT
+    assert terms["realm.md"].state is TermState.EXACT
+
+
+def test_the_pieces_of_a_one_token_question_are_not_terms(identity: Workspace) -> None:
+    """`docs` is a directory the question passed through, not a name it gave.
+
+    The pieces are still looked up as entity names -- that is how `api/config.py`
+    finds the module `config` -- but reporting them would say "docs: not_found"
+    about a directory that plainly exists.
+    """
+    assert set(_terms(identity, "docs/realm.md")) == {"docs/realm.md", "realm.md"}
+    assert set(_terms(identity, "src/keycloak/admin.client.ts")) == {
+        "src/keycloak/admin.client.ts",
+        "admin.client.ts",
+    }
+
+
 def test_a_file_outside_the_indexed_coverage_is_not_found(identity: Workspace) -> None:
     """Honest about coverage: the oversized file exists and is not indexed text."""
     assert _terms(identity, "HUGE_ONLY_MARKER")["HUGE_ONLY_MARKER"].state is TermState.NOT_FOUND
