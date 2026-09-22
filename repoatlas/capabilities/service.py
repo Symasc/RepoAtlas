@@ -130,6 +130,7 @@ from repoatlas.capabilities.verification import (
     projected_answer,
     resolve_citation,
     sanitized_answer,
+    supplied_routes,
     supplied_set,
     validate_grounding_request,
     verdict_for,
@@ -1115,8 +1116,11 @@ class CapabilityService:
 
             checked_at = datetime.now(UTC)
             outcomes = self._resolve_citations(request.answer, session)
+            # The routes this investigation was shown, which prose may name for
+            # the same reason it may name a file this investigation was shown.
+            routes = supplied_routes(session.ledger.entries())
             report = ground_answer(
-                projected_answer(request.answer, outcomes=outcomes),
+                projected_answer(request.answer, outcomes=outcomes, routes=routes),
                 supplied_set(
                     admitted={
                         outcome.evidence_id: entry
@@ -1128,6 +1132,7 @@ class CapabilityService:
                 ),
             )
             return self._grounding_response(
+                routes=routes,
                 request=request,
                 session=session,
                 outcomes=outcomes,
@@ -1172,6 +1177,7 @@ class CapabilityService:
         transitions: tuple[EvidenceTransition, ...],
         freshness: IndexFreshness,
         checked_at: datetime,
+        routes: Sequence[str] = (),
     ) -> VerifyGroundingResponse:
         """Assemble the verdict, what it rests on, and what it leaves unsaid."""
         answer = request.answer
@@ -1250,9 +1256,9 @@ class CapabilityService:
 
         return VerifyGroundingResponse(
             investigation_id=session.id,
-            verdict=verdict_for(submitted=answer, outcomes=outcomes, report=report),
+            verdict=verdict_for(submitted=answer, outcomes=outcomes, report=report, routes=routes),
             original_answer=answer,
-            sanitized_answer=sanitized_answer(answer, report, outcomes=outcomes),
+            sanitized_answer=sanitized_answer(answer, report, outcomes=outcomes, routes=routes),
             findings=tuple(findings),
             citations=tuple(citations),
             evidence_statuses=tuple(statuses),
@@ -1607,12 +1613,19 @@ class CapabilityService:
         """
         assert repository.id is not None
         wanted: dict[str, list[tuple[int, int]]] = {}
+        # Which operations each span was supplied for. One span may state two
+        # rows, and grounding later asks what this investigation was shown, not
+        # which row asked for it first.
+        named: dict[tuple[str, int, int], set[str]] = {}
         for row in rows:
             if row.path is None or row.line_start is None or row.line_end is None:
                 continue
             spans = wanted.setdefault(row.path, [])
             if (row.line_start, row.line_end) not in spans:
                 spans.append((row.line_start, row.line_end))
+            if row.route:
+                operation = f"{row.method} {row.route}" if row.method else row.route
+                named.setdefault((row.path, row.line_start, row.line_end), set()).add(operation)
         supplies: list[ProvenanceSupply] = []
         states = self._workspace.files.states_for(repository.id, sorted(wanted))
         for path in sorted(wanted):
@@ -1649,6 +1662,7 @@ class CapabilityService:
                                 f"{repository.slug}/{path}:{line_start}-{line_end}"
                             ),
                             text_length=len(text),
+                            routes=tuple(sorted(named.get((path, line_start, line_end), ()))),
                         ),
                         text=text,
                     )

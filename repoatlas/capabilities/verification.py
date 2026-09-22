@@ -40,10 +40,12 @@ pins that, and every candidate this module builds carries ``text=""``.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from repoatlas.capabilities.errors import InvalidGroundingRequestError
 from repoatlas.grounding import GroundingReport, ground_answer
+from repoatlas.models import http
 from repoatlas.models.capability_io import LineRange
 from repoatlas.models.evidence import (
     Evidence,
@@ -392,10 +394,85 @@ def supplied_set(
     return EvidenceSet(question=question, candidates=tuple(candidates))
 
 
+# ---------------------------------------------------------------------------
+# A route this investigation supplied is not a file path
+# ---------------------------------------------------------------------------
+
+#: Two characters no path pattern of V1's can read. An anchored route's
+#: separators are written with these while V1 reads the answer, and written back
+#: afterwards, so the prose rule sees no path where the agent named a route.
+_HIDDEN_SLASH = "\x1c"
+_HIDDEN_DOT = "\x1d"
+
+
+def supplied_routes(entries: Iterable[LedgerEntry]) -> tuple[str, ...]:
+    """Every HTTP operation this investigation was shown, sorted and unique.
+
+    Whatever each entry's status is, for the same reason a supplied file may be
+    named after its citation went stale: the agent really was shown the row, and
+    reporting the route as fabricated would be a false accusation about it. Only
+    this investigation's ledger is read, so a route supplied elsewhere is no more
+    supplied here than a file would be.
+    """
+    return tuple(sorted({route for entry in entries for route in entry.routes}))
+
+
+def _anchored(mention: http.RouteMention, supplied: Sequence[str]) -> bool:
+    """Whether one mention structurally equals a route that was supplied.
+
+    Form anchors nothing. ``GET /etc/shadow`` is exempt only if this repository
+    really serves or calls that route and this investigation was shown the row
+    saying so; otherwise it is the fabricated path it looks like. Literal segments
+    must match byte for byte and a parameter never equals a literal, so
+    ``/v1/users/42`` is not covered by a supplied ``/v1/users/:id``. A mention
+    that carries a method must agree with the supplied one, unless the supplied
+    row's own method could not be read.
+    """
+    for entry in supplied:
+        head, _, tail = entry.partition(" ")
+        method, path = (head, tail) if tail else ("", head)
+        if mention.method is not None and method and mention.method != method:
+            continue
+        if http.same_shape(mention.path, path):
+            return True
+    return False
+
+
+def neutralized(text: str, supplied: Sequence[str]) -> str:
+    """``text`` with every anchored route hidden from V1's path reading.
+
+    Each mention is decided on its own, so an unsupplied path in the same sentence
+    as a supplied route is still read as a path and still condemns the claim.
+    """
+    if not text or not supplied:
+        return text
+    # Injective or nothing: a text already holding a hidden character cannot be
+    # written back without inventing one, so it is passed through untouched and
+    # read exactly as it would have been before this existed.
+    if _HIDDEN_SLASH in text or _HIDDEN_DOT in text:
+        return text
+    pieces: list[str] = []
+    cut = 0
+    for mention in http.route_mentions(text):
+        if mention.start < cut or not _anchored(mention, supplied):
+            continue
+        pieces.append(text[cut : mention.start])
+        pieces.append(mention.path.replace("/", _HIDDEN_SLASH).replace(".", _HIDDEN_DOT))
+        cut = mention.end
+    pieces.append(text[cut:])
+    return "".join(pieces)
+
+
+def restored(text: str) -> str:
+    """The inverse of :func:`neutralized`, applied to whatever V1 hands back."""
+    return text.replace(_HIDDEN_SLASH, "/").replace(_HIDDEN_DOT, ".")
+
+
 def projected_answer(
     answer: AgentAnswer,
     *,
     outcomes: dict[tuple[int, int], CitationOutcome],
+    routes: Sequence[str] = (),
 ) -> RepoAtlasAnswer:
     """The submitted answer in V1's shape, carrying decided coordinates only.
 
@@ -429,13 +506,19 @@ def projected_answer(
             default=claim.claimed_confidence,
         )
         hypotheses.append(
-            Hypothesis(statement=claim.statement, confidence=confidence, evidence=kept)
+            Hypothesis(
+                statement=neutralized(claim.statement, routes),
+                confidence=confidence,
+                evidence=kept,
+            )
         )
     return RepoAtlasAnswer(
-        summary=answer.summary,
+        summary=neutralized(answer.summary, routes),
         hypotheses=hypotheses,
-        unknowns=list(answer.unknowns),
-        next_check=answer.next_check,
+        unknowns=[neutralized(unknown, routes) for unknown in answer.unknowns],
+        next_check=(
+            neutralized(answer.next_check, routes) if answer.next_check is not None else None
+        ),
     )
 
 
@@ -444,6 +527,7 @@ def sanitized_answer(
     report: GroundingReport,
     *,
     outcomes: dict[tuple[int, int], CitationOutcome],
+    routes: Sequence[str] = (),
 ) -> AgentAnswer:
     """V1's verified answer, translated back into the public shape.
 
@@ -458,7 +542,10 @@ def sanitized_answer(
         hypothesis.statement: hypothesis.confidence for hypothesis in report.answer.hypotheses
     }
     for claim_index, claim in enumerate(submitted.claims):
-        if claim.statement not in surviving:
+        # Matched through the same transform V1 read the statement under; the
+        # claim itself is handed back exactly as it was submitted.
+        projected = neutralized(claim.statement, routes)
+        if projected not in surviving:
             continue
         citations = tuple(
             citation
@@ -469,18 +556,18 @@ def sanitized_answer(
             claim.model_copy(
                 update={
                     "citations": citations,
-                    "claimed_confidence": confidences.get(
-                        claim.statement, claim.claimed_confidence
-                    ),
+                    "claimed_confidence": confidences.get(projected, claim.claimed_confidence),
                 }
             )
         )
-        surviving.discard(claim.statement)
+        surviving.discard(projected)
     return AgentAnswer(
-        summary=report.answer.summary,
+        summary=restored(report.answer.summary),
         claims=tuple(claims),
-        unknowns=tuple(report.answer.unknowns),
-        next_check=report.answer.next_check,
+        unknowns=tuple(restored(unknown) for unknown in report.answer.unknowns),
+        next_check=(
+            restored(report.answer.next_check) if report.answer.next_check is not None else None
+        ),
     )
 
 
@@ -489,6 +576,7 @@ def verdict_for(
     submitted: AgentAnswer,
     outcomes: dict[tuple[int, int], CitationOutcome],
     report: GroundingReport,
+    routes: Sequence[str] = (),
 ) -> GroundingVerdict:
     """Derive the verdict from grounding outcomes and nothing else.
 
@@ -515,7 +603,7 @@ def verdict_for(
     full = 0
     partial = 0
     for claim_index, claim in enumerate(submitted.claims):
-        if claim.statement not in surviving:
+        if neutralized(claim.statement, routes) not in surviving:
             continue
         decided = [outcomes[(claim_index, index)] for index in range(len(claim.citations))]
         if not decided or not all(outcome.admitted for outcome in decided):
