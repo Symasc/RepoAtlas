@@ -127,7 +127,7 @@ from repoatlas.capabilities.sync import (
 )
 from repoatlas.capabilities.verification import (
     CitationOutcome,
-    neutralized,
+    aligned_hypotheses,
     projected_answer,
     resolve_citation,
     sanitized_answer,
@@ -1229,16 +1229,12 @@ class CapabilityService:
         # was is the whole value of the finding, so it carries its index; not a
         # word of the statement is repeated, for the same reason the count below
         # quotes nothing.
-        surviving: dict[str, int] = {}
-        for hypothesis in report.answer.hypotheses:
-            surviving[hypothesis.statement] = surviving.get(hypothesis.statement, 0) + 1
+        aligned = aligned_hypotheses(answer, report, outcomes=outcomes, routes=routes)
         for claim_index, claim in enumerate(answer.claims):
             decided = [outcomes[(claim_index, index)] for index in range(len(claim.citations))]
             if not decided or not all(outcome.admitted for outcome in decided):
                 continue
-            projected = neutralized(claim.statement, routes)
-            if surviving.get(projected, 0):
-                surviving[projected] -= 1
+            if aligned[claim_index] is not None:
                 continue
             findings.append(
                 GroundingFinding(
