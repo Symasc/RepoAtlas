@@ -19,7 +19,7 @@ refuses to turn that picture into:
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,7 @@ from repoatlas.capabilities.errors import (
     InvalidCursorError,
     StaleCursorError,
 )
-from repoatlas.capabilities.http_inventory import selected
+from repoatlas.capabilities.http_inventory import _route_under, selected
 from repoatlas.capabilities.service import CapabilityService
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.evidence import EvidenceSource
@@ -218,6 +218,11 @@ def _ask(workspace: Workspace, **kwargs: object) -> HttpOperationsResponse:
     fields: dict[str, object] = {"context": _repository(COURSES)}
     fields.update(kwargs)
     return CapabilityService(workspace).http_operations(HttpOperationsRequest(**fields))  # type: ignore[arg-type]
+
+
+def _keys(rows: Sequence[HttpOperation]) -> list[tuple[str, str, str, str, str]]:
+    """Row identity including status, since one route may be requested twice."""
+    return [(r.role, r.status.value, r.method or "", r.route, r.path or "") for r in rows]
 
 
 def _rows(response: HttpOperationsResponse) -> list[tuple[str, str, str, str]]:
@@ -461,6 +466,119 @@ def test_the_method_and_route_prefix_filters_cut_on_whole_values(
     assert {row.route for row in admin.operations} == {"/v1/admin/audit"}
     # A prefix matches whole segments, so `/v1/cour` is not a prefix of `/v1/courses`.
     assert _ask(workspace, route_prefix="/v1/cour").summary.total == 0
+
+
+def test_a_route_prefix_selects_a_written_template_and_a_declared_parameter_alike(
+    indexed: tuple[Workspace, Path],
+) -> None:
+    """One prefix answers for both roles, because they name one route.
+
+    A caller writes ``/v1/courses/${courseId}/roster`` and the handler declares
+    ``/v1/courses/:courseId/roster``. Read byte for byte, a prefix spelled either
+    way answers for one role and silently returns nothing for the other — so an
+    agent that reads a route off a provider row and filters callers by it sees an
+    empty page and concludes the request is not indexed.
+    """
+    workspace, _ = indexed
+    both = _ask(workspace, route_prefix="/v1/courses/:courseId")
+    assert {row.role for row in both.operations} == {"caller", "provider"}
+    assert {(row.role, row.route) for row in both.operations} == {
+        ("provider", "/v1/courses/:courseId/roster"),
+        ("provider", "/v1/courses/:courseId/archive"),
+        ("provider", "/v1/courses/:courseId/export"),
+        ("caller", "/v1/courses/${courseId}/roster"),
+        ("caller", "/v1/courses/${courseId}/guardian"),
+        ("caller", "/v1/courses/${courseId}/archive"),
+    }
+    # The same rows, whichever way the caller spells the prefix.
+    assert _rows(_ask(workspace, route_prefix="/v1/courses/${courseId}")) == _rows(both)
+
+
+def test_a_parameter_segment_matches_however_it_is_spelled_and_whatever_it_is_named(
+    indexed: tuple[Workspace, Path],
+) -> None:
+    """The four declared spellings and the written template are one segment.
+
+    A parameter's *name* is the server's business and the client's separately, so
+    two names for one position are still one position. What is compared is that
+    both sides fill the segment with a value rather than a literal.
+    """
+    workspace, _ = indexed
+    expected = _rows(_ask(workspace, route_prefix="/v1/courses/:courseId"))
+    assert expected
+    for spelling in (
+        "/v1/courses/{courseId}",
+        "/v1/courses/<courseId>",
+        "/v1/courses/${courseId}",
+        # A different name for the same position, in each spelling.
+        "/v1/courses/:id",
+        "/v1/courses/{anything}",
+        "/v1/courses/${whateverTheClientCalledIt}",
+    ):
+        assert _rows(_ask(workspace, route_prefix=spelling)) == expected, spelling
+
+
+def test_a_literal_segment_never_matches_a_parameter_in_either_direction(
+    indexed: tuple[Workspace, Path],
+) -> None:
+    """``/v1/courses/42`` is a request about one course, not about the shape.
+
+    This is the boundary that keeps the looser reading honest: if a literal could
+    stand in for a parameter, every concrete path would select every route of its
+    shape and the filter would stop meaning anything.
+    """
+    workspace, _ = indexed
+    assert _ask(workspace, route_prefix="/v1/courses/42").summary.total == 0
+    assert _ask(workspace, route_prefix="/v1/courses/42/roster").summary.total == 0
+    # And the reverse: a parameter does not select a route with a literal there.
+    assert {row.route for row in _ask(workspace, route_prefix="/v1/:section").operations} == set()
+
+
+def test_a_route_prefix_compares_only_the_segments_it_names(
+    indexed: tuple[Workspace, Path],
+) -> None:
+    """Prefix boundaries, on the shape reading as on the literal one."""
+    workspace, _ = indexed
+    whole = _ask(workspace)
+    # Every rooted route, and nothing filtered out.
+    assert _ask(workspace, route_prefix="/").summary.total == whole.summary.total
+    # A prefix naming more segments than the route has selects nothing.
+    assert _ask(workspace, route_prefix="/v1/courses/:courseId/roster/extra").summary.total == 0
+    # A partial segment is not a segment, whichever side the parameter is on.
+    assert _ask(workspace, route_prefix="/v1/cour/:courseId").summary.total == 0
+    # Narrowing by a further segment really narrows.
+    roster = _ask(workspace, route_prefix="/v1/courses/:courseId/roster")
+    assert {row.route for row in roster.operations} == {
+        "/v1/courses/:courseId/roster",
+        "/v1/courses/${courseId}/roster",
+    }
+
+
+def test_narrowing_by_route_prefix_never_narrows_what_the_rows_were_decided_against(
+    indexed: tuple[Workspace, Path],
+) -> None:
+    """The looser prefix selects rows; it does not re-decide them.
+
+    A caller matched against the whole repository's routes before any filter ran,
+    so its status and counterparts must read identically whether it arrived under
+    a prefix or not.
+    """
+    workspace, _ = indexed
+    prefix = "/v1/courses/:courseId"
+    filtered = _ask(workspace, route_prefix=prefix).operations
+    kept = [row for row in _ask(workspace).operations if _route_under(row.route, prefix)]
+    # Selecting rows is all the filter does: the same rows, decided identically.
+    assert _keys(filtered) == _keys(kept)
+    for row, same in zip(filtered, kept, strict=True):
+        assert (row.status, row.routes, row.counterparts) == (
+            same.status,
+            same.routes,
+            same.counterparts,
+        )
+    # The guardian request is served only by the *other* repository, so it stays
+    # absent here however the prefix that selected it was spelled.
+    guardian = _one(_ask(workspace, route_prefix=prefix), "GET", "/v1/courses/${courseId}/guardian")
+    assert guardian.status is OperationStatus.NO_INDEXED_HANDLER
 
 
 def test_the_status_filter_selects_rows_and_the_summary_counts_the_whole_filtered_set(
