@@ -503,10 +503,29 @@ def _owned(qualified: str | None, owner: str) -> bool:
 
 
 def _route_under(route: str, prefix: str) -> bool:
+    """Whether ``route`` begins with ``prefix``, segment by segment.
+
+    A caller's route is the path as the source writes it — ``/v1/courses/${courseId}``
+    — and a provider's is the path as the handler declares it —
+    ``/v1/courses/:courseId``. They name one route, so one prefix has to select
+    both: read byte for byte, a prefix spelled either way silently answers for one
+    role and not the other.
+
+    So the literal reading is tried first and a shape reading second, using the
+    same :func:`~repoatlas.models.http.route_shape` that decides whether a route
+    named in prose was the route supplied. A segment filled by one value matches a
+    declared parameter whatever either is called, and a literal never matches a
+    parameter in either direction — ``/v1/courses/42`` still selects nothing that
+    ``/v1/courses/:courseId`` serves. Only the segments the prefix names are
+    compared; the route may carry any number more.
+    """
     if prefix == "/":
         return route.startswith("/")
     base = prefix.rstrip("/")
-    return route == base or route.startswith(base + "/")
+    if route == base or route.startswith(base + "/"):
+        return True
+    shape, wanted = http.route_shape(route), http.route_shape(base)
+    return bool(shape) and bool(wanted) and shape[: len(wanted)] == wanted
 
 
 def summarize(drafts: Sequence[Draft]) -> OperationSummary:
