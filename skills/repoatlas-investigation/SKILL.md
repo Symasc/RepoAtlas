@@ -83,6 +83,8 @@ Start with `repoatlas_search`. It finds evidence, records it so you can cite it,
 
 Do not open with `repoatlas_inspect` on a guessed path or `repoatlas_relationships` on a guessed key. Do not use `repoatlas_dependencies` as a search.
 
+**Name the identifiers you want, not the task you are doing.** Every result carries a `tier` and a `match` class saying *how* the question named it. A question that spells a path, a symbol or a literal reaches the deterministic tier (`tier: 0`); a sentence describing a workflow — "frontend remove member button and API client method" — spells none of those, so every result comes back on word overlap alone (`tier: 1`, `match: 6`). Those results are all tied on the only keys that rank them, so their order carries no signal, and in a large tree the words that overlap best are generic ones like `button`, `client` or `course`, which test files and fixtures are full of. Ask the descriptive question once to find the names, then ask again with the names — `"RevokeDialog useRemoveStudent"` — and prefer `within_path` and `budget.breadth` to keep it tight. If a result set is entirely `tier: 1`, treat that as "the index did not recognise anything I named", not as a ranking.
+
 A path you were given is not a guess. When the task names a file, such as a design document at `docs/ARCHITECTURE.md`, search for that path — an indexed file named by its full path ranks first — or inspect it directly under a repository scope. A document is evidence of what the document says, not of what the code does.
 
 **Scope is a boundary, so choose it for the question you are asking.** A `repository` scope answers out of that repository and out of things that belong to no repository at all — an environment variable, a command, an HTTP operation. It will not quietly return a file from somewhere else, which is what makes "nothing here" a usable scoped answer. When the question is "where does this live?" and you do not already know, ask it with `{"scope": "global"}`.
@@ -195,6 +197,8 @@ What the results mean:
 - `cross_repository: true` explicitly allows a repository-scoped walk to cross the repository boundary where graph policy permits.
 - Crossing repositories directly is allowed only for the edge types the policy permits.
 
+**Who uses a symbol is a fact about its file.** `IMPORTS` is recorded between files, so the importers of `RevokeDialog` sit on `file:<repo>:path/to/revoke-dialog.tsx`, not on `sym:<repo>:path/to/revoke-dialog.tsx:RevokeDialog:11`. Asking the symbol for its `incoming` edges returns the `EXPORTS` edge from its own file and nothing else, which reads like "nothing uses this" and is not. To find what renders, imports or mounts a definition, walk the **file** handle; the import line comes back as citable provenance. Reach for the shell only after the file handle has answered.
+
 **An edge is a fact. It is not automatically a citation.** Only provenance that was actually supplied and carries an evidence id can be cited as text. An edge may carry a path and line numbers with `citable` false and no evidence id; those coordinates are metadata about where the fact came from, not text you were shown. Discuss the fact, and cite the evidence ids the edge actually carries, if any.
 
 ### HTTP routes, deployments and endpoints
@@ -224,10 +228,12 @@ An endpoint a specification composes from a server URL and a path has no single 
 `repoatlas_http_operations` lists one repository's HTTP operations: the requests its source makes and the routes it serves or declares. Use it when the question is "which of these calls has a handler?", "which handlers has nothing calling them?" or "what does this client request?" — not as a search.
 
 ```json
-{"tool": "repoatlas_http_operations", "arguments": {"context": {"scope": "repository", "repository": "lvl"}, "role": "caller", "owner": "createLearningClient", "investigation_id": "<the id search returned>"}}
+{"tool": "repoatlas_http_operations", "arguments": {"context": {"scope": "repository", "repository": "lvl"}, "role": "caller", "owner": "createLearningClient", "include_provenance": true, "investigation_id": "<the id search returned>"}}
 ```
 
 It answers for one repository, so it needs a repository scope. Filter with `within_path`, `owner` (a factory's methods, without needing an edge to them), `method`, `route_prefix` and `status`; page with `limit` and the `cursor` it returns.
+
+**Narrow first, then ask for provenance — in the same call.** Evidence is allocated per returned row, so provenance on a whole repository's rows is a large response you mostly did not want, and a second call to fetch the same rows again is a second copy of work you already did. Name the rows you are after with `owner`, `route_prefix`, `method`, `status` or `within_path`, and set `include_provenance: true` on that call. `route_prefix` reads a parameter segment by shape, so `/v1/courses/:courseId` selects the handler that declares it *and* the client that writes `/v1/courses/${courseId}` — a literal still never matches a parameter, so `/v1/courses/42` selects neither.
 
 **Read the statuses as what they are: facts in this repository's index.**
 
@@ -321,6 +327,8 @@ The verdicts:
 - `ungrounded` — do not present it as RepoAtlas-grounded at all.
 
 Do not ignore the verdict, and do not present an answer you never verified as though you had.
+
+**A statement is also read for what it names.** Besides checking citations, grounding scans each statement for repository objects — a file, a line, a route — and removes the whole claim if it names one this investigation was never supplied, however good its citations were. The finding is `prose_reference_not_supplied`, and it carries the `claim_index` it removed. When you see it: you either named something you never actually retrieved, in which case drop the reference or go and retrieve it, or you named a route whose row you fetched without `include_provenance`, in which case fetch that row again with provenance. Do not work around it by paraphrasing the path out of the sentence while keeping the claim.
 
 If the response carries a sanitized answer, it is your answer with the citations that did not check out removed. It is citation-safe, not fact-corrected, truth-checked or semantically improved. If you use it, keep that distinction.
 
