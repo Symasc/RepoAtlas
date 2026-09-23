@@ -522,6 +522,55 @@ def projected_answer(
     )
 
 
+def aligned_hypotheses(
+    submitted: AgentAnswer,
+    report: GroundingReport,
+    *,
+    outcomes: dict[tuple[int, int], CitationOutcome],
+    routes: Sequence[str] = (),
+) -> tuple[Hypothesis | None, ...]:
+    """Each submitted claim beside the hypothesis V1 kept for it, or ``None``.
+
+    Aligned by **position**, never by statement text. Two claims may be worded
+    identically and still be different claims — one citing a span that had to be
+    narrowed, one not — and a mapping keyed by words cannot tell them apart. Keyed
+    that way, the second claim silently disappears while the response reports
+    nothing dropped, and the survivor inherits a confidence it did not earn.
+
+    Position is available because the projection is total: :func:`projected_answer`
+    emits one hypothesis per claim in submission order, and grounding only ever
+    removes, so what comes back is an ordered *subsequence*. A cursor walks it
+    alongside the claims and consumes one hypothesis per surviving claim, which is
+    why this is not a ``zip``: the positions shift the moment anything is dropped.
+
+    Two rules make the walk unambiguous:
+
+    * a claim whose citations did not all resolve was handed to V1 with no evidence
+      at all, so V1 always removed it. It is decided here and consumes nothing —
+      which is what keeps a dropped claim from eating the hypothesis belonging to a
+      later claim worded the same way;
+    * among the claims that remain, the only thing that can still remove one is the
+      prose rule, and that rule reads the statement and nothing else. Identical
+      statements therefore survive or fall together, so the cursor can never take
+      one for the other.
+    """
+    kept = report.answer.hypotheses
+    cursor = 0
+    aligned: list[Hypothesis | None] = []
+    for claim_index, claim in enumerate(submitted.claims):
+        decided = [outcomes[(claim_index, index)] for index in range(len(claim.citations))]
+        if not decided or not all(outcome.admitted for outcome in decided):
+            aligned.append(None)
+            continue
+        projected = neutralized(claim.statement, routes)
+        if cursor < len(kept) and kept[cursor].statement == projected:
+            aligned.append(kept[cursor])
+            cursor += 1
+        else:
+            aligned.append(None)
+    return tuple(aligned)
+
+
 def sanitized_answer(
     submitted: AgentAnswer,
     report: GroundingReport,
@@ -531,21 +580,17 @@ def sanitized_answer(
 ) -> AgentAnswer:
     """V1's verified answer, translated back into the public shape.
 
-    Claims are matched to their originals by statement text in submission order,
-    so a claim V1 removed is simply absent. Citations come back carrying the
-    evidence id they were submitted with, because the id is the identity — the
-    coordinates alone would make the sanitized answer uncitable in a later call.
+    Claims are matched to their originals by position, so a claim V1 removed is
+    simply absent and two claims worded alike stay two claims, each keeping its own
+    citations and its own confidence. Citations come back carrying the evidence id
+    they were submitted with, because the id is the identity — the coordinates
+    alone would make the sanitized answer uncitable in a later call.
     """
-    surviving = {hypothesis.statement for hypothesis in report.answer.hypotheses}
+    aligned = aligned_hypotheses(submitted, report, outcomes=outcomes, routes=routes)
     claims: list[AgentClaim] = []
-    confidences = {
-        hypothesis.statement: hypothesis.confidence for hypothesis in report.answer.hypotheses
-    }
     for claim_index, claim in enumerate(submitted.claims):
-        # Matched through the same transform V1 read the statement under; the
-        # claim itself is handed back exactly as it was submitted.
-        projected = neutralized(claim.statement, routes)
-        if projected not in surviving:
+        hypothesis = aligned[claim_index]
+        if hypothesis is None:
             continue
         citations = tuple(
             citation
@@ -556,11 +601,11 @@ def sanitized_answer(
             claim.model_copy(
                 update={
                     "citations": citations,
-                    "claimed_confidence": confidences.get(projected, claim.claimed_confidence),
+                    # This claim's own number, from the hypothesis V1 kept for it.
+                    "claimed_confidence": hypothesis.confidence,
                 }
             )
         )
-        surviving.discard(projected)
     return AgentAnswer(
         summary=restored(report.answer.summary),
         claims=tuple(claims),
@@ -599,11 +644,11 @@ def verdict_for(
     if not submitted.claims:
         return GroundingVerdict.UNGROUNDED
 
-    surviving = {hypothesis.statement for hypothesis in report.answer.hypotheses}
+    aligned = aligned_hypotheses(submitted, report, outcomes=outcomes, routes=routes)
     full = 0
     partial = 0
     for claim_index, claim in enumerate(submitted.claims):
-        if neutralized(claim.statement, routes) not in surviving:
+        if aligned[claim_index] is None:
             continue
         decided = [outcomes[(claim_index, index)] for index in range(len(claim.citations))]
         if not decided or not all(outcome.admitted for outcome in decided):

@@ -834,3 +834,156 @@ def test_verification_reports_the_status_of_everything_it_was_asked_about(
 
     reported = {status.evidence_id: status.status for status in response.evidence_statuses}
     assert reported == {evidence[0].id: EvidenceStatus.VALID, "E999": None}
+
+
+# ---------------------------------------------------------------------------
+# CASE 18 — claims are identified by position, never by the words they use
+# ---------------------------------------------------------------------------
+#
+# Two claims may be worded identically and still be different claims: one citing
+# a span that had to be narrowed, one not. Matched by text, the second silently
+# vanishes while the response reports nothing dropped, and the survivor inherits
+# a confidence it never earned. These pin the alignment that keeps them apart —
+# including when an earlier claim is rejected, which shifts every position after
+# it and is exactly where a `zip` would go wrong.
+
+
+def _clean_and_narrowed(service: CapabilityService) -> tuple[str, AgentCitation, AgentCitation]:
+    """One investigation, one exact citation and one that reaches past its span."""
+    investigation, evidence = _inspected(service, line_start=5, line_end=12)
+    item = next(e for e in evidence if e.ref.line_start and e.ref.line_start > 1)
+    below = (item.ref.line_start or 2) - 1
+    clean = AgentCitation(evidence_id=item.id)
+    narrowed = AgentCitation(evidence_id=item.id, line_start=below, line_end=item.ref.line_end)
+    return investigation, clean, narrowed
+
+
+def test_two_claims_worded_alike_stay_two_claims_with_their_own_confidences(
+    initialized: Workspace,
+) -> None:
+    """The defect this case exists for: one of the pair used to disappear."""
+    service = _service(initialized)
+    investigation, clean, narrowed = _clean_and_narrowed(service)
+
+    response = _verify(
+        service,
+        investigation,
+        _answer(
+            _claim("the same words", clean, confidence=0.9),
+            _claim("the same words", narrowed, confidence=0.9),
+        ),
+    )
+
+    claims = response.sanitized_answer.claims
+    assert len(claims) == 2
+    # Each keeps the number its own citations earned.
+    assert claims[0].claimed_confidence == 0.9
+    assert claims[1].claimed_confidence == 0.5
+    assert response.dropped_claims == 0
+    # And the finding names the claim that was actually narrowed.
+    clamped = [
+        finding
+        for finding in response.findings
+        if finding.code is GroundingFindingCode.CITATION_CLAMPED_TO_SUPPLIED_SPAN
+    ]
+    assert [finding.claim_index for finding in clamped] == [1]
+
+
+@pytest.mark.parametrize("rejected", [0, 1, 2])
+def test_a_rejected_claim_does_not_shift_the_claims_after_it(
+    initialized: Workspace, rejected: int
+) -> None:
+    """Positions move when a claim is dropped, so the walk may not be a zip.
+
+    Three claims worded identically, one of them condemned by a citation this
+    investigation never issued. Whichever one it is — first, middle or last — the
+    two survivors must keep their own citations and their own confidences.
+    """
+    service = _service(initialized)
+    investigation, clean, narrowed = _clean_and_narrowed(service)
+    fabricated = AgentCitation(evidence_id="E9999")
+
+    citations = [clean, narrowed, clean]
+    confidences = [0.9, 0.9, 0.7]
+    expected = [0.9, 0.5, 0.7]
+    citations[rejected] = fabricated
+
+    response = _verify(
+        service,
+        investigation,
+        _answer(
+            *(
+                _claim("the same words", citation, confidence=confidence)
+                for citation, confidence in zip(citations, confidences, strict=True)
+            )
+        ),
+    )
+
+    survivors = response.sanitized_answer.claims
+    assert response.dropped_claims == 1
+    # The accounting adds up: nothing vanished unannounced.
+    assert len(survivors) + response.dropped_claims == 3
+    assert [claim.claimed_confidence for claim in survivors] == [
+        value for index, value in enumerate(expected) if index != rejected
+    ]
+    # Each survivor carries back the citation it was submitted with.
+    assert [claim.citations[0].evidence_id for claim in survivors] == [
+        citation.evidence_id for index, citation in enumerate(citations) if index != rejected
+    ]
+    # The unknown id is reported against the claim that actually carried it.
+    unknown = [
+        finding
+        for finding in response.findings
+        if finding.code is GroundingFindingCode.UNKNOWN_EVIDENCE
+    ]
+    assert [finding.claim_index for finding in unknown] == [rejected]
+
+
+def test_every_submitted_claim_is_either_returned_or_counted_as_dropped(
+    initialized: Workspace,
+) -> None:
+    """A claim may not leave the answer without the count saying so."""
+    service = _service(initialized)
+    investigation, clean, narrowed = _clean_and_narrowed(service)
+
+    response = _verify(
+        service,
+        investigation,
+        _answer(
+            _claim("the same words", clean),
+            _claim("the same words", narrowed),
+            _claim("the same words", AgentCitation(evidence_id="E9999")),
+            _claim("a claim with nothing behind it"),
+            _claim("the same words", clean),
+        ),
+    )
+
+    assert len(response.sanitized_answer.claims) + response.dropped_claims == 5
+
+
+def test_identical_statements_removed_by_the_prose_rule_are_each_reported(
+    initialized: Workspace,
+) -> None:
+    """The prose rule reads the words, so alike claims fall together — and both are named.
+
+    Each still gets its own finding: which claim was removed is the whole value of
+    the finding, and two claims removed is two things the caller has to fix.
+    """
+    service = _service(initialized)
+    investigation, clean, _ = _clean_and_narrowed(service)
+    statement = "it is configured in services/nowhere/invented.yaml"
+
+    response = _verify(
+        service,
+        investigation,
+        _answer(_claim(statement, clean), _claim(statement, clean)),
+    )
+
+    assert response.sanitized_answer.claims == ()
+    assert response.dropped_claims == 2
+    prose = [
+        finding
+        for finding in response.findings
+        if finding.code is GroundingFindingCode.PROSE_REFERENCE_NOT_SUPPLIED
+    ]
+    assert [finding.claim_index for finding in prose] == [0, 1]
