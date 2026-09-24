@@ -72,8 +72,15 @@ class SearchMode(enum.StrEnum):
 class SearchRequest(BaseModel):
     """Ask what the index holds about a question."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
+    source_preview: bool = Field(
+        default=False,
+        description="Supply a bounded window of indexed source around matching lines, "
+        "or the full definition when it fits. Includes omitted spans; declarations "
+        "remain declarations when source lines cannot be proved. Opt-in; does not "
+        "change ranking. Inspect the entity to expand a partial preview.",
+    )
     question: str
     context: CapabilityContext
     budget: EvidenceBudget = EvidenceBudget()

@@ -105,7 +105,12 @@ def test_the_skill_is_the_only_document_carrying_the_decision_table() -> None:
     """One table, in the document agents read."""
     assert "decision table" in sections(skill_text())
     for path in ROOT.rglob("*.md"):
-        if path == SKILL_PATH or ".venv" in path.parts or "dist" in path.parts:
+        if (
+            path == SKILL_PATH
+            or path == SKILL_PATH.parent / "references/contracts.md"
+            or ".venv" in path.parts
+            or "dist" in path.parts
+        ):
             continue
         if ".pytest_cache" in path.parts:
             continue

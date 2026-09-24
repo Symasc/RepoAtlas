@@ -248,6 +248,14 @@ _FILE_IDENTITY_KINDS = frozenset(
 )
 
 
+class SourcePreview(BaseModel):
+    """Original indexed span and the closed line intervals this preview omits."""
+
+    model_config = ConfigDict(frozen=True)
+    source_span: tuple[int, int]
+    omitted_spans: tuple[tuple[int, int], ...] = ()
+
+
 class EvidenceCandidate(BaseModel):
     """One retrieved piece of a real repository, with the provenance that proves it.
 
@@ -279,6 +287,9 @@ class EvidenceCandidate(BaseModel):
     line_end: int | None = None
     text: str = ""
     score: float = 0.0
+    #: Exact qualified symbol explicitly named by the query; internal ranking intent.
+    qualified_match: bool = Field(default=False, exclude=True)
+    preview: SourcePreview | None = Field(default=None, exclude=True)
     source: EvidenceSource = EvidenceSource.EXACT
     tier: TierField = EvidenceTier.DETERMINISTIC
     #: How precisely the query identified this candidate. Retained through fusion
