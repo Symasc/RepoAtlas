@@ -24,6 +24,7 @@ tier precedence that makes deterministic evidence trustworthy (V1_SPEC §14).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from repoatlas.capabilities.evidence_shaping import provable_span, supply
@@ -114,6 +115,7 @@ def provable_line_span(candidate: EvidenceCandidate) -> tuple[int, int] | None:
 def shape_candidates(
     candidates: tuple[EvidenceCandidate, ...] | list[EvidenceCandidate],
     budget: AppliedBudget,
+    prepare: Callable[[EvidenceCandidate, int], EvidenceCandidate] | None = None,
 ) -> ShapingResult:
     """Turn trusted ranked candidates into evidence that fits the granted budget.
 
@@ -150,6 +152,8 @@ def shape_candidates(
     supplied: set[tuple[str, str, int | None, int | None, str]] = set()
 
     for index, candidate in enumerate(candidates):
+        if prepare is not None and len(items) < budget.max_items:
+            candidate = prepare(candidate, min(budget.max_item_chars, remaining_total))
         if candidate.is_handle_only:
             withheld += 1
             continue
@@ -190,7 +194,7 @@ def shape_candidates(
         text = piece.text
         line_start = piece.line_start
         line_end = piece.line_end
-        truncated = piece.truncated
+        truncated = piece.truncated or bool(candidate.preview and candidate.preview.omitted_spans)
 
         claim = _claim(candidate, text, line_start, line_end)
         if claim in supplied:

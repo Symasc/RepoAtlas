@@ -25,7 +25,12 @@ SKILL_PATH = Path(__file__).parent.parent.parent / "skills" / "repoatlas-investi
 
 
 def skill_text() -> str:
-    return SKILL_PATH.read_text(encoding="utf-8")
+    # Contract tests cover the core and its linked optional reference.
+    return (
+        SKILL_PATH.read_text(encoding="utf-8")
+        + "\n"
+        + (SKILL_PATH.parent / "references/contracts.md").read_text(encoding="utf-8")
+    )
 
 
 def frontmatter(text: str) -> dict[str, Any]:

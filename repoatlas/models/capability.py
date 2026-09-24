@@ -62,7 +62,7 @@ class CapabilityContext(BaseModel):
     ``relationships`` walk that says ``cross_repository``.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     scope: CapabilityScope = CapabilityScope.REPOSITORY
     #: Slug or display name. Required in ``REPOSITORY`` scope, forbidden in
@@ -128,7 +128,7 @@ class EvidenceBudget(BaseModel):
     the profile's default" rather than "no limit".
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     #: Maximum number of evidence items.
     max_items: int | None = Field(default=None, gt=0)

@@ -5,6 +5,9 @@ stdio. This document covers setup. The behaviour an agent should follow lives in
 one place, [`skills/repoatlas-investigation/SKILL.md`](../skills/repoatlas-investigation/SKILL.md),
 and is not repeated here.
 
+For request migration notes, source previews, workspace HTTP discovery and the
+completed-answer evaluation plan, see [agent efficiency](agent-efficiency.md).
+
 ## 1. Index a workspace
 
 Indexing is an operator action, done once with the existing CLI:
@@ -44,15 +47,15 @@ Every tool call states its own repository scope.
 
 The nine tool input schemas are advertised in full and are derived directly from
 the V2 Pydantic request models, so the schema a client validates against is the
-one the capability actually accepts. That costs roughly 28 KB of context at
-handshake as currently measured, which is the price of a contract a client can
-check rather than one it has to guess.
+one the capability actually accepts. A compact JSON serialization of all nine
+tool definitions currently measures 51,652 bytes, including descriptions and
+schemas. This is a byte measurement, not model tokens; clients may expose only
+selected definitions. See the dated comparison in the evaluation notes above.
 
 Output schemas are deliberately omitted. Under the current MCP SDK they would add
-roughly another 124 KB to the same handshake without buying SDK-side validation
+substantial additional data to the same handshake without buying SDK-side validation
 of the result path RepoAtlas uses, so the agent would pay for the whole response
-contract at startup and get no checking for it. Both figures are what this
-version measures, not a guarantee; the decision is the tradeoff, not the number.
+contract at startup and get no checking for it.
 
 There is no hand-maintained copy of any schema to drift from the models, and a
 test asserts that what the transport advertises is exactly `model_json_schema()`.
