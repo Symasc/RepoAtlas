@@ -157,6 +157,7 @@ def compact_grounding(response: VerifyGroundingResponse) -> CompactGroundingResp
 def _evidence(items: Sequence[EvidenceItem]) -> tuple[CompactEvidence, ...]:
     return tuple(
         CompactEvidence(
+            preview=item.preview,
             id=item.id,
             rank=item.rank,
             location=item.location,

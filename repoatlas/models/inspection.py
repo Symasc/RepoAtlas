@@ -89,7 +89,7 @@ class InspectTarget(BaseModel):
     would answer a question nobody posed.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     #: An id from **this** investigation. Meaningless in any other, and never
     #: searched for across investigations.
@@ -221,7 +221,7 @@ class InspectedFile(BaseModel):
 class InspectRequest(BaseModel):
     """Read source RepoAtlas already indexed, and record what it hands over."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     #: Explicit, as everywhere in this layer. A capability server has no working
     #: directory worth consulting.
@@ -232,7 +232,13 @@ class InspectRequest(BaseModel):
     line_start: int | None = Field(default=None, ge=1)
     line_end: int | None = Field(default=None, ge=1)
     #: Lines added on each side of the derived range, before clamping.
-    context_lines: int = Field(default=DEFAULT_CONTEXT_LINES, ge=0, le=MAX_CONTEXT_LINES)
+    context_lines: int = Field(
+        default=DEFAULT_CONTEXT_LINES,
+        ge=0,
+        le=MAX_CONTEXT_LINES,
+        description="Extra lines on each side of the requested range or entity. "
+        "Defaults to 20; set 0 for precisely the requested lines.",
+    )
     budget: EvidenceBudget = EvidenceBudget()
     #: Whether RepoAtlas may read the working tree at all. Even when true, live
     #: bytes are used only if they hash equal to the indexed content hash; this

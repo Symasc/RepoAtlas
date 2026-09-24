@@ -61,7 +61,7 @@ class SyncRequest(BaseModel):
     because fetching a model is a network operation a sync must never start.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     context: CapabilityContext
     full: bool = False

@@ -699,6 +699,20 @@ class Retriever:
             #: Split for the trace: a match on a spelling the question named, a
             #: match on a word merely present in it, and a full-text hit are three
             #: different claims, and the trace must not blur them.
+            qualified_ids = {
+                hit.entity_id
+                for hit in resolved
+                if hit.qualified_name
+                and "." in hit.qualified_name
+                and hit.qualified_name.lower() in exact_names
+            }
+            # Only a whole-query qualified lookup suppresses component-name seeds.
+            # Prose may independently name several symbols; keep those alternatives.
+            qualified_lookup = any(
+                hit.entity_id in qualified_ids
+                and hit.qualified_name == question.strip().strip("`\"'")
+                for hit in resolved
+            )
             by_name = 0
             by_recall = 0
             for hit in resolved:
@@ -713,7 +727,8 @@ class Retriever:
                     # Only a named term seeds expansion. Seeding from a prose word
                     # would send the walk out from whatever happened to share it,
                     # and expansion labels everything it reaches DETERMINISTIC.
-                    entity_ids.append(hit.entity_id)
+                    if not qualified_lookup or hit.entity_id in qualified_ids:
+                        entity_ids.append(hit.entity_id)
                     by_name += 1
                 else:
                     by_recall += 1
@@ -734,6 +749,7 @@ class Retriever:
                         description=f"defines {hit.name}",
                         entity_id=hit.entity_id,
                         entity_type=hit.type,
+                        qualified_match=hit.entity_id in qualified_ids,
                         # The recorded declaration, not the span's own lines.
                         declaration=bool(quote_signatures and hit.signature),
                     )
@@ -746,7 +762,7 @@ class Retriever:
                         continue
                     seen_entities.add(hit.entity_id)
                     exact = hit.name.lower() in exact_names
-                    if exact:
+                    if exact and not qualified_lookup:
                         # The question named this entity outright; FTS merely found
                         # it first. It is a fact, so it may seed expansion.
                         entity_ids.append(hit.entity_id)

@@ -34,7 +34,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
 from repoatlas.models.capability import CapabilityScope
-from repoatlas.models.evidence import MatchField, RetrievalTrace, TierField
+from repoatlas.models.evidence import MatchField, RetrievalTrace, SourcePreview, TierField
 from repoatlas.models.freshness import FreshnessDepth, FreshnessState
 from repoatlas.models.inspection import Coverage, InspectedFile
 from repoatlas.models.investigation import EvidenceId, EvidenceStatus, LedgerSummary
@@ -62,6 +62,7 @@ class CompactEvidence(BaseModel):
     id: EvidenceId
     rank: int
     location: str
+    preview: SourcePreview | None = None
     text: str = ""
     tier: TierField
     match: MatchField

@@ -110,3 +110,20 @@ def test_the_repository_holds_exactly_one_skill_document() -> None:
         if ".venv" not in path.parts and "dist" not in path.parts
     )
     assert found == [SOURCE_PATH], found
+
+
+def test_core_guidance_is_small_and_its_optional_reference_exists() -> None:
+    core = SKILL_PATH.read_text(encoding="utf-8")
+    assert len(core.encode()) <= 12_000
+    assert "references/contracts.md" in core
+    assert (SKILL_PATH.parent / "references/contracts.md").is_file()
+
+
+@requires_uv
+def test_optional_contract_reference_ships_with_the_wheel(built: Path) -> None:
+    path = "repoatlas/skills/repoatlas-investigation/references/contracts.md"
+    with zipfile.ZipFile(next(built.glob("*.whl"))) as archive:
+        assert (
+            archive.read(path).decode()
+            == (SKILL_PATH.parent / "references/contracts.md").read_text()
+        )
