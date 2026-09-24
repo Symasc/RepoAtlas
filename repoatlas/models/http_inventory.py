@@ -31,9 +31,10 @@ from pydantic import (
     SerializerFunctionWrapHandler,
     field_validator,
     model_serializer,
+    model_validator,
 )
 
-from repoatlas.models.capability import CapabilityContext
+from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.capability_io import ContextView, EvidenceItem
 from repoatlas.models.dependency_inventory import AppliedPageLimits
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
@@ -86,9 +87,16 @@ class OperationStatus(enum.StrEnum):
 class HttpOperationsRequest(BaseModel):
     """List the HTTP operations one repository's indexed source makes or serves."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     context: CapabilityContext
+    discover: bool = Field(
+        default=False,
+        description="With global scope and a non-root route_prefix, discover "
+        "compatible operations across repositories. Rows retain repository-local "
+        "statuses and source identity; compatibility does not prove deployment "
+        "identity or a runtime dependency. Results are paginated.",
+    )
     role: OperationRole = Field(
         default=OperationRole.BOTH,
         description="`caller` for requests the source makes, `provider` for routes it "
@@ -126,6 +134,17 @@ class HttpOperationsRequest(BaseModel):
     )
     investigation_id: str | None = None
     depth: FreshnessDepth = FreshnessDepth.STORED
+
+    @model_validator(mode="after")
+    def _discovery_is_bounded(self) -> HttpOperationsRequest:
+        if self.discover:
+            if self.context.scope is not CapabilityScope.GLOBAL:
+                raise ValueError("discover requires global scope")
+            if not self.route_prefix or not self.route_prefix.strip("/"):
+                raise ValueError("global discovery requires a non-root route_prefix")
+            if self.within_path is not None:
+                raise ValueError("within_path requires repository scope")
+        return self
 
     @field_validator("within_path")
     @classmethod
@@ -229,6 +248,8 @@ class HttpOperation(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    #: Present in workspace discovery; canonical source repository, never a provider guess.
+    repository: str | None = None
     role: Literal["caller", "provider"]
     status: OperationStatus
     #: ``None`` when the method cannot be read.
@@ -286,6 +307,27 @@ class OperationBasis(BaseModel):
     )
 
 
+class DiscoveryBasis(BaseModel):
+    """Workspace candidates; every row's status still describes its source repository."""
+
+    model_config = ConfigDict(frozen=True)
+    extraction: Literal["static"] = "static"
+    scope: Literal["global"] = "global"
+    repository: None = None
+    status_scope: Literal["source_repository"] = "source_repository"
+    repositories: tuple[str, ...]
+    repositories_examined: int
+    operations_examined: int
+    negative_statuses: Literal["indexed_absence_only"] = "indexed_absence_only"
+    establishes: tuple[str, ...] = ("route_compatibility_candidates",)
+    does_not_establish: tuple[str, ...] = (
+        "runtime_dependency",
+        "service_configuration",
+        "deployment_identity",
+        "data_ownership",
+    )
+
+
 class OperationSummary(BaseModel):
     """Counts over the whole filtered set, not the page."""
 
@@ -331,7 +373,7 @@ class HttpOperationsResponse(BaseModel):
 
     investigation_id: str
     context: ContextView
-    basis: OperationBasis
+    basis: OperationBasis | DiscoveryBasis
     summary: OperationSummary
     #: Rows in an order fixed by what they are, so the same index answers the same
     #: question the same way.

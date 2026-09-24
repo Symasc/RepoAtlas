@@ -117,6 +117,7 @@ from repoatlas.capabilities.session import (
     InvestigationSession,
     SessionRegistry,
 )
+from repoatlas.capabilities.source_previews import preview
 from repoatlas.capabilities.sync import (
     attribute_reports,
     relative_unreadable,
@@ -173,9 +174,10 @@ from repoatlas.models.dependency_inventory import (
     DependencyProvenance,
     ProviderView,
 )
-from repoatlas.models.evidence import EvidenceSource, EvidenceTier, MatchClass
+from repoatlas.models.evidence import EvidenceCandidate, EvidenceSource, EvidenceTier, MatchClass
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
 from repoatlas.models.http_inventory import (
+    DiscoveryBasis,
     HttpOperation,
     HttpOperationsRequest,
     HttpOperationsResponse,
@@ -224,6 +226,7 @@ from repoatlas.models.verification import (
     VerifyGroundingRequest,
     VerifyGroundingResponse,
 )
+from repoatlas.retrieval.query import analyze
 from repoatlas.retrieval.retriever import DIAGNOSTIC_LIMITS
 from repoatlas.services import sync_service
 from repoatlas.services.freshness_service import (
@@ -692,7 +695,39 @@ class CapabilityService:
                         confined=True,
                         path_prefix=path_prefix,
                     )
-                    shaped = shape_candidates(outcome.evidence.candidates, applied)
+                    line_cache: dict[tuple[str, str], dict[int, str]] = {}
+                    by_slug = {repo.slug: repo for repo in resolution.repositories}
+                    analysis = analyze(request.question)
+
+                    def prepare(candidate: EvidenceCandidate, limit: int) -> EvidenceCandidate:
+                        if candidate.line_start is None:
+                            return candidate
+                        key = (candidate.repository_slug, candidate.path)
+                        if key not in line_cache:
+                            repo = by_slug[key[0]]
+                            assert repo.id is not None
+                            state = self._workspace.files.states_for(repo.id, [key[1]]).get(key[1])
+                            line_cache[key] = (
+                                indexed_line_map(
+                                    self._workspace.knowledge.chunks_for_file(
+                                        state.file_id, 1, WHOLE_FILE_END
+                                    )
+                                )
+                                if state
+                                else {}
+                            )
+                        return preview(
+                            candidate,
+                            line_cache[key],
+                            analysis.literal_terms or analysis.terms,
+                            limit,
+                        )
+
+                    shaped = shape_candidates(
+                        outcome.evidence.candidates,
+                        applied,
+                        prepare=prepare if request.source_preview else None,
+                    )
                     proposed = self._propose(shaped.items, registered)
                 # The single atomic point. A capacity refusal raises here having
                 # allocated nothing and strengthened nothing.
@@ -989,7 +1024,7 @@ class CapabilityService:
             # Before any investigation exists, so a rejected context or a
             # malformed request leaves no session behind.
             resolution = resolve_context(request.context, registered)
-            if (
+            if not request.discover and (
                 resolution.scope is not CapabilityScope.REPOSITORY
                 or len(resolution.repositories) != 1
             ):
@@ -1002,7 +1037,7 @@ class CapabilityService:
                     reason=ContextFailure.AMBIGUOUS,
                     candidates=tuple(sorted(repo.slug for repo in resolution.repositories)),
                 )
-            repository = resolution.repositories[0]
+            repository = None if request.discover else resolution.repositories[0]
             prefix = _search_path(request.within_path, resolution)
             limits = http_inventory.page_limits_for(request)
 
@@ -1023,17 +1058,54 @@ class CapabilityService:
                         resolution.repository_ids, prefix
                     ):
                         raise FileNotIndexedError("no indexed file stands at or beneath that path")
-                    inventory = self._http_inventory(repository)
+                    if repository is not None:
+                        inventory = self._http_inventory(repository)
+                    else:
+                        inventories = [
+                            (repo, self._http_inventory(repo)) for repo in resolution.repositories
+                        ]
+                        inventory = http_inventory.Inventory(
+                            drafts=[
+                                http_inventory.Draft(
+                                    operation=draft.operation.model_copy(
+                                        update={"repository": repo.slug}
+                                    ),
+                                    qualified_name=draft.qualified_name,
+                                    reaches=draft.reaches,
+                                )
+                                for repo, local in inventories
+                                for draft in local.drafts
+                            ],
+                            parsers={
+                                f"{repo.slug}/{path}": parser
+                                for repo, local in inventories
+                                for path, parser in local.parsers.items()
+                            },
+                            stale_graph=any(local.stale_graph for _, local in inventories),
+                        )
                     chosen = http_inventory.selected(inventory.drafts, request, prefix)
                     page = http_inventory.cut_page(
                         chosen,
                         request.cursor,
-                        identity=http_inventory.request_digest(request, repository.slug, prefix),
+                        identity=http_inventory.request_digest(
+                            request, repository.slug if repository else "*global*", prefix
+                        ),
                         inventory=http_inventory.inventory_digest(chosen),
                         limits=limits,
                     )
                     supplies = (
-                        self._http_operation_supplies(repository, page.rows)
+                        [
+                            supply
+                            for repo in resolution.repositories
+                            for supply in self._http_operation_supplies(
+                                repo,
+                                [
+                                    row
+                                    for row in page.rows
+                                    if (row.repository or repo.slug) == repo.slug
+                                ],
+                            )
+                        ]
                         if request.include_provenance
                         else []
                     )
@@ -1702,7 +1774,7 @@ class CapabilityService:
         request: HttpOperationsRequest,
         resolution: ContextResolution,
         session: InvestigationSession,
-        repository: Repository,
+        repository: Repository | None,
         inventory: http_inventory.Inventory,
         chosen: Sequence[http_inventory.Draft],
         page: http_inventory.Page,
@@ -1712,12 +1784,12 @@ class CapabilityService:
         prefix: str | None,
     ) -> HttpOperationsResponse:
         """Bind recorded evidence to the rows whose lines it is, then answer."""
-        ids: dict[tuple[str, int, int], str] = {}
+        ids: dict[tuple[str, str, int, int], str] = {}
         items: list[EvidenceItem] = []
         for rank, (supply, entry) in enumerate(zip(supplies, entries, strict=True), start=1):
             ref = supply.proposed.ref
             assert ref.line_start is not None and ref.line_end is not None
-            ids[(ref.path, ref.line_start, ref.line_end)] = entry.id
+            ids[(ref.repository_slug, ref.path, ref.line_start, ref.line_end)] = entry.id
             items.append(
                 EvidenceItem(
                     id=entry.id,
@@ -1738,7 +1810,16 @@ class CapabilityService:
             if row.path is not None
             and row.line_start is not None
             and row.line_end is not None
-            and (evidence_id := ids.get((row.path, row.line_start, row.line_end)))
+            and (
+                evidence_id := ids.get(
+                    (
+                        row.repository or (repository.slug if repository else ""),
+                        row.path,
+                        row.line_start,
+                        row.line_end,
+                    )
+                )
+            )
             else row
             for row in page.rows
         ]
@@ -1759,7 +1840,15 @@ class CapabilityService:
                 primary=resolution.primary.slug if resolution.primary else None,
                 reason=resolution.reason,
             ),
-            basis=OperationBasis(repository=repository.slug),
+            basis=(
+                OperationBasis(repository=repository.slug)
+                if repository
+                else DiscoveryBasis(
+                    repositories=tuple(sorted(repo.slug for repo in resolution.repositories)),
+                    repositories_examined=len(resolution.repositories),
+                    operations_examined=len(inventory.drafts),
+                )
+            ),
             summary=http_inventory.summarize(chosen),
             operations=tuple(rows),
             coverage=http_inventory.coverage(
@@ -1938,6 +2027,7 @@ class CapabilityService:
                 tier=shaped_item.candidate.tier,
                 match=shaped_item.candidate.match,
                 declaration=shaped_item.candidate.declaration,
+                preview=shaped_item.candidate.preview,
                 entity=handles.get(id(shaped_item)),
                 status=entry.status,
             )

@@ -169,7 +169,7 @@ class AgentCitation(BaseModel):
     range cites the whole span that was supplied under that id.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     #: Ledger identity, valid inside the named investigation only.
     evidence_id: EvidenceId
@@ -203,7 +203,7 @@ class AgentClaim(BaseModel):
     attention its content receives.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     statement: str
     #: The claimant's own number. Carried so grounding can **lower** it when a
@@ -233,7 +233,7 @@ class AgentAnswer(BaseModel):
     contain the characters ``E12`` is prose, not a citation.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     summary: str = ""
     claims: tuple[AgentClaim, ...] = ()
@@ -262,7 +262,7 @@ class VerifyGroundingRequest(BaseModel):
     wrong.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     investigation_id: str = Field(min_length=1)
     answer: AgentAnswer

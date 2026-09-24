@@ -108,7 +108,8 @@ SEARCH = ToolSpec(
         "one did not run or did not finish; not_found describes that indexed scope, not "
         "the whole repository. Set within_path to search one directory or file of the "
         "repository, and presentation to compact to receive the same evidence with "
-        "repeated metadata written once."
+        "repeated metadata written once. Set source_preview true to receive bounded "
+        "indexed source around matching lines, with omitted spans made explicit."
     ),
     request=SearchRequest,
     capability="search",
@@ -162,7 +163,7 @@ DEPENDENCIES = ToolSpec(
 
 HTTP_OPERATIONS = ToolSpec(
     name=f"{NAMESPACE}_http_operations",
-    title="List one repository's HTTP operations",
+    title="Discover indexed HTTP operations",
     description=(
         "List the HTTP operations RepoAtlas statically indexed in one repository: the "
         "requests its source makes and the routes it serves or declares, each with its "
@@ -172,7 +173,9 @@ HTTP_OPERATIONS = ToolSpec(
         "unproven mounts and unrecorded constructs are reported under coverage. A "
         "route match shows route compatibility only, never service configuration, "
         "deployment identity or data ownership. Reads the local index; paged, with "
-        "optional evidence."
+        "optional evidence. For workspace discovery, use global scope, discover true "
+        "and a non-root route_prefix. Rows retain source repository identity and local "
+        "statuses; compatible candidates do not establish runtime dependencies."
     ),
     request=HttpOperationsRequest,
     capability="http_operations",

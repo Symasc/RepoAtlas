@@ -138,6 +138,10 @@ def server_environment(state: Path, **overrides: str) -> dict[str, str]:
         "HOME": str(state / "home"),
         "REPOATLAS_CONFIG": str(state / "config.yaml"),
         "REPOATLAS_DB": str(state / "state" / "atlas.db"),
+        # An isolated worktree may reuse a virtualenv whose editable install
+        # points at another checkout. Exercise this checkout across the process
+        # boundary too, independent of the server's working directory.
+        "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
     }
     environment.update(overrides)
     (state / "home").mkdir(exist_ok=True)
