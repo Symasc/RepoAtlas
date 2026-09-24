@@ -27,7 +27,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
-from repoatlas.models.evidence import EvidenceTier, MatchClass, MatchField, TierField
+from repoatlas.models.evidence import EvidenceTier, MatchClass, MatchField, SourcePreview, TierField
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness, RepositoryFreshness
 from repoatlas.models.investigation import EvidenceId, EvidenceRef, EvidenceStatus
 from repoatlas.models.parsing import EntityType
@@ -48,7 +48,7 @@ class RepositoriesRequest(BaseModel):
     where it is actionable.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     context: CapabilityContext
     #: Absolute on-disk location, off by default. A host path is the caller's
@@ -162,7 +162,7 @@ class StatusRequest(BaseModel):
     changed" a mutating operation (V1_SPEC §4).
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     context: CapabilityContext
     #: ``LIVE`` by default, because the question status answers is whether the
@@ -333,6 +333,8 @@ class EvidenceItem(BaseModel):
     #: ``slug/path``, ``slug/path:line`` or ``slug/path:start-end``. Derived from
     #: ``ref``, so it can never describe a wider span than was supplied.
     location: str = ""
+    #: Original span and omissions when opt-in source preview selected a window.
+    preview: SourcePreview | None = None
     #: The supplied text. Empty for file-identity evidence, which claims the file
     #: exists and nothing about any line.
     text: str = ""

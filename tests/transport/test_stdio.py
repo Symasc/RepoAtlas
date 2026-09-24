@@ -332,4 +332,6 @@ def test_the_server_environment_carries_no_host_configuration(tmp_path: Path) ->
         "HOME",
         "REPOATLAS_CONFIG",
         "REPOATLAS_DB",
+        "PYTHONPATH",
     }
+    assert environment["PYTHONPATH"] == str(Path(__file__).resolve().parents[2])

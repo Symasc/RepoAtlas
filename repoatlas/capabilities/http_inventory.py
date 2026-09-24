@@ -102,7 +102,7 @@ class Draft:
     @property
     def sort_key(self) -> tuple[str, ...]:
         row = self.operation
-        return (
+        return ((row.repository, row.package or "") if row.repository else ()) + (
             row.path or "",
             f"{row.line_start or 0:09d}",
             row.role,
@@ -734,7 +734,7 @@ def decode_cursor(token: str) -> tuple[str, str, tuple[str, ...]]:
         not isinstance(request, str)
         or not isinstance(inventory, str)
         or not isinstance(after, list)
-        or len(after) != 8
+        or len(after) not in (8, 10)
         or not all(isinstance(part, str) for part in after)
     ):
         raise InvalidCursorError(_CURSOR_REFUSED)

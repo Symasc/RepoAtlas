@@ -240,7 +240,7 @@ class AppliedPageLimits(BaseModel):
 class DependenciesRequest(BaseModel):
     """Ask what the index records about declared and resolved packages."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     context: CapabilityContext
     #: Narrow to one ecosystem. ``None`` means every ecosystem.

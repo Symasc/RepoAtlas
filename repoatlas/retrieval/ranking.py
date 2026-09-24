@@ -41,8 +41,9 @@ component suffix path        an explicitly typed multi-component path matched on
                              several files
 ============================ =====================================================
 
-Everything below them — a basename, an entity name, a content mention, a lexical
-or semantic neighbour — is still ordered by agreement exactly as before. A
+Within those file boundaries, an exact qualified symbol named by the query
+precedes component-name matches and graph neighbors. Other candidates retain
+their agreement ordering. A
 gradient over all eight classes would have re-ranked the whole funnel on a signal
 nobody asked for; these two boundaries answer the questions that were actually
 ambiguous.
@@ -171,7 +172,8 @@ def fuse(
     make the fused score a measure of file size rather than of agreement between
     retrievers, letting generated data outrank the answer purely by volume.
 
-    Ordering is ``(tier, specificity, -score, tie-break)``. The specificity key
+    Ordering is ``(tier, path specificity, qualified-symbol intent, -score, tie-break)``.
+    The specificity key
     holds the guarantee the score cannot express: **a candidate from a file the
     query named by path outranks every candidate from a file that was merely named
     less exactly** — a shared basename, a symbol with a matching name, a lexical or
@@ -188,19 +190,23 @@ def fuse(
     question was asked from sorts first, without either file being promoted over
     the other by anything structural. RepoAtlas does not decide which one was meant.
 
-    Everything the anchors do not touch is ordered exactly as before. When no query
-    names a path — the common case — every candidate sits on the same side of both
-    boundaries and fusion is unchanged.
+    Exact qualified symbol definitions precede component-name matches and graph
+    neighbors inside each path boundary. Ambiguous qualified matches remain peers;
+    this priority never promotes a candidate across a trust tier. With no qualified
+    match or path anchor, the original fused-score ordering is unchanged.
     """
     scores: dict[_Key, float] = {}
     tiers: dict[_Key, EvidenceTier] = {}
     matches: dict[_Key, MatchClass] = {}
     best: dict[_Key, EvidenceCandidate] = {}
+    qualified: set[_Key] = set()
 
     for ranked in ranked_lists:
         counted: set[_Key] = set()
         for rank, candidate in enumerate(ranked, start=1):
             key = _key(candidate)
+            if candidate.qualified_match:
+                qualified.add(key)
             if key not in counted:
                 counted.add(key)
                 scores[key] = scores.get(key, 0.0) + 1.0 / (_RRF_K + rank)
@@ -241,13 +247,19 @@ def fuse(
         key=lambda key: (
             tiers[key],
             anchored.get(key[:2], _UNNAMED),
+            key not in qualified,
             -scores[key],
             _ordering(key),
         ),
     )
     return [
         best[key].model_copy(
-            update={"score": scores[key], "tier": tiers[key], "match": matches[key]}
+            update={
+                "score": scores[key],
+                "tier": tiers[key],
+                "match": matches[key],
+                "qualified_match": key in qualified,
+            }
         )
         for key in ordered
     ]

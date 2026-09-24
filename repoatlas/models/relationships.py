@@ -191,7 +191,7 @@ class AppliedGraphLimits(BaseModel):
 class RelationshipsRequest(BaseModel):
     """Ask what RepoAtlas already knows is connected to one exact entity."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     context: CapabilityContext
     #: The exact natural key. This is the handle ``search`` hands back, usable
