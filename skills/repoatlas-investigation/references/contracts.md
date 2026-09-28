@@ -16,7 +16,7 @@ Ask for the smallest evidence set that lets you make the next decision. You almo
 
 ## The tools
 
-Nine, and no others:
+Ten, and no others:
 
 | Tool | Use it to |
 |---|---|
@@ -24,6 +24,7 @@ Nine, and no others:
 | `repoatlas_status` | check how the index stands against the working trees |
 | `repoatlas_search` | find evidence for a question; the exploratory entry point |
 | `repoatlas_inspect` | read a narrow range of source already in the index |
+| `repoatlas_impact` | trace what a change to one thing may affect, with the indexed step behind each |
 | `repoatlas_relationships` | walk indexed graph facts from one exact entity |
 | `repoatlas_dependencies` | read declared, resolved and provided package facts |
 | `repoatlas_http_operations` | list a repository's HTTP operations, or explicitly discover route candidates across repositories |
@@ -32,7 +33,7 @@ Nine, and no others:
 
 There is no tool that initializes an index, answers a question for you, reads an arbitrary file, or runs anything. Indexing a workspace for the first time is an operator action outside this tool surface; if nothing is indexed, say so.
 
-Do not call all nine on every question. Most questions need two or three.
+Do not call all ten on every question. Most questions need two or three.
 
 ## Investigations
 
@@ -60,7 +61,7 @@ Keep evidence ids visible in your answer where the host allows it, written as Re
 
 1. Establish scope only if it matters: `repoatlas_repositories` or `repoatlas_status`.
 2. Choose the direct entry point: inspect a known file, filter an HTTP inventory for a route, or search an unknown location. Keep the `investigation_id`, the evidence ids, and any exact entity handles that came back.
-3. Decide what is actually missing, and get only that: `repoatlas_inspect` for more source, `repoatlas_relationships` for graph facts, `repoatlas_dependencies` for package facts, `repoatlas_http_operations` for what one repository requests and serves over HTTP.
+3. Decide what is actually missing, and get only that: `repoatlas_inspect` for more source, `repoatlas_impact` for what a change affects, `repoatlas_relationships` for graph facts, `repoatlas_dependencies` for package facts, `repoatlas_http_operations` for what one repository requests and serves over HTTP.
 4. Repeat only the step you need, passing the same `investigation_id`.
 5. Draft an answer using only evidence you actually obtained.
 6. Verify it with `repoatlas_verify_grounding` before presenting it as grounded in RepoAtlas.
@@ -171,6 +172,25 @@ If coverage is still incomplete, report one of these instead of asserting a repo
 
 State what you checked and what additional evidence would settle the question.
 
+## Impact
+
+Name what changes. A key a tool returned is best, but a declaration's name or qualified name, an `env:` or `module:` key, a configuration key's qualified name, or a repository-relative file or directory path are accepted:
+
+```json
+{"tool": "repoatlas_impact", "arguments": {"context": {"scope": "global"}, "seed": "sym:app:src/limits.ts:LIMIT:1", "investigation_id": "<the id an earlier call returned>"}}
+```
+
+What the result means:
+
+- `seed.status` other than `resolved` means nothing was followed. `ambiguous` lists the candidates the seed could mean; call again with one of their `entity` keys.
+- Candidates are ranked, not rated. Each `step` is one indexed fact (`edge`, `at`, `lines`) or one derived from keys and spans (`derived`), and `from` is the candidate it leads from (`0` is the seed). Read the lines a step names before claiming the candidate is affected.
+- `basis` says how precise the path is: `exact` joins declarations, keys or files by facts about exactly them; `containment` passes through a member of what changes; `file` rests on a file-level import.
+- `hubs` are candidates with more dependents than one answer shows. `collapsed` counts the rest; collapsed dependents are not less affected.
+- `packages` are coarse: a unit or repository declares the package the change lives in. `exact_consumers: "unresolved"` means RepoAtlas does not know which of its declarations uses the change.
+- `omitted` counts what was left out, by reason and by unit, and `summary.complete` is false when a budget or the distance bound stopped the walk. A short answer is not proof that nothing else is affected.
+
+Nothing is recorded in the investigation, so a step has no evidence id; read the source it names with any tool and cite what you read.
+
 ## Relationships
 
 Pass the exact natural entity handle RepoAtlas returned, verbatim:
@@ -192,6 +212,8 @@ What the results mean:
 - Under `scope: global`, a walk rooted at a shared node may see every repository that touches it.
 - `cross_repository: true` explicitly allows a repository-scoped walk to cross the repository boundary where graph policy permits.
 - Crossing repositories directly is allowed only for the edge types the policy permits.
+
+Declaration-level uses (`USES`) are returned only when `edge_types` names them; for what a change affects, `repoatlas_impact` follows them for you.
 
 **Who uses a symbol is a fact about its file.** `IMPORTS` is recorded between files, so the importers of `RevokeDialog` sit on `file:<repo>:path/to/revoke-dialog.tsx`, not on `sym:<repo>:path/to/revoke-dialog.tsx:RevokeDialog:11`. Asking the symbol for its `incoming` edges returns the `EXPORTS` edge from its own file and nothing else, which reads like "nothing uses this" and is not. To find what renders, imports or mounts a definition, walk the **file** handle; the import line comes back as citable provenance. For supported relative imports, a file walk is useful. For known-unsupported aliases, JSX wiring or injected member calls, use focused direct text inspection immediately and label it separately.
 
@@ -411,6 +433,7 @@ Keep your planning to yourself; what the reader needs is the finding, the citati
 | you need a definition you already have evidence for | use the evidence you hold | inspect again for more text |
 | a search item has `declaration: true` and you need its source | inspect its `entity.key` | cite the declaration as source lines |
 | the question is about one directory of a repository | search with `within_path` | filter a whole-repository search afterwards |
+| the question is what a change to one thing affects | call `repoatlas_impact` with that thing, then read the lines each step names | treat the ranking as a verdict, or cite a step as evidence text |
 
 ## Do not
 

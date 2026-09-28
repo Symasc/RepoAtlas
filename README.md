@@ -155,7 +155,7 @@ RepoAtlas serves its capabilities to an agent over the Model Context Protocol on
 repoatlas mcp
 ```
 
-Nine tools, all deterministic and local: `repositories`, `status`, `search`, `inspect`, `relationships`,
+Ten tools, all deterministic and local: `repositories`, `status`, `search`, `inspect`, `impact`, `relationships`,
 `dependencies`, `http_operations`, `verify_grounding` and `sync`. No model runs behind them and no resource or prompt is exposed, so
 repository source is reachable only through the evidence path that records what it supplies. The agent is the
 reasoner; RepoAtlas supplies evidence and checks citations against it.

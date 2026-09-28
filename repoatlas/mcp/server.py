@@ -79,7 +79,9 @@ INSTRUCTIONS = (
     "investigation_id for an unrelated task. Verification checks that citations "
     "resolve to evidence supplied in that investigation; it does not check whether "
     "a statement is true. A search item marked declaration is RepoAtlas's record of "
-    "a definition, not its source: inspect its entity key to read the source."
+    "a definition, not its source: inspect its entity key to read the source. "
+    "For a change-impact question, call repoatlas_impact with what changes, then "
+    "read the source each step names."
 )
 
 
@@ -89,7 +91,7 @@ INSTRUCTIONS = (
 
 
 def tool_definitions() -> list[protocol.Tool]:
-    """The nine tools, with schemas derived from the request models themselves.
+    """The ten tools, with schemas derived from the request models themselves.
 
     ``model_json_schema()`` rather than a hand-written declaration, so enum
     members, numeric bounds, defaults and which fields are optional are stated
@@ -264,7 +266,7 @@ def dispatch(
 
 
 def build_server(service: CapabilityService) -> Server[object, object]:
-    """Bind the nine tools to one already-open service.
+    """Bind the ten tools to one already-open service.
 
     Exactly two handlers are registered, which is also how the handshake comes to
     advertise tools and nothing else: the SDK derives server capabilities from the

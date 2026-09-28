@@ -456,4 +456,4 @@ def test_the_installed_product_runs_with_no_model_server_or_variable(
         text=True,
         env=environment,
     ).stdout.split()
-    assert probe == ["9", "absent"], probe
+    assert probe == ["10", "absent"], probe

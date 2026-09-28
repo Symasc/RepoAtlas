@@ -373,7 +373,7 @@ def test_verification_is_taught_as_a_step_before_answering(skill: str) -> None:
 
 def test_the_skill_does_not_require_every_tool_on_every_task(skill: str) -> None:
     text = skill.lower()
-    assert "do not call all nine on every question" in text
+    assert "do not call all ten on every question" in text
     assert contains_all(text, "most questions need two or three")
     assert "skipping a step you do not need is correct" in sections(skill)["workflow"]
 

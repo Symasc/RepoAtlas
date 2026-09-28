@@ -90,6 +90,8 @@ def _arguments_for(tool: str) -> dict[str, Any]:
         }
     if tool == "repoatlas_relationships":
         return {"context": GLOBAL, "target": "env:SERVICE_HOST"}
+    if tool == "repoatlas_impact":
+        return {"context": GLOBAL, "seed": "env:SERVICE_HOST"}
     if tool == "repoatlas_dependencies":
         return {"context": GLOBAL, "limit": 2}
     if tool == "repoatlas_http_operations":
