@@ -103,6 +103,9 @@ WS: dict[str, str] = {
     "packages/excluded/index.ts": "export function Internal() {\n  return 3;\n}\n",
     "tools/shared/package.json": manifest(name="@fixture/shared", main="index.ts"),
     "tools/shared/index.ts": "export function Internal() {\n  return 4;\n}\n",
+    # provided in the repository, but by no member of its workspace
+    "tools/lonely/package.json": manifest(name="@fixture/lonely", version="1.0.0", main="index.ts"),
+    "tools/lonely/index.ts": "export const Lonely = 1;\n",
     "apps/other/package.json": manifest(name="other"),
     "apps/other/src/internal.ts": "export function Internal() {\n  return 5;\n}\n",
     # the app
@@ -116,6 +119,7 @@ WS: dict[str, str] = {
             "@fixture/twin": "workspace:*",
             "@fixture/shadow": "workspace:*",
             "@fixture/plain": "workspace:*",
+            "@fixture/lonely": "^1.0.0",
             "@fixture/kit": "^1.0.0",
         },
     ),
@@ -152,11 +156,13 @@ WS: dict[str, str] = {
         'import { Twin } from "@fixture/twin";\n'
         'import { Hidden } from "@fixture/shared/hidden";\n'
         'import { Secret } from "@fixture/plain/../../apps/app/src/secret";\n'
+        'import { Lonely } from "@fixture/lonely";\n'
         "export function useAmb() {\n  return Amb;\n}\n"
         "export function useRooted() {\n  return Rooted;\n}\n"
         "export function useTwin() {\n  return Twin;\n}\n"
         "export function useHidden() {\n  return Hidden;\n}\n"
         "export function useSecret() {\n  return Secret;\n}\n"
+        "export function useLonely() {\n  return Lonely;\n}\n"
     ),
     "apps/app/src/secret.ts": "export const Secret = 1;\n",
     "apps/app/src/local-shadow.ts": 'export const Shade = "local";\n',

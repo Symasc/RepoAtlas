@@ -297,9 +297,7 @@ def plan_uses(
         elif claim.target_key != USES_EXPORT_TABLE:
             uses.append(claim)
 
-    modules = ModuleResolver(index, knowledge.list_module_facts(), {})
-    tables = _Tables(knowledge)
-    resolver = UseResolver(modules, index, tables, PackageLinks(modules, index, records))
+    resolver = use_resolver(knowledge, index, records)
     by_id = {row.file_id: row for rows in index.files_by_repo.values() for row in rows.values()}
 
     edges: list[EdgeRecord] = []
@@ -355,6 +353,14 @@ def plan_uses(
         repositories_touched=len({by_id[f].repo_id for f in consumers if f in by_id}),
     )
     return UsesPlan(scope=scope, edges=tuple(edges), reads=reads, work=work)
+
+
+def use_resolver(
+    knowledge: SqliteKnowledgeStore, index: ResolutionIndex, records: Sequence[DependencyRecord]
+) -> UseResolver:
+    """The resolver a pass resolves uses with, built from indexed facts alone."""
+    modules = ModuleResolver(index, knowledge.list_module_facts(), {})
+    return UseResolver(modules, index, _Tables(knowledge), PackageLinks(modules, index, records))
 
 
 def apply_uses(knowledge: SqliteKnowledgeStore, plan: UsesPlan, *, producer: str) -> UsesApplied:

@@ -245,6 +245,8 @@ class ModuleResolver:
         #: its directory: relative paths are joined to the directory, the project config is
         #: the nearest one above it, and the workspace is the innermost one holding it.
         self._resolved: dict[tuple[int, str, str], ModuleTarget | None] = {}
+        #: Why a specifier that reached the workspace named no member, by the same key.
+        self._refused: dict[tuple[int, str, str], str] = {}
         self._build_dirs_of: dict[tuple[int, str], list[tuple[str, str]]] = {}
         self._source_roots: dict[tuple[int, str], tuple[str, str] | None] = {}
         self._traced: dict[tuple[int, str], Definition | None] = {}
@@ -463,19 +465,39 @@ class ModuleResolver:
         paths = self._options(origin.repo_id, config).get("paths") or {}
         return _match_paths(paths, specifier) is not None
 
-    def _by_workspace(self, origin: FileRow, specifier: str) -> ModuleTarget | None:
-        workspace = self._workspace_of(origin)
-        split = split_package(specifier)
-        if workspace is None or split is None:
+    def workspace_refusal(self, origin: FileRow, specifier: str) -> str | None:
+        """Why ``specifier`` names no member of ``origin``'s workspace; ``None`` if it resolves.
+
+        ``no-local-member`` (``origin``'s repository indexes no member of that name, which
+        says nothing of members indexed as other repositories), ``provider-ambiguous``, or
+        why the member's entry names no file (:class:`PackageEntry`). ``None`` too for a
+        specifier that never reaches the workspace: a relative path, a ``node:`` builtin.
+        """
+        if self.resolve(origin, specifier) is not None:
             return None
-        name, subpath = split
-        homes = workspace.members.get(name, [])
-        if len(homes) != 1:
-            return None  # absent, or two members share the name: never a guess
+        return self._refused.get((origin.repo_id, _parent(origin.rel_path), specifier))
+
+    def _by_workspace(self, origin: FileRow, specifier: str) -> ModuleTarget | None:
+        split = split_package(specifier)
+        if split is None:
+            return None
+        found = self._member(origin, *split)
+        if isinstance(found, str):
+            self._refused[(origin.repo_id, _parent(origin.rel_path), specifier)] = found
+            return None
+        return found
+
+    def _member(self, origin: FileRow, name: str, subpath: str) -> ModuleTarget | str:
+        workspace = self._workspace_of(origin)
+        homes = workspace.members.get(name, []) if workspace is not None else []
+        if not homes:
+            return "no-local-member"
+        if len(homes) > 1:
+            return "provider-ambiguous"  # two members share the name: never a guess
         directory = homes[0]
         entry = self.package_entry(origin.repo_id, directory, subpath, build_output=True)
         if entry.file is None:
-            return None
+            return entry.reason or "entry-unresolved"
         detail: list[tuple[str, Any]] = [
             ("entry", ",".join(entry.fields)),
             ("manifest", f"{directory}/package.json" if directory else "package.json"),
