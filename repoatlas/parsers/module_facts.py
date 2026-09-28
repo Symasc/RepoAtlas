@@ -36,6 +36,8 @@ MODULE_RESOLUTION = "module_resolution"
 TSCONFIG = "tsconfig"
 PACKAGE = "package"
 WORKSPACE = "workspace"
+#: A Python project's ``pyproject.toml`` (repoatlas.parsers.python_project).
+PYTHON_PROJECT = "python-project"
 
 #: Larger than any hand-written configuration; beyond it a file contributes nothing.
 _MAX_BYTES = 256 * 1024

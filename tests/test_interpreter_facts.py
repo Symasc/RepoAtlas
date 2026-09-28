@@ -16,6 +16,7 @@ from repoatlas.config.settings import Settings
 from repoatlas.dependencies.python import PyProjectParser, SetupPyParser, UvLockParser
 from repoatlas.parsers.interpreter import interpreter_tag
 from repoatlas.parsers.python import PythonParser
+from repoatlas.parsers.python_project import PythonProjectParser
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace
 from repoatlas.sync.planner import facts_version
@@ -24,21 +25,24 @@ from tests.impact_corpus import build
 RUNNING = f"py{sys.version_info.major}.{sys.version_info.minor}"
 #: A tag no interpreter running this suite has: the index "another interpreter" wrote.
 ELSEWHERE = "py2.7"
+#: Every parser that reads with the interpreter's standard library.
+TAGGED = (PythonParser, PythonProjectParser, SetupPyParser, PyProjectParser, UvLockParser)
 
 
 def test_the_tag_is_the_running_major_and_minor() -> None:
     assert interpreter_tag() == RUNNING
 
 
-@pytest.mark.parametrize("parser", [PythonParser, SetupPyParser, PyProjectParser, UvLockParser])
+@pytest.mark.parametrize("parser", TAGGED)
 def test_every_standard_library_parser_carries_the_tag(parser: type) -> None:
     assert parser.version.endswith(f"+{RUNNING}"), parser.version
 
 
 def test_the_facts_version_moves_with_the_interpreter(workspace: Workspace) -> None:
     live = facts_version(workspace.registry, workspace.dependency_registry)
-    assert f"{PythonParser.name}:{PythonParser.version}" in live
-    assert live.count(f"+{RUNNING}") == 4, live
+    for parser in TAGGED:
+        assert f"{parser.name}:{parser.version}" in live, parser.name
+    assert live.count(f"+{RUNNING}") == len(TAGGED), live
 
 
 def test_an_index_another_interpreter_wrote_is_reparsed(
