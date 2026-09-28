@@ -724,15 +724,28 @@ def test_recognition_is_shape_not_table_names(tmp_path: Path) -> None:
         assert recognizes(genuine, SCHEMA_VERSION, migrations) is True
         assert recognizes(lookalike, 0, migrations) is False
         assert recognizes(lookalike, SCHEMA_VERSION, migrations) is False
-        # A v5 shape stamped 4 is not a mismatch: it is exactly what a crash
-        # between the last statement of 005 and its version stamp leaves behind,
-        # and Pass 2 recovers it. Recognition has to include it or that database
-        # becomes unopenable.
-        assert recognizes(genuine, 4, migrations) is True
-        # The other direction has no such reading. Nothing produces version 5
-        # over a v4 schema, because the stamp lands last.
-        assert recognizes(genuine, 3, migrations) is False
+        # The latest shape stamped one lower is not a mismatch: it is exactly what
+        # a crash between the last statement of the latest migration and its
+        # version stamp leaves behind, and Pass 2 recovers it. Recognition has to
+        # include it or that database becomes unopenable.
+        assert recognizes(genuine, SCHEMA_VERSION - 1, migrations) is True
+        # The other direction has no such reading. Nothing produces the latest
+        # version over a schema two behind, because each stamp lands last.
+        assert recognizes(genuine, SCHEMA_VERSION - 2, migrations) is False
         assert recognizes(genuine, 99, migrations) is False
+        # The same reading at 005, whose crash window the rule was written for.
+        v5 = connect(tmp_path / "v5.db")
+        try:
+            for migration in migrations:
+                if migration.version > 5:
+                    break
+                for statement in migration.statements:
+                    v5.execute(statement)
+            v5.commit()
+            assert recognizes(v5, 4, migrations) is True
+            assert recognizes(v5, 3, migrations) is False
+        finally:
+            v5.close()
     finally:
         genuine.close()
         lookalike.close()
