@@ -298,7 +298,7 @@ def plan_uses(
             uses.append(claim)
 
     modules = ModuleResolver(index, knowledge.list_module_facts(), {})
-    tables = _Tables(knowledge, preload=scope.files is None)
+    tables = _Tables(knowledge)
     resolver = UseResolver(modules, index, tables, PackageLinks(modules, index, records))
     by_id = {row.file_id: row for rows in index.files_by_repo.values() for row in rows.values()}
 
@@ -374,18 +374,19 @@ def apply_uses(knowledge: SqliteKnowledgeStore, plan: UsesPlan, *, producer: str
 
 
 class _Tables:
-    """Export tables by file id, read from the store as traces ask for them."""
+    """Export tables by file id, read in one query and decoded as traces ask for them.
 
-    def __init__(self, knowledge: SqliteKnowledgeStore, *, preload: bool) -> None:
-        self._knowledge = knowledge
-        self._raw: dict[int, str] = knowledge.list_export_tables(None) if preload else {}
-        self._complete = preload
+    One query for all of them, even when only a few files' uses are resolved: a trace
+    may pass through any barrel, and asking for each file's table in turn scanned the
+    export tables once per file.
+    """
+
+    def __init__(self, knowledge: SqliteKnowledgeStore) -> None:
+        self._raw: dict[int, str] = knowledge.list_export_tables(None)
         self._parsed: dict[int, dict[str, Any] | None] = {}
 
     def __call__(self, file_id: int) -> dict[str, Any] | None:
         if file_id not in self._parsed:
-            if not self._complete and file_id not in self._raw:
-                self._raw.update(self._knowledge.list_export_tables([file_id]))
             raw = self._raw.get(file_id)
             self._parsed[file_id] = table_from_meta(raw) if raw else None
         return self._parsed[file_id]
