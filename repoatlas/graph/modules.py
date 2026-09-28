@@ -15,15 +15,16 @@ before this module existed. It reads:
   directory; a bare ``baseUrl`` is tried after ``paths``;
 * **workspace packages**: a ``pnpm-workspace.yaml`` or a ``package.json`` with
   ``workspaces`` declares which directories are packages. A specifier resolves to a
-  package only inside the importing file's own workspace, in its own repository,
-  and only when exactly one member has that name.
+  member of the importing file's own workspace indexed in its own repository, and
+  only when exactly one such member has that name. That is the reach of this pass,
+  not a claim that a workspace ends where a repository does: a member indexed as
+  another repository is simply not decided here.
 
 A package's entry comes from ``exports``, else ``source``, ``types``, ``typings``,
 ``module`` and ``main``. Every field present must lead to the same indexed file, or
 the import stays unresolved. An entry inside build output (``main: dist/index.js``)
-is mapped to source only through a ``tsconfig`` in the package that declares both
-``outDir`` and ``rootDir``, and only when exactly one indexed source file answers:
-no ``dist``-to-``src`` rewrite is ever assumed.
+is mapped to source only on the package's own evidence, described below: no
+``dist``-to-``src`` rewrite is ever assumed.
 
 **Barrels.** For a named import, :meth:`ModuleResolver.definition` follows
 ``export { X } from``, renamed re-exports, ``export * as NS from`` and ``export *
@@ -40,14 +41,17 @@ dependency fact (``DEPENDS_ON``), never an import target of these edges. Only th
 package link that ``USES`` alone reads (:mod:`repoatlas.graph.packages`) enters another
 repository's package, through :meth:`ModuleResolver.package_entry`.
 
-**Build output, for a package link only.** A published package usually names its
-entry in build output that is not in the repository (``exports: ./dist/index.mjs``).
-:meth:`ModuleResolver.package_entry` maps such an entry to source only when asked to,
-and only on the package's own evidence: the output directory holds no indexed file,
-the package's tsconfig names exactly one source root (its ``rootDir``, else its single
-``include`` directory, which is the root ``tsc`` itself would infer), exactly one
-indexed source file answers the entry's stem there, and every condition of the entry
-maps to that same file. Workspace resolution never asks, so no edge it produced changes.
+**Build output.** A package usually names its entry in build output that is not in
+the repository (``exports: ./dist/index.mjs``), whether it is published or a workspace
+member built before its siblings run. A tsconfig in the package that declares both
+``outDir`` and ``rootDir`` maps such an entry through that pair. Otherwise
+:meth:`ModuleResolver.package_entry` maps it only when asked to -- a workspace member
+and a package link both ask -- and only on the package's own evidence: the output
+directory holds no indexed file, the package's tsconfig names exactly one source root
+(its ``rootDir``, else its single ``include`` directory, which is the root ``tsc``
+itself would infer), exactly one indexed source file answers the entry's stem there,
+and every condition of the entry maps to that same file. The edge records which of
+these mapped it (``mapped``).
 """
 
 from __future__ import annotations
@@ -113,7 +117,8 @@ class PackageEntry:
 
     ``reason`` is set exactly when ``file`` is ``None``: ``entry-not-exported`` (the
     package's ``exports`` list no root), ``subpath-not-exported``, ``entry-ambiguous``
-    (its conditions lead to different files) or ``entry-unresolved``.
+    (its conditions lead to different files), ``subpath-outside-package`` (the subpath
+    climbs out of the package) or ``entry-unresolved``.
     """
 
     file: FileRow | None
@@ -468,26 +473,17 @@ class ModuleResolver:
         if len(homes) != 1:
             return None  # absent, or two members share the name: never a guess
         directory = homes[0]
-        entry = self._entry(origin.repo_id, directory, subpath)
-        if entry is None:
+        entry = self.package_entry(origin.repo_id, directory, subpath, build_output=True)
+        if entry.file is None:
             return None
-        found, fields, mapped = entry
         detail: list[tuple[str, Any]] = [
-            ("entry", ",".join(fields)),
+            ("entry", ",".join(entry.fields)),
             ("manifest", f"{directory}/package.json" if directory else "package.json"),
             ("package", name),
         ]
-        if mapped:
-            detail.append(("mapped", "outDir->rootDir"))
-        return ModuleTarget(found, WORKSPACE_PACKAGE, tuple(sorted(detail)))
-
-    def _entry(
-        self, repo_id: int, directory: str, subpath: str
-    ) -> tuple[FileRow, list[str], bool] | None:
-        entry = self.package_entry(repo_id, directory, subpath)
-        if entry.file is None:
-            return None
-        return entry.file, list(entry.fields), bool(entry.mapped)
+        if entry.mapped:
+            detail.append(("mapped", dict(entry.mapped)["by"]))
+        return ModuleTarget(entry.file, WORKSPACE_PACKAGE, tuple(sorted(detail)))
 
     def package_entry(
         self, repo_id: int, directory: str, subpath: str, *, build_output: bool = False
@@ -495,8 +491,11 @@ class ModuleResolver:
         """The file the package at ``directory`` names for ``subpath``, or why none.
 
         ``build_output`` admits the mapping from build output to source described in the
-        module docstring; only a package link asks for it.
+        module docstring. A subpath with a ``.`` or ``..`` segment names nothing: Node never
+        resolves one to a file of the package it starts from.
         """
+        if subpath and any(part in (".", "..") for part in subpath.split("/")):
+            return PackageEntry(None, reason="subpath-outside-package")
         facts = self._packages[repo_id].get(directory, {})
         exports = facts.get("exports")
         if exports is not None:

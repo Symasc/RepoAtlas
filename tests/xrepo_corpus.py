@@ -337,7 +337,7 @@ SPLIT = {
 }
 
 #: A workspace package whose entry is build output, imported inside its own repository:
-#: the build-output mapping belongs to package links alone, so this stays unresolved.
+#: the same mapping resolves it, as a member of the workspace and never as a crossing.
 WS_BUILT = {
     "package.json": manifest(name="ws-built", private=True, workspaces=["packages/*", "apps/*"]),
     "packages/lib/package.json": manifest(name="@ws/lib", main="./dist/index.js"),

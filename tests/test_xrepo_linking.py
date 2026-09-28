@@ -9,6 +9,7 @@ reason every refused import joins nothing.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 
@@ -162,15 +163,20 @@ def test_n7_an_entry_in_build_output_is_mapped_to_its_one_source_root(indexed: W
     }
 
 
-def test_n7_the_mapping_is_never_used_inside_one_repository(indexed: Workspace) -> None:
+def test_n7_inside_one_repository_the_mapping_serves_a_workspace_member_without_crossing(
+    indexed: Workspace,
+) -> None:
     rows = indexed.database.execute(
         """
-        SELECT COUNT(*) FROM edges e
+        SELECT e.resolution FROM edges e
         JOIN entities s ON s.id = e.src_id JOIN entities d ON d.id = e.dst_id
         WHERE e.type = 'USES' AND s.key LIKE 'sym:ws-built:apps/web/%' AND d.name = 'lib'
+          AND d.repo_id = s.repo_id
         """
-    ).fetchone()
-    assert rows[0] == 0
+    ).fetchall()
+    [resolution] = [json.loads(row[0]) for row in rows]
+    assert (resolution["basis"], resolution["mapped"]) == ("workspace-package", "tsconfig include")
+    assert "crossing" not in resolution
 
 
 def test_xr5_repositories_that_share_only_a_name_share_no_edge(indexed: Workspace) -> None:
