@@ -52,8 +52,8 @@ EXPANSION_EDGES = (
 
 #: Edge types an **explicit** relationship request may name.
 #:
-#: Wider than :data:`EXPANSION_EDGES` by exactly one member, and the difference is
-#: the point. Those two sets answer different questions, and using one tuple for
+#: Wider than :data:`EXPANSION_EDGES` by exactly ``CALLS`` and ``USES``, and the
+#: difference is the point. Those two sets answer different questions, and using one tuple for
 #: both is what made ~26,000 indexed ``CALLS`` relationships unreachable: the
 #: relationships capability refused to traverse a type the graph plainly held,
 #: because the set it consulted was the set that governs *automatic* expansion.
@@ -65,10 +65,15 @@ EXPANSION_EDGES = (
 #: which is the failure :data:`EXPANSION_EDGES` exists to prevent, and why it is
 #: unchanged.
 #:
-#: Being nameable is not being reachable across a boundary. ``CALLS`` is
-#: deliberately absent from :data:`CROSS_REPOSITORY_EDGES` below, so an explicit
+#: ``USES`` is here for the same reason. A declaration's uses of module-scope names
+#: are the facts a change-impact question needs, and far more numerous than calls;
+#: search must answer exactly as it did before they were indexed, so it never
+#: expands through them.
+#:
+#: Being nameable is not being reachable across a boundary. ``CALLS`` and ``USES``
+#: are deliberately absent from :data:`CROSS_REPOSITORY_EDGES` below, so an explicit
 #: request still cannot follow one out of its repository.
-RELATIONSHIP_EDGES = (*EXPANSION_EDGES, EdgeType.CALLS)
+RELATIONSHIP_EDGES = (*EXPANSION_EDGES, EdgeType.CALLS, EdgeType.USES)
 
 #: Edge types a traversal may follow **out of one repository into another**.
 #:

@@ -152,9 +152,14 @@ def test_a_message_handler_leaves_no_http_claim(index: Index) -> None:
 
 def test_the_sync_report_counts_pending_routes_as_unresolved(index: Index) -> None:
     workspace, root, report = index()
-    ordinary = [c for c in _claims(workspace) if "pending_fact" not in c["meta"]]
+    ordinary = [
+        c
+        for c in _claims(workspace)
+        if "pending_fact" not in c["meta"] and "uses_exports" not in c["meta"]
+    ]
     # Both route declarations and every ordinary claim are unresolved references;
-    # nothing else in these files is.
+    # nothing else in these files is. A file's export table is a fact the global pass
+    # reads, like module-resolution configuration, never a reference to resolve.
     assert report.unresolved_references == len(_routes(workspace)) + len(ordinary)
     assert _sync(workspace, root).unresolved_references == report.unresolved_references
 

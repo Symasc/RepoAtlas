@@ -72,6 +72,12 @@ class EdgeType(enum.StrEnum):
     DECLARES_HTTP_DEPLOYMENT = "DECLARES_HTTP_DEPLOYMENT"
     EXPOSES_HTTP_ENDPOINT = "EXPOSES_HTTP_ENDPOINT"
     CALLS_HTTP_ENDPOINT = "CALLS_HTTP_ENDPOINT"
+    #: A declaration, or a file where no declaration encloses it, uses a module-scope
+    #: name: reads a constant, constructs a class, renders a component, names a type.
+    #: Stored as *user → used definition*, each with its kind of use and the syntax
+    #: that proves it (repoatlas.parsers.ts_uses). Traversed only when asked for by
+    #: name, never by search expansion, and within one repository by construction.
+    USES = "USES"
 
 
 class EdgeDirection(enum.StrEnum):

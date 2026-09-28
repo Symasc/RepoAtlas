@@ -37,7 +37,9 @@ from dataclasses import dataclass, field
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
 from repoatlas.graph.http_claims import HttpClaimPlan, plan_http_claims
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
+from repoatlas.graph.modules import ModuleResolver
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
+from repoatlas.graph.uses import UseResolver, export_table, use_resolution
 from repoatlas.models import http
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.parsing import (
@@ -182,7 +184,8 @@ class ReferenceLinker:
         if file_entity_id is None:
             return LinkResult(edges=0, unresolved=0)
 
-        symbol_ids = self._symbol_ids(file_id, repo_slug, rel_path, parsed.symbols)
+        qualified: dict[str, int] = {}
+        symbol_ids = self._symbol_ids(file_id, repo_slug, rel_path, parsed.symbols, qualified)
         imported = _imported_names(parsed)
 
         edges: list[EdgeRecord] = [
@@ -200,6 +203,33 @@ class ReferenceLinker:
         claims: list[UnresolvedRefRecord] = []
         for reference in parsed.references:
             source_id = symbol_ids.get(reference.source_symbol or "", file_entity_id)
+
+            if reference.edge_type is EdgeType.USES:
+                # A declaration's use of a module-scope name (repoatlas.parsers.ts_uses).
+                # A name this file declares is proven here, and only by its exact
+                # qualified name: the bare-name fallback other references get would be
+                # a guess. An imported name, and the file's export table, are claims
+                # for the global pass (repoatlas.graph.uses).
+                if reference.meta.get("binding") == "local":
+                    target = qualified.get(reference.target_key)
+                    if target is not None:
+                        edges.append(
+                            EdgeRecord(
+                                src_id=source_id,
+                                dst_id=target,
+                                type=EdgeType.USES,
+                                confidence=reference.confidence,
+                                repo_id=repo_id,
+                                file_id=file_id,
+                                line_start=reference.line_start,
+                                line_end=reference.line_end,
+                                parser=parsed.parser,
+                                resolution=use_resolution(reference.meta),
+                            )
+                        )
+                else:
+                    claims.append(self._claim(repo_id, file_id, source_id, reference, parsed))
+                continue
 
             if reference.meta.get(PENDING_FACT):
                 # A pending fact (repoatlas.parsers.http_facts): only the global pass
@@ -339,14 +369,21 @@ class ReferenceLinker:
         repo_slug: str,
         rel_path: str,
         symbols: tuple[ParsedSymbol, ...],
+        qualified: dict[str, int] | None = None,
     ) -> dict[str, int]:
-        """Map qualified symbol name to its persisted entity id."""
+        """Map qualified symbol name to its persisted entity id.
+
+        ``qualified``, when given, receives the qualified names alone, without the
+        bare-name fallback below.
+        """
         mapping: dict[str, int] = {}
         for symbol in symbols:
             key = symbol_key(repo_slug, rel_path, symbol.qualified_name, symbol.line_start)
             entity_id = self._knowledge.find_file_entity(file_id, key)
             if entity_id is not None:
                 mapping[symbol.qualified_name] = entity_id
+                if qualified is not None:
+                    qualified[symbol.qualified_name] = entity_id
                 # A returned object's property is reachable only through the object,
                 # never by its bare name: `createCourse()` beside a `createCourse:`
                 # property names whatever `createCourse` is bound to, not the property.
@@ -391,12 +428,25 @@ class ReferenceLinker:
 
         with Stopwatch("resolve") as watch:
             recorded = self._knowledge.list_unresolved_refs()
-            # Module-resolution configuration is read, never resolved itself.
-            claims = [claim for claim in recorded if not _is_module_fact(claim)]
+            # Module-resolution configuration and export tables are read, never
+            # resolved themselves.
+            claims = [
+                claim
+                for claim in recorded
+                if not _is_module_fact(claim) and export_table(claim) is None
+            ]
             watch.candidates_in = len(claims)
             by_file: dict[int, list[UnresolvedRefRecord]] = {}
             for claim in claims:
                 by_file.setdefault(claim.file_id, []).append(claim)
+            # Declaration uses resolve by their own path (repoatlas.graph.uses), and only
+            # they read the module resolver: every other claim resolves as it always has.
+            modules = ModuleResolver(
+                index,
+                recorded,
+                self._knowledge.list_exported_names(exclude_parser=GLOBAL_PARSER),
+            )
+            uses = UseResolver(modules, index, recorded)
 
             edges: list[EdgeRecord] = []
             resolved = 0
@@ -412,7 +462,7 @@ class ReferenceLinker:
                 if origin is None:
                     unresolved += 1
                     continue
-                edge = self._resolve(claim, origin, index, by_file.get(claim.file_id, []))
+                edge = self._resolve(claim, origin, index, by_file.get(claim.file_id, []), uses)
                 if edge is None:
                     unresolved += 1
                     continue
@@ -560,9 +610,18 @@ class ReferenceLinker:
         origin: FileRow,
         index: ResolutionIndex,
         siblings: list[UnresolvedRefRecord],
+        uses: UseResolver | None = None,
     ) -> EdgeRecord | None:
         meta = json.loads(claim.meta_json) if claim.meta_json else {}
         kind = claim.target_kind
+
+        if claim.edge_type is EdgeType.USES:
+            # Resolved by its own path and no other (repoatlas.graph.uses).
+            found = uses.resolve(origin, meta) if uses is not None else None
+            if found is None:
+                return None
+            entity_id, fields = found
+            return self._edge(claim, origin, entity_id, resolution=use_resolution(meta, **fields))
 
         if kind is EntityType.MODULE:
             return self._resolve_module(claim, origin, index, meta)
@@ -688,6 +747,7 @@ class ReferenceLinker:
         dst_id: int,
         *,
         confidence: float | None = None,
+        resolution: str | None = None,
     ) -> EdgeRecord:
         return EdgeRecord(
             src_id=claim.src_id,
@@ -699,6 +759,7 @@ class ReferenceLinker:
             line_start=claim.line_start,
             line_end=claim.line_end,
             parser=GLOBAL_PARSER,
+            resolution=resolution,
         )
 
     # -- dependencies and cross-repository edges -----------------------------
