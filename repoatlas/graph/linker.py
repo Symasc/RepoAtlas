@@ -37,7 +37,8 @@ from dataclasses import dataclass, field
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
 from repoatlas.graph.http_claims import HttpClaimPlan, plan_http_claims
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
-from repoatlas.graph.modules import ModuleResolver
+from repoatlas.graph.modules import ModuleResolver, binding_pairs
+from repoatlas.graph.packages import CROSSING, PackageLinks
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
 from repoatlas.graph.uses import UseResolver, export_table, use_resolution
 from repoatlas.models import http
@@ -446,7 +447,12 @@ class ReferenceLinker:
                 recorded,
                 self._knowledge.list_exported_names(exclude_parser=GLOBAL_PARSER),
             )
-            uses = UseResolver(modules, index, recorded)
+            # Read once: package links resolve uses against them, and the dependency
+            # stage below plans its edges from the same rows.
+            records = (
+                self._dependencies.list_for_repos(None) if self._dependencies is not None else []
+            )
+            uses = UseResolver(modules, index, recorded, PackageLinks(modules, index, records))
 
             edges: list[EdgeRecord] = []
             resolved = 0
@@ -485,7 +491,7 @@ class ReferenceLinker:
         stages.append(_timing(watch))
 
         with Stopwatch("dependencies") as watch:
-            dependencies, cross = self._plan_dependencies(index)
+            dependencies, cross = self._plan_dependencies(index, records)
             watch.candidates_in = len(dependencies)
             watch.candidates_out = cross
             watch.detail = "cross-repository edges"
@@ -621,6 +627,11 @@ class ReferenceLinker:
             if found is None:
                 return None
             entity_id, fields = found
+            crossing = fields.get(CROSSING)
+            if isinstance(crossing, dict):
+                line = _import_line(siblings, meta)
+                if line is not None:
+                    crossing["imported_at"] = line
             return self._edge(claim, origin, entity_id, resolution=use_resolution(meta, **fields))
 
         if kind is EntityType.MODULE:
@@ -764,7 +775,9 @@ class ReferenceLinker:
 
     # -- dependencies and cross-repository edges -----------------------------
 
-    def _plan_dependencies(self, index: ResolutionIndex) -> tuple[list[PendingEdge], int]:
+    def _plan_dependencies(
+        self, index: ResolutionIndex, records: Sequence[DependencyRecord]
+    ) -> tuple[list[PendingEdge], int]:
         """Plan package and repository edges from declared dependencies.
 
         Writes nothing: entity *keys* are decided here and interned during the
@@ -799,7 +812,7 @@ class ReferenceLinker:
                 repo_id=repo_id,
             )
 
-        for record in self._dependencies.list_for_repos(None):
+        for record in records:
             if record.role != "declared":
                 continue
             source = repository_entity(record.repo_id)
@@ -912,6 +925,59 @@ def _imported_names(parsed: ParsedFile) -> dict[str, str]:
         if tail:
             imported.setdefault(tail, specifier)
     return imported
+
+
+def _import_line(siblings: Sequence[UnresolvedRefRecord], meta: dict[str, str]) -> int | None:
+    """The line of the import statement that binds a use's local name, when one does.
+
+    Found among the same file's own claims: the import of that specifier whose bindings
+    include the name. The first by line when the file imports it twice.
+    """
+    specifier, local = meta.get("module"), meta.get("local")
+    if not specifier or not local:
+        return None
+    lines = sorted(
+        claim.line_start
+        for claim in siblings
+        if claim.edge_type is EdgeType.IMPORTS
+        and claim.line_start is not None
+        and claim.target_key == specifier
+        and claim.meta_json
+        and _binds(json.loads(claim.meta_json), local)
+    )
+    return lines[0] if lines else None
+
+
+def _binds(meta: dict[str, str], local: str) -> bool:
+    """Whether an import (never a re-export, which binds nothing) binds ``local``."""
+    if meta.get("role") == "re-export":
+        return False
+    return any(bound == local for bound, _ in _bound_names(meta))
+
+
+def _bound_names(meta: dict[str, str]) -> list[tuple[str, str | None]]:
+    """(local, exported) for each name one import binds.
+
+    Reads the parser's binding record when there is one, and otherwise the older
+    ``names`` list, whose ``type X`` and ``A as B`` spellings are taken apart here.
+    """
+    if any(key in meta for key in ("bindings", "default", "namespace")):
+        found: list[tuple[str, str | None]] = [
+            (local, name) for name, local in binding_pairs(meta.get("bindings"))
+        ]
+        if meta.get("default"):
+            found.append((meta["default"], "default"))
+        if meta.get("namespace"):
+            found.append((meta["namespace"], None))
+        return found
+    found = []
+    for raw in (meta.get("names") or "").split(","):
+        name = raw.strip().removeprefix("type ").strip()
+        if not name:
+            continue
+        exported, _, local = name.partition(" as ")
+        found.append((local.strip() or exported.strip(), exported.strip()))
+    return found
 
 
 def _is_module_fact(claim: UnresolvedRefRecord) -> bool:

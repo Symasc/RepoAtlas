@@ -19,8 +19,13 @@ It reads each file's own export table, and follows what that trace cannot:
 
 Every file passed through is kept, in order, with the name it exports the use by, so a
 chain can say which name each hop spells. Wholesale re-exports (``export *``) that lead
-to two different declarations answer nothing, as they do for the import graph, and a
-use leaves its repository never: specifiers resolve within it.
+to two different declarations answer nothing, as they do for the import graph.
+
+A specifier resolves within its own repository first, always. Only one that names no
+file there may name a package another repository provides, and only on the evidence
+:class:`~repoatlas.graph.packages.PackageLinks` requires; the name is then traced from
+that package's entry exactly as above, and the edge records the crossing's evidence. No
+other ``USES`` edge joins two repositories.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from repoatlas.graph.modules import MAX_REEXPORT_HOPS, MAX_TRACE_STEPS, ModuleResolver
+from repoatlas.graph.packages import CROSSING, PACKAGE_BASIS, PackageLink, PackageLinks
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.parsers.ts_uses import USES_EXPORTS
@@ -85,9 +91,11 @@ class UseResolver:
         modules: ModuleResolver,
         index: ResolutionIndex,
         claims: Sequence[UnresolvedRefRecord],
+        links: PackageLinks | None = None,
     ) -> None:
         self._modules = modules
         self._index = index
+        self._links = links
         self._tables: dict[int, dict[str, Any]] = {}
         for claim in claims:
             table = export_table(claim)
@@ -102,27 +110,35 @@ class UseResolver:
         """The used entity's id and how it was reached, or ``None`` with the reason counted."""
         specifier = meta.get("module") or ""
         target = self._modules.resolve(origin, specifier)
+        link: PackageLink | None = None
         if target is None:
-            self.unresolved["specifier"] += 1
-            return None
+            found = self._links.resolve(origin, specifier) if self._links is not None else None
+            if not isinstance(found, PackageLink):
+                # A specifier that is no package at all keeps v1's reason.
+                refused = found not in (None, "relative", "not-a-package")
+                self.unresolved[f"package:{found}" if refused else "specifier"] += 1
+                return None
+            link = found
+        module = target.file if target is not None else link.file if link is not None else None
+        assert module is not None
         name = meta.get("imported")
         if name is None:
             if meta.get("binding") != "namespace":
                 self.unresolved["no-name"] += 1
                 return None
-            definition: UseDefinition | None = UseDefinition(target.file, None, None)
+            definition: UseDefinition | None = UseDefinition(module, None, None)
         else:
             self._steps = 0
-            definition, reason = self._trace(target.file, name, frozenset(), 0)[:2]
+            definition, reason = self._trace(module, name, frozenset(), 0)[:2]
             if definition is None:
                 self.unresolved[reason or "not-exported"] += 1
                 return None
         assert definition is not None
         entity = definition.symbol_id
         fields: dict[str, Any] = {
-            "basis": target.basis,
+            "basis": target.basis if target is not None else PACKAGE_BASIS,
             "specifier": specifier,
-            **dict(target.detail),
+            **(dict(target.detail) if target is not None else {}),
             "local": meta.get("local"),
             "imported": name,
             "defined_at": definition.file.rel_path,
@@ -130,6 +146,8 @@ class UseResolver:
             "via": list(definition.via),
             "via_names": list(definition.via_names),
         }
+        if link is not None:
+            fields[CROSSING] = dict(link.crossing)
         if entity is None:
             fields["namespace"] = True
             entity = definition.file.file_entity_id
