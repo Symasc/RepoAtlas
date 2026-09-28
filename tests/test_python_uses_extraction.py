@@ -274,9 +274,9 @@ def test_tp_c_bounds_and_defaults_resolve_while_the_parameter_stays_local() -> N
 
 
 def test_tp_d_a_generic_alias_parameter_is_not_the_import() -> None:
-    assert uses("from provider import T\ntype Alias[T] = list[T]\ntype Other = T\n") == {
-        (None, "T", "type", "type-alias")
-    }
+    # Apart: both are the file's, so together one use would hide the other.
+    assert uses("from provider import T\ntype Alias[T] = list[T]\n") == set()
+    assert uses("from provider import T\ntype Other = T\n") == {(None, "T", "type", "type-alias")}
 
 
 def test_tp_e_decorators_and_defaults_are_outside_the_scope() -> None:
