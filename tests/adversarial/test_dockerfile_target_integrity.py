@@ -47,7 +47,7 @@ from pathlib import Path
 
 import pytest
 from repoatlas.config.settings import Settings
-from repoatlas.models.parsing import EdgeType, EntityType, ParsedFile
+from repoatlas.models.parsing import USES_EXPORT_TABLE, EdgeType, EntityType, ParsedFile
 from repoatlas.parsers.dockerfile import DockerfileParser
 from repoatlas.parsers.dockerwords import Proof, split_words
 from repoatlas.services.init_service import initialize
@@ -791,8 +791,10 @@ def test_the_review_dockerfile_leaves_no_fabricated_row_anywhere(
         assert expression not in claims
         assert not any(expression in key for key in keys)
     # Not a blanket ban on `$`: the assertion is that no *Dockerfile* target key
-    # carries an expression the builder or the shell would have evaluated.
-    assert claims == set()
+    # carries an expression the builder or the shell would have evaluated. The one
+    # other claim is `src/app.py`'s export table, a fact about the Python module's own
+    # bindings that names no target at all.
+    assert claims - {USES_EXPORT_TABLE} == set()
 
 
 def test_the_variables_themselves_remain_indexed(

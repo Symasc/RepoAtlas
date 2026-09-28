@@ -22,7 +22,8 @@ chain can say which name each hop spells. Wholesale re-exports (``export *``) th
 to two different declarations answer nothing, as they do for the import graph.
 
 Each use gets the answer a trace from it alone would give, whatever was traced before it
-in the same pass. A remembered answer is reused only when walking it again would stay
+in the same pass (:class:`BoundedTrace`, which Python's resolver shares,
+:mod:`repoatlas.graph.py_uses`). A remembered answer is reused only when walking it again would stay
 within the hop and step bounds from where it is reached, and it is charged the steps and
 depth that walk would take; an answer a cycle or a bound cut short is never remembered.
 So the result is a function of the indexed facts, not of the order claims are read in,
@@ -124,19 +125,16 @@ def use_resolution(meta: dict[str, str], **fields: Any) -> str:
     return json.dumps(record, sort_keys=True, separators=(",", ":"))
 
 
-class UseResolver:
-    """Resolves the ``USES`` claims of one global pass."""
+class BoundedTrace:
+    """A name traced through export tables, bounded and independent of the order asked.
 
-    def __init__(
-        self,
-        modules: ModuleResolver,
-        index: ResolutionIndex,
-        tables: Callable[[int], dict[str, Any] | None],
-        links: PackageLinks | None = None,
-    ) -> None:
-        self._modules = modules
-        self._index = index
-        self._links = links
+    The walk itself (:meth:`_trace_once`) is the language's; this keeps what makes every
+    language's answer a function of the indexed facts alone (see the module docstring):
+    the step and hop bounds, the remembered answers and what each one cost, and the
+    export tables each consumer's uses read.
+    """
+
+    def __init__(self, tables: Callable[[int], dict[str, Any] | None]) -> None:
         #: A file's export table by file id, ``None`` when it records none.
         self._tables = tables
         self._traced: dict[tuple[int, str], _Traced] = {}
@@ -152,64 +150,6 @@ class UseResolver:
         #: Why each unresolved use stayed unresolved; measurement only. A package the
         #: importer's own repository provides is counted as ``workspace:<why>``.
         self.unresolved: Counter[str] = Counter()
-
-    def resolve(self, origin: FileRow, meta: dict[str, str]) -> tuple[int, dict[str, Any]] | None:
-        """The used entity's id and how it was reached, or ``None`` with the reason counted."""
-        specifier = meta.get("module") or ""
-        target = self._modules.resolve(origin, specifier)
-        link: PackageLink | None = None
-        if target is None:
-            found = self._links.resolve(origin, specifier) if self._links is not None else None
-            if not isinstance(found, PackageLink):
-                # A specifier that is no package at all keeps v1's reason.
-                refused = found not in (None, "relative", "not-a-package")
-                why = self._refusal(origin, specifier, found) if refused else "specifier"
-                self.unresolved[why] += 1
-                return None
-            link = found
-        module = target.file if target is not None else link.file if link is not None else None
-        assert module is not None
-        name = meta.get("imported")
-        if name is None:
-            if meta.get("binding") != "namespace":
-                self.unresolved["no-name"] += 1
-                return None
-            definition: UseDefinition | None = UseDefinition(module, None, None)
-        else:
-            self._steps = self._reach = 0
-            self._reading = [self.reads.setdefault(origin.file_id, set())]
-            definition, reason = self._trace(module, name, frozenset(), 0)[:2]
-            if definition is None:
-                self.unresolved[reason or "not-exported"] += 1
-                return None
-        assert definition is not None
-        entity = definition.symbol_id
-        fields: dict[str, Any] = {
-            "basis": target.basis if target is not None else PACKAGE_BASIS,
-            "specifier": specifier,
-            **(dict(target.detail) if target is not None else {}),
-            "local": meta.get("local"),
-            "imported": name,
-            "defined_at": definition.file.rel_path,
-            "name": definition.name,
-            "via": list(definition.via),
-            "via_names": list(definition.via_names),
-        }
-        if link is not None:
-            fields[CROSSING] = dict(link.crossing)
-        if entity is None:
-            fields["namespace"] = True
-            entity = definition.file.file_entity_id
-        return entity, fields
-
-    def _refusal(self, origin: FileRow, specifier: str, found: str | None) -> str:
-        """``package:<why>``; for a package ``origin``'s own repository provides, what its
-        workspace said instead, since that and not a package link decides such a name."""
-        if found == "provided-locally":
-            why = self._modules.workspace_refusal(origin, specifier)
-            if why is not None:
-                return f"workspace:{why}"
-        return f"package:{found}"
 
     def _trace(
         self, module: FileRow, name: str, visiting: frozenset[tuple[int, str]], depth: int
@@ -248,6 +188,89 @@ class UseResolver:
         if not cut:
             self._traced[key] = _Traced(found, reason, self._steps - start, below, frozenset(read))
         return found, reason, cut
+
+    def _begin(self, origin: FileRow) -> None:
+        """Start one use's trace: nothing spent yet, its reads charged to ``origin``."""
+        self._steps = self._reach = 0
+        self._reading = [self.reads.setdefault(origin.file_id, set())]
+
+    def _trace_once(
+        self, module: FileRow, name: str, visiting: frozenset[tuple[int, str]], depth: int
+    ) -> tuple[UseDefinition | None, str | None, bool]:
+        raise NotImplementedError
+
+
+class UseResolver(BoundedTrace):
+    """Resolves the TypeScript and JavaScript ``USES`` claims of one global pass."""
+
+    def __init__(
+        self,
+        modules: ModuleResolver,
+        index: ResolutionIndex,
+        tables: Callable[[int], dict[str, Any] | None],
+        links: PackageLinks | None = None,
+    ) -> None:
+        super().__init__(tables)
+        self._modules = modules
+        self._index = index
+        self._links = links
+
+    def resolve(self, origin: FileRow, meta: dict[str, str]) -> tuple[int, dict[str, Any]] | None:
+        """The used entity's id and how it was reached, or ``None`` with the reason counted."""
+        specifier = meta.get("module") or ""
+        target = self._modules.resolve(origin, specifier)
+        link: PackageLink | None = None
+        if target is None:
+            found = self._links.resolve(origin, specifier) if self._links is not None else None
+            if not isinstance(found, PackageLink):
+                # A specifier that is no package at all keeps v1's reason.
+                refused = found not in (None, "relative", "not-a-package")
+                why = self._refusal(origin, specifier, found) if refused else "specifier"
+                self.unresolved[why] += 1
+                return None
+            link = found
+        module = target.file if target is not None else link.file if link is not None else None
+        assert module is not None
+        name = meta.get("imported")
+        if name is None:
+            if meta.get("binding") != "namespace":
+                self.unresolved["no-name"] += 1
+                return None
+            definition: UseDefinition | None = UseDefinition(module, None, None)
+        else:
+            self._begin(origin)
+            definition, reason = self._trace(module, name, frozenset(), 0)[:2]
+            if definition is None:
+                self.unresolved[reason or "not-exported"] += 1
+                return None
+        assert definition is not None
+        entity = definition.symbol_id
+        fields: dict[str, Any] = {
+            "basis": target.basis if target is not None else PACKAGE_BASIS,
+            "specifier": specifier,
+            **(dict(target.detail) if target is not None else {}),
+            "local": meta.get("local"),
+            "imported": name,
+            "defined_at": definition.file.rel_path,
+            "name": definition.name,
+            "via": list(definition.via),
+            "via_names": list(definition.via_names),
+        }
+        if link is not None:
+            fields[CROSSING] = dict(link.crossing)
+        if entity is None:
+            fields["namespace"] = True
+            entity = definition.file.file_entity_id
+        return entity, fields
+
+    def _refusal(self, origin: FileRow, specifier: str, found: str | None) -> str:
+        """``package:<why>``; for a package ``origin``'s own repository provides, what its
+        workspace said instead, since that and not a package link decides such a name."""
+        if found == "provided-locally":
+            why = self._modules.workspace_refusal(origin, specifier)
+            if why is not None:
+                return f"workspace:{why}"
+        return f"package:{found}"
 
     def _trace_once(
         self, module: FileRow, name: str, visiting: frozenset[tuple[int, str]], depth: int

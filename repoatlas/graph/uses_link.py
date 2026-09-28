@@ -13,7 +13,10 @@ This module plans the stage while writing nothing (:func:`plan_uses`) and applie
 inside the global pass's one transaction (:func:`apply_uses`), which also records that
 the stored edges are complete. When they are not known to be -- a first index, a
 database from before this stage, a run that died before its commit, or a change to how
-uses resolve (:data:`USES_RESOLUTION_VERSION`) -- every use is resolved again.
+uses resolve (:data:`USES_RESOLUTION_VERSION`) -- every use is resolved again. A
+TypeScript or JavaScript use is resolved by :class:`~repoatlas.graph.uses.UseResolver`, a
+Python one by :class:`~repoatlas.graph.py_uses.PythonUseResolver`; both read the same
+export tables and record the same reads, so everything below holds for either.
 
 Otherwise :class:`UsesChangeLog` gathers, as each file is written, what changed that a
 use can depend on, and :meth:`UsesChangeLog.scope` turns it into the files to resolve:
@@ -24,9 +27,10 @@ use can depend on, and :meth:`UsesChangeLog.scope` turns it into the files to re
   (lines aside), the modules it re-exports wholesale, and whether each local export names
   exactly one declaration -- every file whose uses read its export table (``use_reads``);
 * a file added or deleted, or a change to a repository's module-resolution facts
-  (tsconfig, package manifests, workspaces): every file of that repository and of every
-  repository declaring a package it provides, since specifiers resolve within their own
-  repository and only a package link, which needs that declaration, reaches into it; and
+  (tsconfig, package manifests, workspaces, Python projects): every file of that
+  repository and of every repository declaring a package it provides, since specifiers
+  resolve within their own repository and only a package link, which needs that
+  declaration, reaches into it; and
   every file of each repository nested inside it, since a workspace it declares may hold
   them, and a package link resolves a ``workspace:`` declaration by that workspace
   whichever repository each member is indexed as;
@@ -46,6 +50,8 @@ from typing import Any
 from repoatlas.dependencies.normalize import NPM
 from repoatlas.graph.modules import ModuleResolver, binding_pairs, declared_constraints
 from repoatlas.graph.packages import CROSSING, PackageLinks
+from repoatlas.graph.py_modules import PythonModules
+from repoatlas.graph.py_uses import PythonUseResolver
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.graph.uses import UseResolver, declared_entity, table_from_meta, use_resolution
 from repoatlas.models.dependencies import DependencyRecord
@@ -57,7 +63,7 @@ from repoatlas.storage.sqlite.stores import SqliteDependencyStore, SqliteKnowled
 
 #: Changed whenever what a use resolves to changes for the same facts, so edges kept
 #: from before the change are never trusted: the next sync resolves every use again.
-USES_RESOLUTION_VERSION = "3"
+USES_RESOLUTION_VERSION = "4"
 COMPLETE = f"complete:{USES_RESOLUTION_VERSION}"
 PENDING = "pending"
 
@@ -251,7 +257,10 @@ def export_surface(file_id: int, meta_json: str | None, symbols: Sequence[Symbol
             names[exported] = ["local", spec[1], "declared" if found is not None else "none"]
         else:
             names[exported] = spec
-    return json.dumps({"names": names, "star": table.get("star", [])}, sort_keys=True)
+    # Every other key a table records is read by a trace as it is (a Python table's
+    # module ``__getattr__``); a TypeScript table has none, so its surface is unchanged.
+    rest = {key: value for key, value in table.items() if key not in ("names", "star")}
+    return json.dumps({"names": names, "star": table.get("star", []), **rest}, sort_keys=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,7 +315,9 @@ def plan_uses(
         elif claim.target_key != USES_EXPORT_TABLE:
             uses.append(claim)
 
-    resolver = use_resolver(knowledge, index, records)
+    tables = _Tables(knowledge)
+    resolver = use_resolver(knowledge, index, records, tables)
+    python_resolver = python_use_resolver(knowledge, index, tables)
     by_id = {row.file_id: row for rows in index.files_by_repo.values() for row in rows.values()}
 
     edges: list[EdgeRecord] = []
@@ -315,11 +326,8 @@ def plan_uses(
         if origin is None:
             continue
         meta = json.loads(claim.meta_json) if claim.meta_json else {}
-        if str(meta.get("parser", "")).startswith("python"):
-            # A Python use names a module by a dotted name, which this resolver would
-            # read as a path or a package: not resolved here.
-            continue
-        found = resolver.resolve(origin, meta)
+        python = str(meta.get("parser", "")).startswith("python")
+        found = (python_resolver if python else resolver).resolve(origin, meta)
         if found is None:
             continue
         entity_id, fields = found
@@ -344,10 +352,12 @@ def plan_uses(
         )
 
     consumers = {claim.file_id for claim in uses}
+    read_by: dict[int, set[int]] = {}
+    for traced in (resolver, python_resolver):
+        for consumer, found in traced.reads.items():
+            read_by.setdefault(consumer, set()).update(found)
     reads = tuple(
-        (consumer, read)
-        for consumer in sorted(resolver.reads)
-        for read in sorted(resolver.reads[consumer])
+        (consumer, read) for consumer in sorted(read_by) for read in sorted(read_by[consumer])
     )
     work = UsesWork(
         mode="global" if scope.files is None else "incremental",
@@ -369,13 +379,26 @@ def plan_uses(
 
 
 def use_resolver(
-    knowledge: SqliteKnowledgeStore, index: ResolutionIndex, records: Sequence[DependencyRecord]
+    knowledge: SqliteKnowledgeStore,
+    index: ResolutionIndex,
+    records: Sequence[DependencyRecord],
+    tables: _Tables | None = None,
 ) -> UseResolver:
-    """The resolver a pass resolves uses with, built from indexed facts alone."""
+    """The resolver a pass resolves TypeScript uses with, built from indexed facts alone."""
     modules = ModuleResolver(
         index, knowledge.list_module_facts(), {}, declared=declared_constraints(index, records)
     )
-    return UseResolver(modules, index, _Tables(knowledge), PackageLinks(modules, index, records))
+    return UseResolver(
+        modules, index, tables or _Tables(knowledge), PackageLinks(modules, index, records)
+    )
+
+
+def python_use_resolver(
+    knowledge: SqliteKnowledgeStore, index: ResolutionIndex, tables: _Tables | None = None
+) -> PythonUseResolver:
+    """The resolver a pass resolves Python uses with, built from indexed facts alone."""
+    modules = PythonModules(index, knowledge.list_module_facts())
+    return PythonUseResolver(modules, index, tables or _Tables(knowledge))
 
 
 def apply_uses(knowledge: SqliteKnowledgeStore, plan: UsesPlan, *, producer: str) -> UsesApplied:
@@ -422,6 +445,9 @@ def _import_line(siblings: Sequence[UnresolvedRefRecord], meta: dict[str, str]) 
     specifier, local = meta.get("module"), meta.get("local")
     if not specifier or not local:
         return None
+    if str(meta.get("bound_at") or "").isdigit():
+        # A Python use carries its import's line (repoatlas.parsers.py_uses).
+        return int(meta["bound_at"])
     lines = sorted(
         claim.line_start
         for claim in siblings
