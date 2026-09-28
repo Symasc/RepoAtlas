@@ -38,6 +38,7 @@ from tests.impact_corpus import (
     build,
     hub_repo,
 )
+from tests.xrepo_corpus import LINKING
 
 HUB_USERS = HUB_FILES * HUB_USERS_PER_FILE
 
@@ -65,6 +66,14 @@ def mixed(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Workspace]:
     workspace = _indexed(
         tmp_path_factory.mktemp("mixed"), {"symbols": SYMBOLS, "alpha": ALPHA, "zeta": ZETA}
     )
+    yield workspace
+    workspace.close()
+
+
+@pytest.fixture(scope="module")
+def xrepo(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Workspace]:
+    """Repositories joined by package links: the edges that cross only on evidence."""
+    workspace = _indexed(tmp_path_factory.mktemp("xrepo"), LINKING)
     yield workspace
     workspace.close()
 
@@ -98,13 +107,21 @@ def all_edges(workspace: Workspace) -> list[dict[str, Any]]:
                src.repo_id AS src_repo, dst.repo_id AS dst_repo, src.key AS src_key,
                dst.key AS dst_key, src.type AS src_type, dst.type AS dst_type,
                src.file_id AS src_file, dst.file_id AS dst_file,
-               af.rel_path AS file_path, sf.rel_path AS src_path, df.rel_path AS dst_path
+               af.rel_path AS file_path, sf.rel_path AS src_path, df.rel_path AS dst_path,
+               e.resolution AS resolution
         FROM edges e JOIN entities src ON src.id = e.src_id JOIN entities dst ON dst.id = e.dst_id
         LEFT JOIN files af ON af.id = e.file_id LEFT JOIN files sf ON sf.id = src.file_id
         LEFT JOIN files df ON df.id = dst.file_id
         """
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def evidenced(resolution: str | None) -> bool:
+    """Whether an edge records a package link's evidence for crossing."""
+    record = json.loads(resolution) if resolution else {}
+    crossing = record.get("crossing") if isinstance(record, dict) else None
+    return isinstance(crossing, dict) and crossing.get("package") is not None
 
 
 def uses_from_files(edges: list[dict[str, Any]]) -> set[tuple[int, int]]:
@@ -145,6 +162,7 @@ def brute(
             type=EdgeType(e["type"]),
             src_repo_id=e["src_repo"],
             dst_repo_id=e["dst_repo"],
+            evidenced=evidenced(e["resolution"]),
         )
         if not confinement.admits(neighbour, outgoing=out):
             continue
@@ -170,9 +188,19 @@ def brute(
     )
 
 
-def confinements(workspace: Workspace) -> list[Confinement]:
-    repos = [r[0] for r in workspace.database.execute("SELECT id FROM repositories").fetchall()]
-    found = [Confinement(), Confinement(crossing=CROSS_REPOSITORY_EDGES)]
+def confinements(workspace: Workspace, homes: tuple[str, ...] = ()) -> list[Confinement]:
+    """Every confinement shape, homed in each repository (or only in ``homes``)."""
+    repos = [
+        r[0]
+        for r in workspace.database.execute("SELECT id, slug FROM repositories").fetchall()
+        if not homes or r[1] in homes
+    ]
+    uses = frozenset({EdgeType.USES})
+    found = [
+        Confinement(),
+        Confinement(crossing=CROSS_REPOSITORY_EDGES),
+        Confinement(evidenced=uses),
+    ]
     for repo_id in repos:
         found.append(Confinement(home_repo_id=repo_id))
         found.append(Confinement(crossing=CROSS_REPOSITORY_EDGES, home_repo_id=repo_id))
@@ -181,6 +209,15 @@ def confinements(workspace: Workspace) -> list[Confinement]:
                 crossing=CROSS_REPOSITORY_EDGES, home_repo_id=repo_id, crossing_moves_home=True
             )
         )
+        # the change-impact walk's own confinement, in each scope it can be given
+        walk = Confinement(
+            crossing=CROSS_REPOSITORY_EDGES,
+            evidenced=uses,
+            home_repo_id=repo_id,
+            crossing_moves_home=True,
+        )
+        found.append(walk)
+        found.append(walk.model_copy(update={"scope_repo_ids": frozenset({repo_id})}))
     return found
 
 
@@ -203,14 +240,22 @@ def rules(kinds: list[EdgeType]) -> list[NeighborRule]:
     return found
 
 
-def test_every_bounded_query_equals_the_brute_force(mixed: Workspace) -> None:
+#: The homes each corpus is checked from: all of them, or the XR provider and a consumer.
+HOMES = {"mixed": (), "xrepo": ("contracts", "app")}
+
+
+@pytest.mark.parametrize("corpus", ["mixed", "xrepo"])
+def test_every_bounded_query_equals_the_brute_force(
+    corpus: str, request: pytest.FixtureRequest
+) -> None:
+    mixed: Workspace = request.getfixturevalue(corpus)
     knowledge = mixed.knowledge
     edges = all_edges(mixed)
     uses_from = uses_from_files(edges)
     kinds = sorted({EdgeType(e["type"]) for e in edges}, key=str)
     nodes = sorted({e["src_id"] for e in edges} | {e["dst_id"] for e in edges})
     checked = 0
-    for confinement in confinements(mixed):
+    for confinement in confinements(mixed, HOMES[corpus]):
         for rule in rules(kinds):
             if True:
                 counts = knowledge.impact_counts(nodes, rule, confinement)

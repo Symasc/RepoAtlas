@@ -342,6 +342,9 @@ class NeighborEdge(BaseModel):
     line_start: int | None = None
     line_end: int | None = None
     parser: str | None = None
+    #: The edge records the package evidence that lets it join two repositories
+    #: (:data:`repoatlas.graph.packages.CROSSING`).
+    evidenced: bool = False
 
     def other(self, entity_id: int) -> int:
         return self.dst_id if entity_id == self.src_id else self.src_id
@@ -359,34 +362,42 @@ class Confinement(BaseModel):
     """Which edges the change-impact walk may follow out of the node it stands on.
 
     The rule :func:`repoatlas.graph.traversal.walk` applies to the edges it reads,
-    stated as a value. An edge whose two ends belong to different repositories is
-    followed only when its type is in ``crossing``; and under ``home_repo_id``, only
-    when its far end belongs to that repository or to none (a shared node: an
-    environment variable, an HTTP operation, a package). :meth:`admits` is the rule
-    in Python; the bounded neighbour queries render the same rule as SQL, so a count
-    or a page is exact *after* confinement rather than cut before it.
+    stated as a value, and widened for the change-impact walk. An edge whose two ends
+    belong to different repositories is followed only when its type is in
+    ``crossing``, or is in ``evidenced`` and the edge itself records the package
+    evidence for the crossing; and under ``home_repo_id``, only when its far end
+    belongs to that repository or to none (a shared node: an environment variable, an
+    HTTP operation, a package). Under ``scope_repo_ids`` the far end must belong to
+    one of those repositories or to none, whatever else admits it. :meth:`admits` is
+    the rule in Python; the bounded neighbour queries render the same rule as SQL, so
+    a count or a page is exact *after* confinement rather than cut before it.
     """
 
     model_config = ConfigDict(frozen=True)
 
     crossing: frozenset[EdgeType] = frozenset()
+    #: Types that may join two repositories only edge by edge: when the edge records
+    #: the evidence for the crossing, never on the strength of its type.
+    evidenced: frozenset[EdgeType] = frozenset()
     home_repo_id: int | None = None
     #: Whether a direct crossing edge of an admitted type may leave ``home_repo_id``,
     #: making the far end's repository the new home (the change-impact walk). Off,
     #: the home holds against every edge, as it does in ``walk``.
     crossing_moves_home: bool = False
+    #: The repositories the caller's scope names; ``None`` when it names them all.
+    scope_repo_ids: frozenset[int] | None = None
 
     def admits(self, edge: NeighborEdge, *, outgoing: bool) -> bool:
+        far = edge.dst_repo_id if outgoing else edge.src_repo_id
+        if self.scope_repo_ids is not None and far is not None and far not in self.scope_repo_ids:
+            return False
         if edge.crosses_repositories:
-            if edge.type not in self.crossing:
+            crosses = edge.type in self.crossing or (edge.type in self.evidenced and edge.evidenced)
+            if not crosses:
                 return False
             if self.crossing_moves_home:
                 return True
-        if self.home_repo_id is not None:
-            far = edge.dst_repo_id if outgoing else edge.src_repo_id
-            if far is not None and far != self.home_repo_id:
-                return False
-        return True
+        return self.home_repo_id is None or far is None or far == self.home_repo_id
 
 
 class NeighborRule(BaseModel):

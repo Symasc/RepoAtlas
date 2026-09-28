@@ -1069,25 +1069,48 @@ class SqliteKnowledgeStore:
                   SELECT 1 FROM edges u JOIN entities ue ON ue.id = u.src_id
                   WHERE u.type = 'USES' AND u.dst_id = e.{near}_id
                     AND ue.file_id = {far}.file_id))"""  # noqa: S608 - column names only
+        # Which edges may join two repositories: a crossing type, or an evidenced type
+        # whose own resolution records the package evidence (repoatlas.graph.packages).
+        crossed = sorted(str(t) for t in confinement.crossing)
+        evidenced = sorted(str(t) for t in confinement.evidenced)
+        admitted: list[str] = []
+        admitted_params: list[object] = []
+        if crossed:
+            admitted.append(f"e.type IN ({','.join('?' * len(crossed))})")
+            admitted_params.extend(crossed)
+        if evidenced:
+            admitted.append(
+                f"(e.type IN ({','.join('?' * len(evidenced))})"
+                " AND json_extract(e.resolution, '$.crossing.package') IS NOT NULL)"
+            )
+            admitted_params.extend(evidenced)
+        may_cross = " OR ".join(admitted)
         crossing = ""
-        if confinement.crossing:
-            crossed = sorted(str(t) for t in confinement.crossing)
-            crossing = f" OR e.type IN ({','.join('?' * len(crossed))})"
-            params.extend(crossed)
+        if may_cross:
+            crossing = f" OR {may_cross}"
+            params.extend(admitted_params)
         home = ""
         if confinement.home_repo_id is not None:
             moves = ""
-            if confinement.crossing and confinement.crossing_moves_home:
-                crossed = sorted(str(t) for t in confinement.crossing)
+            if may_cross and confinement.crossing_moves_home:
                 moves = (
-                    f" OR (e.type IN ({','.join('?' * len(crossed))})"
+                    f" OR (({may_cross})"
                     " AND src.repo_id IS NOT NULL AND dst.repo_id IS NOT NULL"
                     " AND src.repo_id != dst.repo_id)"
                 )
             home = f" AND ({far}.repo_id IS NULL OR {far}.repo_id = ?{moves})"
             params.append(confinement.home_repo_id)
             if moves:
-                params.extend(sorted(str(t) for t in confinement.crossing))
+                params.extend(admitted_params)
+        scope = ""
+        if confinement.scope_repo_ids is not None:
+            allowed = sorted(confinement.scope_repo_ids)
+            if allowed:
+                placeholders = ",".join("?" * len(allowed))
+                scope = f" AND ({far}.repo_id IS NULL OR {far}.repo_id IN ({placeholders}))"
+                params.extend(allowed)
+            else:
+                scope = f" AND {far}.repo_id IS NULL"
         where = f"""
             FROM edges e
             JOIN entities src ON src.id = e.src_id
@@ -1099,7 +1122,7 @@ class SqliteKnowledgeStore:
               AND e.type IN ({",".join("?" * len(kinds))}){constrained}
               AND e.src_id != e.dst_id
               AND (src.repo_id IS NULL OR dst.repo_id IS NULL
-                   OR src.repo_id = dst.repo_id{crossing}){home}
+                   OR src.repo_id = dst.repo_id{crossing}){home}{scope}
         """
         return near, far, where, params
 
