@@ -315,6 +315,10 @@ def plan_uses(
         if origin is None:
             continue
         meta = json.loads(claim.meta_json) if claim.meta_json else {}
+        if str(meta.get("parser", "")).startswith("python"):
+            # A Python use names a module by a dotted name, which this resolver would
+            # read as a path or a package: not resolved here.
+            continue
         found = resolver.resolve(origin, meta)
         if found is None:
             continue

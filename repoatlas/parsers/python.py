@@ -27,6 +27,7 @@ from repoatlas.models.parsing import (
 from repoatlas.parsers.http_python import PythonHttp
 from repoatlas.parsers.interpreter import interpreter_tag
 from repoatlas.parsers.marks import whole_file_span
+from repoatlas.parsers.py_uses import PythonUseAnalysis, python_use_references
 
 _SUFFIXES = frozenset({".py", ".pyi"})
 
@@ -344,10 +345,12 @@ class PythonParser:
     #    makes an ordinary `sync` reparse it and produce the edge (V1_SPEC §12).
     # 4: routes a proven FastAPI or Flask application serves, and requests a
     #    proven `requests` or `httpx` call makes, become HTTP facts.
+    # 5: declarations' uses of the names they import or the module declares, and the
+    #    file's export table (repoatlas.parsers.py_uses).
     # +pyX.Y: `ast` is the running interpreter's, and what it accepts moves with the
     #    interpreter (repoatlas.parsers.interpreter), so facts parsed by another one
     #    are never kept.
-    version = f"4+{interpreter_tag()}"
+    version = f"5+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
@@ -385,6 +388,12 @@ class PythonParser:
 
         visitor = _Visitor(module_name, PythonHttp(tree))
         visitor.visit(tree)
+        try:
+            uses = python_use_references(PythonUseAnalysis(tree), visitor.symbols)
+        except RecursionError:
+            # Nesting deeper than the analysis can walk costs the file its uses, never
+            # its other facts.
+            uses = []
 
         whole_file_start, whole_file_last = whole_file_span(content)
         module_symbol = ParsedSymbol(
@@ -400,5 +409,5 @@ class PythonParser:
             parser=self.name,
             parser_version=self.version,
             symbols=(module_symbol, *visitor.symbols),
-            references=tuple(visitor.references),
+            references=(*visitor.references, *uses),
         )
