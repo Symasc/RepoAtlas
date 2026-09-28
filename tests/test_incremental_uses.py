@@ -30,6 +30,8 @@ from tests.incremental_corpus import (
     dup_repo,
     edit,
     fresh_index,
+    internal_consumer,
+    internal_provider,
     mono_repo,
     provider_repo,
     read_snapshot,
@@ -39,6 +41,7 @@ from tests.incremental_corpus import (
     use_snapshot,
     ws_repo,
 )
+from tests.workspace_corpus import repo_uses
 
 SHALLOW = ("shallow.ts#useShallow", "chain/c13.ts#Deep", "value")
 DEEP = ("deep.ts#useDeep", "chain/c13.ts#Deep", "value")
@@ -544,3 +547,61 @@ def test_i18_an_unrelated_edit_beside_a_member_s_consumer_stays_its_own(
     assert (work.landed, work.readers, work.repository, work.package) == (0, 0, 0, 0)
     assert use_edge_rows(wsinc, "apps/api/src/handler.ts") == before
     assert_equals_fresh(wsinc, settings, root, tmp_path, "fresh")
+
+
+# -- I19-I22: an internal package in another repository ------------------------------------
+
+USE_INTERNAL = "src/use.ts#useInternal"
+
+
+def _internal_uses(workspace: Workspace) -> set[tuple[str, str]]:
+    """(consumer, declaration) of every use that crossed into another repository."""
+    return {(e["source"], e["target"]) for e in repo_uses(workspace) if "crossing" in e}
+
+
+@pytest.fixture
+def pathed(workspace: Workspace, tmp_path: Path) -> Workspace:
+    return build(
+        workspace,
+        tmp_path,
+        {
+            "ipath": internal_consumer("file:../iprov"),
+            "iprov": internal_provider(),
+            "iwrong": internal_provider("@inc/wrong"),
+        },
+    )
+
+
+def test_i19_pointing_the_path_elsewhere_and_back(
+    pathed: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    linked = {(f"ipath:{USE_INTERNAL}", "iprov:src/index.ts#internalTool")}
+    assert _internal_uses(pathed) == linked
+    _replace(root, "ipath", "package.json", '"file:../iprov"', '"file:../iwrong"')
+    work = sync_all(pathed, root)
+    # the path now leads to a package of another name: no link, and no fall-back
+    assert _internal_uses(pathed) == set()
+    # a declaration is no module-resolution fact: its own repository, through its packages
+    assert (work.mode, work.repositories_invalidated) == ("incremental", 1)
+    assert_equals_fresh(pathed, settings, root, tmp_path, "fresh-elsewhere")
+
+    _replace(root, "ipath", "package.json", '"file:../iwrong"', '"file:../iprov"')
+    sync_all(pathed, root)
+    assert _internal_uses(pathed) == linked
+    assert_equals_fresh(pathed, settings, root, tmp_path, "fresh-restored")
+
+
+def test_i20_renaming_the_package_the_path_leads_to_and_back(
+    pathed: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    _replace(root, "iprov", "package.json", '"@inc/internal"', '"@inc/renamed"')
+    sync_all(pathed, root)
+    assert _internal_uses(pathed) == set()
+    assert_equals_fresh(pathed, settings, root, tmp_path, "fresh-renamed")
+
+    _replace(root, "iprov", "package.json", '"@inc/renamed"', '"@inc/internal"')
+    sync_all(pathed, root)
+    assert _internal_uses(pathed) == {(f"ipath:{USE_INTERNAL}", "iprov:src/index.ts#internalTool")}
+    assert_equals_fresh(pathed, settings, root, tmp_path, "fresh-restored")
