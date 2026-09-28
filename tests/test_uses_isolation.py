@@ -209,6 +209,7 @@ REVIEWED_EDGE_READS = {
     "count_edges": "status total: counts every indexed relationship, reads none",
     "_count": "status total: the row count behind count_edges and its siblings",
     "_impact_scope": "typed: the edge types of an impact rule, confined in SQL",
+    "count_whole_module_uses": "typed: USES, counted for the impact package summary",
 }
 
 

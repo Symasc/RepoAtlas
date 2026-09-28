@@ -24,11 +24,13 @@ in every scope; anything else must belong to a repository the call named.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from repoatlas.graph.impact import ImpactWalk, Node, Tier, WalkResult, is_test_path
-from repoatlas.graph.keys import file_key
+from repoatlas.graph.keys import file_key, package_key
+from repoatlas.graph.packages import CROSSING
 from repoatlas.graph.units import package_directories, unit_of
+from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.impact import (
     MAX_SEED_CANDIDATES,
     Granularity,
@@ -40,20 +42,27 @@ from repoatlas.models.impact import (
     ImpactStep,
     ImpactSummary,
     ImpactWork,
+    PackageCrossing,
+    PackageImpact,
     SeedBasis,
     SeedCandidate,
     SeedStatus,
     UnresolvedImpact,
 )
-from repoatlas.models.parsing import EntityType
+from repoatlas.models.parsing import EdgeDirection, EdgeType, EntityType
 from repoatlas.storage.protocols import (
+    Confinement,
+    DependencyStore,
     EntityIdentity,
     KnowledgeStore,
+    NeighborRow,
+    NeighborRule,
     SearchIndex,
 )
 
-#: The traversal policy's name and version, reported with every answer.
-POLICY = "impact/1"
+#: The traversal policy's name and version, reported with every answer. 2: a use crosses
+#: into another repository on a package link's evidence.
+POLICY = "impact/2"
 
 #: Entity types a change is a *key* change for: they name a value, not code.
 _KEYS = frozenset(
@@ -382,22 +391,44 @@ class Assembled:
     summary: ImpactSummary
 
 
-def _round_robin(nodes: Sequence[Node], unit: Callable[[Node], str]) -> list[Node]:
+def _round_robin(
+    nodes: Sequence[Node], unit: Callable[[Node], str], repository: Callable[[Node], str | None]
+) -> list[Node]:
     """Rank order, except that within each tier the units take turns.
 
     One large part of a monorepo -- whichever sorts first -- would otherwise fill an
-    answer before any other part the change reaches appears.
+    answer before any other part the change reaches appears. Where a tier spans more
+    than one repository, the repositories take turns first and each one's units within
+    its turns, so one repository with many units cannot fill it either.
     """
     order: list[Node] = []
     for tier in sorted({n.tier for n in nodes}):
-        queues: dict[str, list[Node]] = {}
-        for node in (n for n in nodes if n.tier == tier):
-            queues.setdefault(unit(node), []).append(node)
-        while queues:
-            for name in list(queues):
-                order.append(queues[name].pop(0))
-                if not queues[name]:
-                    del queues[name]
+        tiered = [n for n in nodes if n.tier == tier]
+        if len({r for n in tiered if (r := repository(n)) is not None}) <= 1:
+            queues: dict[str, list[Node]] = {}
+            for node in tiered:
+                queues.setdefault(unit(node), []).append(node)
+            while queues:
+                for name in list(queues):
+                    order.append(queues[name].pop(0))
+                    if not queues[name]:
+                        del queues[name]
+            continue
+        # a shared node belongs to no repository: it takes its own turns, as its own unit
+        turns: dict[str, dict[str, list[Node]]] = {}
+        for node in tiered:
+            own = turns.setdefault(repository(node) or unit(node), {})
+            own.setdefault(unit(node), []).append(node)
+        while turns:
+            for name in list(turns):
+                units = turns[name]
+                first = next(iter(units))
+                queue = units.pop(first)
+                order.append(queue.pop(0))
+                if queue:
+                    units[first] = queue  # its next turn goes to the repository's next unit
+                if not units:
+                    del turns[name]
     return order
 
 
@@ -438,6 +469,21 @@ def assemble(
             selected[item.entity_id] = item
         return True
 
+    def repository(node: Node) -> str | None:
+        return walk.slug_of(node.repo_id) if node.repo_id is not None else None
+
+    def reading(node: Node) -> str:
+        """The step's reading; a crossing also says which repositories, and by what package."""
+        assert node.step is not None
+        crossing = node.step.resolution.get(CROSSING)
+        if not isinstance(crossing, dict) or node.step.row is None:
+            return node.step.reading
+        consumer = walk.slug_of(node.step.row.file_repo_id)
+        return (
+            f"{node.step.reading}, {crossing.get('provider')} -> {consumer}"
+            f" via {crossing.get('package')}"
+        )
+
     tests = [n for n in ranked if is_test_path(n.path) and n.role is not ImpactRole.MEMBER]
     loose = [n for n in ranked if _is_unresolved(n) and not is_test_path(n.path)]
     others = [
@@ -445,11 +491,11 @@ def assemble(
         for n in ranked
         if n.role is not ImpactRole.MEMBER and not is_test_path(n.path) and not _is_unresolved(n)
     ]
-    for node in _round_robin(others, unit):
+    for node in _round_robin(others, unit, repository):
         if not take(node, max_candidates - len(selected)):
             cut.append(node)
     chosen_tests: list[Node] = []
-    for node in _round_robin(tests, unit):
+    for node in _round_robin(tests, unit, repository):
         # A test is listed in its own section; the predecessors it needs are candidates
         # and must fit in what the candidate cap has left.
         room = max_candidates - (len(selected) - len(chosen_tests)) + 1
@@ -494,6 +540,10 @@ def assemble(
             at = f"{walk.slug_of(row.file_repo_id)}/{row.file_path}"
             if row.line_start is not None:
                 lines = (row.line_start, row.line_end or row.line_start)
+        crossing = _crossing(resolution, walk.slug_of(row.file_repo_id) if row else None, row)
+        via = tuple(str(v) for v in _list(resolution.get("via")))
+        if crossing is not None:
+            via = tuple(f"{crossing.from_repository}/{v}" for v in via)
         parent = node.parent
         return ImpactCandidate(
             id=ids[node.entity_id],
@@ -516,15 +566,16 @@ def assemble(
                 lines=lines,
                 parser=row.parser if row is not None else None,
                 syntax=_text(resolution.get("syntax")),
-                via=tuple(str(v) for v in _list(resolution.get("via"))),
+                via=via,
                 via_names=tuple(str(v) for v in _list(resolution.get("via_names"))),
+                crossing=crossing,
                 resolution=(resolution or None) if full else None,
             ),
             boundaries=tuple(boundaries),
             basis=_BASIS[node.tier],
             chain=" -> ".join(
                 [display(nodes[0])]
-                + [f"{display(n)} ({n.step.reading})" for n in nodes[1:] if n.step is not None]
+                + [f"{display(n)} ({reading(n)})" for n in nodes[1:] if n.step is not None]
             ),
             alt_paths=tuple(
                 sorted(ids[a.entity_id] for a in node.alternatives if a.entity_id in ids)
@@ -551,6 +602,7 @@ def assemble(
                 fanout=hub.fanout,
                 units=dict(sorted(hub.units.items())),
                 units_partial=hub.units_partial,
+                repositories=dict(sorted(hub.repositories.items())),
                 shown=hub.shown,
                 collapsed=hub.collapsed,
             )
@@ -607,8 +659,314 @@ def assemble(
     )
 
 
+MAX_PACKAGES = 8
+#: The most exact consumers one package entry points at.
+MAX_CONSUMERS = 3
+#: Declarations that name another package, or a location, rather than the provider's.
+_NOT_THE_PROVIDER = ("npm:", "workspace:", "file:", "link:", "portal:")
+OUTSIDE_SCOPE = "outside scope"
+
+
+@dataclass(slots=True)
+class _Crossed:
+    """Every reached declaration a package crossing leads to, for one dependent."""
+
+    provided_by: str
+    provider: str
+    consumer: str
+    declared_manifest: str
+    reached: set[int] = field(default_factory=set)
+    subpaths: set[str] = field(default_factory=set)
+
+
+def _crossed(result: WalkResult, walk: ImpactWalk) -> dict[tuple[str, str], _Crossed]:
+    """What the walk crossed, by (package, declaring manifest line): read from its own steps."""
+    found: dict[tuple[str, str], _Crossed] = {}
+    for node in result.reached.values():
+        step = node.step
+        if step is None or step.row is None or node.entity_id is None:
+            continue
+        record = step.resolution.get(CROSSING)
+        if not isinstance(record, dict):
+            continue
+        consumer = walk.slug_of(step.row.file_repo_id) or ""
+        declared = f"{consumer}/{record.get('declared_at')}"
+        provider = str(record.get("provider"))
+        entry = found.setdefault(
+            (str(record.get("package")), declared),
+            _Crossed(
+                provided_by=f"{provider}/{record.get('provided_at')}",
+                provider=provider,
+                consumer=consumer,
+                declared_manifest=str(record.get("declared_at")).rpartition(":")[0],
+            ),
+        )
+        entry.reached.add(node.entity_id)
+        entry.subpaths.add(str(record.get("subpath") or ""))
+    return found
+
+
+def package_dependents(
+    seed: Seed,
+    knowledge: KnowledgeStore,
+    dependencies: DependencyStore,
+    walk: ImpactWalk,
+    result: WalkResult,
+    returned: Sequence[ImpactCandidate],
+    directories: Mapping[str, Sequence[str]],
+    *,
+    scoped: bool = False,
+) -> tuple[tuple[PackageImpact, ...], int]:
+    """Units and repositories depending on a package the change reaches; coarse by construction.
+
+    Two kinds of entry. The seed's own package -- the one its nearest providing manifest
+    names -- with every unit or repository that declares it. A unit of the seed's own
+    repository depends on it when a manifest there declares it and no other manifest in
+    that repository provides the same name. Another repository depends on it only when
+    the linker's repository-to-repository edge -- drawn only when exactly one other
+    managed repository provides the name -- is asserted by the same manifest and line,
+    and only when that repository neither provides the name itself nor declares it as
+    something else (an ``npm:`` alias, a workspace or path protocol): a shared name alone
+    is never enough. And every package an exact path crossed, whichever it is.
+
+    Across repositories an entry counts only what crossed into the dependent through that
+    very package and declaration -- never whatever else was found there -- and points at
+    the candidates that did. A dependent with none says its exact consumer is unresolved,
+    and counts the declarations there that use the package's module as a whole. Returns
+    the entries listed and how many more there were.
+    """
+    crossed = _crossed(result, walk)
+    found: dict[tuple[str, str], PackageImpact] = {}
+    slug, path = seed.model.repository, seed.model.path
+    repo_id = walk.repo_id(slug) if slug else None
+    if slug is not None and path is not None and repo_id is not None and walk.work.query():
+        for entry in _seed_package(
+            knowledge, dependencies, walk, slug, path, repo_id, returned, directories
+        ):
+            found.setdefault((entry.package, entry.declared_at), entry)
+    for (package, declared), crossing in crossed.items():
+        if (package, declared) in found:
+            continue
+        dependent = unit_of(
+            f"{crossing.consumer}:{crossing.declared_manifest}",
+            crossing.consumer,
+            crossing.declared_manifest,
+            directories,
+        )
+        found[(package, declared)] = PackageImpact(
+            package=package,
+            provided_by=crossing.provided_by,
+            dependent=dependent,
+            declared_at=declared,
+            crosses_repository=True,
+            exact_consumers=len(crossing.reached),
+        )
+    listed = [
+        _exact(entry, crossed, returned, knowledge, walk, scoped)
+        if entry.crosses_repository
+        else entry
+        for entry in found.values()
+    ]
+    listed.sort(
+        key=lambda p: (not p.consumers, p.crosses_repository, p.dependent, p.declared_at, p.package)
+    )
+    return tuple(listed[:MAX_PACKAGES]), max(0, len(listed) - MAX_PACKAGES)
+
+
+def _exact(
+    entry: PackageImpact,
+    crossed: Mapping[tuple[str, str], _Crossed],
+    returned: Sequence[ImpactCandidate],
+    knowledge: KnowledgeStore,
+    walk: ImpactWalk,
+    scoped: bool,
+) -> PackageImpact:
+    """A cross-repository entry's exact consumers, from the crossings the walk took."""
+    crossing = crossed.get((entry.package, entry.declared_at))
+    reached = crossing.reached if crossing is not None else set()
+    consumers = tuple(
+        sorted(
+            c.id
+            for c in returned
+            if c.step.crossing is not None
+            and c.step.crossing.package == entry.package
+            and c.step.crossing.declared_by == entry.declared_at
+        )[:MAX_CONSUMERS]
+    )
+    provider = walk.repo_id(entry.provided_by.split("/", 1)[0])
+    dependent = walk.repo_id(entry.declared_at.split("/", 1)[0])
+    unresolved = None
+    if provider is not None and dependent is not None and walk.work.query():
+        unresolved = knowledge.count_whole_module_uses(
+            entry.package, provider, dependent, exclude_ids=sorted(reached)
+        )
+    subpaths = crossing.subpaths if crossing is not None else set()
+    exact: int | str = len(reached)
+    if not reached:
+        exact = OUTSIDE_SCOPE if scoped else "unresolved"
+    return entry.model_copy(
+        update={
+            "exact_consumers": exact,
+            "consumers": consumers,
+            "unresolved_consumers": unresolved or None,
+            "subpaths": tuple(sorted(subpaths)) if subpaths - {""} else (),
+        }
+    )
+
+
+def _seed_package(
+    knowledge: KnowledgeStore,
+    dependencies: DependencyStore,
+    walk: ImpactWalk,
+    slug: str,
+    path: str,
+    repo_id: int,
+    returned: Sequence[ImpactCandidate],
+    directories: Mapping[str, Sequence[str]],
+) -> list[PackageImpact]:
+    """The seed's own package, and every unit or repository declaring it (see above)."""
+    provided = [r for r in dependencies.list_for_repos([repo_id]) if r.role == "provided"]
+    places = knowledge.file_locations(sorted({r.file_id for r in provided}))
+    within = [
+        (record, places[record.file_id][1])
+        for record in provided
+        if record.file_id in places
+        and _contains(places[record.file_id][1].rpartition("/")[0], path)
+    ]
+    if not within:
+        return []
+    nearest = max(manifest.rpartition("/")[0] for _, manifest in within)
+    repo_key = knowledge.get_entities_by_key([f"repo:{slug}"])
+    evidenced: set[tuple[int | None, str | None, int | None]] = set()
+    if len(repo_key) == 1:
+        crossing = Confinement(crossing=frozenset({EdgeType.DEPENDS_ON}))
+        for row in walk.page(repo_key[0].entity_id, _DEPENDS_IN, crossing, limit=MAX_DECLARATIONS):
+            evidenced.add((row.far_repo_id, row.file_path, row.line_start))
+    providing = next(m for _, m in within if m.rpartition("/")[0] == nearest)
+    providing_unit = unit_of(f"{slug}:{providing}", slug, providing, directories)
+    found: list[PackageImpact] = []
+    for record, manifest in sorted(within, key=lambda item: (item[1], item[0].normalized_name)):
+        if manifest.rpartition("/")[0] != nearest:
+            continue
+        name = (record.ecosystem, record.normalized_name)
+        unique_here = sum(1 for r in provided if (r.ecosystem, r.normalized_name) == name) == 1
+        package = knowledge.get_entities_by_key([package_key(*name)])
+        if len(package) != 1:
+            continue
+        rows = walk.page(package[0].entity_id, _DEPENDS_IN, Confinement(), limit=MAX_DECLARATIONS)
+        others = sorted({r.far_repo_id for r in rows if r.far_repo_id not in (None, repo_id)})
+        declared_elsewhere = _declarations(dependencies, walk, others)
+        for row in rows:
+            other = row.far_repo_id
+            crosses = other != repo_id
+            if crosses and (other, row.file_path, row.line_start) not in evidenced:
+                continue
+            if crosses and not _declares_the_provider(declared_elsewhere, other, row, name):
+                continue
+            if not crosses and (not unique_here or row.file_path == manifest):
+                continue
+            dependent_slug = walk.slug_of(other)
+            dependent = unit_of(
+                f"{dependent_slug}:{row.file_path}", dependent_slug, row.file_path, directories
+            )
+            if not crosses and dependent == providing_unit:
+                continue
+            # across repositories, what crossed into the dependent is counted afterwards
+            exact = (
+                0
+                if crosses
+                else sum(
+                    1 for c in returned if c.repository == dependent_slug and c.unit == dependent
+                )
+            )
+            found.append(
+                PackageImpact(
+                    package=f"{record.ecosystem}:{record.name}",
+                    provided_by=f"{slug}/{manifest}:{record.line_start}",
+                    dependent=dependent,
+                    declared_at=f"{dependent_slug}/{row.file_path}:{row.line_start}",
+                    crosses_repository=crosses,
+                    exact_consumers=exact if exact else "unresolved",
+                )
+            )
+    return found
+
+
+def _declarations(
+    dependencies: DependencyStore, walk: ImpactWalk, repo_ids: Sequence[int]
+) -> list[DependencyRecord]:
+    """The dependency rows of the repositories that declare a package, in one charged read."""
+    if not repo_ids or not walk.work.query():
+        return []
+    return dependencies.list_for_repos(list(repo_ids))
+
+
+def _declares_the_provider(
+    records: Sequence[DependencyRecord],
+    repo_id: int | None,
+    row: NeighborRow,
+    name: tuple[str, str],
+) -> bool:
+    """Whether a repository's declaration is of the package the seed's repository provides.
+
+    Not when that repository provides the same name itself (two providers: which one it
+    uses is not ours to pick), nor when its declaration names another package or a
+    location for it.
+    """
+    mine = [r for r in records if r.repo_id == repo_id and (r.ecosystem, r.normalized_name) == name]
+    if any(r.role == "provided" for r in mine):
+        return False
+    declared = [
+        r
+        for r in mine
+        if r.role == "declared" and r.file_id == row.file_id and r.line_start == row.line_start
+    ]
+    return not any((r.constraint or "").strip().startswith(_NOT_THE_PROVIDER) for r in declared)
+
+
+#: The most package declarations one step reads.
+MAX_DECLARATIONS = 500
+_DEPENDS_IN = NeighborRule(edge_types=(EdgeType.DEPENDS_ON,), direction=EdgeDirection.IN)
+
+
+def _contains(directory: str, path: str) -> bool:
+    return directory == "" or path == directory or path.startswith(directory + "/")
+
+
 def _text(value: object) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _crossing(
+    resolution: Mapping[str, object], consumer: str | None, row: NeighborRow | None
+) -> PackageCrossing | None:
+    """A step's package evidence, each part spelled where it can be read, or ``None``."""
+    record = resolution.get(CROSSING)
+    if not isinstance(record, dict) or row is None or consumer is None:
+        return None
+    provider = str(record.get("provider") or "")
+    mapped = record.get("entry_mapped")
+    imported_at = record.get("imported_at")
+    return PackageCrossing(
+        package=str(record.get("package")),
+        subpath=_text(record.get("subpath")),
+        from_repository=provider,
+        to_repository=consumer,
+        provided_by=f"{provider}/{record.get('provided_at')}",
+        entry=f"{provider}/{record.get('entry')}",
+        entry_fields=_text(record.get("entry_fields")),
+        entry_mapped=f"{mapped.get('from')} -> {mapped.get('to')} ({mapped.get('by')})"
+        if isinstance(mapped, dict)
+        else None,
+        declared_by=f"{consumer}/{record.get('declared_at')}",
+        constraint=_text(record.get("constraint")),
+        imported_at=f"{consumer}/{row.file_path}:{imported_at}"
+        if isinstance(imported_at, int) and row.file_path
+        else None,
+        declared_as=_text(resolution.get("name")),
+        imported_as=_text(resolution.get("imported")),
+        local=_text(resolution.get("local")),
+    )
 
 
 def _list(value: object) -> list[object]:

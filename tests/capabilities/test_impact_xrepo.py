@@ -165,3 +165,193 @@ def test_a_whole_module_use_across_repositories_follows_only_a_whole_file_change
     assert whole <= set(by_entity(impact(indexed, "file:contracts:src/index.ts")))
     # one declaration it re-exports changes: a computed member names no declaration
     assert not whole & set(by_entity(impact(indexed, COURSE_ROLE)))
+
+
+# -- what the answer says about a crossing -----------------------------------------------
+
+
+def verify_crossing(workspace: Workspace, candidate: ImpactCandidate) -> None:
+    """Every part of a crossing names a fact the index holds, at the line it gives."""
+    crossing = candidate.step.crossing
+    assert crossing is not None
+
+    def dependency(role: str, spelled: str) -> None:
+        located, _, line = spelled.rpartition(":")
+        repository, _, manifest = located.partition("/")
+        [(count,)] = workspace.database.execute(
+            """
+            SELECT COUNT(*) FROM dependencies d
+            JOIN files f ON f.id = d.file_id JOIN repositories r ON r.id = d.repo_id
+            WHERE d.role = ? AND r.slug = ? AND f.rel_path = ? AND d.line_start = ?
+              AND 'npm:' || d.name = ?
+            """,
+            (role, repository, manifest, int(line), crossing.package),
+        ).fetchall()
+        assert count == 1, (role, spelled)
+
+    dependency("provided", crossing.provided_by)
+    dependency("declared", crossing.declared_by)
+    repository, _, entry = crossing.entry.partition("/")
+    assert (repository, crossing.to_repository) == (
+        crossing.from_repository,
+        candidate.repository,
+    )
+    [(files,)] = workspace.database.execute(
+        "SELECT COUNT(*) FROM files f JOIN repositories r ON r.id = f.repo_id"
+        " WHERE r.slug = ? AND f.rel_path = ?",
+        (repository, entry),
+    ).fetchall()
+    assert files == 1
+    if crossing.imported_at is not None:
+        located, _, line = crossing.imported_at.rpartition(":")
+        repository, _, path = located.partition("/")
+        root = Path(workspace.settings.repos.root or "") / repository
+        text = (root / path).read_text().splitlines()[int(line) - 1]
+        assert text.startswith("import") and (crossing.local or "") in text
+
+
+def test_xr1_the_answer_says_how_the_change_crossed_and_where_to_read_it(
+    indexed: Workspace,
+) -> None:
+    response = impact(indexed, COURSE_ROLE)
+    consumer = {c.entity: c for c in response.candidates}[CAN_EDIT]
+    crossing = consumer.step.crossing
+    assert crossing is not None
+    assert crossing.model_dump(exclude_none=True) == {
+        "package": "npm:@fixture/contracts",
+        "from_repository": "contracts",
+        "to_repository": "app",
+        "provided_by": "contracts/package.json:2",
+        "entry": "contracts/src/index.ts",
+        "entry_fields": "main",
+        "declared_by": "app/package.json:5",
+        "constraint": "^1.0.0",
+        "imported_at": "app/src/policy.ts:1",
+        "declared_as": "CourseRole",
+        "imported_as": "CourseRole",
+        "local": "CourseRole",
+    }
+    assert consumer.step.via == ("contracts/src/index.ts",)
+    assert consumer.boundaries == ("contracts:. -> app:.",)
+    assert (
+        consumer.chain
+        == "CourseRole -> canEdit (uses, contracts -> app via npm:@fixture/contracts)"
+    )
+    for candidate in response.candidates:
+        if candidate.step.crossing is not None:
+            verify_crossing(indexed, candidate)
+    # the steps after the crossing are the consumer's own, and say nothing of packages
+    assert all(
+        c.step.crossing is None for c in (*response.candidates, *response.tests) if c.distance > 1
+    )
+    assert response.summary.policy == "impact/2"
+
+
+def test_xr2_every_name_on_the_way_is_in_the_answer(indexed: Workspace) -> None:
+    response = impact(indexed, "sym:contracts:src/internal.ts:InternalRole:1")
+    [consumer] = response.candidates
+    crossing = consumer.step.crossing
+    assert crossing is not None
+    # declared InternalRole; exported as Role by public.ts, then the barrel; bound LocalRole
+    assert (
+        crossing.declared_as,
+        consumer.step.via_names,
+        crossing.imported_as,
+        crossing.local,
+    ) == (
+        "InternalRole",
+        ("Role", "Role"),
+        "Role",
+        "LocalRole",
+    )
+    assert consumer.step.via == ("contracts/src/index.ts", "contracts/src/public.ts")
+    verify_crossing(indexed, consumer)
+
+
+def test_xr3_the_subpath_is_named_on_the_step_and_the_package(indexed: Workspace) -> None:
+    response = impact(indexed, "sym:auth-kit:src/auth/index.ts:Role:1")
+    [consumer] = response.candidates
+    assert consumer.step.crossing is not None
+    assert (consumer.step.crossing.subpath, consumer.step.crossing.entry) == (
+        "auth",
+        "auth-kit/src/auth/index.ts",
+    )
+    [package] = [p for p in response.packages if p.dependent == "app:."]
+    assert (package.exact_consumers, package.consumers, package.subpaths) == (
+        1,
+        (consumer.id,),
+        ("auth",),
+    )
+    # the root's own Role, a different declaration, is used by nobody
+    assert impact(indexed, "sym:auth-kit:src/index.ts:Role:1").candidates == ()
+
+
+def test_xr7_a_dependent_whose_consumer_cannot_be_named_stays_coarse(indexed: Workspace) -> None:
+    response = impact(indexed, COURSE_ROLE)
+    [coarse] = [p for p in response.packages if p.dependent == "coarse-user:."]
+    assert (coarse.granularity, coarse.exact_consumers, coarse.consumers) == (
+        "package",
+        "unresolved",
+        (),
+    )
+    assert coarse.unresolved_consumers == 1  # pick: a computed member
+    assert not any(c.repository == "coarse-user" for c in response.candidates)
+    [exact] = [p for p in response.packages if p.dependent == "app:."]
+    # canEdit and staticMember cross; guard is reached after them, not through the package
+    assert exact.exact_consumers == 2
+    assert {c.entity for c in response.candidates if c.id in exact.consumers} == {
+        CAN_EDIT,
+        "sym:app:src/spaces.ts:staticMember:2",
+    }
+    assert exact.unresolved_consumers == 1  # computedMember
+
+
+def test_xr7b_an_exact_consumer_is_credited_only_to_the_package_it_crossed(
+    indexed: Workspace,
+) -> None:
+    response = impact(indexed, "sym:mono-kit:packages/p/src/index.ts:X:1")
+    g = {c.entity: c for c in response.candidates}["sym:kit-user:src/g.ts:g:2"]
+    by_package = {(p.package, p.dependent): p for p in response.packages}
+    through_q = by_package[("npm:@kit/q", "kit-user:.")]
+    assert (through_q.exact_consumers, through_q.consumers) == (1, (g.id,))
+    # the seed's own package is declared by kit-user too, but nothing crossed through it
+    through_p = by_package[("npm:@kit/p", "kit-user:.")]
+    assert (through_p.exact_consumers, through_p.consumers) == ("unresolved", ())
+    # every consumer a package entry names has a path through that very package
+    for package in response.packages:
+        for consumer in package.consumers:
+            [candidate] = [c for c in response.candidates if c.id == consumer]
+            assert candidate.step.crossing is not None
+            assert (candidate.step.crossing.package, candidate.step.crossing.declared_by) == (
+                package.package,
+                package.declared_at,
+            )
+
+
+def test_n5_a_scoped_answer_says_the_dependents_are_outside_it(indexed: Workspace) -> None:
+    only = CapabilityContext(scope=CapabilityScope.REPOSITORY, repository="contracts")
+    response = impact(indexed, COURSE_ROLE, only)
+    across = [p for p in response.packages if p.crosses_repository]
+    assert across and {p.exact_consumers for p in across} == {"outside scope"}
+
+
+def test_a_dependent_that_is_not_the_provider_s_is_not_listed(indexed: Workspace) -> None:
+    listed = {p.dependent for p in impact(indexed, COURSE_ROLE).packages}
+    # an npm: alias and a workspace protocol declare some other package under the name
+    assert not {"refusals:aliased", "refusals:workspace"} & listed
+    # a repository providing the name itself: which provider it uses is not ours to pick
+    shadowed = impact(indexed, "sym:shadow-source:src/index.ts:shade:1")
+    assert not any(p.dependent.startswith("self-provider") for p in shadowed.packages)
+
+
+def test_a_dependent_that_uses_none_of_the_change_claims_no_exact_consumer(
+    indexed: Workspace,
+) -> None:
+    response = impact(indexed, "sym:mono-kit:packages/p/src/index.ts:Y:2")
+    assert response.candidates == ()
+    by_dependent = {p.dependent: p for p in response.packages}
+    # a unit of the same repository declares the package, and nothing crossed from Y
+    assert by_dependent["mono-kit:packages/q"].exact_consumers == "unresolved"
+    # another repository declares it too: coarse, and says so
+    assert by_dependent["kit-user:."].exact_consumers == "unresolved"
+    assert by_dependent["kit-user:."].consumers == ()
