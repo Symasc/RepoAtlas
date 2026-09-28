@@ -58,6 +58,8 @@ class UsesPlan:
 
     scope: UsesScope
     edges: tuple[EdgeRecord, ...] = ()
+    #: (consumer file, file whose export table its uses read), for every file in scope.
+    reads: tuple[tuple[int, int], ...] = ()
     work: UsesWork = field(default_factory=UsesWork)
 
 
@@ -138,15 +140,21 @@ def plan_uses(
         )
 
     consumers = {claim.file_id for claim in uses}
+    reads = tuple(
+        (consumer, read)
+        for consumer in sorted(resolver.reads)
+        for read in sorted(resolver.reads[consumer])
+    )
     work = UsesWork(
         mode="global" if scope.files is None else "incremental",
         reason=scope.reason,
         files_invalidated=len(consumers) if scope.files is None else len(scope.files),
         claims_examined=len(uses),
         claims_resolved=len(edges),
+        reads_written=len(reads),
         repositories_touched=len({by_id[f].repo_id for f in consumers if f in by_id}),
     )
-    return UsesPlan(scope=scope, edges=tuple(edges), work=work)
+    return UsesPlan(scope=scope, edges=tuple(edges), reads=reads, work=work)
 
 
 def apply_uses(knowledge: SqliteKnowledgeStore, plan: UsesPlan, *, producer: str) -> UsesApplied:
@@ -155,6 +163,7 @@ def apply_uses(knowledge: SqliteKnowledgeStore, plan: UsesPlan, *, producer: str
     with knowledge.transaction():
         deleted = knowledge.delete_use_edges(producer, files)
         knowledge.add_edges(plan.edges)
+        knowledge.replace_use_reads(files, plan.reads)
         knowledge.set_uses_links_state(COMPLETE)
         edges = knowledge.count_use_edges(producer)
         claims = knowledge.count_use_claims()

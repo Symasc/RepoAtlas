@@ -790,6 +790,28 @@ class SqliteKnowledgeStore:
                 )
             return removed
 
+    def replace_use_reads(
+        self, file_ids: Sequence[int] | None, reads: Sequence[tuple[int, int]]
+    ) -> None:
+        """Record which export tables these files' uses read, replacing what they read before.
+
+        ``reads`` holds (consumer file, file whose export table it read) pairs, and
+        ``file_ids`` the consumers they replace -- every consumer when ``None``.
+        """
+        with self._db.transaction() as conn:
+            if file_ids is None:
+                conn.execute("DELETE FROM use_reads")
+            else:
+                for chunk in _chunks(sorted(set(file_ids))):
+                    placeholders = ",".join("?" * len(chunk))
+                    conn.execute(
+                        f"DELETE FROM use_reads WHERE file_id IN ({placeholders})",  # noqa: S608 - placeholders are generated counts, values are bound
+                        tuple(chunk),
+                    )
+            conn.executemany(
+                "INSERT INTO use_reads (file_id, read_file_id) VALUES (?, ?)", list(reads)
+            )
+
     def count_use_edges(self, parser: str) -> int:
         """``USES`` edges ``parser`` wrote: one per claim it resolved."""
         row = self._db.execute(

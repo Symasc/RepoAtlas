@@ -46,6 +46,19 @@ def use_snapshot(workspace: Workspace) -> list[str]:
     return sorted(json.dumps(edge, sort_keys=True) for edge in use_edges(workspace))
 
 
+def read_snapshot(workspace: Workspace) -> list[tuple[str, str]]:
+    """``use_reads`` as (consumer, file whose export table it read), each ``repo:path``."""
+    rows = workspace.database.execute(
+        """
+        SELECT cr.slug || ':' || c.rel_path AS consumer, rr.slug || ':' || r.rel_path AS read
+        FROM use_reads u
+        JOIN files c ON c.id = u.file_id JOIN repositories cr ON cr.id = c.repo_id
+        JOIN files r ON r.id = u.read_file_id JOIN repositories rr ON rr.id = r.repo_id
+        """
+    ).fetchall()
+    return sorted((row["consumer"], row["read"]) for row in rows)
+
+
 def edit(root: Path, repo: str, path: str, text: str) -> None:
     """Replace one file's content."""
     target = root / repo / path
