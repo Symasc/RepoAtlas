@@ -56,6 +56,7 @@ import json
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -155,6 +156,7 @@ def _join(directory: str, path: str) -> str | None:
     return _normalize(f"{directory}/{path}" if directory else path)
 
 
+@lru_cache(maxsize=1 << 16)
 def _parent(rel_path: str) -> str:
     parent = str(PurePosixPath(rel_path).parent)
     return "" if parent == "." else parent
@@ -233,6 +235,13 @@ class ModuleResolver:
         self._workspaces: dict[int, list[_Workspace]] = defaultdict(list)
         self._reexports: dict[int, list[_Reexport]] = defaultdict(list)
         self._effective: dict[tuple[int, str], dict[str, Any]] = {}
+        #: What each (repository, directory, specifier) resolved to in this pass. A
+        #: specifier's target depends on the importing file only through its repository and
+        #: its directory: relative paths are joined to the directory, the project config is
+        #: the nearest one above it, and the workspace is the innermost one holding it.
+        self._resolved: dict[tuple[int, str, str], ModuleTarget | None] = {}
+        self._build_dirs_of: dict[tuple[int, str], list[tuple[str, str]]] = {}
+        self._source_roots: dict[tuple[int, str], tuple[str, str] | None] = {}
         self._traced: dict[tuple[int, str], Definition | None] = {}
         #: Re-export steps taken by the current lookup, and by all lookups so far.
         self._steps = 0
@@ -304,6 +313,12 @@ class ModuleResolver:
 
     def resolve(self, origin: FileRow, specifier: str) -> ModuleTarget | None:
         """The indexed file a specifier written in ``origin`` names, or ``None``."""
+        key = (origin.repo_id, _parent(origin.rel_path), specifier)
+        if key not in self._resolved:
+            self._resolved[key] = self._resolve(origin, specifier)
+        return self._resolved[key]
+
+    def _resolve(self, origin: FileRow, specifier: str) -> ModuleTarget | None:
         if not specifier or "$" in specifier or "{" in specifier:
             return None
         if specifier.startswith((".", "/")):
@@ -569,6 +584,12 @@ class ModuleResolver:
 
     def _source_root(self, repo_id: int, directory: str) -> tuple[str, str] | None:
         """The one source root the package's own tsconfig names, and which option named it."""
+        key = (repo_id, directory)
+        if key not in self._source_roots:
+            self._source_roots[key] = self._find_source_root(repo_id, directory)
+        return self._source_roots[key]
+
+    def _find_source_root(self, repo_id: int, directory: str) -> tuple[str, str] | None:
         roots: set[tuple[str, str]] = set()
         for config in sorted({*self._tsconfigs.get(repo_id, {}), *self._includes.get(repo_id, {})}):
             if _parent(config) != directory:
@@ -623,6 +644,12 @@ class ModuleResolver:
 
     def _build_dirs(self, repo_id: int, directory: str) -> list[tuple[str, str]]:
         """(outDir, rootDir) pairs declared by the package's own tsconfig files."""
+        key = (repo_id, directory)
+        if key not in self._build_dirs_of:
+            self._build_dirs_of[key] = self._find_build_dirs(repo_id, directory)
+        return self._build_dirs_of[key]
+
+    def _find_build_dirs(self, repo_id: int, directory: str) -> list[tuple[str, str]]:
         pairs = set()
         for config in self._tsconfigs.get(repo_id, {}):
             if _parent(config) != directory:

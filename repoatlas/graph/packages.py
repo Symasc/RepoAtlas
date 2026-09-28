@@ -32,6 +32,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -76,6 +77,7 @@ class _Declaration:
     constraint: str | None
 
 
+@lru_cache(maxsize=1 << 16)
 def _parent(rel_path: str) -> str:
     parent = str(PurePosixPath(rel_path).parent)
     return "" if parent == "." else parent
