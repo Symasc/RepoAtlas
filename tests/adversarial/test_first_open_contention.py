@@ -401,6 +401,7 @@ def test_simultaneous_first_opens_of_a_new_database_all_succeed(index: Path, cou
     assert {r["integrity"] for r in results} == {"ok"}
 
 
+@pytest.mark.timing
 def test_a_lock_released_before_the_deadline_is_waited_out(index: Path) -> None:
     """§10: a millisecond-scale race is a wait, not an error.
 
@@ -515,6 +516,7 @@ def test_an_ordinary_open_of_a_healthy_index_never_writes_the_header(index: Path
     assert f"PRAGMA journal_mode = {WAL}" not in statements, statements
 
 
+@pytest.mark.timing
 def test_a_healthy_index_opens_immediately_while_another_process_writes(index: Path) -> None:
     """The consequence of the previous test, measured rather than inspected.
 
@@ -534,6 +536,7 @@ def test_a_healthy_index_opens_immediately_while_another_process_writes(index: P
 # == 3. busy-handler semantics, measured =====================================
 
 
+@pytest.mark.timing
 def test_the_busy_timeout_does_not_cover_the_journal_mode_transition(index: Path) -> None:
     """The measurement the whole design rests on, kept executable.
 
@@ -559,6 +562,7 @@ def test_the_busy_timeout_does_not_cover_the_journal_mode_transition(index: Path
     assert elapsed < 1.0, f"the busy handler ran for {elapsed:.2f}s after all"
 
 
+@pytest.mark.timing
 def test_an_ordinary_write_does_get_the_busy_timeout(index: Path) -> None:
     """The control for the test above. Without it, "SQLite ignores the timeout"
     would read as a general claim, and the design would be aimed at the wrong
@@ -653,6 +657,7 @@ def test_a_refused_wal_database_gains_nothing_in_its_sidecars(index: Path) -> No
 
 
 @pytest.mark.parametrize("name,prepare", USABLE, ids=[n for n, _ in USABLE])
+@pytest.mark.timing
 def test_a_lock_held_past_the_timeout_is_a_diagnostic_not_a_traceback(
     index: Path, name: str, prepare: Shape
 ) -> None:
@@ -770,6 +775,7 @@ def test_a_migration_failure_that_mentions_a_lock_is_not_contention(index: Path)
         connection.close()
 
 
+@pytest.mark.timing
 def test_a_read_only_index_fails_at_once_rather_than_waiting(index: Path) -> None:
     """§ read-only: nothing improves by waiting ten seconds to say the same thing.
 
@@ -792,6 +798,7 @@ def test_a_read_only_index_fails_at_once_rather_than_waiting(index: Path) -> Non
     assert elapsed < 2.0, f"a read-only index took {elapsed:.2f}s to refuse"
 
 
+@pytest.mark.timing
 def test_an_unreachable_index_path_fails_at_once(index: Path) -> None:
     """The same principle for a path fault rather than a permission one."""
     unreachable = index.parent / "missing" / "index.db"

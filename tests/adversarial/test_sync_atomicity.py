@@ -586,6 +586,7 @@ def test_a_terminated_writer_does_not_strand_the_lock(
     assert integrity(database) == ("ok", 0)
 
 
+@pytest.mark.timing
 def test_a_reader_does_not_need_the_writer_lock(
     cli_workspace: tuple[Path, Path, dict[str, str]],
 ) -> None:
@@ -604,6 +605,7 @@ def test_a_reader_does_not_need_the_writer_lock(
             assert elapsed < 20.0, (command, elapsed)
 
 
+@pytest.mark.timing
 def test_the_second_writer_waits_when_a_timeout_allows_it(tmp_path: Path) -> None:
     """The bounded wait is the default; a contending run is not simply rejected."""
     from repoatlas.errors import SyncInProgressError

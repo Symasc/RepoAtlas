@@ -665,6 +665,7 @@ def test_the_oracle_shows_tilde_minus_depends_on_shell_state() -> None:
 
 
 @pytest.mark.slow
+@pytest.mark.timing
 def test_tilde_detection_does_not_change_parse_cost() -> None:
     """§40. One tree lookup per word, on words the parser already visits."""
     plain = "".join(f"./tool{i}.sh\n" for i in range(1000))
