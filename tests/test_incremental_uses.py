@@ -80,10 +80,14 @@ def test_i0_a_use_gets_the_same_answer_whatever_was_resolved_before_it(
     assert SHALLOW in found
     assert DEEP not in found
 
-    # Re-indexing deep.ts alone puts its claim after shallow.ts's, so the pass now reaches
-    # the seven hops shallow.ts already traced before it reaches deep.ts's own thirteen.
+    # Re-indexing deep.ts puts its claim after shallow.ts's. Touching c13.ts too, where
+    # shallow.ts's use lands and deep.ts's never reaches, makes the pass resolve both files
+    # again -- shallow.ts first, by claim order -- so deep.ts's trace meets the seven hops
+    # shallow.ts's just walked, before its own thirteen.
     append(root, "chain", "deep.ts", "// touched\n")
-    sync_all(workspace, root)
+    append(root, "chain", "chain/c13.ts", "// touched\n")
+    work = sync_all(workspace, root)
+    assert (work.mode, work.own, work.landed) == ("incremental", 2, 1)
 
     incremental = use_snapshot(workspace)
     with fresh_index(settings, root, tmp_path, "fresh") as fresh:
@@ -181,6 +185,13 @@ def test_i3_a_barrel_change_re_resolves_the_files_that_read_it(
     # every reader of b.ts: its export * branch was searched even where it held nothing
     assert (work.own, work.readers, work.repository) == (1, 3, 0)
     assert_equals_fresh(mono, settings, root, tmp_path, "fresh-ambiguous")
+
+    # The barrel stops re-exporting b.ts wholesale: Beta is no longer reachable through it.
+    _replace(root, "mono", f"{KIT}/index.ts", 'export * from "./b";\n', "")
+    work = sync_all(mono, root)
+    assert not any(target == f"{KIT}/b.ts#Beta" for _, target, _ in uses(mono))
+    assert (work.own, work.readers, work.repository) == (1, 3, 0)
+    assert_equals_fresh(mono, settings, root, tmp_path, "fresh-star")
     assert use_edge_rows(mono, f"{WEB}/unrelated.ts") == unrelated
 
 
@@ -315,22 +326,28 @@ def test_i10_an_export_change_in_the_provider_reaches_its_reader_in_another_repo
 # -- I8, I9: files come and go, and files nothing uses -----------------------------------
 
 
-def test_i8_deleting_and_adding_files_re_resolves_their_repository(
+def test_i8_adding_deleting_and_renaming_files_re_resolves_their_repository(
     mono: Workspace, settings: Settings, tmp_path: Path
 ) -> None:
     root = tmp_path / "repos"
-    (root / "mono" / KIT / "a.ts").unlink()
-    (root / "mono" / KIT / "b.ts").rename(root / "mono" / KIT / "b2.ts")
-    # the file consumer.ts has imported all along, which no trace could read
+    # The file consumer.ts has imported all along. No trace read it and no use landed in
+    # it, so only the file set says consumer.ts must be resolved again.
     edit(root, "mono", f"{WEB}/fresh.ts", "export const Fresh = 11;\n")
     work = sync_all(mono, root)
-
-    found = uses(mono)
-    assert not any(target.startswith(f"{KIT}/a.ts#") for _, target, _ in found)
-    assert _use(f"{CONSUMER}#useBeta", f"{KIT}/b.ts#Beta") not in found
-    assert _use(f"{CONSUMER}#useFresh", f"{WEB}/fresh.ts#Fresh") in found
+    assert _use(f"{CONSUMER}#useFresh", f"{WEB}/fresh.ts#Fresh") in uses(mono)
     assert (work.mode, work.repositories_invalidated) == ("incremental", 1)
-    assert_equals_fresh(mono, settings, root, tmp_path, "fresh")
+    assert_equals_fresh(mono, settings, root, tmp_path, "fresh-added")
+
+    (root / "mono" / KIT / "a.ts").unlink()
+    work = sync_all(mono, root)
+    assert not any(target.startswith(f"{KIT}/a.ts#") for _, target, _ in uses(mono))
+    assert (work.mode, work.repositories_invalidated) == ("incremental", 1)
+    assert_equals_fresh(mono, settings, root, tmp_path, "fresh-deleted")
+
+    (root / "mono" / KIT / "b.ts").rename(root / "mono" / KIT / "b2.ts")
+    work = sync_all(mono, root)
+    assert _use(f"{CONSUMER}#useBeta", f"{KIT}/b.ts#Beta") not in uses(mono)
+    assert_equals_fresh(mono, settings, root, tmp_path, "fresh-renamed")
 
 
 def test_i9_an_unrelated_edit_leaves_every_other_use_untouched(
