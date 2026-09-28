@@ -66,6 +66,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from repoatlas.dependencies.normalize import NPM, normalize
+from repoatlas.graph.declared import REFUSED_AS, TargetKind, classify_dependency_target
 from repoatlas.graph.resolution import ResolutionIndex, _normalize
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION, PACKAGE, TSCONFIG, WORKSPACE
@@ -90,11 +91,6 @@ _INCLUDE_TAIL = re.compile(r"(/\*\*)?(/\*[^/]*)?/?$")
 _OUTPUT_SUFFIXES = (".d.mts", ".d.cts", ".d.ts", ".mjs", ".cjs", ".jsx", ".js")
 _SOURCE_SUFFIXES = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
 _JS_TO_TS = {".js": (".ts", ".tsx"), ".mjs": (".mts",), ".cjs": (".cts",), ".jsx": (".tsx",)}
-
-#: Declarations that name a directory, read from the declaring manifest's directory.
-_PATH_PROTOCOLS = frozenset({"file", "link", "portal"})
-#: A version, never a location: a ``catalog:`` entry is a range kept in the workspace file.
-_VERSION_PROTOCOLS = frozenset({"catalog"})
 
 #: What each package every manifest declares asks for, by (repository, manifest directory).
 Declared = Mapping[tuple[int, str], Mapping[str, tuple[str, ...]]]
@@ -831,38 +827,16 @@ def declared_against(constraint: str, wanted: str, manifest: str, member: str) -
 
     ``manifest`` is the declaring manifest's directory and ``member`` the member's, both
     repository-relative. ``None`` when the declaration names the member, or only a version
-    of it: a range, a tag, ``workspace:*``/``^``/``~``/a range, a ``catalog:`` entry, or
-    an alias spelling the same name. Otherwise ``dependency-aliased`` (``npm:`` or a
-    ``workspace:`` alias of another name), ``dependency-elsewhere`` (a path to another
-    directory -- including one outside the repository, which may well hold a package,
-    only never this member -- or a remote source) or ``dependency-unreadable``.
+    of it (:func:`~repoatlas.graph.declared.classify_dependency_target`). Otherwise
+    ``dependency-aliased`` (``npm:`` or a ``workspace:`` alias of another name),
+    ``dependency-elsewhere`` (a path to another directory -- including one outside the
+    repository, which may well hold a package, only never this member -- or a remote
+    source) or ``dependency-unreadable``.
     """
-    protocol, colon, rest = constraint.partition(":")
-    if not colon:
-        if constraint.startswith((".", "/", "~/")):
-            return _elsewhere(manifest, constraint, member)
-        # `owner/repo` is a remote source; a range or a tag never holds a slash
-        return "dependency-elsewhere" if "/" in constraint else None
-    if protocol in _VERSION_PROTOCOLS:
-        return None
-    if protocol == "npm":
-        return None if _alias_name(rest) == wanted else "dependency-aliased"
-    if protocol in _PATH_PROTOCOLS:
-        return _elsewhere(manifest, rest, member)
-    if protocol != "workspace":
-        return "dependency-elsewhere"
-    if rest.startswith((".", "/")):
-        return _elsewhere(manifest, rest, member)
-    if "@" in rest[1:]:
-        return None if _alias_name(rest) == wanted else "dependency-aliased"
-    return "dependency-unreadable" if "/" in rest or ":" in rest else None
-
-
-def _alias_name(value: str) -> str:
-    """The package ``pkg@range``, ``@scope/pkg@range`` or ``pkg`` names, normalized."""
-    scoped = value.startswith("@")
-    name = value[1:].partition("@")[0] if scoped else value.partition("@")[0]
-    return normalize(NPM, f"@{name}" if scoped else name)
+    target = classify_dependency_target(constraint, wanted)
+    if target.kind is TargetKind.PATH:
+        return _elsewhere(manifest, target.path or "", member)
+    return REFUSED_AS.get(target.kind)
 
 
 def _elsewhere(manifest: str, path: str, member: str) -> str | None:
