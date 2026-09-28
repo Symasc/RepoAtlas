@@ -45,17 +45,21 @@ def impact(workspace: Workspace, seed: str, **options: object) -> ImpactResponse
     request = ImpactRequest(context=GLOBAL, seed=seed, **options)  # type: ignore[arg-type]
     response = CapabilityService(workspace).impact(request)
     verify_steps(workspace, response)
-    ids = [c.id for c in response.candidates]
+    returned = [*response.candidates, *response.tests]
+    ids = sorted(c.id for c in returned)
     assert ids == list(range(1, len(ids) + 1))
-    # closed: every predecessor is returned, and ranks before what it leads to
-    assert all(c.from_ < c.id for c in response.candidates)
+    # closed: every predecessor is returned, as a candidate, and ranks before its successor
+    candidate_ids = {c.id for c in response.candidates}
+    assert all(c.from_ < c.id and (c.from_ == 0 or c.from_ in candidate_ids) for c in returned)
     return response
 
 
-def shape(response: ImpactResponse) -> list[tuple[int, str, str, str, str]]:
+def shape(
+    response: ImpactResponse, section: str = "candidates"
+) -> list[tuple[int, str, str, str, str]]:
     return [
         (c.from_, c.entity, c.role.value, c.basis, str(c.step.edge or c.step.derived))
-        for c in response.candidates
+        for c in getattr(response, section)
     ]
 
 

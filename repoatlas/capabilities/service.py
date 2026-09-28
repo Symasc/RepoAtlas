@@ -90,7 +90,7 @@ from repoatlas.capabilities.errors import (
 )
 from repoatlas.capabilities.evidence_shaping import LINE_SEPARATOR
 from repoatlas.capabilities.impact import POLICY as IMPACT_POLICY
-from repoatlas.capabilities.impact import SeedResolver, assemble, seed_nodes
+from repoatlas.capabilities.impact import Assembled, SeedResolver, assemble, seed_nodes
 from repoatlas.capabilities.indexed_source import WHOLE_FILE_END, indexed_line_map
 from repoatlas.capabilities.inspection import (
     ShapedInspection,
@@ -153,7 +153,7 @@ from repoatlas.graph.impact import ImpactWalk
 from repoatlas.graph.keys import is_positional
 from repoatlas.graph.linker import plan_repository_http
 from repoatlas.graph.traversal import CROSS_REPOSITORY_EDGES, WalkResult, WalkStep, walk
-from repoatlas.graph.units import package_directories
+from repoatlas.graph.units import package_directories, unit_of
 from repoatlas.grounding import GroundingReport, ground_answer
 from repoatlas.indexing.chunking import chunk_hash
 from repoatlas.models.capability import (
@@ -193,7 +193,6 @@ from repoatlas.models.http_inventory import (
     OperationBasis,
 )
 from repoatlas.models.impact import (
-    ImpactCandidate,
     ImpactOmitted,
     ImpactRequest,
     ImpactResponse,
@@ -969,9 +968,7 @@ class CapabilityService:
             )
             scope = {repo.slug: repo.id for repo in resolution.repositories if repo.id is not None}
             slugs = {repo.id: repo.slug for repo in registered if repo.id is not None}
-            candidates: tuple[ImpactCandidate, ...] = ()
-            omitted = ImpactOmitted()
-            summary = ImpactSummary(policy=IMPACT_POLICY)
+            answer: Assembled | None = None
             # The seed, the walk and every row it reads are one indexed snapshot.
             with self._workspace.database.read_snapshot():
                 seeds = SeedResolver(self._workspace.knowledge, self._workspace.search, scope)
@@ -982,21 +979,28 @@ class CapabilityService:
                         # A shared seed (an environment variable, a route) walked from
                         # inside one repository stays in it.
                         home = resolution.primary.id if resolution.primary else None
-                    walk = ImpactWalk(self._workspace.knowledge, slugs)
+                    manifests = self._workspace.knowledge.provided_manifests(sorted(slugs.values()))
+                    directories = {
+                        slug: package_directories(paths) for slug, paths in manifests.items()
+                    }
+                    walk = ImpactWalk(
+                        self._workspace.knowledge,
+                        slugs,
+                        unit=lambda key, slug, path: unit_of(key, slug, path, directories),
+                    )
                     starts, members = seed_nodes(seed, walk, home)
                     walked = walk.run(starts, members)
-                    manifests = self._workspace.knowledge.provided_manifests(sorted(slugs.values()))
-                    candidates, omitted, summary = assemble(
+                    answer = assemble(
                         walked,
                         walk,
                         max_candidates=request.max_candidates,
                         full=request.presentation is Presentation.FULL,
-                        directories={
-                            slug: package_directories(paths) for slug, paths in manifests.items()
-                        },
+                        directories=directories,
                     )
+            candidates = answer.candidates if answer is not None else ()
+            tests = answer.tests if answer is not None else ()
             facts = current_facts_version(self._workspace)
-            drawn = {c.repository for c in candidates if c.repository}
+            drawn = {c.repository for c in (*candidates, *tests) if c.repository}
             if seed.model.repository:
                 drawn.add(seed.model.repository)
             covered = self._covering_repositories(resolution, sorted(drawn))
@@ -1018,8 +1022,13 @@ class CapabilityService:
                 ),
                 seed=seed.model,
                 candidates=candidates,
-                omitted=omitted,
-                summary=summary,
+                tests=tests,
+                hubs=answer.hubs if answer is not None else (),
+                unresolved=answer.unresolved if answer is not None else (),
+                omitted=answer.omitted if answer is not None else ImpactOmitted(),
+                summary=answer.summary
+                if answer is not None
+                else ImpactSummary(policy=IMPACT_POLICY),
                 freshness=freshness,
             )
 

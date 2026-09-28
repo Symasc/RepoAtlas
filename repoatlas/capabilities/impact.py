@@ -26,12 +26,13 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
-from repoatlas.graph.impact import ImpactWalk, Node, Tier, WalkResult
+from repoatlas.graph.impact import ImpactWalk, Node, Tier, WalkResult, is_test_path
 from repoatlas.graph.keys import file_key
 from repoatlas.graph.units import package_directories, unit_of
 from repoatlas.models.impact import (
     MAX_SEED_CANDIDATES,
     Granularity,
+    HubImpact,
     ImpactCandidate,
     ImpactOmitted,
     ImpactRole,
@@ -42,9 +43,14 @@ from repoatlas.models.impact import (
     SeedBasis,
     SeedCandidate,
     SeedStatus,
+    UnresolvedImpact,
 )
 from repoatlas.models.parsing import EntityType
-from repoatlas.storage.protocols import EntityIdentity, KnowledgeStore, SearchIndex
+from repoatlas.storage.protocols import (
+    EntityIdentity,
+    KnowledgeStore,
+    SearchIndex,
+)
 
 #: The traversal policy's name and version, reported with every answer.
 POLICY = "impact/1"
@@ -359,6 +365,52 @@ def display(node: Node) -> str:
     return node.qualified_name or node.name
 
 
+#: Section quotas: the most of each kind one answer lists; the rest are counted.
+MAX_TESTS = 10
+MAX_HUBS = 5
+MAX_UNRESOLVED = 5
+UNRESOLVED_READING = "imports it by name; no declaration-level use of it is indexed"
+
+
+@dataclass(slots=True)
+class Assembled:
+    candidates: tuple[ImpactCandidate, ...]
+    tests: tuple[ImpactCandidate, ...]
+    hubs: tuple[HubImpact, ...]
+    unresolved: tuple[UnresolvedImpact, ...]
+    omitted: ImpactOmitted
+    summary: ImpactSummary
+
+
+def _round_robin(nodes: Sequence[Node], unit: Callable[[Node], str]) -> list[Node]:
+    """Rank order, except that within each tier the units take turns.
+
+    One large part of a monorepo -- whichever sorts first -- would otherwise fill an
+    answer before any other part the change reaches appears.
+    """
+    order: list[Node] = []
+    for tier in sorted({n.tier for n in nodes}):
+        queues: dict[str, list[Node]] = {}
+        for node in (n for n in nodes if n.tier == tier):
+            queues.setdefault(unit(node), []).append(node)
+        while queues:
+            for name in list(queues):
+                order.append(queues[name].pop(0))
+                if not queues[name]:
+                    del queues[name]
+    return order
+
+
+def _is_unresolved(node: Node) -> bool:
+    """A file that imports a name and has no indexed declaration-level use of it."""
+    return (
+        node.type is EntityType.FILE
+        and node.step is not None
+        and node.step.family == "references"
+        and not node.whole
+    )
+
+
 def assemble(
     result: WalkResult,
     walk: ImpactWalk,
@@ -366,48 +418,70 @@ def assemble(
     max_candidates: int,
     full: bool,
     directories: Mapping[str, Sequence[str]],
-) -> tuple[tuple[ImpactCandidate, ...], ImpactOmitted, ImpactSummary]:
-    """The ranked candidates, closed under their paths, and what was left out, counted."""
-    ranked = sorted(result.reached.values(), key=lambda n: n.rank)
-    selected: dict[int, Node] = {}
-    cut: list[Node] = []
-    for node in ranked:
-        if node.role is ImpactRole.MEMBER:
-            continue  # a member is returned only as a step on some candidate's path
-        need = [a for a in reversed(node.ancestors()) if a.entity_id not in selected]
-        need.append(node)
-        if len(selected) + len(need) > max_candidates:
-            cut.append(node)
-            continue
-        for item in need:
-            assert item.entity_id is not None
-            selected[item.entity_id] = item
-    ordered = sorted(selected.values(), key=lambda n: n.rank)
-    ids = {node.entity_id: index for index, node in enumerate(ordered, start=1)}
+) -> Assembled:
+    """The ranked, sectioned answer, closed under its paths, and what was left out, counted."""
 
     def unit(node: Node) -> str:
         return unit_of(node.key, walk.slug_of(node.repo_id), node.path, directories)
 
+    ranked = sorted(result.reached.values(), key=lambda n: n.rank)
+    selected: dict[int, Node] = {}
+    cut: list[Node] = []
+
+    def take(node: Node, room: int) -> bool:
+        """Select ``node`` with every predecessor not yet selected, if they fit in ``room``."""
+        need = [a for a in reversed(node.ancestors()) if a.entity_id not in selected]
+        if len(need) + 1 > room:
+            return False
+        for item in [*need, node]:
+            assert item.entity_id is not None
+            selected[item.entity_id] = item
+        return True
+
+    tests = [n for n in ranked if is_test_path(n.path) and n.role is not ImpactRole.MEMBER]
+    loose = [n for n in ranked if _is_unresolved(n) and not is_test_path(n.path)]
+    others = [
+        n
+        for n in ranked
+        if n.role is not ImpactRole.MEMBER and not is_test_path(n.path) and not _is_unresolved(n)
+    ]
+    for node in _round_robin(others, unit):
+        if not take(node, max_candidates - len(selected)):
+            cut.append(node)
+    chosen_tests: list[Node] = []
+    for node in _round_robin(tests, unit):
+        # A test is listed in its own section; the predecessors it needs are candidates
+        # and must fit in what the candidate cap has left.
+        room = max_candidates - (len(selected) - len(chosen_tests)) + 1
+        if len(chosen_tests) < MAX_TESTS and take(node, room):
+            chosen_tests.append(node)
+        else:
+            cut.append(node)
+    listed_loose = [n for n in loose if n.entity_id not in selected][:MAX_UNRESOLVED]
+    cut.extend(n for n in loose if n.entity_id not in selected and n not in listed_loose)
+
+    ordered = sorted(selected.values(), key=lambda n: n.rank)
+    ids = {node.entity_id: index for index, node in enumerate(ordered, start=1)}
+
     def path_of(node: Node) -> list[Node]:
-        chain = [node, *node.ancestors()]
         seed = node
         while seed.parent is not None:
             seed = seed.parent
-        return [seed, *reversed(chain)]
+        return [seed, *reversed(node.ancestors()), node]
 
-    candidates = []
-    for node in ordered:
+    def candidate(node: Node) -> ImpactCandidate:
         nodes = path_of(node)
         boundaries: list[str] = []
         last: str | None = None
         for item in nodes:
-            if item.repo_id is None and item.entity_id is not None:
-                continue  # a shared node belongs to no unit
-            here = (
-                unit(item)
-                if item.entity_id is not None
-                else f"{walk.slug_of(item.repo_id)}:{item.path}/"
-            )
+            if item.entity_id is None:
+                here: str | None = f"{walk.slug_of(item.repo_id)}:{item.path}/"
+            elif item.repo_id is None:
+                here = None  # a shared node belongs to no unit
+            else:
+                here = unit(item)
+            if here is None:
+                continue
             if last is not None and here != last:
                 boundaries.append(f"{last} -> {here}")
             last = here
@@ -415,71 +489,105 @@ def assemble(
         assert step is not None
         row = step.row
         resolution = step.resolution
-        at = None
-        lines = None
+        at, lines = None, None
         if row is not None and row.file_path is not None:
             at = f"{walk.slug_of(row.file_repo_id)}/{row.file_path}"
             if row.line_start is not None:
                 lines = (row.line_start, row.line_end or row.line_start)
         parent = node.parent
-        candidates.append(
-            ImpactCandidate(
-                id=ids[node.entity_id],
-                entity=node.key,
-                type=node.type or EntityType.FILE,
-                name=node.name,
-                repository=walk.slug_of(node.repo_id),
-                path=node.path,
-                lines=node.lines,
-                unit=unit(node),
-                role=node.role,
-                distance=node.distance,
-                from_=ids.get(parent.entity_id, 0) if parent is not None and not parent.seed else 0,
-                step=ImpactStep(
-                    edge=step.edge_type,
-                    derived=step.derived,
-                    reading=step.reading,
-                    use=_text(resolution.get("use")),
-                    at=at,
-                    lines=lines,
-                    parser=row.parser if row is not None else None,
-                    syntax=_text(resolution.get("syntax")),
-                    via=tuple(str(v) for v in _list(resolution.get("via"))),
-                    via_names=tuple(str(v) for v in _list(resolution.get("via_names"))),
-                    resolution=resolution or None if full else None,
-                ),
-                boundaries=tuple(boundaries),
-                basis=_BASIS[node.tier],
-                chain=" -> ".join(
-                    [
-                        display(nodes[0]),
-                        *(f"{display(n)} ({n.step.reading})" for n in nodes[1:] if n.step),
-                    ]
-                ),
-                alt_paths=tuple(
-                    sorted(ids[a.entity_id] for a in node.alternatives if a.entity_id in ids)
-                )
-                if full
-                else (),
+        return ImpactCandidate(
+            id=ids[node.entity_id],
+            entity=node.key,
+            type=node.type or EntityType.FILE,
+            name=node.name,
+            repository=walk.slug_of(node.repo_id),
+            path=node.path,
+            lines=node.lines,
+            unit=unit(node),
+            role=node.role,
+            distance=node.distance,
+            from_=ids.get(parent.entity_id, 0) if parent is not None and not parent.seed else 0,
+            step=ImpactStep(
+                edge=step.edge_type,
+                derived=step.derived,
+                reading=step.reading,
+                use=_text(resolution.get("use")),
+                at=at,
+                lines=lines,
+                parser=row.parser if row is not None else None,
+                syntax=_text(resolution.get("syntax")),
+                via=tuple(str(v) for v in _list(resolution.get("via"))),
+                via_names=tuple(str(v) for v in _list(resolution.get("via_names"))),
+                resolution=(resolution or None) if full else None,
+            ),
+            boundaries=tuple(boundaries),
+            basis=_BASIS[node.tier],
+            chain=" -> ".join(
+                [display(nodes[0])]
+                + [f"{display(n)} ({n.step.reading})" for n in nodes[1:] if n.step is not None]
+            ),
+            alt_paths=tuple(
+                sorted(ids[a.entity_id] for a in node.alternatives if a.entity_id in ids)
             )
+            if full
+            else (),
         )
 
+    chosen_test_ids = {n.entity_id for n in chosen_tests}
+    candidates = tuple(candidate(n) for n in ordered if n.entity_id not in chosen_test_ids)
+    listed_tests = tuple(candidate(n) for n in ordered if n.entity_id in chosen_test_ids)
+
+    hubs = []
+    for node in ordered:
+        hub = result.hubs.get(node.entity_id or -1)
+        if hub is None:
+            continue
+        if len(hubs) == MAX_HUBS:
+            break
+        hubs.append(
+            HubImpact(
+                candidate=ids[node.entity_id],
+                entity=node.key,
+                fanout=hub.fanout,
+                units=dict(sorted(hub.units.items())),
+                units_partial=hub.units_partial,
+                shown=hub.shown,
+                collapsed=hub.collapsed,
+            )
+        )
+    unresolved = tuple(
+        UnresolvedImpact(
+            entity=node.key,
+            reason=f"{UNRESOLVED_READING}: {display(node.parent) if node.parent else ''}",
+            at=f"{walk.slug_of(node.step.row.file_repo_id)}/{node.step.row.file_path}"
+            if node.step is not None and node.step.row is not None and node.step.row.file_path
+            else None,
+            lines=(node.step.row.line_start, node.step.row.line_end or node.step.row.line_start)
+            if node.step is not None and node.step.row is not None and node.step.row.line_start
+            else None,
+        )
+        for node in listed_loose
+    )
+
     by_reason: dict[str, int] = {}
+    by_unit: dict[str, int] = {}
     if cut:
         by_reason["budget"] = len(cut)
+        for node in cut:
+            by_unit[unit(node)] = by_unit.get(unit(node), 0) + 1
+    collapsed = sum(h.collapsed for h in result.hubs.values())
+    if collapsed:
+        by_reason["hub"] = collapsed
     if result.depth_cut:
         by_reason["depth"] = result.depth_cut
     if result.unexpanded or result.members_cut:
         by_reason["work"] = result.unexpanded + (1 if result.members_cut else 0)
-    by_unit: dict[str, int] = {}
-    for node in cut:
-        by_unit[unit(node)] = by_unit.get(unit(node), 0) + 1
-    units = {c.unit for c in candidates if c.unit}
+    returned = [*candidates, *listed_tests]
     summary = ImpactSummary(
         reached=len(result.reached),
-        returned=len(candidates),
-        units=len(units),
-        cross_unit=sum(1 for c in candidates if c.boundaries),
+        returned=len(returned),
+        units=len({c.unit for c in returned if c.unit}),
+        cross_unit=sum(1 for c in returned if c.boundaries),
         complete=result.complete,
         work=ImpactWork(
             expanded=result.work.expanded,
@@ -489,10 +597,13 @@ def assemble(
         ),
         policy=POLICY,
     )
-    return (
-        tuple(candidates),
-        ImpactOmitted(by_reason=by_reason, by_unit=dict(sorted(by_unit.items()))),
-        summary,
+    return Assembled(
+        candidates=candidates,
+        tests=listed_tests,
+        hubs=tuple(hubs),
+        unresolved=unresolved,
+        omitted=ImpactOmitted(by_reason=by_reason, by_unit=dict(sorted(by_unit.items()))),
+        summary=summary,
     )
 
 
