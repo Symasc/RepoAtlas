@@ -814,7 +814,7 @@ def test_the_parser_version_is_ahead_of_the_one_that_lost_the_submodule() -> Non
     does not have to edit this file to stay true, while removing *this* bump
     still fails here.
     """
-    assert int(PythonParser().version) > int(LOSSY_PYTHON_VERSION)
+    assert int(PythonParser().version.partition("+")[0]) > int(LOSSY_PYTHON_VERSION)
 
 
 def test_edits_move_the_edge_and_leave_nothing_stale(tmp_path: Path) -> None:

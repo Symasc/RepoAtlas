@@ -25,6 +25,7 @@ from repoatlas.models.parsing import (
     Severity,
 )
 from repoatlas.parsers.http_python import PythonHttp
+from repoatlas.parsers.interpreter import interpreter_tag
 from repoatlas.parsers.marks import whole_file_span
 
 _SUFFIXES = frozenset({".py", ".pyi"})
@@ -343,7 +344,10 @@ class PythonParser:
     #    makes an ordinary `sync` reparse it and produce the edge (V1_SPEC §12).
     # 4: routes a proven FastAPI or Flask application serves, and requests a
     #    proven `requests` or `httpx` call makes, become HTTP facts.
-    version = "4"
+    # +pyX.Y: `ast` is the running interpreter's, and what it accepts moves with the
+    #    interpreter (repoatlas.parsers.interpreter), so facts parsed by another one
+    #    are never kept.
+    version = f"4+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
