@@ -355,6 +355,137 @@ class NeighborEdge(BaseModel):
         )
 
 
+class Confinement(BaseModel):
+    """Which edges the change-impact walk may follow out of the node it stands on.
+
+    The rule :func:`repoatlas.graph.traversal.walk` applies to the edges it reads,
+    stated as a value. An edge whose two ends belong to different repositories is
+    followed only when its type is in ``crossing``; and under ``home_repo_id``, only
+    when its far end belongs to that repository or to none (a shared node: an
+    environment variable, an HTTP operation, a package). :meth:`admits` is the rule
+    in Python; the bounded neighbour queries render the same rule as SQL, so a count
+    or a page is exact *after* confinement rather than cut before it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    crossing: frozenset[EdgeType] = frozenset()
+    home_repo_id: int | None = None
+    #: Whether a direct crossing edge of an admitted type may leave ``home_repo_id``,
+    #: making the far end's repository the new home (the change-impact walk). Off,
+    #: the home holds against every edge, as it does in ``walk``.
+    crossing_moves_home: bool = False
+
+    def admits(self, edge: NeighborEdge, *, outgoing: bool) -> bool:
+        if edge.crosses_repositories:
+            if edge.type not in self.crossing:
+                return False
+            if self.crossing_moves_home:
+                return True
+        if self.home_repo_id is not None:
+            far = edge.dst_repo_id if outgoing else edge.src_repo_id
+            if far is not None and far != self.home_repo_id:
+                return False
+        return True
+
+
+class NeighborRule(BaseModel):
+    """Edge types followed one way: ``OUT`` from their source, ``IN`` from their target."""
+
+    model_config = ConfigDict(frozen=True)
+
+    edge_types: tuple[EdgeType, ...]
+    direction: EdgeDirection
+    #: Edge types admitted only when the far end is one of the paired entity types.
+    far_types: tuple[tuple[EdgeType, tuple[EntityType, ...]], ...] = ()
+    #: Leave out a file's own file-level ``REFERENCES`` (a named import) or ``CALLS`` (a
+    #: call in a module-scope initializer) to an entity when a declaration in that same
+    #: file (or the file itself) has a ``USES`` edge to it: the declaration-level fact
+    #: says the same thing precisely.
+    uses_replace_file_facts: bool = False
+
+    @property
+    def outgoing(self) -> bool:
+        return self.direction is EdgeDirection.OUT
+
+
+class NeighborCount(BaseModel):
+    """How much one node offers under one rule, counted exactly and fetched not at all."""
+
+    model_config = ConfigDict(frozen=True)
+
+    near_id: int
+    #: Distinct entities at the far end.
+    far: int
+    #: Distinct relationships (the same ends, type, file and lines count once).
+    relationships: int
+
+
+class NeighborCursor(BaseModel):
+    """Where a page stopped, in natural order: continue strictly after it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    type: EdgeType
+    far_key: str
+    file_path: str
+    line_start: int
+    line_end: int
+    edge_id: int
+
+
+class NeighborRow(BaseModel):
+    """One relationship a bounded query returned, with both ends and its provenance."""
+
+    model_config = ConfigDict(frozen=True)
+
+    edge_id: int
+    type: EdgeType
+    near_id: int
+    far_id: int
+    #: Whether the edge was followed from its source (the near end is its source).
+    outgoing: bool
+    far_key: str
+    far_type: EntityType
+    far_name: str
+    far_qualified_name: str | None = None
+    far_repo_id: int | None = None
+    #: The far entity's own file and span, when it is file-scoped.
+    far_file_id: int | None = None
+    far_path: str | None = None
+    far_line_start: int | None = None
+    far_line_end: int | None = None
+    #: The file that asserted the edge, its repository, and where.
+    file_id: int | None = None
+    file_repo_id: int | None = None
+    file_path: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    parser: str | None = None
+    resolution: str | None = None
+
+    @property
+    def cursor(self) -> NeighborCursor:
+        return NeighborCursor(
+            type=self.type,
+            far_key=self.far_key,
+            file_path=self.file_path or "",
+            line_start=self.line_start or 0,
+            line_end=self.line_end or 0,
+            edge_id=self.edge_id,
+        )
+
+
+class NeighborGroup(BaseModel):
+    """How many far entities under one rule live in one file (``path`` ``None``: interned)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    repo_id: int | None
+    path: str | None
+    far: int
+
+
 class EntityDescription(BaseModel):
     """An entity resolved to a citable location (V1_SPEC §11)."""
 
@@ -426,6 +557,33 @@ class KnowledgeStore(Protocol):
         direction: EdgeDirection = EdgeDirection.ANY,
         order: NeighborOrder = NeighborOrder.CONFIDENCE,
     ) -> list[NeighborEdge]: ...
+    def entities_with_key_prefix(
+        self, prefix: str, *, exclude_types: Sequence[EntityType] = (), limit: int
+    ) -> list[EntityIdentity]: ...
+    def impact_counts(
+        self, near_ids: Sequence[int], rule: NeighborRule, confinement: Confinement
+    ) -> dict[int, NeighborCount]: ...
+    def impact_page(
+        self,
+        near_id: int,
+        rule: NeighborRule,
+        confinement: Confinement,
+        *,
+        after: NeighborCursor | None,
+        limit: int,
+    ) -> list[NeighborRow]: ...
+    def impact_distribution(
+        self, near_id: int, rule: NeighborRule, confinement: Confinement, *, max_groups: int
+    ) -> tuple[list[NeighborGroup], bool]: ...
+    def impact_rows_for(
+        self,
+        near_id: int,
+        rule: NeighborRule,
+        confinement: Confinement,
+        *,
+        groups: Sequence[tuple[int | None, str | None]],
+        per_group: int,
+    ) -> list[NeighborRow]: ...
     def get_entities_by_key(self, keys: Sequence[str]) -> list[EntityIdentity]: ...
     def keys_for_entities(self, entity_ids: Sequence[int]) -> dict[int, EntityIdentity]: ...
     def chunks_for_file(self, file_id: int, line_start: int, line_end: int) -> list[ChunkHit]: ...

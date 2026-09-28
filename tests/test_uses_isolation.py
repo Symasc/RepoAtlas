@@ -205,11 +205,10 @@ REVIEWED_EDGE_READS = {
     "list_http_edges": "typed: the HTTP edge types",
     "neighbors": "typed by its caller: the audit below requires edge_types",
     "expand_neighbors": "typed by its caller: the audit below requires edge_types",
-    "build_arg_declarations": "typed: EXPORTS",
-    "count_relationships": "typed: returns 0 for no types",
     "gc_orphan_entities": "maintenance: reference check, no answer",
     "count_edges": "status total: counts every indexed relationship, reads none",
     "_count": "status total: the row count behind count_edges and its siblings",
+    "_impact_scope": "typed: the edge types of an impact rule, confined in SQL",
 }
 
 
