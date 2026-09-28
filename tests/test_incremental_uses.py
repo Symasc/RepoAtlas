@@ -37,6 +37,7 @@ from tests.incremental_corpus import (
     sync_all,
     use_edge_rows,
     use_snapshot,
+    ws_repo,
 )
 
 SHALLOW = ("shallow.ts#useShallow", "chain/c13.ts#Deep", "value")
@@ -60,6 +61,11 @@ def _replace(root: Path, repo: str, path: str, old: str, new: str) -> None:
 @pytest.fixture
 def mono(workspace: Workspace, tmp_path: Path) -> Workspace:
     return build(workspace, tmp_path, {"mono": mono_repo()})
+
+
+@pytest.fixture
+def wsinc(workspace: Workspace, tmp_path: Path) -> Workspace:
+    return build(workspace, tmp_path, {"wsinc": ws_repo()})
 
 
 @pytest.fixture
@@ -422,3 +428,119 @@ def test_i12_edges_not_known_complete_are_all_resolved_again(
     work = sync_all(mono, root)
     assert (work.mode, work.reason) == ("global", reason)
     assert sync_all(mono, root).mode == "incremental"
+
+
+# -- I13-I18: a workspace member mapped from build output ---------------------------------
+
+BACKEND = "packages/backend"
+HANDLE = "apps/api/src/handler.ts#handle"
+NORMALIZE = _use(HANDLE, f"{BACKEND}/src/errors.ts#normalizeError", "call")
+CLAIMS = _use(HANDLE, f"{BACKEND}/src/claims.ts#Claims", "type")
+
+
+def _backend_uses(workspace: Workspace) -> set[tuple[str, str, str]]:
+    return {use for use in uses(workspace) if use[0] == HANDLE}
+
+
+def test_the_member_is_resolved_from_build_output_before_any_edit(wsinc: Workspace) -> None:
+    assert _backend_uses(wsinc) == {NORMALIZE, CLAIMS}
+
+
+def test_i13_moving_an_exported_subpath_moves_its_consumers(
+    wsinc: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    moved = json.loads(ws_repo()["packages/backend/package.json"])
+    moved["exports"]["./claims"] = {"import": "./dist/claims-v2.js"}
+    edit(root, "wsinc", f"{BACKEND}/package.json", json.dumps(moved, indent=2) + "\n")
+    work = sync_all(wsinc, root)
+    assert _backend_uses(wsinc) == {
+        NORMALIZE,
+        _use(HANDLE, f"{BACKEND}/src/claims-v2.ts#Claims", "type"),
+    }
+    assert (work.mode, work.repositories_invalidated) == ("incremental", 1)
+    assert work.repository == len(ws_repo())
+    assert_equals_fresh(wsinc, settings, root, tmp_path, "fresh")
+
+
+def test_i14_a_new_source_root_maps_build_output_somewhere_else(
+    wsinc: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    _replace(root, "wsinc", f"{BACKEND}/tsconfig.json", "src/**/*", "lib/**/*")
+    work = sync_all(wsinc, root)
+    # lib has no index: the root entry now maps to nothing, the subpath to lib
+    assert _backend_uses(wsinc) == {_use(HANDLE, f"{BACKEND}/lib/claims.ts#Claims", "type")}
+    assert (work.mode, work.repositories_invalidated) == ("incremental", 1)
+    assert_equals_fresh(wsinc, settings, root, tmp_path, "fresh")
+
+
+def test_i15_renaming_or_doubling_the_mapped_source_re_resolves_the_repository(
+    wsinc: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    src = root / "wsinc" / BACKEND / "src"
+    (src / "claims.ts").rename(src / "claims-old.ts")
+    work = sync_all(wsinc, root)
+    assert _backend_uses(wsinc) == {NORMALIZE}
+    assert (work.mode, work.repositories_invalidated) == ("incremental", 1)
+    assert_equals_fresh(wsinc, settings, root, tmp_path, "fresh-renamed")
+
+    (src / "claims-old.ts").rename(src / "claims.ts")
+    edit(root, "wsinc", f"{BACKEND}/src/claims/index.ts", "export interface Claims {}\n")
+    sync_all(wsinc, root)
+    # two source files answer dist/claims.js: the subpath names neither
+    assert _backend_uses(wsinc) == {NORMALIZE}
+    assert_equals_fresh(wsinc, settings, root, tmp_path, "fresh-doubled")
+
+
+def test_i16_leaving_the_workspace_and_coming_back(
+    wsinc: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    globs = '  - "packages/*"\n'
+    _replace(root, "wsinc", "pnpm-workspace.yaml", globs, globs + '  - "!packages/backend"\n')
+    work = sync_all(wsinc, root)
+    assert _backend_uses(wsinc) == set()
+    assert (work.mode, work.repositories_invalidated) == ("incremental", 1)
+    assert_equals_fresh(wsinc, settings, root, tmp_path, "fresh-excluded")
+
+    _replace(root, "wsinc", "pnpm-workspace.yaml", '  - "!packages/backend"\n', "")
+    sync_all(wsinc, root)
+    assert _backend_uses(wsinc) == {NORMALIZE, CLAIMS}
+    assert_equals_fresh(wsinc, settings, root, tmp_path, "fresh-restored")
+
+
+def test_i17_a_declaration_aliased_away_refuses_the_member_and_back_again(
+    wsinc: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    manifest = "apps/api/package.json"
+    _replace(root, "wsinc", manifest, '"workspace:*"', '"npm:@inc/other@1.0.0"')
+    work = sync_all(wsinc, root)
+    assert _backend_uses(wsinc) == set()
+    # a declaration is no module-resolution fact: its own repository, through its packages
+    assert (work.mode, work.repositories_invalidated, work.repository) == (
+        "incremental",
+        1,
+        len(ws_repo()),
+    )
+    assert_equals_fresh(wsinc, settings, root, tmp_path, "fresh-aliased")
+
+    _replace(root, "wsinc", manifest, '"npm:@inc/other@1.0.0"', '"workspace:^"')
+    sync_all(wsinc, root)
+    assert _backend_uses(wsinc) == {NORMALIZE, CLAIMS}
+    assert_equals_fresh(wsinc, settings, root, tmp_path, "fresh-restored")
+
+
+def test_i18_an_unrelated_edit_beside_a_member_s_consumer_stays_its_own(
+    wsinc: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    before = use_edge_rows(wsinc, "apps/api/src/handler.ts")
+    append(root, "wsinc", "apps/api/src/quiet.ts", "export function louder() {\n  return 2;\n}\n")
+    work = sync_all(wsinc, root)
+    assert (work.mode, work.files_invalidated, work.own) == ("incremental", 1, 1)
+    assert (work.landed, work.readers, work.repository, work.package) == (0, 0, 0, 0)
+    assert use_edge_rows(wsinc, "apps/api/src/handler.ts") == before
+    assert_equals_fresh(wsinc, settings, root, tmp_path, "fresh")
