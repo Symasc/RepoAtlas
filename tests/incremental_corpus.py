@@ -15,6 +15,10 @@ task; every file states the relationship it exists to prove.
   import of a file that does not exist yet. ``later.ts`` uses ``Later``, which ``a.ts``
   declares below a function whose body an edit grows; ``other.ts`` uses only ``Beta``, so
   it reads ``a.ts`` and lands in ``b.ts``; ``unrelated.ts`` uses nothing.
+* ``wsinc`` (I13-I18): a workspace whose package ``@inc/backend`` names every entry in
+  build output that is not indexed, mapped back through the one source root its tsconfig
+  ``include`` names, and an app that uses it at the root and at a wildcard subpath.
+  ``lib/claims.ts`` is what the subpath maps to once ``include`` names ``lib`` instead.
 * ``provider`` and ``consumer`` (I6, I7, I10): a package another repository declares and
   uses, at its root entry, through a renamed re-export, and at a ``./sub`` subpath.
   ``dup`` (I7) is a second repository that can be made to provide the same name.
@@ -107,6 +111,42 @@ def mono_repo() -> dict[str, str]:
         "apps/web/src/alt/util.ts": "export const util = 7;\n",
         "apps/web/src/local.ts": "export const local = 8;\nexport const Beta = 9;\n",
         "apps/web/src/unrelated.ts": "export function lonely() {\n  return 1;\n}\n",
+    }
+
+
+#: ``@inc/backend``'s exports: the root and every subpath in build output.
+BACKEND_EXPORTS: dict[str, Any] = {
+    ".": {"import": "./dist/index.js", "types": "./dist/index.d.ts"},
+    "./*": {"import": "./dist/*.js", "types": "./dist/*.d.ts"},
+}
+
+
+def ws_repo() -> dict[str, str]:
+    return {
+        "pnpm-workspace.yaml": 'packages:\n  - "apps/*"\n  - "packages/*"\n',
+        "package.json": manifest(name="wsinc-root", private=True),
+        "packages/backend/package.json": manifest(
+            name="@inc/backend", version="1.0.0", main="dist/index.js", exports=BACKEND_EXPORTS
+        ),
+        "packages/backend/tsconfig.json": json.dumps(
+            {"compilerOptions": {"outDir": "./dist"}, "include": ["src/**/*"]}
+        ),
+        "packages/backend/src/index.ts": 'export * from "./errors";\n',
+        "packages/backend/src/errors.ts": (
+            "export function normalizeError(error: unknown) {\n  return error;\n}\n"
+        ),
+        "packages/backend/src/claims.ts": "export interface Claims {\n  id: string;\n}\n",
+        "packages/backend/src/claims-v2.ts": "export interface Claims {\n  version: 2;\n}\n",
+        "packages/backend/lib/claims.ts": "export interface Claims {\n  id: number;\n}\n",
+        "apps/api/package.json": manifest(name="api", dependencies={"@inc/backend": "workspace:*"}),
+        "apps/api/src/handler.ts": (
+            'import { normalizeError } from "@inc/backend";\n'
+            'import type { Claims } from "@inc/backend/claims";\n'
+            "export function handle(error: unknown): Claims {\n"
+            "  return normalizeError(error) as Claims;\n"
+            "}\n"
+        ),
+        "apps/api/src/quiet.ts": "export function quiet() {\n  return 1;\n}\n",
     }
 
 
