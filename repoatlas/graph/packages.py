@@ -20,10 +20,12 @@ proven, and it decides it only on what the repositories' own files state:
    it names (:mod:`repoatlas.graph.declared`). Another package (an alias), a remote
    source or an unreadable form joins nothing. A path pins the provider: it must lead,
    followed from that manifest, to the directory of an indexed manifest providing the
-   package, in whichever repository that is. Otherwise, a version names the package
-   wherever it is provided, and then exactly one manifest in all the other
-   repositories must provide the name: two -- in two repositories or in one -- is an
-   ambiguity, never a choice;
+   package, in whichever repository that is. A ``workspace:`` range pins it too: it
+   must be the one member of that name of the innermost workspace an indexed file
+   declares around the manifest, whichever repository each member is indexed as.
+   Otherwise, a version names the package wherever it is provided, and then exactly
+   one manifest in all the other repositories must provide the name: two -- in two
+   repositories or in one -- is an ambiguity, never a choice;
 4. that package's entry for the specifier's subpath is exactly one indexed file
    (:meth:`~repoatlas.graph.modules.ModuleResolver.package_entry`).
 
@@ -50,7 +52,12 @@ from repoatlas.graph.declared import (
     classify_dependency_target,
     path_target,
 )
-from repoatlas.graph.modules import ModuleResolver, split_package
+from repoatlas.graph.modules import (
+    ModuleResolver,
+    WorkspaceDeclaration,
+    member_matcher,
+    split_package,
+)
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.storage.protocols import FileRow
@@ -160,6 +167,8 @@ class PackageLinks:
         self._targets = ProviderTargets(
             {repo_id: str(path) for path, repo_id in index.repo_roots},
             [p for provisions in self._provided.values() for p in provisions],
+            modules.workspace_declarations,
+            index.repo_slugs,
         )
         self._memo: dict[tuple[int, str, str], PackageLink | str] = {}
 
@@ -201,7 +210,7 @@ class PackageLinks:
                     origin.repo_id, declaration.manifest, target.path or "", wanted
                 )
             elif target.kind is TargetKind.WORKSPACE:
-                return "dependency-protocol"
+                found = self._targets.by_workspace(origin.repo_id, declaration.manifest, wanted)
             else:
                 continue
             if isinstance(found, str):
@@ -253,13 +262,23 @@ class PackageLinks:
 
 
 class ProviderTargets:
-    """Where a path declaration leads, across every indexed repository.
+    """Where a path or a workspace declaration leads, across every indexed repository.
 
     Shared by package links and by the package-level dependents of a change, so both
-    take a declaration to name the same provider.
+    take a declaration to name the same provider. Everything is placed by absolute
+    path, followed lexically from each repository's root: a workspace's members are the
+    manifests under its root that its globs match, in whichever repository each is
+    indexed -- a repository nested inside the workspace is as much a member as a
+    directory of the repository declaring it.
     """
 
-    def __init__(self, roots: Mapping[int, str], provisions: Iterable[Provision]) -> None:
+    def __init__(
+        self,
+        roots: Mapping[int, str],
+        provisions: Iterable[Provision],
+        workspaces: Iterable[WorkspaceDeclaration] = (),
+        slugs: Mapping[int, str] | None = None,
+    ) -> None:
         #: Each repository's absolute root, innermost first: a path lands in the first
         #: that holds it, never in the repository around that one.
         self._roots = sorted(
@@ -267,10 +286,19 @@ class ProviderTargets:
             key=lambda item: (-len(PurePosixPath(item[0]).parts), item[0]),
         )
         self._root_of = dict(roots)
+        self._slugs = dict(slugs or {})
+        self._provisions = list(provisions)
         #: The provision of each manifest directory, where a path declaration may lead.
         self._at: dict[tuple[int, str], Provision] = {}
-        for provision in provisions:
+        for provision in self._provisions:
             self._at.setdefault((provision.repo_id, provision.directory), provision)
+        #: Each workspace by its absolute root; its members by name, built when first asked.
+        self._workspaces: dict[str, list[WorkspaceDeclaration]] = defaultdict(list)
+        for declared in workspaces:
+            root = self._root_of.get(declared.repo_id)
+            if root is not None:
+                self._workspaces[path_target(root, declared.root, "")].append(declared)
+        self._members: dict[WorkspaceDeclaration, dict[str, list[Provision]]] = {}
 
     def by_path(
         self, repo_id: int, manifest: str, path: str, wanted: str
@@ -294,6 +322,48 @@ class ProviderTargets:
         if provision.normalized != wanted:
             return "dependency-elsewhere"
         return provision, {"resolved_by": "path"}
+
+    def by_workspace(
+        self, repo_id: int, manifest: str, wanted: str
+    ) -> tuple[Provision, dict[str, str]] | str:
+        """The member ``wanted`` of the workspace holding ``manifest``, or why there is none.
+
+        The workspace is the innermost one whose root holds the declaring manifest, as a
+        package manager finds it; an outer one never stands in for it. ``workspace-unindexed``
+        when no indexed file declares one there, ``workspace-member-absent`` when it has no
+        member of that name, ``provider-ambiguous`` when it has two. Two files declaring a
+        workspace at the same root (``pnpm-workspace.yaml`` and ``package.json``) both count.
+        """
+        root = self._root_of.get(repo_id)
+        if root is None:
+            return "workspace-unindexed"
+        here = path_target(root, _parent(manifest), "")
+        holding = [w for w in self._workspaces if here == w or here.startswith(w + "/")]
+        if not holding:
+            return "workspace-unindexed"
+        found: dict[Provision, WorkspaceDeclaration] = {}
+        for declared in self._workspaces[max(holding, key=len)]:
+            for member in self._members_of(declared).get(wanted, []):
+                found.setdefault(member, declared)
+        if not found:
+            return "workspace-member-absent"
+        if len(found) > 1:
+            return "provider-ambiguous"  # two members share the name: never a guess
+        [(member, declared)] = found.items()
+        slug = self._slugs.get(declared.repo_id, "")
+        return member, {"resolved_by": "workspace", "workspace": f"{slug}/{declared.file}"}
+
+    def _members_of(self, declared: WorkspaceDeclaration) -> dict[str, list[Provision]]:
+        if declared not in self._members:
+            root = path_target(self._root_of[declared.repo_id], declared.root, "")
+            matches = member_matcher(declared.globs)
+            members: dict[str, list[Provision]] = defaultdict(list)
+            for provision in self._provisions:
+                place = path_target(self._root_of[provision.repo_id], provision.directory, "")
+                if place.startswith(root + "/") and matches(place[len(root) + 1 :]):
+                    members[provision.normalized].append(provision)
+            self._members[declared] = dict(members)
+        return self._members[declared]
 
     def _owner(self, target: str) -> tuple[int, str] | None:
         """The innermost indexed repository holding ``target``, and the path within it."""

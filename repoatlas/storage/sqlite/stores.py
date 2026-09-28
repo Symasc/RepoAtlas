@@ -861,6 +861,20 @@ class SqliteKnowledgeStore:
             found.update(int(row["id"]) for row in rows)
         return found
 
+    def nested_repositories(self, repo_ids: Sequence[int]) -> set[int]:
+        """Repositories whose root lies inside the root of any of these repositories."""
+        found: set[int] = set()
+        for chunk in _chunks(sorted(set(repo_ids))):
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._db.execute(
+                "SELECT n.id AS id FROM repositories o JOIN repositories n "  # noqa: S608 - placeholders are generated counts, values are bound
+                "ON substr(n.path, 1, length(o.path) + 1) = o.path || '/' "
+                f"WHERE o.id IN ({placeholders})",
+                tuple(chunk),
+            ).fetchall()
+            found.update(int(row["id"]) for row in rows)
+        return found
+
     def count_use_edges(self, parser: str) -> int:
         """``USES`` edges ``parser`` wrote: one per claim it resolved."""
         row = self._db.execute(

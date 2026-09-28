@@ -200,7 +200,7 @@ def _links(workspace: Workspace) -> tuple[PackageLinks, ResolutionIndex]:
     [
         ("refusals", "ok/use.ts", "@fixture/contracts", "link"),
         ("refusals", "aliased/use.ts", "@fixture/contracts", "dependency-aliased"),
-        ("refusals", "workspace/use.ts", "@fixture/contracts", "dependency-protocol"),
+        ("refusals", "workspace/use.ts", "@fixture/contracts", "workspace-unindexed"),
         ("refusals", "shadowed/use.ts", "@fixture/contracts", "local-alias"),
         ("refusals", "undeclared/use.ts", "@fixture/contracts", "dependency-absent"),
         ("refusals", "unprovided/use.ts", "@nowhere/pkg", "provider-absent"),

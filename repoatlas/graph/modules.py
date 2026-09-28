@@ -16,9 +16,10 @@ before this module existed. It reads:
 * **workspace packages**: a ``pnpm-workspace.yaml`` or a ``package.json`` with
   ``workspaces`` declares which directories are packages. A specifier resolves to a
   member of the importing file's own workspace indexed in its own repository, and
-  only when exactly one such member has that name. That is the reach of this pass,
-  not a claim that a workspace ends where a repository does: a member indexed as
-  another repository is simply not decided here.
+  only when exactly one such member has that name. That is the reach of this
+  resolver, not a claim that a workspace ends where a repository does: a member
+  indexed as another repository -- one nested under the workspace's root -- is decided
+  by the package link (:mod:`repoatlas.graph.packages`), which records the crossing.
 
 A package's entry comes from ``exports``, else ``source``, ``types``, ``typings``,
 ``module`` and ``main``. Every field present must lead to the same indexed file, or
@@ -59,7 +60,7 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import PurePosixPath
@@ -160,6 +161,20 @@ class _Reexport:
 class _Workspace:
     root: str
     members: dict[str, list[str]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceDeclaration:
+    """A file declaring a package-manager workspace: its members are the globs' matches."""
+
+    repo_id: int
+    #: ``pnpm-workspace.yaml`` or a ``package.json`` with ``workspaces``, repository-relative.
+    file: str
+    globs: tuple[str, ...]
+
+    @property
+    def root(self) -> str:
+        return _parent(self.file)
 
 
 def _join(directory: str, path: str) -> str | None:
@@ -266,6 +281,7 @@ class ModuleResolver:
         self._steps = 0
         self.steps = 0
         workspaces: list[tuple[int, str, list[str]]] = []
+        declarations: list[WorkspaceDeclaration] = []
         for claim in claims:
             meta = json.loads(claim.meta_json) if claim.meta_json else {}
             origin = self._by_id.get(claim.file_id)
@@ -282,12 +298,9 @@ class ModuleResolver:
                         self._tsconfigs[origin.repo_id][origin.rel_path] = facts
                 elif kind == PACKAGE:
                     self._packages[origin.repo_id][_parent(origin.rel_path)] = facts
-                    if facts.get("workspaces"):
-                        workspaces.append(
-                            (origin.repo_id, _parent(origin.rel_path), facts["workspaces"])
-                        )
-                elif kind == WORKSPACE and facts.get("packages"):
-                    workspaces.append((origin.repo_id, _parent(origin.rel_path), facts["packages"]))
+                if (workspace := workspace_declaration(kind, facts, origin)) is not None:
+                    workspaces.append((origin.repo_id, workspace.root, list(workspace.globs)))
+                    declarations.append(workspace)
             elif meta.get("role") == "re-export" and meta.get("reexport"):
                 self._reexports[claim.file_id].append(
                     _Reexport(
@@ -302,23 +315,24 @@ class ModuleResolver:
                 )
         for repo_id, root, globs in sorted(workspaces):
             self._workspaces[repo_id].append(self._members(repo_id, root, globs))
+        #: Every workspace any indexed file declares, whichever repository its members are
+        #: indexed as: that is for a package link to decide, never :meth:`resolve`.
+        self.workspace_declarations = tuple(
+            sorted(declarations, key=lambda d: (d.repo_id, d.file, d.globs))
+        )
         for reexports in self._reexports.values():
             reexports.sort(key=lambda r: (r.kind, r.specifier, r.names, r.namespace or ""))
 
     # -- workspaces ----------------------------------------------------------
 
     def _members(self, repo_id: int, root: str, globs: list[str]) -> _Workspace:
-        include = [_glob(g) for g in globs if not g.startswith("!")]
-        exclude = [_glob(g[1:]) for g in globs if g.startswith("!")]
+        matches = member_matcher(globs)
         workspace = _Workspace(root=root)
         for directory, facts in sorted(self._packages[repo_id].items()):
             name = facts.get("name")
             if not isinstance(name, str) or directory == root or not _inside(directory, root):
                 continue
-            relative = directory[len(root) + 1 :] if root else directory
-            if any(p.match(relative) for p in include) and not any(
-                p.match(relative) for p in exclude
-            ):
+            if matches(directory[len(root) + 1 :] if root else directory):
                 workspace.members.setdefault(name, []).append(directory)
         return workspace
 
@@ -801,6 +815,30 @@ class ModuleResolver:
         if len(found_all) != 1:
             return None, cut_any  # not re-exported, or two star exports disagree
         return _through(module, next(iter(found_all.values()))), cut_any
+
+
+def workspace_declaration(
+    kind: str, facts: Mapping[str, Any], origin: FileRow
+) -> WorkspaceDeclaration | None:
+    """The workspace a module-resolution fact declares, if it declares one."""
+    if kind == PACKAGE:
+        globs = facts.get("workspaces")
+    elif kind == WORKSPACE:
+        globs = facts.get("packages")
+    else:
+        return None
+    if not globs:
+        return None
+    return WorkspaceDeclaration(origin.repo_id, origin.rel_path, tuple(globs))
+
+
+def member_matcher(globs: Sequence[str]) -> Callable[[str], bool]:
+    """Whether a directory, relative to a workspace's root, is one of the globs' members."""
+    include = [_glob(g) for g in globs if not g.startswith("!")]
+    exclude = [_glob(g[1:]) for g in globs if g.startswith("!")]
+    return lambda relative: (
+        any(p.match(relative) for p in include) and not any(p.match(relative) for p in exclude)
+    )
 
 
 def declared_constraints(index: ResolutionIndex, records: Sequence[DependencyRecord]) -> Declared:

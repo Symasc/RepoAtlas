@@ -13,13 +13,18 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
+from repoatlas.capabilities.service import CapabilityService
 from repoatlas.config.settings import Settings
+from repoatlas.models.capability import CapabilityContext, CapabilityScope
+from repoatlas.models.impact import ImpactRequest
 from repoatlas.services.workspace import Workspace, open_workspace
 from tests.impact_corpus import build
 from tests.internal_corpus import REPOS, refusals
 from tests.workspace_corpus import repo_uses
 
 FOO = "provider:src/foo.ts#InternalFoo"
+NESTED_FOO = "mono/packages/internal:src/foo.ts#InternalFoo"
+LOCAL_TOOL = "mono:packages/local/src/index.ts#localTool"
 PLAIN_TOOL = "plain:src/index.ts#plainTool"
 
 
@@ -108,6 +113,112 @@ def test_xw11_every_name_survives_the_rename_and_the_alias(edges: list[dict[str,
         ["src/index.ts"],
         ["Foo"],
     )
+
+
+# -- workspaces ------------------------------------------------------------------------
+
+
+def test_xw1_a_workspace_range_links_the_member_nested_in_another_repository(
+    edges: list[dict[str, Any]],
+) -> None:
+    # `mono` indexes none of the nested repository's files: the member is its own repository
+    use = edge(edges, "mono:apps/app/src/use.ts#useFoo", NESTED_FOO)
+    assert use["basis"] == "package"
+    assert use["crossing"] == {
+        "package": "npm:@fixture/internal",
+        "provider": "mono/packages/internal",
+        "provided_at": "package.json:2",
+        "entry": "src/index.ts",
+        "entry_fields": "exports",
+        "declared_at": "apps/app/package.json:4",
+        "constraint": "workspace:*",
+        "imported_at": 1,
+        "resolved_by": "workspace",
+        "workspace": "mono/pnpm-workspace.yaml",
+    }
+    # a consumer that is itself a nested repository is a member of the same workspace
+    nested = edge(edges, "mono/apps/nested-app:src/use.ts#useFoo", NESTED_FOO)["crossing"]
+    assert (nested["constraint"], nested["workspace"]) == (
+        "workspace:^",
+        "mono/pnpm-workspace.yaml",
+    )
+
+
+def test_xw2_a_workspace_alias_of_the_package_s_own_name_links_it_too(
+    edges: list[dict[str, Any]],
+) -> None:
+    crossing = edge(edges, "mono:apps/named/src/use.ts#useFoo", NESTED_FOO)["crossing"]
+    assert (crossing["constraint"], crossing["resolved_by"]) == (
+        "workspace:@fixture/internal@*",
+        "workspace",
+    )
+
+
+def test_xw14_a_member_of_the_workspace_s_own_repository_resolves_as_before(
+    edges: list[dict[str, Any]],
+) -> None:
+    local = edge(edges, "mono:apps/app/src/local-use.ts#useLocal", LOCAL_TOOL)
+    assert local["basis"] == "workspace-package"
+    assert "crossing" not in local
+
+
+WORKSPACE_REFUSED = {
+    # XW1b: no indexed file declares a workspace holding the declaring manifest
+    ("paths", "ws-unindexed/use.ts"): ("plainTool", "workspace-unindexed"),
+    # XW1c: the innermost workspace decides, and it has no such member
+    ("mono/apps/inner-ws", "src/use.ts"): ("LocalFoo", "workspace-member-absent"),
+    # XW3: a workspace alias of another package
+    ("mono", "apps/other/src/use.ts"): ("LocalFoo", "dependency-aliased"),
+    # XW9: two nested members share the name
+    ("twins", "apps/app/src/use.ts"): ("twinTool", "provider-ambiguous"),
+}
+
+
+@pytest.mark.parametrize(("where", "why"), list(WORKSPACE_REFUSED.items()))
+def test_each_workspace_declaration_naming_no_one_member_joins_nothing(
+    indexed: Workspace, edges: list[dict[str, Any]], where: tuple[str, str], why: tuple[str, str]
+) -> None:
+    repository, path = where
+    assert not [e for e in edges if e["source"].startswith(f"{repository}:{path}#")]
+    local, reason = why
+    assert refusals(indexed, repository, path) == {local: f"package:{reason}"}
+
+
+def test_xw12_a_change_to_the_member_reaches_the_consumer_and_on_to_its_test(
+    indexed: Workspace,
+) -> None:
+    response = CapabilityService(indexed).impact(
+        ImpactRequest(
+            context=CapabilityContext(scope=CapabilityScope.GLOBAL),
+            seed="sym:mono/packages/internal:src/foo.ts:InternalFoo:1",
+        )
+    )
+    reached = {c.entity: c for c in (*response.candidates, *response.tests)}
+    use = reached["sym:mono/apps/nested-app:src/use.ts:useFoo:2"]
+    assert (use.distance, use.step.edge) == (1, "USES")
+    assert use.step.crossing is not None
+    assert use.step.crossing.model_dump(exclude_none=True) == {
+        "package": "npm:@fixture/internal",
+        "from_repository": "mono/packages/internal",
+        "to_repository": "mono/apps/nested-app",
+        "provided_by": "mono/packages/internal/package.json:2",
+        "entry": "mono/packages/internal/src/index.ts",
+        "entry_fields": "exports",
+        "declared_by": "mono/apps/nested-app/package.json:4",
+        "constraint": "workspace:^",
+        "imported_at": "mono/apps/nested-app/src/use.ts:1",
+        "declared_as": "InternalFoo",
+        "imported_as": "Foo",
+        "local": "LocalFoo",
+    }
+    assert reached["sym:mono/apps/nested-app:src/downstream.ts:downstream:2"].distance == 2
+    test = reached["sym:mono/apps/nested-app:test/downstream.test.ts:checksDownstream:2"]
+    assert test.distance == 3
+    # the pinned package is credited to each dependent that crossed through it
+    by_dependent = {p.dependent: p for p in response.packages}
+    assert (by_dependent["mono/apps/nested-app:."].exact_consumers,) == (1,)
+    # `provider` shares the name but is no member: nothing crossed from it
+    assert not any(c.repository == "provider" for c in reached.values())
 
 
 # -- versions --------------------------------------------------------------------------
