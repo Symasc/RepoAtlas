@@ -53,12 +53,13 @@ from repoatlas.storage.protocols import FileRow, SymbolRow, UnresolvedRefRecord
 
 @dataclass(frozen=True, slots=True)
 class _Traced:
-    """A remembered answer, with what walking to it cost: steps, and hops below its start."""
+    """A remembered answer, with what walking to it cost and which export tables it read."""
 
     found: UseDefinition | None
     reason: str | None
     steps: int
     depth: int
+    reads: frozenset[int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +143,12 @@ class UseResolver:
         #: Steps the current use's trace has taken, and the deepest hop it has reached.
         self._steps = 0
         self._reach = 0
+        #: The export tables each open step of the current trace has read, innermost last.
+        self._reading: list[set[int]] = [set()]
+        #: Per consumer file, every file whose export table its uses read: the target, each
+        #: barrel passed, every ``export *`` branch searched. A remembered answer brings the
+        #: tables its walk read, so what a use read never depends on what was traced first.
+        self.reads: dict[int, set[int]] = {}
         #: Why each unresolved use stayed unresolved; measurement only.
         self.unresolved: Counter[str] = Counter()
 
@@ -168,6 +175,7 @@ class UseResolver:
             definition: UseDefinition | None = UseDefinition(module, None, None)
         else:
             self._steps = self._reach = 0
+            self._reading = [self.reads.setdefault(origin.file_id, set())]
             definition, reason = self._trace(module, name, frozenset(), 0)[:2]
             if definition is None:
                 self.unresolved[reason or "not-exported"] += 1
@@ -211,17 +219,23 @@ class UseResolver:
         ):
             self._steps += known.steps
             self._reach = max(self._reach, depth + known.depth)
+            self._reading[-1].update(known.reads)
             return known.found, known.reason, False
         if key in visiting or depth > MAX_REEXPORT_HOPS or self._steps >= MAX_TRACE_STEPS:
             return None, "bound", True
         start, reach = self._steps, self._reach
         self._steps += 1
         self._reach = depth
-        found, reason, cut = self._trace_once(module, name, visiting | {key}, depth)
+        self._reading.append({module.file_id})
+        try:
+            found, reason, cut = self._trace_once(module, name, visiting | {key}, depth)
+        finally:
+            read = self._reading.pop()
+        self._reading[-1].update(read)
         below = self._reach - depth
         self._reach = max(reach, self._reach)
         if not cut:
-            self._traced[key] = _Traced(found, reason, self._steps - start, below)
+            self._traced[key] = _Traced(found, reason, self._steps - start, below, frozenset(read))
         return found, reason, cut
 
     def _trace_once(
