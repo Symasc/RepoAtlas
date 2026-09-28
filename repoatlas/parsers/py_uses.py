@@ -853,7 +853,7 @@ def _typing_guards(tree: ast.Module) -> tuple[frozenset[str], frozenset[str]]:
 
 
 def python_use_references(
-    analysis: PythonUseAnalysis, symbols: Sequence[ParsedSymbol]
+    analysis: PythonUseAnalysis, symbols: Sequence[ParsedSymbol], *, package: bool = False
 ) -> list[ParsedReference]:
     """The file's ``USES`` references: attributed uses, merged, plus its export table.
 
@@ -912,16 +912,20 @@ def python_use_references(
                 meta=meta,
             )
         )
+    # A package's table is recorded even when empty: ``from pkg import sub`` falls back
+    # to the submodule only when the package is known to bind nothing, and a package
+    # with no table at all is one that failed to parse.
     exports = analysis.exports
-    if exports.get("names") or exports.get("star"):
-        references.append(
-            ParsedReference(
-                edge_type=EdgeType.USES,
-                target_kind=EntityType.SYMBOL,
-                target_key=USES_EXPORT_TABLE,
-                line_start=1,
-                line_end=1,
-                meta={USES_EXPORTS: json.dumps(exports, sort_keys=True, separators=(",", ":"))},
-            )
+    if not (package or exports.get("names") or exports.get("star") or exports.get("getattr")):
+        return references
+    references.append(
+        ParsedReference(
+            edge_type=EdgeType.USES,
+            target_kind=EntityType.SYMBOL,
+            target_key=USES_EXPORT_TABLE,
+            line_start=1,
+            line_end=1,
+            meta={USES_EXPORTS: json.dumps(exports, sort_keys=True, separators=(",", ":"))},
         )
+    )
     return references

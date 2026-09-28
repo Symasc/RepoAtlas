@@ -389,7 +389,11 @@ class PythonParser:
         visitor = _Visitor(module_name, PythonHttp(tree))
         visitor.visit(tree)
         try:
-            uses = python_use_references(PythonUseAnalysis(tree), visitor.symbols)
+            uses = python_use_references(
+                PythonUseAnalysis(tree),
+                visitor.symbols,
+                package=path.name in {"__init__.py", "__init__.pyi"},
+            )
         except RecursionError:
             # Nesting deeper than the analysis can walk costs the file its uses, never
             # its other facts.
