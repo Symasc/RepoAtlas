@@ -784,7 +784,8 @@ def test_the_transaction_is_held_for_every_statement(tmp_path: Path) -> None:
         "the transaction was closed part-way through the migration: "
         f"{observed.index(False)} of {len(observed)} observations"
     )
-    assert shape(path)["user_version"] == SCHEMA_VERSION
+    # Only migration 5 was applied, so it lands at 5 whatever the latest schema is.
+    assert shape(path)["user_version"] == 5
 
 
 def test_twelve_concurrent_openers_of_an_old_database_all_succeed(tmp_path: Path) -> None:

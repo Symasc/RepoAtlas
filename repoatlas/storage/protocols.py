@@ -49,6 +49,10 @@ class EdgeRecord(BaseModel):
     line_start: int | None = None
     line_end: int | None = None
     parser: str | None = None
+    #: How the global pass resolved it, as JSON, when not from literal text alone:
+    #: a workspace package, a tsconfig alias, a chain of re-exports, a package another
+    #: repository provides. Internal only.
+    resolution: str | None = None
 
 
 class SyncCompletion(BaseModel):

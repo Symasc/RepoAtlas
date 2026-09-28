@@ -40,6 +40,7 @@ from repoatlas.services.init_service import initialize
 from repoatlas.services.retrieval_service import locate
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace
+from repoatlas.storage.sqlite.database import SCHEMA_VERSION
 from tests.conftest import fact_snapshot, init_git_repository, reindex_from_scratch
 
 pytestmark = pytest.mark.adversarial
@@ -653,7 +654,7 @@ def test_a_moved_repository_leaves_no_stale_identity(duplicates: Workspace) -> N
 
 
 def downgrade_to_schema_v4(database: Path) -> None:
-    """Rewrite a v5 database into exactly the shape schema v4 produced.
+    """Rewrite a current database into exactly the shape schema v4 produced.
 
     Migration tests that only ever see a fresh database prove nothing about the
     upgrade path, and this pass changes what every repository-scoped key *means*.
@@ -697,8 +698,11 @@ def downgrade_to_schema_v4(database: Path) -> None:
         # what makes an upgrade reparse every file. A downgrade that left it saying
         # `schema:5` would make the upgrade a no-op and the test vacuous.
         connection.execute(
-            "UPDATE files SET parser_version = replace(parser_version, 'schema:5', 'schema:4')"
+            "UPDATE files SET parser_version = replace(parser_version, ?, 'schema:4')",
+            (f"schema:{SCHEMA_VERSION}",),
         )
+        # 006 added how the global pass resolved an edge; v4 had no such column.
+        connection.execute("ALTER TABLE edges DROP COLUMN resolution")
         connection.execute("DROP INDEX IF EXISTS idx_repositories_slug")
         connection.execute("ALTER TABLE repositories DROP COLUMN slug")
         connection.execute("PRAGMA user_version = 4")

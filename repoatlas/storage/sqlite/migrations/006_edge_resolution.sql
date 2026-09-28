@@ -1,0 +1,15 @@
+-- RepoAtlas schema v6 — how the global link pass resolved an edge.
+--
+-- A declaration's use of a name imported as `@acme/contracts` or `@/api/client`
+-- reaches the declaration it names through configuration and re-exports rather than
+-- through its literal text: a workspace package and its entry, a tsconfig path alias,
+-- a barrel that re-exports the name from the file that defines it, or a package that
+-- another repository provides. `resolution` records that chain as a small JSON object
+-- (its basis, the files passed through, the names spelled on the way and, across
+-- repositories, the manifest evidence), so such an edge can be read back to what
+-- proved it.
+--
+-- NULL on every edge a file asserts on its own and on every literal resolution.
+-- Written only by the global pass, which rebuilds all of its edges on every sync, so
+-- an upgraded database needs no backfill: the next sync writes it.
+ALTER TABLE edges ADD COLUMN resolution TEXT;

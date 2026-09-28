@@ -587,8 +587,8 @@ class SqliteKnowledgeStore:
                 """
                 INSERT INTO edges (
                     src_id, dst_id, type, confidence, repo_id, file_id,
-                    line_start, line_end, parser
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    line_start, line_end, parser, resolution
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -601,6 +601,7 @@ class SqliteKnowledgeStore:
                         e.line_start,
                         e.line_end,
                         e.parser,
+                        e.resolution,
                     )
                     for e in edges
                 ],
@@ -751,6 +752,30 @@ class SqliteKnowledgeStore:
             )
             for row in rows
         ]
+
+    def list_exported_names(self, *, exclude_parser: str) -> dict[int, dict[str, list[int]]]:
+        """Per file, each name its own ``EXPORTS`` edges declare, with the defining entities.
+
+        Only a file's own definitions: an ``EXPORTS`` edge to a symbol in another file,
+        and anything the named producer (the global pass) wrote, are left out, so what
+        the global pass reads never depends on its own previous output.
+        """
+        rows = self._db.execute(
+            """
+            SELECT e.file_id, d.name, d.id
+            FROM edges e JOIN entities d ON d.id = e.dst_id
+            WHERE e.type = ? AND d.file_id = e.file_id
+              AND (e.parser IS NULL OR e.parser != ?)
+            ORDER BY e.file_id, d.name, d.id
+            """,
+            (str(EdgeType.EXPORTS), exclude_parser),
+        ).fetchall()
+        found: dict[int, dict[str, list[int]]] = {}
+        for row in rows:
+            ids = found.setdefault(row["file_id"], {}).setdefault(row["name"], [])
+            if row["id"] not in ids:
+                ids.append(row["id"])
+        return found
 
     def list_served_routes(
         self, *, exclude_parser: str, repo_id: int | None = None
