@@ -299,6 +299,8 @@ class Hub:
     units_partial: bool
     #: Far entities the representatives reached.
     shown: int
+    #: Exact dependents per repository, when they are in more than one.
+    repositories: dict[str, int] = field(default_factory=dict)
 
     @property
     def collapsed(self) -> int:
@@ -523,20 +525,22 @@ class ImpactWalk:
         )
         units: dict[str, int] = {}
         queues: dict[str, list[tuple[int | None, str | None]]] = {}
+        #: Each unit's repository (a shared node's unit is its own), and each one's total.
+        owner: dict[str, str] = {}
+        repositories: dict[str, int] = {}
         for group in groups:
             slug = self.slug_of(group.repo_id)
             unit = self._unit(f"{slug}:{group.path}", slug, group.path)
             units[unit] = units.get(unit, 0) + group.far
             queues.setdefault(unit, []).append((group.repo_id, group.path))
+            owner.setdefault(unit, slug or unit)
+            if slug is not None:
+                repositories[slug] = group.repository_far
         # Largest units first, then by name; within a unit, non-test files first.
         for queue in queues.values():
             queue.sort(key=lambda g: is_test_path(g[1]))
         order = sorted(queues, key=lambda u: (-units[u], u))
-        chosen: list[tuple[int | None, str | None]] = []
-        while len(chosen) < REPRESENTATIVES and any(queues[u] for u in order):
-            for unit in order:
-                if queues[unit] and len(chosen) < REPRESENTATIVES:
-                    chosen.append(queues[unit].pop(0))
+        chosen = _representatives(order, queues, owner, repositories)
         rows = self._neighbourhood.rows_for(
             node.entity_id, rule, confinement, groups=chosen, per_group=1
         )
@@ -545,7 +549,11 @@ class ImpactWalk:
             self._reach(node, row, families[row.type])
             shown.add(row.far_id)
         self._hubs[node.entity_id] = Hub(
-            fanout=count.far, units=units, units_partial=partial, shown=len(shown)
+            fanout=count.far,
+            units=units,
+            units_partial=partial,
+            shown=len(shown),
+            repositories=repositories if len(repositories) > 1 else {},
         )
         return True
 
@@ -690,3 +698,44 @@ class ImpactWalk:
     def _push(self, node: Node) -> None:
         self._pushed += 1
         heapq.heappush(self._heap, (node.rank, self._pushed, node))
+
+
+def _representatives(
+    order: Sequence[str],
+    queues: dict[str, list[tuple[int | None, str | None]]],
+    owner: dict[str, str],
+    totals: dict[str, int],
+) -> list[tuple[int | None, str | None]]:
+    """A hub's representatives: repositories take turns, then each one's units do.
+
+    Within one repository -- the only case before package links -- this is the units'
+    own round, largest first. Across several, the largest repository goes first, and
+    each turn a repository gives its next unit's next file, so one repository with many
+    units cannot fill every place while another's dependents go unshown.
+    """
+    chosen: list[tuple[int | None, str | None]] = []
+    by_repository: dict[str, list[str]] = {}
+    for unit in order:
+        by_repository.setdefault(owner[unit], []).append(unit)
+    if len(by_repository) <= 1:
+        while len(chosen) < REPRESENTATIVES and any(queues[u] for u in order):
+            for unit in order:
+                if queues[unit] and len(chosen) < REPRESENTATIVES:
+                    chosen.append(queues[unit].pop(0))
+        return chosen
+
+    def total(repository: str) -> int:
+        return totals.get(repository, sum(len(queues[u]) for u in by_repository[repository]))
+
+    turn = sorted(by_repository, key=lambda r: (-total(r), r))
+    cursor = dict.fromkeys(turn, 0)
+    while len(chosen) < REPRESENTATIVES and any(queues[u] for u in order):
+        for repository in turn:
+            own = by_repository[repository]
+            for step in range(len(own)):
+                unit = own[(cursor[repository] + step) % len(own)]
+                if queues[unit] and len(chosen) < REPRESENTATIVES:
+                    chosen.append(queues[unit].pop(0))
+                    cursor[repository] = (cursor[repository] + step + 1) % len(own)
+                    break
+    return chosen

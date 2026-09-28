@@ -495,6 +495,8 @@ class NeighborGroup(BaseModel):
     repo_id: int | None
     path: str | None
     far: int
+    #: Far entities in all of this group's repository, counted over every group.
+    repository_far: int = 0
 
 
 class EntityDescription(BaseModel):
@@ -598,8 +600,17 @@ class KnowledgeStore(Protocol):
         groups: Sequence[tuple[int | None, str | None]],
         per_group: int,
     ) -> list[NeighborRow]: ...
+    def count_whole_module_uses(
+        self,
+        package: str,
+        provider_repo_id: int,
+        dependent_repo_id: int,
+        *,
+        exclude_ids: Sequence[int] = (),
+    ) -> int: ...
     def get_entities_by_key(self, keys: Sequence[str]) -> list[EntityIdentity]: ...
     def keys_for_entities(self, entity_ids: Sequence[int]) -> dict[int, EntityIdentity]: ...
+    def file_locations(self, file_ids: Sequence[int]) -> dict[int, tuple[str, str]]: ...
     def provided_manifests(self, repository_slugs: Sequence[str]) -> dict[str, tuple[str, ...]]: ...
     def chunks_for_file(self, file_id: int, line_start: int, line_end: int) -> list[ChunkHit]: ...
     def gc_orphan_entities(self) -> int: ...

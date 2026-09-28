@@ -1243,6 +1243,12 @@ class SqliteKnowledgeStore:
     ) -> tuple[list[NeighborGroup], bool]:
         """Far entities per far file, largest first, at most ``max_groups`` of them.
 
+        Repositories take turns: every repository's largest file comes before any
+        repository's second, so one repository with many files cannot fill the list
+        while another's dependents go unseen. Within one repository the order is simply
+        largest first. Each group also carries its repository's exact total, counted
+        over every group rather than those that fit.
+
         The second value says the groups did not all fit: the list is then partial
         and says so, rather than a count that looks complete.
         """
@@ -1250,17 +1256,33 @@ class SqliteKnowledgeStore:
         params.append(max_groups + 1)
         rows = self._db.execute(
             f"""
-            SELECT {far}.repo_id AS repo_id, ff.rel_path AS path,
-                   COUNT(DISTINCT e.{far}_id) AS far
-            {where}
-            GROUP BY {far}.repo_id, ff.rel_path
-            ORDER BY far DESC, COALESCE(MIN(fr.slug), ''), COALESCE(ff.rel_path, '')
+            SELECT repo_id, path, far, repository_far FROM (
+                SELECT g.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY COALESCE(g.repo_id, 0)
+                           ORDER BY g.far DESC, COALESCE(g.path, '')
+                       ) AS turn,
+                       SUM(g.far) OVER (PARTITION BY COALESCE(g.repo_id, 0)) AS repository_far
+                FROM (
+                    SELECT {far}.repo_id AS repo_id, ff.rel_path AS path,
+                           COALESCE(MIN(fr.slug), '') AS slug,
+                           COUNT(DISTINCT e.{far}_id) AS far
+                    {where}
+                    GROUP BY {far}.repo_id, ff.rel_path
+                ) g
+            )
+            ORDER BY turn, far DESC, slug, COALESCE(path, '')
             LIMIT ?
-            """,
+            """,  # noqa: S608 - placeholders are generated counts, values are bound
             tuple(params),
         ).fetchall()
         groups = [
-            NeighborGroup(repo_id=row["repo_id"], path=row["path"], far=row["far"])
+            NeighborGroup(
+                repo_id=row["repo_id"],
+                path=row["path"],
+                far=row["far"],
+                repository_far=row["repository_far"],
+            )
             for row in rows[:max_groups]
         ]
         return groups, len(rows) > max_groups
@@ -1300,6 +1322,38 @@ class SqliteKnowledgeStore:
             tuple(params),
         ).fetchall()
         return [self._impact_row(row, rule) for row in rows]
+
+    def count_whole_module_uses(
+        self,
+        package: str,
+        provider_repo_id: int,
+        dependent_repo_id: int,
+        *,
+        exclude_ids: Sequence[int] = (),
+    ) -> int:
+        """Declarations of one repository using a package's module as a whole, counted.
+
+        The uses a package link could only resolve to a file (a computed member, the
+        namespace passed as a value): consumers of the package that name no declaration
+        of it. ``exclude_ids`` are left out -- declarations already exact consumers.
+        """
+        excluded = ""
+        params: list[object] = [provider_repo_id, dependent_repo_id, package]
+        if exclude_ids:
+            excluded = f" AND e.src_id NOT IN ({','.join('?' * len(exclude_ids))})"
+            params.extend(exclude_ids)
+        row = self._db.execute(
+            f"""
+            SELECT COUNT(DISTINCT e.src_id)
+            FROM edges e
+            JOIN entities d ON d.id = e.dst_id
+            JOIN entities s ON s.id = e.src_id
+            WHERE e.type = 'USES' AND d.type = 'file' AND d.repo_id = ? AND s.repo_id = ?
+              AND json_extract(e.resolution, '$.crossing.package') = ?{excluded}
+            """,  # noqa: S608 - placeholders are generated counts, values are bound
+            tuple(params),
+        ).fetchone()
+        return int(row[0])
 
     def describe_entities(
         self, entity_ids: Sequence[int], *, path_prefix: str | None = None
@@ -1388,6 +1442,28 @@ class SqliteKnowledgeStore:
             tuple(entity_ids),
         ).fetchall()
         return {int(row["id"]): _entity_identity(row) for row in rows}
+
+    def file_locations(self, file_ids: Sequence[int]) -> dict[int, tuple[str, str]]:
+        """Each file id's repository slug and path, in one query.
+
+        What an edge's provenance names when no source text is being supplied: the
+        asserting file's own row, never the edge's source entity. Reading the
+        whole file's chunks would answer the same question at the cost of every
+        line in it.
+        """
+        if not file_ids:
+            return {}
+        placeholders = ",".join("?" * len(file_ids))
+        rows = self._db.execute(
+            f"""
+            SELECT f.id, r.slug, f.rel_path
+            FROM files f
+            JOIN repositories r ON r.id = f.repo_id
+            WHERE f.id IN ({placeholders})
+            """,  # noqa: S608 - placeholders are generated counts, values are bound
+            tuple(file_ids),
+        ).fetchall()
+        return {int(row["id"]): (row["slug"] or "", row["rel_path"]) for row in rows}
 
     def provided_manifests(self, repository_slugs: Sequence[str]) -> dict[str, tuple[str, ...]]:
         """Each repository's manifests that provide a package, by path, in one query.

@@ -14,8 +14,10 @@ Three kinds of answer are kept apart in the types rather than in prose:
   every step is an indexed edge or a fact derived from spans or manifests, and every
   candidate's predecessors are returned too, so each path can be read end to end;
 * **package-level dependents** (:attr:`ImpactResponse.packages`): a unit or repository
-  that declares the package the change lives in. That is coarse by construction -- it
-  says the dependent *may* use the change, never which of its declarations does;
+  that declares the package the change lives in, or one an exact path crossed. That is
+  coarse by construction -- it says the dependent *may* use the change -- and it names
+  which of its declarations do only by pointing at the exact candidates whose path
+  crosses into it through that package;
 * **what was not followed** (:attr:`ImpactResponse.hubs`, :attr:`ImpactResponse.unresolved`,
   :attr:`ImpactResponse.omitted`): counted exactly, so a short answer never reads as a
   complete one.
@@ -143,6 +145,36 @@ class ImpactRole(enum.StrEnum):
     MEMBER = "member"
 
 
+class PackageCrossing(BaseModel):
+    """How one step crossed from a providing repository into a consuming one.
+
+    The evidence a package link recorded (:mod:`repoatlas.graph.packages`), each part
+    locatable: the manifest that provides the package, the file its entry names, the
+    consuming manifest that declares it, and the import statement that binds the name.
+    The names read in the change's direction: declared as ``declared_as``, exported under
+    each of the step's ``via_names`` by the files in its ``via``, imported as
+    ``imported_as``, and bound in the consumer as ``local``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    package: str
+    subpath: str | None = None
+    from_repository: str
+    to_repository: str
+    provided_by: str
+    entry: str
+    entry_fields: str | None = None
+    #: How an entry in build output was mapped to source: ``<from> -> <to> (<by>)``.
+    entry_mapped: str | None = None
+    declared_by: str
+    constraint: str | None = None
+    imported_at: str | None = None
+    declared_as: str | None = None
+    imported_as: str | None = None
+    local: str | None = None
+
+
 class ImpactStep(BaseModel):
     """The one fact connecting a candidate to its predecessor.
 
@@ -162,9 +194,12 @@ class ImpactStep(BaseModel):
     lines: tuple[int, int] | None = None
     parser: str | None = None
     syntax: str | None = None
-    #: Files a use was re-exported through, and the name it bore in each.
+    #: Files a use was re-exported through, and the name it bore in each. On a step that
+    #: crosses repositories each file is spelled ``<repository>/<path>``.
     via: tuple[str, ...] = ()
     via_names: tuple[str, ...] = ()
+    #: The package evidence of a step that crosses from one repository into another.
+    crossing: PackageCrossing | None = None
     #: The edge's recorded resolution; ``full`` only.
     resolution: dict[str, object] | None = None
 
@@ -209,9 +244,18 @@ class PackageImpact(BaseModel):
     declared_at: str
     crosses_repository: bool
     granularity: str = "package"
-    #: Exact candidates found inside the dependent, or ``unresolved`` when none were:
-    #: a package-level dependent says nothing about which declaration uses the change.
+    #: How many reached declarations use the change through this very package and
+    #: declaration, or ``unresolved`` when none do (the exact consumer is unresolved),
+    #: or ``outside scope`` when the dependent is a repository the call did not name.
+    #: Within one repository: exact candidates found inside the dependent unit.
     exact_consumers: int | str
+    #: Candidates (by ``id``) whose path crosses into the dependent through this package.
+    consumers: tuple[int, ...] = ()
+    #: Declarations in the dependent that use the package's module as a whole (a computed
+    #: member, the namespace as a value): consumers no declaration can be named for.
+    unresolved_consumers: int | None = None
+    #: Package subpaths the exact consumers import from, when not only the root.
+    subpaths: tuple[str, ...] = ()
 
 
 class HubImpact(BaseModel):
@@ -224,6 +268,8 @@ class HubImpact(BaseModel):
     fanout: int
     units: dict[str, int] = Field(default_factory=dict)
     units_partial: bool = False
+    #: Exact dependents per repository, when they are in more than one.
+    repositories: dict[str, int] = Field(default_factory=dict)
     shown: int
     collapsed: int
     note: str = "collapsed dependents are not less affected; they were not listed"

@@ -90,7 +90,13 @@ from repoatlas.capabilities.errors import (
 )
 from repoatlas.capabilities.evidence_shaping import LINE_SEPARATOR
 from repoatlas.capabilities.impact import POLICY as IMPACT_POLICY
-from repoatlas.capabilities.impact import Assembled, SeedResolver, assemble, seed_nodes
+from repoatlas.capabilities.impact import (
+    Assembled,
+    SeedResolver,
+    assemble,
+    package_dependents,
+    seed_nodes,
+)
 from repoatlas.capabilities.indexed_source import WHOLE_FILE_END, indexed_line_map
 from repoatlas.capabilities.inspection import (
     ShapedInspection,
@@ -197,6 +203,7 @@ from repoatlas.models.impact import (
     ImpactRequest,
     ImpactResponse,
     ImpactSummary,
+    PackageImpact,
     SeedStatus,
 )
 from repoatlas.models.inspection import (
@@ -969,6 +976,7 @@ class CapabilityService:
             scope = {repo.slug: repo.id for repo in resolution.repositories if repo.id is not None}
             slugs = {repo.id: repo.slug for repo in registered if repo.id is not None}
             answer: Assembled | None = None
+            packages: tuple[PackageImpact, ...] = ()
             # The seed, the walk and every row it reads are one indexed snapshot.
             with self._workspace.database.read_snapshot():
                 seeds = SeedResolver(self._workspace.knowledge, self._workspace.search, scope)
@@ -1001,6 +1009,20 @@ class CapabilityService:
                         full=request.presentation is Presentation.FULL,
                         directories=directories,
                     )
+                    packages, more = package_dependents(
+                        seed,
+                        self._workspace.knowledge,
+                        self._workspace.dependencies,
+                        walk,
+                        walked,
+                        [*answer.candidates, *answer.tests],
+                        directories,
+                        scoped=resolution.scope is CapabilityScope.REPOSITORY,
+                    )
+                    if more:
+                        reasons = dict(answer.omitted.by_reason)
+                        reasons["budget"] = reasons.get("budget", 0) + more
+                        answer.omitted = answer.omitted.model_copy(update={"by_reason": reasons})
             candidates = answer.candidates if answer is not None else ()
             tests = answer.tests if answer is not None else ()
             facts = current_facts_version(self._workspace)
@@ -1027,6 +1049,7 @@ class CapabilityService:
                 seed=seed.model,
                 candidates=candidates,
                 tests=tests,
+                packages=packages,
                 hubs=answer.hubs if answer is not None else (),
                 unresolved=answer.unresolved if answer is not None else (),
                 omitted=answer.omitted if answer is not None else ImpactOmitted(),
