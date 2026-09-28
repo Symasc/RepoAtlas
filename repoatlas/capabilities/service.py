@@ -90,7 +90,7 @@ from repoatlas.capabilities.errors import (
 )
 from repoatlas.capabilities.evidence_shaping import LINE_SEPARATOR
 from repoatlas.capabilities.impact import POLICY as IMPACT_POLICY
-from repoatlas.capabilities.impact import SeedResolver
+from repoatlas.capabilities.impact import SeedResolver, assemble, seed_nodes
 from repoatlas.capabilities.indexed_source import WHOLE_FILE_END, indexed_line_map
 from repoatlas.capabilities.inspection import (
     ShapedInspection,
@@ -149,12 +149,19 @@ from repoatlas.errors import (
     SyncInProgressError,
 )
 from repoatlas.freshness import index_freshness
+from repoatlas.graph.impact import ImpactWalk
 from repoatlas.graph.keys import is_positional
 from repoatlas.graph.linker import plan_repository_http
 from repoatlas.graph.traversal import CROSS_REPOSITORY_EDGES, WalkResult, WalkStep, walk
+from repoatlas.graph.units import package_directories
 from repoatlas.grounding import GroundingReport, ground_answer
 from repoatlas.indexing.chunking import chunk_hash
-from repoatlas.models.capability import AppliedBudget, CapabilityScope, ContextResolution
+from repoatlas.models.capability import (
+    AppliedBudget,
+    CapabilityScope,
+    ContextResolution,
+    Presentation,
+)
 from repoatlas.models.capability_io import (
     ContextView,
     EntityHandle,
@@ -185,7 +192,14 @@ from repoatlas.models.http_inventory import (
     HttpOperationsResponse,
     OperationBasis,
 )
-from repoatlas.models.impact import ImpactRequest, ImpactResponse, ImpactSummary, SeedStatus
+from repoatlas.models.impact import (
+    ImpactCandidate,
+    ImpactOmitted,
+    ImpactRequest,
+    ImpactResponse,
+    ImpactSummary,
+    SeedStatus,
+)
 from repoatlas.models.inspection import (
     Coverage,
     InspectedFile,
@@ -940,9 +954,10 @@ class CapabilityService:
 
         Deterministic throughout, like ``relationships``: the seed resolves to exactly
         one thing or nothing is followed, and every step returned is an indexed edge
-        or a fact derived from spans or manifests. Nothing is recorded in the
-        investigation's ledger and no source text is returned: each step names the
-        file and lines that prove it, and reading them is the caller's part.
+        or a fact derived from spans or manifests (:mod:`repoatlas.graph.impact`).
+        Nothing is recorded in the investigation's ledger and no source text is
+        returned: each step names the file and lines that prove it, and reading them
+        is the caller's part.
         """
         with self._operation():
             registered = self._workspace.repositories.list_all()
@@ -953,12 +968,38 @@ class CapabilityService:
                 else self._sessions.create()
             )
             scope = {repo.slug: repo.id for repo in resolution.repositories if repo.id is not None}
+            slugs = {repo.id: repo.slug for repo in registered if repo.id is not None}
+            candidates: tuple[ImpactCandidate, ...] = ()
+            omitted = ImpactOmitted()
+            summary = ImpactSummary(policy=IMPACT_POLICY)
+            # The seed, the walk and every row it reads are one indexed snapshot.
             with self._workspace.database.read_snapshot():
                 seeds = SeedResolver(self._workspace.knowledge, self._workspace.search, scope)
                 seed = seeds.resolve(request.seed)
+                if seed.model.status is SeedStatus.RESOLVED:
+                    home = scope.get(seed.model.repository or "")
+                    if home is None and resolution.scope is CapabilityScope.REPOSITORY:
+                        # A shared seed (an environment variable, a route) walked from
+                        # inside one repository stays in it.
+                        home = resolution.primary.id if resolution.primary else None
+                    walk = ImpactWalk(self._workspace.knowledge, slugs)
+                    starts, members = seed_nodes(seed, walk, home)
+                    walked = walk.run(starts, members)
+                    manifests = self._workspace.knowledge.provided_manifests(sorted(slugs.values()))
+                    candidates, omitted, summary = assemble(
+                        walked,
+                        walk,
+                        max_candidates=request.max_candidates,
+                        full=request.presentation is Presentation.FULL,
+                        directories={
+                            slug: package_directories(paths) for slug, paths in manifests.items()
+                        },
+                    )
             facts = current_facts_version(self._workspace)
-            drawn = [seed.model.repository] if seed.model.repository else []
-            covered = self._covering_repositories(resolution, drawn)
+            drawn = {c.repository for c in candidates if c.repository}
+            if seed.model.repository:
+                drawn.add(seed.model.repository)
+            covered = self._covering_repositories(resolution, sorted(drawn))
             freshness = index_freshness(
                 [
                     repository_freshness_for(self._workspace, r, depth=request.depth, facts=facts)
@@ -976,11 +1017,9 @@ class CapabilityService:
                     reason=resolution.reason,
                 ),
                 seed=seed.model,
-                # A resolved seed has not been walked yet: saying "complete" with no
-                # candidates would read as "nothing is affected".
-                summary=ImpactSummary(
-                    policy=IMPACT_POLICY, complete=seed.model.status is not SeedStatus.RESOLVED
-                ),
+                candidates=candidates,
+                omitted=omitted,
+                summary=summary,
                 freshness=freshness,
             )
 

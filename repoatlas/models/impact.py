@@ -139,8 +139,8 @@ class ImpactRole(enum.StrEnum):
     DEPENDENT = "dependent"
     #: It sets the configuration key that precedes it.
     SETS = "sets"
-    #: It produces the file that precedes it.
-    PRODUCES = "produces"
+    #: It is part of what changes: a member of the seed.
+    MEMBER = "member"
 
 
 class ImpactStep(BaseModel):

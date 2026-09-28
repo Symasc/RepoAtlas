@@ -291,7 +291,19 @@ DIRECTION = {
 }
 
 
-# -- fixture E (repositories) ---------------------------------------------------------
+# -- fixture D (a directory) and fixture E (repositories) ------------------------------
+
+#: A directory whose module is imported from outside it: a directory seed changes
+#: everything beneath it, and reaches the importer through what it declares.
+TREE = {
+    "package.json": json.dumps({"name": "tree", "private": True}),
+    "src/gen/api.ts": 'export const endpoints = { list: "/items" };\n',
+    "src/client.ts": (
+        'import { endpoints } from "./gen/api";\n'
+        "export function listPath() {\n  return endpoints.list;\n}\n"
+    ),
+}
+
 
 #: Two repositories that read one environment variable and each declare a function
 #: named alike. Neither fact joins them.
