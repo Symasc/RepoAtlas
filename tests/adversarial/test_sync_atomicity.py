@@ -29,6 +29,7 @@ import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 from repoatlas.config.settings import Settings
@@ -205,8 +206,8 @@ def _fail_when(
     if point == "before_swap":
         original = SqliteKnowledgeStore.list_unresolved_refs
 
-        def failing_prepare(self: SqliteKnowledgeStore):
-            original(self)
+        def failing_prepare(self: SqliteKnowledgeStore, *args: Any, **kwargs: Any):
+            original(self, *args, **kwargs)
             raise _Injected("failure while computing the replacement graph")
 
         monkeypatch.setattr(SqliteKnowledgeStore, "list_unresolved_refs", failing_prepare)
@@ -305,8 +306,8 @@ def test_no_committed_state_ever_has_the_graph_deleted_and_not_rebuilt(
     seen: list[int] = []
     original_delete = SqliteKnowledgeStore.delete_edges_by_parser
 
-    def sampling_delete(self: SqliteKnowledgeStore, parser: str) -> int:
-        removed = original_delete(self, parser)
+    def sampling_delete(self: SqliteKnowledgeStore, parser: str, **kwargs: Any) -> int:
+        removed = original_delete(self, parser, **kwargs)
         # A separate connection sees only committed rows. If the delete has been
         # committed on its own, this reads zero.
         seen.append(int(_observe(linked, global_edge_count)))  # type: ignore[arg-type]
@@ -329,8 +330,8 @@ def test_a_reader_during_a_sync_sees_one_complete_graph_or_the_other(
     observed: list[set[tuple[str, str]]] = []
     original_delete = SqliteKnowledgeStore.delete_edges_by_parser
 
-    def sampling_delete(self: SqliteKnowledgeStore, parser: str) -> int:
-        removed = original_delete(self, parser)
+    def sampling_delete(self: SqliteKnowledgeStore, parser: str, **kwargs: Any) -> int:
+        removed = original_delete(self, parser, **kwargs)
         observed.append(_observe(linked, repo_edges))  # type: ignore[arg-type]
         return removed
 

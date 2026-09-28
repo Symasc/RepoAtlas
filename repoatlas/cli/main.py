@@ -252,6 +252,14 @@ def _report_sync_telemetry(report: SyncReport) -> None:
                 f"{stage.candidates_in:>6} -> {stage.candidates_out:<6} {stage.detail}",
                 err=True,
             )
+        if trace.uses is not None:
+            work = trace.uses
+            typer.echo(
+                f"  uses: {work.mode}, {work.files_invalidated} file(s), "
+                f"{work.claims_examined} claim(s) examined, {work.edges_deleted} edge(s) "
+                f"replaced by {work.edges_inserted}",
+                err=True,
+            )
     if report.embedding_detail:
         typer.echo(
             f"embeddings: {report.embedded_chunks} embedded, "

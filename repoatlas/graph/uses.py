@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -48,7 +48,7 @@ from repoatlas.graph.packages import CROSSING, PACKAGE_BASIS, PackageLink, Packa
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.parsers.ts_uses import USES_EXPORTS
-from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
+from repoatlas.storage.protocols import FileRow, SymbolRow, UnresolvedRefRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,10 +80,33 @@ def export_table(claim: UnresolvedRefRecord) -> dict[str, Any] | None:
     """A file's export table, if ``claim`` is one."""
     if claim.edge_type is not EdgeType.USES or not claim.meta_json:
         return None
-    if USES_EXPORTS not in claim.meta_json:
+    return table_from_meta(claim.meta_json)
+
+
+def table_from_meta(meta_json: str) -> dict[str, Any] | None:
+    """The export table an export-table claim's ``meta`` records, or ``None``."""
+    if USES_EXPORTS not in meta_json:
         return None
-    raw = json.loads(claim.meta_json).get(USES_EXPORTS)
+    raw = json.loads(meta_json).get(USES_EXPORTS)
     return json.loads(raw) if isinstance(raw, str) else None
+
+
+def declared_entity(symbols: dict[str, list[SymbolRow]] | None, name: str, line: int) -> int | None:
+    """The one top-level declaration of ``name`` at ``line`` among a file's symbols.
+
+    What a ``local`` export binds (``["local", name, line]``) resolves to. Shared with the
+    export surface (:mod:`repoatlas.graph.uses_link`), which must read it exactly as a
+    trace does.
+    """
+    rows = [
+        row
+        for row in (symbols or {}).get(name, [])
+        if row.qualified_name == name and row.line_start == line
+    ]
+    if len(rows) > 1:
+        rows = [row for row in rows if row.type is not EntityType.MODULE]
+    ids = {row.entity_id for row in rows}
+    return ids.pop() if len(ids) == 1 else None
 
 
 def use_resolution(meta: dict[str, str], **fields: Any) -> str:
@@ -107,17 +130,14 @@ class UseResolver:
         self,
         modules: ModuleResolver,
         index: ResolutionIndex,
-        claims: Sequence[UnresolvedRefRecord],
+        tables: Callable[[int], dict[str, Any] | None],
         links: PackageLinks | None = None,
     ) -> None:
         self._modules = modules
         self._index = index
         self._links = links
-        self._tables: dict[int, dict[str, Any]] = {}
-        for claim in claims:
-            table = export_table(claim)
-            if table is not None:
-                self._tables[claim.file_id] = table
+        #: A file's export table by file id, ``None`` when it records none.
+        self._tables = tables
         self._traced: dict[tuple[int, str], _Traced] = {}
         #: Steps the current use's trace has taken, and the deepest hop it has reached.
         self._steps = 0
@@ -207,7 +227,7 @@ class UseResolver:
     def _trace_once(
         self, module: FileRow, name: str, visiting: frozenset[tuple[int, str]], depth: int
     ) -> tuple[UseDefinition | None, str | None, bool]:
-        table = self._tables.get(module.file_id)
+        table = self._tables(module.file_id)
         if table is None:
             return None, "no-export-table", False
         spec = table.get("names", {}).get(name)
@@ -265,15 +285,7 @@ class UseResolver:
 
     def _symbol(self, file: FileRow, name: str, line: int) -> int | None:
         """The one top-level declaration of ``name`` at ``line`` in ``file``."""
-        rows = [
-            row
-            for row in self._index.symbols_by_file.get(file.file_id, {}).get(name, [])
-            if row.qualified_name == name and row.line_start == line
-        ]
-        if len(rows) > 1:
-            rows = [row for row in rows if row.type is not EntityType.MODULE]
-        ids = {row.entity_id for row in rows}
-        return ids.pop() if len(ids) == 1 else None
+        return declared_entity(self._index.symbols_by_file.get(file.file_id), name, line)
 
 
 def _through(module: FileRow, exported: str, definition: UseDefinition) -> UseDefinition:

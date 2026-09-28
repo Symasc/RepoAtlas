@@ -43,7 +43,13 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from repoatlas.models.parsing import EdgeType, EntityType, ParsedReference, ParsedSymbol
+from repoatlas.models.parsing import (
+    USES_EXPORT_TABLE,
+    EdgeType,
+    EntityType,
+    ParsedReference,
+    ParsedSymbol,
+)
 from repoatlas.parsers.treesitter import line_range, node_text, string_literal
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -788,7 +794,7 @@ def use_references(
             ParsedReference(
                 edge_type=EdgeType.USES,
                 target_kind=EntityType.SYMBOL,
-                target_key="export-table",
+                target_key=USES_EXPORT_TABLE,
                 line_start=1,
                 line_end=1,
                 meta={USES_EXPORTS: json.dumps(exports, sort_keys=True, separators=(",", ":"))},

@@ -20,7 +20,13 @@ from repoatlas.models.dependencies import (
     DependencyScope,
 )
 from repoatlas.models.http import ROUTE_KEY_PREFIX
-from repoatlas.models.parsing import EdgeDirection, EdgeType, EntityType, NeighborOrder
+from repoatlas.models.parsing import (
+    USES_EXPORT_TABLE,
+    EdgeDirection,
+    EdgeType,
+    EntityType,
+    NeighborOrder,
+)
 from repoatlas.models.repository import FileState, IndexedFile, Repository, SyncStatus
 from repoatlas.storage.protocols import (
     ChunkHit,
@@ -85,6 +91,38 @@ def _parse_dt(raw: str | None) -> datetime | None:
 
 #: What every shared HTTP node's key starts with: routes, endpoints, deployments.
 _HTTP_KEY_PREFIX = "http-"
+
+
+#: The ``meta`` key under which the ``USES`` stage records whether its edges are complete.
+USES_LINKS_KEY = "uses_links"
+#: The columns a standing claim is read back with (:func:`_claim`).
+_CLAIM_COLUMNS = (
+    "u.id, u.repo_id, u.file_id, u.src_id, u.edge_type, u.target_kind, "
+    "u.target_key, u.line_start, u.line_end, u.confidence, u.meta_json"
+)
+#: Bound parameters per ``IN (...)`` list, well under SQLite's limit.
+_CHUNK = 500
+
+
+def _claim(row: sqlite3.Row) -> UnresolvedRefRecord:
+    return UnresolvedRefRecord(
+        id=row["id"],
+        repo_id=row["repo_id"],
+        file_id=row["file_id"],
+        src_id=row["src_id"],
+        edge_type=EdgeType(row["edge_type"]),
+        target_kind=EntityType(row["target_kind"]),
+        target_key=row["target_key"],
+        line_start=row["line_start"],
+        line_end=row["line_end"],
+        confidence=row["confidence"],
+        meta_json=row["meta_json"],
+    )
+
+
+def _chunks(values: Sequence[int]) -> Iterator[Sequence[int]]:
+    for start in range(0, len(values), _CHUNK):
+        yield values[start : start + _CHUNK]
 
 
 def _after(prefix: str) -> str:
@@ -643,20 +681,21 @@ class SqliteKnowledgeStore:
             )
 
     def list_unresolved_refs(
-        self, repo_id: int | None = None, *, pending_only: bool = False
+        self,
+        repo_id: int | None = None,
+        *,
+        pending_only: bool = False,
+        exclude_uses: bool = False,
     ) -> list[UnresolvedRefRecord]:
         """Standing claims, optionally one repository's, optionally pending facts only.
 
         A repository's claims are the ones its files assert, reached through
         ``files`` (indexed on ``repo_id``) rather than a column ``unresolved_refs``
         has no index for. ``pending_only`` is a cheap prefilter on the recorded
-        role; callers that need the exact rule still apply it.
+        role; callers that need the exact rule still apply it. ``exclude_uses`` leaves
+        out ``USES`` claims, which the global pass resolves in a stage of their own.
         """
-        sql = """
-            SELECT u.id, u.repo_id, u.file_id, u.src_id, u.edge_type, u.target_kind,
-                   u.target_key, u.line_start, u.line_end, u.confidence, u.meta_json
-            FROM unresolved_refs u
-        """
+        sql = f"SELECT {_CLAIM_COLUMNS} FROM unresolved_refs u"  # noqa: S608 - column names only
         clauses: list[str] = []
         params: list[object] = []
         if repo_id is not None:
@@ -666,36 +705,131 @@ class SqliteKnowledgeStore:
         if pending_only:
             clauses.append("u.meta_json LIKE ?")
             params.append('%"pending_fact"%')
+        if exclude_uses:
+            clauses.append("u.edge_type != ?")
+            params.append(str(EdgeType.USES))
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         rows = self._db.execute(sql + " ORDER BY u.id", tuple(params)).fetchall()
-        return [
-            UnresolvedRefRecord(
-                id=row["id"],
-                repo_id=row["repo_id"],
-                file_id=row["file_id"],
-                src_id=row["src_id"],
-                edge_type=EdgeType(row["edge_type"]),
-                target_kind=EntityType(row["target_kind"]),
-                target_key=row["target_key"],
-                line_start=row["line_start"],
-                line_end=row["line_end"],
-                confidence=row["confidence"],
-                meta_json=row["meta_json"],
-            )
-            for row in rows
-        ]
+        return [_claim(row) for row in rows]
 
-    def delete_edges_by_parser(self, parser: str) -> int:
-        """Drop every edge a given producer created.
+    def list_use_claims(self, file_ids: Sequence[int] | None) -> list[UnresolvedRefRecord]:
+        """The ``USES`` and ``IMPORTS`` claims of these files, or of every file.
+
+        A use is resolved from its own claim and the imports beside it, which say where
+        its name was imported (:mod:`repoatlas.graph.uses_link`). Read by file through
+        ``idx_unresolved_file``, so resolving a few files reads only their claims.
+        """
+        kinds = (str(EdgeType.USES), str(EdgeType.IMPORTS))
+        sql = (
+            f"SELECT {_CLAIM_COLUMNS} FROM unresolved_refs u "  # noqa: S608 - column names only
+            "WHERE u.edge_type IN (?, ?)"
+        )
+        if file_ids is None:
+            rows = self._db.execute(sql + " ORDER BY u.id", kinds).fetchall()
+            return [_claim(row) for row in rows]
+        found: list[sqlite3.Row] = []
+        for chunk in _chunks(sorted(set(file_ids))):
+            found.extend(
+                self._db.execute(
+                    sql + f" AND u.file_id IN ({','.join('?' * len(chunk))})", (*kinds, *chunk)
+                ).fetchall()
+            )
+        return [_claim(row) for row in sorted(found, key=lambda row: row["id"])]
+
+    def list_module_facts(self) -> list[UnresolvedRefRecord]:
+        """Every module-resolution fact (:mod:`repoatlas.parsers.module_facts`), in any repository.
+
+        A key range on ``idx_unresolved_target``: each such claim targets the config
+        ``module-resolution:<kind>``. The caller still reads the fact's own marker.
+        """
+        rows = self._db.execute(
+            f"SELECT {_CLAIM_COLUMNS} FROM unresolved_refs u "  # noqa: S608 - column names only
+            "WHERE u.target_kind = ? AND u.target_key >= ? AND u.target_key < ? ORDER BY u.id",
+            (str(EntityType.CONFIG), "module-resolution:", "module-resolution;"),
+        ).fetchall()
+        return [_claim(row) for row in rows]
+
+    def list_export_tables(self, file_ids: Sequence[int] | None) -> dict[int, str]:
+        """Each file's export-table claim (:mod:`repoatlas.parsers.ts_uses`), as its raw meta.
+
+        One per file; were there two, the later one is kept, as it always was.
+        """
+        sql = (
+            "SELECT u.file_id, u.meta_json FROM unresolved_refs u "
+            "WHERE u.target_kind = ? AND u.target_key = ? AND u.edge_type = ?"
+        )
+        params: tuple[object, ...] = (str(EntityType.SYMBOL), USES_EXPORT_TABLE, str(EdgeType.USES))
+        rows: list[sqlite3.Row] = []
+        if file_ids is None:
+            rows = self._db.execute(sql + " ORDER BY u.id", params).fetchall()
+        else:
+            for chunk in _chunks(sorted(set(file_ids))):
+                rows.extend(
+                    self._db.execute(
+                        sql + f" AND u.file_id IN ({','.join('?' * len(chunk))}) ORDER BY u.id",
+                        (*params, *chunk),
+                    ).fetchall()
+                )
+        return {int(row["file_id"]): row["meta_json"] for row in rows if row["meta_json"]}
+
+    def delete_use_edges(self, parser: str, file_ids: Sequence[int] | None) -> int:
+        """Drop the ``USES`` edges ``parser`` wrote for these files, or for every file."""
+        sql = "DELETE FROM edges WHERE type = ? AND parser = ?"
+        params: tuple[object, ...] = (str(EdgeType.USES), parser)
+        with self._db.transaction() as conn:
+            if file_ids is None:
+                return conn.execute(sql, params).rowcount or 0
+            removed = 0
+            for chunk in _chunks(sorted(set(file_ids))):
+                removed += (
+                    conn.execute(
+                        sql + f" AND file_id IN ({','.join('?' * len(chunk))})", (*params, *chunk)
+                    ).rowcount
+                    or 0
+                )
+            return removed
+
+    def count_use_edges(self, parser: str) -> int:
+        """``USES`` edges ``parser`` wrote: one per claim it resolved."""
+        row = self._db.execute(
+            "SELECT COUNT(*) AS n FROM edges WHERE type = ? AND parser = ?",
+            (str(EdgeType.USES), parser),
+        ).fetchone()
+        return int(row["n"])
+
+    def count_use_claims(self) -> int:
+        """Standing ``USES`` claims, export tables aside: every use the global pass resolves."""
+        row = self._db.execute(
+            "SELECT COUNT(*) AS n FROM unresolved_refs WHERE edge_type = ? AND target_key != ?",
+            (str(EdgeType.USES), USES_EXPORT_TABLE),
+        ).fetchone()
+        return int(row["n"])
+
+    def uses_links_state(self) -> str | None:
+        """What the ``USES`` stage last recorded about the edges it keeps (``graph/uses_link``)."""
+        return self._db.get_meta(USES_LINKS_KEY)
+
+    def set_uses_links_state(self, state: str) -> None:
+        with self._db.transaction():
+            self._db.set_meta(USES_LINKS_KEY, state)
+
+    def delete_edges_by_parser(self, parser: str, *, keep: EdgeType | None = None) -> int:
+        """Drop every edge a given producer created, except those of type ``keep``.
 
         The global link pass owns its edges exclusively, so deleting them by
         producer and rebuilding makes the pass idempotent: running it twice gives
         the same graph as running it once, which is what makes an incremental sync
-        equal a full reindex (V1_SPEC §12).
+        equal a full reindex (V1_SPEC §12). Its ``USES`` edges are kept and replaced
+        per file by a stage of their own (:mod:`repoatlas.graph.uses_link`).
         """
         with self._db.transaction() as conn:
-            cursor = conn.execute("DELETE FROM edges WHERE parser = ?", (parser,))
+            if keep is None:
+                cursor = conn.execute("DELETE FROM edges WHERE parser = ?", (parser,))
+            else:
+                cursor = conn.execute(
+                    "DELETE FROM edges WHERE parser = ? AND type != ?", (parser, str(keep))
+                )
         return cursor.rowcount or 0
 
     def list_file_rows(self, repo_id: int | None = None) -> list[FileRow]:
