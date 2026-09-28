@@ -987,6 +987,10 @@ class CapabilityService:
                         self._workspace.knowledge,
                         slugs,
                         unit=lambda key, slug, path: unit_of(key, slug, path, directories),
+                        # A repository scope is a boundary: nothing crosses out of it.
+                        scope=frozenset(scope.values())
+                        if resolution.scope is CapabilityScope.REPOSITORY
+                        else None,
                     )
                     starts, members = seed_nodes(seed, walk, home)
                     walked = walk.run(starts, members)

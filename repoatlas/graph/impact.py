@@ -24,10 +24,15 @@ Along a path the key never decreases, so any prefix of the ranking is closed: ev
 candidate's predecessors rank before it.
 
 **Confinement.** A walk has a home repository: the seed's, else the context's. It leaves
-it only by a direct edge of a crossing type (:data:`CROSS_REPOSITORY_EDGES`), and never
-through a shared node: the same environment variable read in two repositories does not
-join them. A walk rooted at a shared node with no home adopts the repository of each
-dependent it reaches.
+it only by a direct edge of a crossing type (:data:`CROSS_REPOSITORY_EDGES`), or by an
+edge of a family that crosses on evidence (:attr:`Family.crosses`) and records that
+evidence itself -- a ``USES`` edge a package link proved (:mod:`repoatlas.graph.packages`)
+-- and never through a shared node: the same environment variable read in two
+repositories does not join them. A crossing moves the home to the far end's repository,
+so the walk goes on there exactly as it would have started there; a shared node keeps
+the home it was reached with. A walk rooted at a shared node with no home adopts the
+repository of each dependent it reaches. Nothing crosses into a repository outside the
+caller's scope.
 
 **Bounds.** At most :data:`MAX_DISTANCE` steps. Every read goes through
 :class:`~repoatlas.graph.neighbourhood.Neighbourhood` and is charged to :class:`Work`;
@@ -106,10 +111,13 @@ class Family:
     #: file reached because it imports or re-exports one name does not change whole,
     #: and its importers are reached precisely through their uses.
     whole_only: bool = False
+    #: The evidence on which an edge of this family may join two repositories, edge by
+    #: edge: ``package``, a package link's ``crossing`` record. ``None``: it never does.
+    crosses: str | None = None
 
 
 FAMILIES: tuple[Family, ...] = (
-    Family("uses", EdgeType.USES, IN, ImpactRole.DEPENDENT, Tier.EXACT, "uses"),
+    Family("uses", EdgeType.USES, IN, ImpactRole.DEPENDENT, Tier.EXACT, "uses", crosses="package"),
     Family("references", EdgeType.REFERENCES, IN, ImpactRole.DEPENDENT, Tier.EXACT, "references"),
     Family("calls", EdgeType.CALLS, IN, ImpactRole.DEPENDENT, Tier.EXACT, "calls"),
     Family("reads", EdgeType.READS, IN, ImpactRole.DEPENDENT, Tier.EXACT, "reads"),
@@ -181,6 +189,9 @@ FAMILIES: tuple[Family, ...] = (
         whole_only=True,
     ),
 )
+
+#: Edge types that may join two repositories, edge by edge, on the evidence they record.
+EVIDENCED_CROSSING = frozenset(f.edge_type for f in FAMILIES if f.crosses is not None)
 
 #: Derived steps: facts about keys and spans, not edges.
 MEMBER = "member"
@@ -358,8 +369,11 @@ class ImpactWalk:
         limits: WorkLimits | None = None,
         max_distance: int = MAX_DISTANCE,
         unit: Callable[[str, str | None, str | None], str] | None = None,
+        scope: frozenset[int] | None = None,
     ) -> None:
         self.work = Work(limits or WorkLimits())
+        #: The repositories the caller's scope names; ``None`` for all of them.
+        self._scope = scope
         self._neighbourhood = Neighbourhood(knowledge, self.work)
         self._slug_ids = {slug: repo_id for repo_id, slug in repo_slugs.items()}
         self._max_distance = max_distance
@@ -446,8 +460,18 @@ class ImpactWalk:
 
     def _expand(self, node: Node) -> None:
         assert node.entity_id is not None
+        # Across repositories a file is followed into only when it changes whole. A use
+        # that reaches a file names its whole namespace (a computed member, the module
+        # passed as a value): it says no declaration in it is used, so from a file that
+        # only re-exports or imports the changed name it is no exact consumer of it.
+        # The package summary counts it instead, as a consumer left unresolved.
+        whole_only = node.type is EntityType.FILE and not node.whole
         confinement = Confinement(
-            crossing=CROSS_REPOSITORY_EDGES, home_repo_id=node.home, crossing_moves_home=True
+            crossing=CROSS_REPOSITORY_EDGES,
+            evidenced=frozenset() if whole_only else EVIDENCED_CROSSING,
+            home_repo_id=node.home,
+            crossing_moves_home=True,
+            scope_repo_ids=self._scope,
         )
         for rule, families in rules_for(node):
             after = None
