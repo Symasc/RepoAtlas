@@ -26,7 +26,10 @@ use can depend on, and :meth:`UsesChangeLog.scope` turns it into the files to re
 * a file added or deleted, or a change to a repository's module-resolution facts
   (tsconfig, package manifests, workspaces): every file of that repository and of every
   repository declaring a package it provides, since specifiers resolve within their own
-  repository and only a package link, which needs that declaration, reaches into it;
+  repository and only a package link, which needs that declaration, reaches into it; and
+  every file of each repository nested inside it, since a workspace it declares may hold
+  them, and a package link resolves a ``workspace:`` declaration by that workspace
+  whichever repository each member is indexed as;
 * a change to a repository's declared packages: its own files; to the packages it
   provides: its own files and those of every repository declaring such a package.
 
@@ -124,6 +127,8 @@ class UsesChangeLog:
         self.package_repositories: set[int] = set()
         #: Package names whose providers changed.
         self.packages: set[str] = set()
+        #: Repositories nested inside a repository forgotten in this run, found before it is.
+        self.nested: set[int] = set()
 
     def before(self, file_id: int) -> FileState | None:
         """The file's state before its facts are replaced; notes the uses landing in it."""
@@ -154,10 +159,13 @@ class UsesChangeLog:
             self._compare(repo_id, file_id, self._state(file_id), FileState())
 
     def repository_removing(self, repo_id: int) -> None:
-        """Before a repository is forgotten: the packages it provided lose a provider."""
-        if self.everything is not None or self._dependencies is None:
+        """Before a repository is forgotten: the packages it provided lose a provider, and
+        the repositories nested inside it any workspace it declared."""
+        if self.everything is not None:
             return
-        self.packages |= self._dependencies.names_provided_by([repo_id], NPM)
+        self.nested |= self._knowledge.nested_repositories([repo_id])
+        if self._dependencies is not None:
+            self.packages |= self._dependencies.names_provided_by([repo_id], NPM)
 
     def scope(self) -> UsesScope:
         """The files whose uses may have changed (see the module docstring)."""
@@ -174,7 +182,8 @@ class UsesChangeLog:
             package_files = self._knowledge.file_ids_of_repositories(
                 sorted(self._dependencies.repositories_declaring(sorted(self.packages), NPM))
             )
-        repositories = dependents | self.package_repositories
+        nested = self.nested | self._knowledge.nested_repositories(sorted(self.repositories))
+        repositories = dependents | self.package_repositories | nested
         repository_files = self._knowledge.file_ids_of_repositories(sorted(repositories))
         files = self.own | self.landed | readers | repository_files | package_files
         return UsesScope(

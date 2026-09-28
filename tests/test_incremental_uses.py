@@ -32,6 +32,7 @@ from tests.incremental_corpus import (
     fresh_index,
     internal_consumer,
     internal_provider,
+    meta_repo,
     mono_repo,
     provider_repo,
     read_snapshot,
@@ -605,3 +606,53 @@ def test_i20_renaming_the_package_the_path_leads_to_and_back(
     sync_all(pathed, root)
     assert _internal_uses(pathed) == {(f"ipath:{USE_INTERNAL}", "iprov:src/index.ts#internalTool")}
     assert_equals_fresh(pathed, settings, root, tmp_path, "fresh-restored")
+
+
+@pytest.fixture
+def nested(workspace: Workspace, tmp_path: Path) -> Workspace:
+    return build(
+        workspace,
+        tmp_path,
+        {
+            "imeta": meta_repo(),
+            "imeta/packages/iprov": internal_provider(),
+            "imeta/apps/iapp": internal_consumer("workspace:*"),
+        },
+    )
+
+
+NESTED_USE = (f"imeta/apps/iapp:{USE_INTERNAL}", "imeta/packages/iprov:src/index.ts#internalTool")
+
+
+def test_i21_the_workspace_around_two_repositories_drops_the_provider_and_takes_it_back(
+    nested: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    assert _internal_uses(nested) == {NESTED_USE}
+    globs = '  - "packages/*"\n'
+    _replace(root, "imeta", "pnpm-workspace.yaml", globs, globs + '  - "!packages/iprov"\n')
+    work = sync_all(nested, root)
+    # neither repository changed: the one declaring the workspace they share did
+    assert _internal_uses(nested) == set()
+    assert (work.mode, work.repositories_invalidated) == ("incremental", 3)
+    assert_equals_fresh(nested, settings, root, tmp_path, "fresh-excluded")
+
+    _replace(root, "imeta", "pnpm-workspace.yaml", '  - "!packages/iprov"\n', "")
+    sync_all(nested, root)
+    assert _internal_uses(nested) == {NESTED_USE}
+    assert_equals_fresh(nested, settings, root, tmp_path, "fresh-restored")
+
+
+def test_i22_a_second_member_of_the_name_makes_it_ambiguous_until_it_goes(
+    nested: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    add_repo(root, "imeta/packages/idup", internal_provider())
+    sync_all(nested, root)
+    assert _internal_uses(nested) == set()
+    assert_equals_fresh(nested, settings, root, tmp_path, "fresh-doubled")
+
+    remove_repo(root, "imeta/packages/idup")
+    sync_all(nested, root)
+    assert _internal_uses(nested) == {NESTED_USE}
+    assert_equals_fresh(nested, settings, root, tmp_path, "fresh-restored")
