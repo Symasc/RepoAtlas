@@ -9,14 +9,19 @@ arrangement that must join nothing. The fixtures are in :mod:`tests.workspace_co
 
 from __future__ import annotations
 
+import json
+from collections import Counter
 from collections.abc import Iterator
 from typing import Any
 
 import pytest
 from repoatlas.capabilities.service import CapabilityService
 from repoatlas.config.settings import Settings
+from repoatlas.graph.resolution import ResolutionIndex
+from repoatlas.graph.uses_link import use_resolver
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.impact import ImpactRequest
+from repoatlas.models.parsing import USES_EXPORT_TABLE, EdgeType
 from repoatlas.services.workspace import Workspace, open_workspace
 from tests.impact_corpus import build
 from tests.workspace_corpus import REPOS, repo_uses
@@ -53,6 +58,30 @@ def edge(edges: list[dict[str, Any]], source: str, target: str) -> dict[str, Any
 
 def from_source(edges: list[dict[str, Any]], source: str) -> set[str]:
     return {e["target"] for e in edges if e["source"] == source}
+
+
+def refusals(workspace: Workspace, repository: str, path: str) -> dict[str, str]:
+    """Why each use one file makes resolved to nothing, by the local name it uses.
+
+    Resolved with the resolver the global pass builds, one use at a time, reading the
+    reason each adds to its (measurement-only) count.
+    """
+    knowledge = workspace.knowledge
+    index = ResolutionIndex.build(knowledge.list_file_rows(), knowledge.list_symbols())
+    resolver = use_resolver(knowledge, index, workspace.dependencies.list_for_repos(None))
+    [repo_id] = [i for i, slug in index.repo_slugs.items() if slug == repository]
+    origin = index.file(repo_id, path)
+    assert origin is not None
+    found: dict[str, str] = {}
+    for claim in knowledge.list_use_claims([origin.file_id]):
+        if claim.edge_type is EdgeType.IMPORTS or claim.target_key == USES_EXPORT_TABLE:
+            continue
+        meta = json.loads(claim.meta_json or "{}")
+        before = Counter(resolver.unresolved)
+        if resolver.resolve(origin, meta) is None:
+            [why] = (resolver.unresolved - before).elements()
+            found[meta["local"]] = why
+    return found
 
 
 def test_w1_a_root_import_is_a_use_of_the_member_s_declaration(
@@ -102,12 +131,24 @@ def test_w5_an_entry_in_build_output_is_mapped_to_the_one_source_root(
         ("useTwin", "W6: two members share the name"),
         ("useHidden", "W8: the subpath is not exported, though a file sits there"),
         ("useSecret", "W8b: the subpath climbs out of the package"),
+        ("useLonely", "the repository provides the name, but no member of its workspace"),
     ],
 )
 def test_what_is_not_proven_joins_nothing(
     edges: list[dict[str, Any]], declaration: str, why: str
 ) -> None:
     assert from_source(edges, f"{APP}/refused.ts#{declaration}") == set(), why
+
+
+def test_each_refusal_inside_the_repository_says_why(indexed: Workspace) -> None:
+    assert refusals(indexed, "ws", "apps/app/src/refused.ts") == {
+        "Amb": "workspace:entry-ambiguous",
+        "Rooted": "workspace:entry-unresolved",
+        "Twin": "workspace:provider-ambiguous",
+        "Hidden": "workspace:subpath-not-exported",
+        "Secret": "workspace:subpath-outside-package",
+        "Lonely": "workspace:no-local-member",
+    }
 
 
 def test_w7_the_app_s_own_tsconfig_alias_wins_over_a_member_of_that_name(
@@ -165,7 +206,7 @@ def test_w11_a_package_another_repository_provides_still_crosses_on_its_own_evid
         "entry": "src/index.ts",
         "entry_fields": "exports.import,exports.types",
         "entry_mapped": {"by": "tsconfig include", "from": "dist/index.mjs", "to": "src/index.ts"},
-        "declared_at": "apps/app/package.json:11",
+        "declared_at": "apps/app/package.json:12",
         "constraint": "^1.0.0",
         "imported_at": 1,
     }

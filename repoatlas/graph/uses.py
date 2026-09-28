@@ -149,7 +149,8 @@ class UseResolver:
         #: barrel passed, every ``export *`` branch searched. A remembered answer brings the
         #: tables its walk read, so what a use read never depends on what was traced first.
         self.reads: dict[int, set[int]] = {}
-        #: Why each unresolved use stayed unresolved; measurement only.
+        #: Why each unresolved use stayed unresolved; measurement only. A package the
+        #: importer's own repository provides is counted as ``workspace:<why>``.
         self.unresolved: Counter[str] = Counter()
 
     def resolve(self, origin: FileRow, meta: dict[str, str]) -> tuple[int, dict[str, Any]] | None:
@@ -162,7 +163,8 @@ class UseResolver:
             if not isinstance(found, PackageLink):
                 # A specifier that is no package at all keeps v1's reason.
                 refused = found not in (None, "relative", "not-a-package")
-                self.unresolved[f"package:{found}" if refused else "specifier"] += 1
+                why = self._refusal(origin, specifier, found) if refused else "specifier"
+                self.unresolved[why] += 1
                 return None
             link = found
         module = target.file if target is not None else link.file if link is not None else None
@@ -199,6 +201,15 @@ class UseResolver:
             fields["namespace"] = True
             entity = definition.file.file_entity_id
         return entity, fields
+
+    def _refusal(self, origin: FileRow, specifier: str, found: str | None) -> str:
+        """``package:<why>``; for a package ``origin``'s own repository provides, what its
+        workspace said instead, since that and not a package link decides such a name."""
+        if found == "provided-locally":
+            why = self._modules.workspace_refusal(origin, specifier)
+            if why is not None:
+                return f"workspace:{why}"
+        return f"package:{found}"
 
     def _trace(
         self, module: FileRow, name: str, visiting: frozenset[tuple[int, str]], depth: int
