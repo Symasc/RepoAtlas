@@ -210,6 +210,8 @@ REVIEWED_EDGE_READS = {
     "_count": "status total: the row count behind count_edges and its siblings",
     "_impact_scope": "typed: the edge types of an impact rule, confined in SQL",
     "count_whole_module_uses": "typed: USES, counted for the impact package summary",
+    "delete_use_edges": "maintenance: deletes the USES stage's edges for some files",
+    "count_use_edges": "typed: USES, counted for the sync report's totals",
 }
 
 

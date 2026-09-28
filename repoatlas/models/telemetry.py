@@ -71,6 +71,39 @@ class RetrievalTrace(BaseModel):
         return round(sum(stage.duration_ms for stage in self.stages), 3)
 
 
+class UsesWork(BaseModel):
+    """What one ``USES`` stage resolved again, and why (repoatlas.graph.uses_link).
+
+    Counts, not times: which files a change reached and how much work that cost are
+    deterministic, so they are what a test can hold a sync to.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: ``incremental``, or ``global`` when every use was resolved again.
+    mode: str = "global"
+    #: Why a pass was global; ``None`` for an incremental one.
+    reason: str | None = None
+    #: Files whose uses were resolved again, and how many were reached each way: the
+    #: file itself changed, a use of it landed in a changed file, it read a changed
+    #: export table, its repository's resolution changed, or a package it may link did.
+    files_invalidated: int = 0
+    own: int = 0
+    landed: int = 0
+    readers: int = 0
+    repository: int = 0
+    package: int = 0
+    repositories_invalidated: int = 0
+    packages_invalidated: int = 0
+    claims_examined: int = 0
+    claims_resolved: int = 0
+    edges_deleted: int = 0
+    edges_inserted: int = 0
+    #: Export tables recorded as read, for the next pass to invalidate by.
+    reads_written: int = 0
+    repositories_touched: int = 0
+
+
 class LinkTrace(BaseModel):
     """Instrumentation for the global link pass (ARCHITECTURE.md §5, §6)."""
 
@@ -81,6 +114,7 @@ class LinkTrace(BaseModel):
     files_indexed: int = 0
     symbols_indexed: int = 0
     stages: tuple[StageTiming, ...] = ()
+    uses: UsesWork | None = None
 
 
 class Stopwatch:

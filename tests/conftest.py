@@ -173,10 +173,17 @@ def fact_snapshot(workspace: Workspace) -> dict[str, object]:
         "ORDER BY key, name, line_start"
     ).fetchall()
     edges = workspace.database.execute(
-        "SELECT e.type, src.key AS src_key, dst.key AS dst_key, e.line_start "
+        # Who asserted an edge, which pass wrote it and how it was resolved are part of
+        # the fact: USES edges are kept between syncs and replaced per file
+        # (repoatlas.graph.uses_link), so a kept edge whose resolution record went
+        # stale would be an edge a full reindex does not write.
+        "SELECT e.type, src.key AS src_key, dst.key AS dst_key, e.line_start, "
+        "COALESCE(f.rel_path, '') AS asserted_by, COALESCE(e.parser, '') AS parser, "
+        "COALESCE(e.resolution, '') AS resolution "
         "FROM edges e JOIN entities src ON src.id = e.src_id "
         "JOIN entities dst ON dst.id = e.dst_id "
-        "ORDER BY src.key, dst.key, e.type, e.line_start"
+        "LEFT JOIN files f ON f.id = e.file_id "
+        "ORDER BY src.key, dst.key, e.type, e.line_start, asserted_by, parser, resolution"
     ).fetchall()
     dependencies = workspace.database.execute(
         # The source path is part of a dependency fact, not decoration: one

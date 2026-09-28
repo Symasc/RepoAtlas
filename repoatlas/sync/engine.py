@@ -46,6 +46,7 @@ from repoatlas.embeddings.protocol import EmbeddingModel, EmbeddingUnavailable
 from repoatlas.gitstate.client import GitClient
 from repoatlas.graph.keys import file_key, repository_key, symbol_key
 from repoatlas.graph.linker import GlobalLinkResult, ReferenceLinker
+from repoatlas.graph.uses_link import PENDING, UsesScope, stored_scope
 from repoatlas.indexing.chunking import chunk_content
 from repoatlas.models.dependencies import DependencyRecord, DependencyReport
 from repoatlas.models.parsing import (
@@ -735,6 +736,13 @@ class SyncEngine:
         reports: list[RepositorySyncReport] = []
         completions: list[SyncCompletion] = []
 
+        # USES edges are kept between syncs (repoatlas.graph.uses_link). Which of them
+        # this run must replace is decided from the state they were left in, and until
+        # this run's link commit they are recorded as not known complete, so a run that
+        # dies before it leaves the next one resolving every use.
+        uses = stored_scope(self._knowledge) or UsesScope.everything("every use requested")
+        self._knowledge.set_uses_links_state(PENDING)
+
         for repo in repositories:
             # Scope decides which repositories a run may forget, exactly as it
             # decides which it may index: a repository-scoped run never touches
@@ -759,7 +767,7 @@ class SyncEngine:
 
         # Computed outside the transaction: this is the expensive half, and none
         # of it touches the graph it is going to replace.
-        plan = self._linker.prepare_global()
+        plan = self._linker.prepare_global(uses)
 
         with self._knowledge.transaction():
             link = self._linker.commit_global(plan)

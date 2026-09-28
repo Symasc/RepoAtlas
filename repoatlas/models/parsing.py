@@ -80,6 +80,11 @@ class EdgeType(enum.StrEnum):
     USES = "USES"
 
 
+#: The target key of the one ``USES`` claim per file that is its export table, not a use
+#: (repoatlas.parsers.ts_uses). No identifier spells it, so no use can collide with it.
+USES_EXPORT_TABLE = "export-table"
+
+
 class EdgeDirection(enum.StrEnum):
     """Which end of an edge the queried entity is required to sit on.
 

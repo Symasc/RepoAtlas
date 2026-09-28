@@ -37,10 +37,9 @@ from dataclasses import dataclass, field
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
 from repoatlas.graph.http_claims import HttpClaimPlan, plan_http_claims
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
-from repoatlas.graph.modules import ModuleResolver, binding_pairs
-from repoatlas.graph.packages import CROSSING, PackageLinks
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
-from repoatlas.graph.uses import UseResolver, export_table, use_resolution
+from repoatlas.graph.uses import use_resolution
+from repoatlas.graph.uses_link import UsesPlan, UsesScope, apply_uses, plan_uses, stored_scope
 from repoatlas.models import http
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.parsing import (
@@ -149,6 +148,8 @@ class GlobalPlan:
     dependencies: tuple[PendingEdge, ...] = ()
     #: What the pending HTTP facts established, and why each one did or did not.
     http: HttpClaimPlan = field(default_factory=HttpClaimPlan)
+    #: The ``USES`` edges to replace, and whose (repoatlas.graph.uses_link).
+    uses: UsesPlan | None = None
     resolved: int = 0
     unresolved: int = 0
     cross_repository: int = 0
@@ -402,7 +403,7 @@ class ReferenceLinker:
         """
         return self.commit_global(self.prepare_global())
 
-    def prepare_global(self) -> GlobalPlan:
+    def prepare_global(self, uses: UsesScope | None = None) -> GlobalPlan:
         """Compute the complete replacement graph. **Writes nothing.**
 
         Everything expensive happens here: reading every file row and symbol,
@@ -411,6 +412,11 @@ class ReferenceLinker:
         anywhere in this phase leaves the committed state exactly as it was — which
         is the first half of why a failed link pass can no longer publish an empty
         graph (ARCHITECTURE.md §9).
+
+        ``USES`` claims are the exception to "every": ``uses`` names the consumer files
+        whose uses to resolve again, and the rest keep their edges
+        (:mod:`repoatlas.graph.uses_link`). Without it, or when the stored ``USES``
+        edges are not known complete, every use is resolved.
 
         Instrumented per stage so the traversal's cost is measurable without
         anyone restructuring it to find out (V1_SPEC §20).
@@ -428,31 +434,19 @@ class ReferenceLinker:
         by_id = {row.file_id: row for row in file_rows}
 
         with Stopwatch("resolve") as watch:
-            recorded = self._knowledge.list_unresolved_refs()
-            # Module-resolution configuration and export tables are read, never
-            # resolved themselves.
-            claims = [
-                claim
-                for claim in recorded
-                if not _is_module_fact(claim) and export_table(claim) is None
-            ]
+            # Declaration uses resolve in a stage of their own, below; module-resolution
+            # configuration is read by that stage, never resolved itself.
+            recorded = self._knowledge.list_unresolved_refs(exclude_uses=True)
+            claims = [claim for claim in recorded if not _is_module_fact(claim)]
             watch.candidates_in = len(claims)
             by_file: dict[int, list[UnresolvedRefRecord]] = {}
             for claim in claims:
                 by_file.setdefault(claim.file_id, []).append(claim)
-            # Declaration uses resolve by their own path (repoatlas.graph.uses), and only
-            # they read the module resolver: every other claim resolves as it always has.
-            modules = ModuleResolver(
-                index,
-                recorded,
-                self._knowledge.list_exported_names(exclude_parser=GLOBAL_PARSER),
-            )
             # Read once: package links resolve uses against them, and the dependency
             # stage below plans its edges from the same rows.
             records = (
                 self._dependencies.list_for_repos(None) if self._dependencies is not None else []
             )
-            uses = UseResolver(modules, index, recorded, PackageLinks(modules, index, records))
 
             edges: list[EdgeRecord] = []
             resolved = 0
@@ -468,7 +462,7 @@ class ReferenceLinker:
                 if origin is None:
                     unresolved += 1
                     continue
-                edge = self._resolve(claim, origin, index, by_file.get(claim.file_id, []), uses)
+                edge = self._resolve(claim, origin, index, by_file.get(claim.file_id, []))
                 if edge is None:
                     unresolved += 1
                     continue
@@ -490,6 +484,18 @@ class ReferenceLinker:
             watch.detail = f"{unresolved} still unresolved; {decided.detail}"
         stages.append(_timing(watch))
 
+        with Stopwatch("uses") as watch:
+            scope = (
+                uses or stored_scope(self._knowledge) or UsesScope.everything("every use requested")
+            )
+            uses_plan = plan_uses(
+                self._knowledge, index, records, producer=GLOBAL_PARSER, scope=scope
+            )
+            watch.candidates_in = uses_plan.work.claims_examined
+            watch.candidates_out = uses_plan.work.claims_resolved
+            watch.detail = _uses_detail(uses_plan)
+        stages.append(_timing(watch))
+
         with Stopwatch("dependencies") as watch:
             dependencies, cross = self._plan_dependencies(index, records)
             watch.candidates_in = len(dependencies)
@@ -501,10 +507,11 @@ class ReferenceLinker:
             edges=tuple(edges),
             dependencies=tuple(dependencies),
             http=decided,
+            uses=uses_plan,
             resolved=resolved,
             unresolved=unresolved,
             cross_repository=cross,
-            claims_considered=len(claims),
+            claims_considered=len(claims) + uses_plan.work.claims_examined,
             files_indexed=len(file_rows),
             symbols_indexed=len(symbols),
             stages=tuple(stages),
@@ -528,23 +535,27 @@ class ReferenceLinker:
         """
         stages = list(plan.stages)
         edges = list(plan.edges)
+        uses = plan.uses or UsesPlan(scope=UsesScope.everything("every use requested"))
 
-        planned = len(edges) + len(plan.dependencies) + len(plan.http.http)
+        planned = len(edges) + len(plan.dependencies) + len(plan.http.http) + len(uses.edges)
         with Stopwatch("swap", candidates_in=planned) as watch:
             with self._knowledge.transaction():
-                removed = self._knowledge.delete_edges_by_parser(GLOBAL_PARSER)
+                # USES edges outside the plan's files are kept; apply_uses replaces the rest.
+                removed = self._knowledge.delete_edges_by_parser(GLOBAL_PARSER, keep=EdgeType.USES)
                 edges.extend(self._materialize(plan.dependencies))
                 edges.extend(self._materialize_http(plan.http))
                 self._knowledge.add_edges(edges)
+                applied = apply_uses(self._knowledge, uses, producer=GLOBAL_PARSER)
                 self._knowledge.gc_orphan_entities()
-            watch.candidates_out = len(edges)
-            watch.detail = f"{removed} replaced"
+            watch.candidates_out = len(edges) + len(uses.edges)
+            watch.detail = f"{removed + applied.work.edges_deleted} replaced"
         stages.append(_timing(watch))
 
+        # Every use counts, kept or resolved again: one edge per use that resolved.
         return GlobalLinkResult(
-            edges=len(edges),
-            resolved=plan.resolved,
-            unresolved=plan.unresolved,
+            edges=len(edges) + len(uses.edges),
+            resolved=plan.resolved + applied.edges,
+            unresolved=plan.unresolved + applied.claims - applied.edges,
             cross_repository=plan.cross_repository,
             trace=LinkTrace(
                 duration_ms=round(sum(stage.duration_ms for stage in stages), 3),
@@ -552,6 +563,7 @@ class ReferenceLinker:
                 files_indexed=plan.files_indexed,
                 symbols_indexed=plan.symbols_indexed,
                 stages=tuple(stages),
+                uses=applied.work,
             ),
         )
 
@@ -616,23 +628,9 @@ class ReferenceLinker:
         origin: FileRow,
         index: ResolutionIndex,
         siblings: list[UnresolvedRefRecord],
-        uses: UseResolver | None = None,
     ) -> EdgeRecord | None:
         meta = json.loads(claim.meta_json) if claim.meta_json else {}
         kind = claim.target_kind
-
-        if claim.edge_type is EdgeType.USES:
-            # Resolved by its own path and no other (repoatlas.graph.uses).
-            found = uses.resolve(origin, meta) if uses is not None else None
-            if found is None:
-                return None
-            entity_id, fields = found
-            crossing = fields.get(CROSSING)
-            if isinstance(crossing, dict):
-                line = _import_line(siblings, meta)
-                if line is not None:
-                    crossing["imported_at"] = line
-            return self._edge(claim, origin, entity_id, resolution=use_resolution(meta, **fields))
 
         if kind is EntityType.MODULE:
             return self._resolve_module(claim, origin, index, meta)
@@ -758,7 +756,6 @@ class ReferenceLinker:
         dst_id: int,
         *,
         confidence: float | None = None,
-        resolution: str | None = None,
     ) -> EdgeRecord:
         return EdgeRecord(
             src_id=claim.src_id,
@@ -770,7 +767,6 @@ class ReferenceLinker:
             line_start=claim.line_start,
             line_end=claim.line_end,
             parser=GLOBAL_PARSER,
-            resolution=resolution,
         )
 
     # -- dependencies and cross-repository edges -----------------------------
@@ -927,63 +923,21 @@ def _imported_names(parsed: ParsedFile) -> dict[str, str]:
     return imported
 
 
-def _import_line(siblings: Sequence[UnresolvedRefRecord], meta: dict[str, str]) -> int | None:
-    """The line of the import statement that binds a use's local name, when one does.
-
-    Found among the same file's own claims: the import of that specifier whose bindings
-    include the name. The first by line when the file imports it twice.
-    """
-    specifier, local = meta.get("module"), meta.get("local")
-    if not specifier or not local:
-        return None
-    lines = sorted(
-        claim.line_start
-        for claim in siblings
-        if claim.edge_type is EdgeType.IMPORTS
-        and claim.line_start is not None
-        and claim.target_key == specifier
-        and claim.meta_json
-        and _binds(json.loads(claim.meta_json), local)
-    )
-    return lines[0] if lines else None
-
-
-def _binds(meta: dict[str, str], local: str) -> bool:
-    """Whether an import (never a re-export, which binds nothing) binds ``local``."""
-    if meta.get("role") == "re-export":
-        return False
-    return any(bound == local for bound, _ in _bound_names(meta))
-
-
-def _bound_names(meta: dict[str, str]) -> list[tuple[str, str | None]]:
-    """(local, exported) for each name one import binds.
-
-    Reads the parser's binding record when there is one, and otherwise the older
-    ``names`` list, whose ``type X`` and ``A as B`` spellings are taken apart here.
-    """
-    if any(key in meta for key in ("bindings", "default", "namespace")):
-        found: list[tuple[str, str | None]] = [
-            (local, name) for name, local in binding_pairs(meta.get("bindings"))
-        ]
-        if meta.get("default"):
-            found.append((meta["default"], "default"))
-        if meta.get("namespace"):
-            found.append((meta["namespace"], None))
-        return found
-    found = []
-    for raw in (meta.get("names") or "").split(","):
-        name = raw.strip().removeprefix("type ").strip()
-        if not name:
-            continue
-        exported, _, local = name.partition(" as ")
-        found.append((local.strip() or exported.strip(), exported.strip()))
-    return found
-
-
 def _is_module_fact(claim: UnresolvedRefRecord) -> bool:
     if not claim.meta_json or MODULE_RESOLUTION not in claim.meta_json:
         return False
     return bool(json.loads(claim.meta_json).get(MODULE_RESOLUTION))
+
+
+def _uses_detail(plan: UsesPlan) -> str:
+    work = plan.work
+    if work.mode == "global":
+        return f"global ({work.reason}): {work.files_invalidated} file(s)"
+    return (
+        f"incremental: {work.files_invalidated} file(s) -- {work.own} changed, "
+        f"{work.landed} landed, {work.readers} readers, {work.repository} by repository, "
+        f"{work.package} by package"
+    )
 
 
 def _timing(watch: Stopwatch) -> StageTiming:
