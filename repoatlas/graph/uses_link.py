@@ -14,6 +14,23 @@ inside the global pass's one transaction (:func:`apply_uses`), which also record
 the stored edges are complete. When they are not known to be -- a first index, a
 database from before this stage, a run that died before its commit, or a change to how
 uses resolve (:data:`USES_RESOLUTION_VERSION`) -- every use is resolved again.
+
+Otherwise :class:`UsesChangeLog` gathers, as each file is written, what changed that a
+use can depend on, and :meth:`UsesChangeLog.scope` turns it into the files to resolve:
+
+* a file whose facts were replaced: its own uses, and every file with a use landing in
+  it, because its entities are written again with new ids and those edges went with them;
+* a file whose **export surface** changed -- the names it exports, what each is bound to
+  (lines aside), the modules it re-exports wholesale, and whether each local export names
+  exactly one declaration -- every file whose uses read its export table (``use_reads``);
+* a file added or deleted, or a change to a repository's module-resolution facts
+  (tsconfig, package manifests, workspaces): every file of that repository and of every
+  repository declaring a package it provides, since specifiers resolve within their own
+  repository and only a package link, which needs that declaration, reaches into it;
+* a change to a repository's declared packages: its own files; to the packages it
+  provides: its own files and those of every repository declaring such a package.
+
+Nothing else a use reads can change without one of these.
 """
 
 from __future__ import annotations
@@ -23,15 +40,17 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from repoatlas.dependencies.normalize import NPM
 from repoatlas.graph.modules import ModuleResolver, binding_pairs
 from repoatlas.graph.packages import CROSSING, PackageLinks
 from repoatlas.graph.resolution import ResolutionIndex
-from repoatlas.graph.uses import UseResolver, table_from_meta, use_resolution
+from repoatlas.graph.uses import UseResolver, declared_entity, table_from_meta, use_resolution
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.parsing import USES_EXPORT_TABLE, EdgeType
 from repoatlas.models.telemetry import UsesWork
-from repoatlas.storage.protocols import EdgeRecord, UnresolvedRefRecord
-from repoatlas.storage.sqlite.stores import SqliteKnowledgeStore
+from repoatlas.parsers.module_facts import MODULE_RESOLUTION
+from repoatlas.storage.protocols import EdgeRecord, SymbolRow, UnresolvedRefRecord
+from repoatlas.storage.sqlite.stores import SqliteDependencyStore, SqliteKnowledgeStore
 
 #: Changed whenever what a use resolves to changes for the same facts, so edges kept
 #: from before the change are never trusted: the next sync resolves every use again.
@@ -42,14 +61,188 @@ PENDING = "pending"
 
 @dataclass(frozen=True, slots=True)
 class UsesScope:
-    """The consumer files whose uses a pass resolves again; ``None`` means every file."""
+    """The consumer files whose uses a pass resolves again; ``None`` means every file.
+
+    The counts say how many files each rule reached; one file may be reached by several.
+    """
 
     files: frozenset[int] | None
     reason: str | None = None
+    own: int = 0
+    landed: int = 0
+    readers: int = 0
+    repository: int = 0
+    package: int = 0
+    repositories: int = 0
+    packages: int = 0
 
     @classmethod
     def everything(cls, reason: str) -> UsesScope:
         return cls(files=None, reason=reason)
+
+
+@dataclass(frozen=True, slots=True)
+class FileState:
+    """What one file contributes to other files' uses, compared before and after a write."""
+
+    #: Its export surface (:func:`export_surface`).
+    surface: str = "none"
+    #: Its module-resolution facts, as recorded.
+    facts: tuple[str, ...] = ()
+    #: Its npm declared and provided rows (role, name, display name, constraint, line).
+    packages: tuple[tuple[str, str, str, str, int], ...] = ()
+
+
+class UsesChangeLog:
+    """What one sync run changed that uses can depend on, gathered as each file is written.
+
+    Each ``before`` is asked inside the file's own transaction, before its facts are
+    replaced or deleted, and each ``after`` once they are written. When the stored edges
+    are not known complete (``everything``) nothing is gathered: every use is resolved.
+    """
+
+    def __init__(
+        self,
+        knowledge: SqliteKnowledgeStore,
+        dependencies: SqliteDependencyStore | None,
+        *,
+        producer: str,
+        everything: str | None,
+    ) -> None:
+        self._knowledge = knowledge
+        self._dependencies = dependencies
+        self._producer = producer
+        self.everything = everything
+        self.own: set[int] = set()
+        self.landed: set[int] = set()
+        #: Files whose export surface changed and still exist, and readers of deleted ones.
+        self.surface: set[int] = set()
+        self.readers: set[int] = set()
+        #: Repositories whose file set or module facts changed.
+        self.repositories: set[int] = set()
+        #: Repositories whose declared or provided packages changed.
+        self.package_repositories: set[int] = set()
+        #: Package names whose providers changed.
+        self.packages: set[str] = set()
+
+    def before(self, file_id: int) -> FileState | None:
+        """The file's state before its facts are replaced; notes the uses landing in it."""
+        if self.everything is not None:
+            return None
+        self.landed |= self._knowledge.use_consumers_landing_in(file_id, self._producer)
+        return self._state(file_id)
+
+    def after(self, repo_id: int, file_id: int, before: FileState | None) -> None:
+        """Compare the file's written state with ``before`` (``None`` for a new file)."""
+        if self.everything is not None:
+            return
+        self.own.add(file_id)
+        self._compare(repo_id, file_id, before or FileState(), self._state(file_id))
+
+    def files_added(self, repo_id: int) -> None:
+        if self.everything is None:
+            self.repositories.add(repo_id)
+
+    def files_deleting(self, repo_id: int, file_ids: Sequence[int]) -> None:
+        """Before files are deleted: what landed in them, read them and they provided."""
+        if self.everything is not None or not file_ids:
+            return
+        self.repositories.add(repo_id)
+        for file_id in file_ids:
+            self.landed |= self._knowledge.use_consumers_landing_in(file_id, self._producer)
+            self.readers |= self._knowledge.use_readers([file_id])
+            self._compare(repo_id, file_id, self._state(file_id), FileState())
+
+    def repository_removing(self, repo_id: int) -> None:
+        """Before a repository is forgotten: the packages it provided lose a provider."""
+        if self.everything is not None or self._dependencies is None:
+            return
+        self.packages |= self._dependencies.names_provided_by([repo_id], NPM)
+
+    def scope(self) -> UsesScope:
+        """The files whose uses may have changed (see the module docstring)."""
+        if self.everything is not None:
+            return UsesScope.everything(self.everything)
+        readers = self.readers | (
+            self._knowledge.use_readers(sorted(self.surface)) if self.surface else set()
+        )
+        dependents = set(self.repositories)
+        package_files: set[int] = set()
+        if self._dependencies is not None:
+            provided = self._dependencies.names_provided_by(sorted(dependents), NPM)
+            dependents |= self._dependencies.repositories_declaring(sorted(provided), NPM)
+            package_files = self._knowledge.file_ids_of_repositories(
+                sorted(self._dependencies.repositories_declaring(sorted(self.packages), NPM))
+            )
+        repositories = dependents | self.package_repositories
+        repository_files = self._knowledge.file_ids_of_repositories(sorted(repositories))
+        files = self.own | self.landed | readers | repository_files | package_files
+        return UsesScope(
+            files=frozenset(files),
+            own=len(self.own),
+            landed=len(self.landed),
+            readers=len(readers),
+            repository=len(repository_files),
+            package=len(package_files),
+            repositories=len(repositories),
+            packages=len(self.packages),
+        )
+
+    def _state(self, file_id: int) -> FileState:
+        tables = self._knowledge.list_export_tables([file_id])
+        return FileState(
+            surface=export_surface(
+                file_id, tables.get(file_id), self._knowledge.list_symbols(file_id=file_id)
+            ),
+            facts=tuple(
+                sorted(
+                    claim.meta_json or ""
+                    for claim in self._knowledge.list_module_facts(file_id)
+                    if claim.meta_json and MODULE_RESOLUTION in claim.meta_json
+                )
+            ),
+            packages=(
+                self._dependencies.package_rows_for_file(file_id, NPM)
+                if self._dependencies is not None
+                else ()
+            ),
+        )
+
+    def _compare(self, repo_id: int, file_id: int, before: FileState, after: FileState) -> None:
+        if before.surface != after.surface:
+            self.surface.add(file_id)
+        if before.facts != after.facts:
+            self.repositories.add(repo_id)
+        if before.packages != after.packages:
+            # Declarations are read only for this repository's own files; provisions for
+            # them too (``provided-locally``), and for every file declaring the package.
+            self.package_repositories.add(repo_id)
+            provided = {row for row in before.packages if row[0] == "provided"} ^ {
+                row for row in after.packages if row[0] == "provided"
+            }
+            self.packages |= {row[1] for row in provided}
+
+
+def export_surface(file_id: int, meta_json: str | None, symbols: Sequence[SymbolRow]) -> str:
+    """What a trace passing through this file reads from it, whatever it lands on.
+
+    The export table, with each well-formed ``local`` binding's line replaced by whether
+    it names exactly one declaration (:func:`~repoatlas.graph.uses.declared_entity`, as a
+    trace reads it). A use that lands on a declaration here is re-resolved whenever the
+    file is written, so the line it lands on need not be part of this.
+    """
+    table = table_from_meta(meta_json) if meta_json else None
+    if table is None:
+        return "none"
+    declared = ResolutionIndex.build([], list(symbols)).symbols_by_file.get(file_id)
+    names: dict[str, Any] = {}
+    for exported, spec in table.get("names", {}).items():
+        if spec and spec[0] == "local" and len(spec) == 3 and spec[2].isdigit():
+            found = declared_entity(declared, spec[1], int(spec[2]))
+            names[exported] = ["local", spec[1], "declared" if found is not None else "none"]
+        else:
+            names[exported] = spec
+    return json.dumps({"names": names, "star": table.get("star", [])}, sort_keys=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +342,13 @@ def plan_uses(
         mode="global" if scope.files is None else "incremental",
         reason=scope.reason,
         files_invalidated=len(consumers) if scope.files is None else len(scope.files),
+        own=scope.own,
+        landed=scope.landed,
+        readers=scope.readers,
+        repository=scope.repository,
+        package=scope.package,
+        repositories_invalidated=scope.repositories,
+        packages_invalidated=scope.packages,
         claims_examined=len(uses),
         claims_resolved=len(edges),
         reads_written=len(reads),

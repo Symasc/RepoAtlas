@@ -737,17 +737,25 @@ class SqliteKnowledgeStore:
             )
         return [_claim(row) for row in sorted(found, key=lambda row: row["id"])]
 
-    def list_module_facts(self) -> list[UnresolvedRefRecord]:
-        """Every module-resolution fact (:mod:`repoatlas.parsers.module_facts`), in any repository.
+    def list_module_facts(self, file_id: int | None = None) -> list[UnresolvedRefRecord]:
+        """Module-resolution facts (:mod:`repoatlas.parsers.module_facts`): all, or one file's.
 
         A key range on ``idx_unresolved_target``: each such claim targets the config
         ``module-resolution:<kind>``. The caller still reads the fact's own marker.
         """
-        rows = self._db.execute(
+        sql = (
             f"SELECT {_CLAIM_COLUMNS} FROM unresolved_refs u "  # noqa: S608 - column names only
-            "WHERE u.target_kind = ? AND u.target_key >= ? AND u.target_key < ? ORDER BY u.id",
-            (str(EntityType.CONFIG), "module-resolution:", "module-resolution;"),
-        ).fetchall()
+            "WHERE u.target_kind = ? AND u.target_key >= ? AND u.target_key < ?"
+        )
+        params: tuple[object, ...] = (
+            str(EntityType.CONFIG),
+            "module-resolution:",
+            "module-resolution;",
+        )
+        if file_id is not None:
+            sql += " AND u.file_id = ?"
+            params = (*params, file_id)
+        rows = self._db.execute(sql + " ORDER BY u.id", params).fetchall()
         return [_claim(row) for row in rows]
 
     def list_export_tables(self, file_ids: Sequence[int] | None) -> dict[int, str]:
@@ -811,6 +819,47 @@ class SqliteKnowledgeStore:
             conn.executemany(
                 "INSERT INTO use_reads (file_id, read_file_id) VALUES (?, ?)", list(reads)
             )
+
+    def use_consumers_landing_in(self, file_id: int, parser: str) -> set[int]:
+        """Files with a ``USES`` edge ``parser`` wrote into one of this file's entities.
+
+        Asked before the file's facts are replaced or deleted: its entities are written
+        again with new ids, and every edge into the old ones goes with them.
+        """
+        rows = self._db.execute(
+            """
+            SELECT DISTINCT e.file_id AS file_id
+            FROM entities d JOIN edges e ON e.dst_id = d.id AND e.type = ?
+            WHERE d.file_id = ? AND e.parser = ? AND e.file_id IS NOT NULL
+            """,
+            (str(EdgeType.USES), file_id, parser),
+        ).fetchall()
+        return {int(row["file_id"]) for row in rows}
+
+    def use_readers(self, file_ids: Sequence[int]) -> set[int]:
+        """Files whose uses read the export table of any of these files (``use_reads``)."""
+        found: set[int] = set()
+        for chunk in _chunks(sorted(set(file_ids))):
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._db.execute(
+                "SELECT DISTINCT file_id FROM use_reads "  # noqa: S608 - placeholders are generated counts, values are bound
+                f"WHERE read_file_id IN ({placeholders})",
+                tuple(chunk),
+            ).fetchall()
+            found.update(int(row["file_id"]) for row in rows)
+        return found
+
+    def file_ids_of_repositories(self, repo_ids: Sequence[int]) -> set[int]:
+        """Every indexed file of these repositories."""
+        found: set[int] = set()
+        for chunk in _chunks(sorted(set(repo_ids))):
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._db.execute(
+                f"SELECT id FROM files WHERE repo_id IN ({placeholders})",  # noqa: S608 - placeholders are generated counts, values are bound
+                tuple(chunk),
+            ).fetchall()
+            found.update(int(row["id"]) for row in rows)
+        return found
 
     def count_use_edges(self, parser: str) -> int:
         """``USES`` edges ``parser`` wrote: one per claim it resolved."""
@@ -883,7 +932,11 @@ class SqliteKnowledgeStore:
         ]
 
     def list_symbols(
-        self, types: Sequence[EntityType] | None = None, repo_id: int | None = None
+        self,
+        types: Sequence[EntityType] | None = None,
+        repo_id: int | None = None,
+        *,
+        file_id: int | None = None,
     ) -> list[SymbolRow]:
         """File-scoped definitions, for cross-file and cross-repository resolution."""
         sql = """
@@ -901,6 +954,9 @@ class SqliteKnowledgeStore:
         if repo_id is not None:
             sql += " AND repo_id = ?"
             params = (*params, repo_id)
+        if file_id is not None:
+            sql += " AND file_id = ?"
+            params = (*params, file_id)
         rows = self._db.execute(sql, params).fetchall()
         return [
             SymbolRow(
@@ -1808,6 +1864,65 @@ class SqliteDependencyStore:
             (ecosystem, normalized_name),
         ).fetchall()
         return [(int(row["repo_id"]), str(row["repo_name"])) for row in rows]
+
+    def package_rows_for_file(
+        self, file_id: int, ecosystem: str
+    ) -> tuple[tuple[str, str, str, str, int], ...]:
+        """One file's declared and provided rows of one ecosystem, as package links read them.
+
+        (role, normalized name, name, constraint, line), sorted: what a declaration or a
+        provision contributes to a link, including where it is written.
+        """
+        rows = self._db.execute(
+            """
+            SELECT role, normalized_name, name, COALESCE(constraint_text, '') AS constraint_text,
+                   line_start
+            FROM dependencies
+            WHERE file_id = ? AND ecosystem = ? AND role IN ('declared', 'provided')
+            """,
+            (file_id, ecosystem),
+        ).fetchall()
+        return tuple(
+            sorted(
+                (
+                    str(row["role"]),
+                    str(row["normalized_name"]),
+                    str(row["name"]),
+                    str(row["constraint_text"]),
+                    int(row["line_start"]),
+                )
+                for row in rows
+            )
+        )
+
+    def names_provided_by(self, repo_ids: Sequence[int], ecosystem: str) -> set[str]:
+        """Normalized names of the packages these repositories provide."""
+        found: set[str] = set()
+        for chunk in _chunks(sorted(set(repo_ids))):
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._db.execute(
+                "SELECT DISTINCT normalized_name FROM dependencies "  # noqa: S608 - placeholders are generated counts, values are bound
+                f"WHERE role = 'provided' AND ecosystem = ? AND repo_id IN ({placeholders})",
+                (ecosystem, *chunk),
+            ).fetchall()
+            found.update(str(row["normalized_name"]) for row in rows)
+        return found
+
+    def repositories_declaring(self, names: Sequence[str], ecosystem: str) -> set[int]:
+        """Repositories with a manifest declaring any of these packages."""
+        found: set[int] = set()
+        ordered = sorted(set(names))
+        for start in range(0, len(ordered), _CHUNK):
+            chunk = ordered[start : start + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._db.execute(
+                "SELECT DISTINCT repo_id FROM dependencies "  # noqa: S608 - placeholders are generated counts, values are bound
+                "WHERE role = 'declared' AND ecosystem = ? "
+                f"AND normalized_name IN ({placeholders})",
+                (ecosystem, *chunk),
+            ).fetchall()
+            found.update(int(row["repo_id"]) for row in rows)
+        return found
 
     def list_for_repos(self, repo_ids: Sequence[int] | None = None) -> list[DependencyRecord]:
         sql = """

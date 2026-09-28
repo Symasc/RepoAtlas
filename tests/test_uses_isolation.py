@@ -212,6 +212,7 @@ REVIEWED_EDGE_READS = {
     "count_whole_module_uses": "typed: USES, counted for the impact package summary",
     "delete_use_edges": "maintenance: deletes the USES stage's edges for some files",
     "count_use_edges": "typed: USES, counted for the sync report's totals",
+    "use_consumers_landing_in": "typed: USES, which files' uses land in a file being rewritten",
 }
 
 
