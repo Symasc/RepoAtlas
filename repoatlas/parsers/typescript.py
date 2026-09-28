@@ -175,9 +175,55 @@ class _Walker:
                 meta={
                     "specifier": "relative" if _relative(specifier) else "package",
                     **({"names": names} if names else {}),
+                    **self._import_bindings(node),
                 },
             )
         )
+
+    def _import_bindings(self, node: Node) -> dict[str, str]:
+        """How each name is bound: the default, a namespace, and ``imported:local`` pairs.
+
+        ``names`` keeps the local names a file uses; resolution needs the names the
+        imported module *exports*, which an alias (``B as C``) and a default import
+        do not spell, so they are recorded apart.
+        """
+        clause = next((c for c in node.children if c.type == "import_clause"), None)
+        if clause is None:
+            return {}
+        found: dict[str, str] = {}
+        whole_type = any(c.type == "type" for c in node.children)
+        for child in clause.children:
+            if child.type == "identifier":
+                found["default"] = node_text(self._source, child)
+            elif child.type == "namespace_import":
+                local = next((c for c in child.children if c.type == "identifier"), None)
+                if local is not None:
+                    found["namespace"] = node_text(self._source, local)
+            elif child.type == "named_imports":
+                pairs, typed = self._specifiers(child, "import_specifier")
+                if pairs:
+                    found["bindings"] = ",".join(pairs)
+                if whole_type or typed:
+                    found["type_only"] = "*" if whole_type else ",".join(typed)
+        return found
+
+    def _specifiers(self, clause: Node, kind: str) -> tuple[list[str], list[str]]:
+        """``name`` or ``name:alias`` for each specifier, and the type-only names."""
+        pairs: list[str] = []
+        typed: list[str] = []
+        for spec in clause.children:
+            if spec.type != kind:
+                continue
+            name = spec.child_by_field_name("name")
+            if name is None:
+                continue
+            imported = node_text(self._source, name)
+            alias = spec.child_by_field_name("alias")
+            local = node_text(self._source, alias) if alias is not None else imported
+            pairs.append(imported if local == imported else f"{imported}:{local}")
+            if any(c.type == "type" for c in spec.children):
+                typed.append(imported)
+        return pairs, typed
 
     def _imported_names(self, node: Node) -> str:
         clause = node.child_by_field_name("import_clause") or next(
@@ -216,6 +262,7 @@ class _Walker:
                         meta={
                             "specifier": "relative" if _relative(specifier) else "package",
                             "role": "re-export",
+                            **self._reexport_bindings(node),
                         },
                     )
                 )
@@ -234,6 +281,30 @@ class _Walker:
             )
 
         self._visit_children(node, exported=True)
+
+    def _reexport_bindings(self, node: Node) -> dict[str, str]:
+        """What a re-export passes on: everything (``*``), a namespace, or named bindings.
+
+        Named bindings are ``imported:exported`` pairs, so a renamed re-export
+        (``export { Y as Z } from``) is followed under the name importers use.
+        """
+        clause = next((c for c in node.children if c.type == "export_clause"), None)
+        if clause is not None:
+            pairs, typed = self._specifiers(clause, "export_specifier")
+            whole_type = any(c.type == "type" for c in node.children)
+            found = {"reexport": "named", "bindings": ",".join(pairs)}
+            if whole_type or typed:
+                found["type_only"] = "*" if whole_type else ",".join(typed)
+            return found
+        namespace = next((c for c in node.children if c.type == "namespace_export"), None)
+        if namespace is not None:
+            local = next((c for c in namespace.children if c.type == "identifier"), None)
+            if local is None:
+                return {}
+            return {"reexport": "namespace", "namespace": node_text(self._source, local)}
+        if any(c.type == "*" for c in node.children):
+            return {"reexport": "*"}
+        return {}
 
     def _exported_names(self, node: Node) -> list[str]:
         found: list[str] = []
@@ -597,7 +668,11 @@ class TypeScriptParser:
     #    of rooted paths, a named value, or a route with an unread method — is
     #    recorded as a pending claim, and template arguments are recorded as parts
     #    rather than text, so the global pass can match them against served routes.
-    version = "8"
+    # 9: imports record how each name is bound (default, namespace, and
+    #    ``imported:local`` pairs), and re-exports what they pass on (``*``, a
+    #    namespace, or ``imported:exported`` pairs), so the global pass can follow a
+    #    named import through re-exporting barrels to the file that defines it.
+    version = "9"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:

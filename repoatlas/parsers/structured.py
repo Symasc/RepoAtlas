@@ -29,6 +29,7 @@ from repoatlas.models.parsing import (
 )
 from repoatlas.parsers.http_openapi import MAX_OPERATIONS, specification_references
 from repoatlas.parsers.marks import diagnostic_line, node_span
+from repoatlas.parsers.module_facts import module_facts
 
 _YAML_SUFFIXES = frozenset({".yaml", ".yml"})
 _JSON_SUFFIXES = frozenset({".json"})
@@ -123,7 +124,11 @@ class StructuredParser:
     # 2: OpenAPI 3 and Swagger 2 documents also yield HTTP route, deployment and
     #    endpoint facts. A specification is unchanged on disk when this ships, so
     #    only a facts-version change makes an ordinary sync reparse it.
-    version = "2"
+    # 3: tsconfig, package.json and pnpm-workspace.yaml also record the values
+    #    module resolution reads (repoatlas.parsers.module_facts), including a
+    #    tsconfig's ``include``, the source root a package link reads to find the
+    #    source of an entry that names build output (repoatlas.graph.packages).
+    version = "3"
     language = "YAML"
 
     def supports(self, path: Path) -> bool:
@@ -134,6 +139,9 @@ class StructuredParser:
 
         if path.name in _LOCKFILES:
             return ParsedFile(language=language, parser=self.name, parser_version=self.version)
+
+        # Read on their own terms, before YAML is asked: a tsconfig may carry comments.
+        resolution = module_facts(path.name, content)
 
         text = content
         if language == "JSON":
@@ -151,6 +159,7 @@ class StructuredParser:
                 language=language,
                 parser=self.name,
                 parser_version=self.version,
+                references=tuple(resolution),
                 diagnostics=(
                     ParseDiagnostic(
                         severity=Severity.WARNING,
@@ -207,6 +216,6 @@ class StructuredParser:
             parser=self.name,
             parser_version=self.version,
             symbols=tuple(collector.symbols),
-            references=tuple(references.values()),
+            references=(*references.values(), *resolution),
             diagnostics=tuple(diagnostics),
         )

@@ -49,6 +49,7 @@ from repoatlas.models.parsing import (
 )
 from repoatlas.models.telemetry import LinkTrace, StageTiming, Stopwatch
 from repoatlas.parsers.http_facts import PENDING_FACT
+from repoatlas.parsers.module_facts import MODULE_RESOLUTION
 from repoatlas.storage.protocols import (
     EdgeRecord,
     EntityRecord,
@@ -204,6 +205,12 @@ class ReferenceLinker:
                 # A pending fact (repoatlas.parsers.http_facts): only the global pass
                 # can prove it, so it is kept as a claim — never interned here, and
                 # never matched against a local definition by name.
+                claims.append(self._claim(repo_id, file_id, source_id, reference, parsed))
+                continue
+
+            if reference.meta.get(MODULE_RESOLUTION):
+                # Configuration the global pass reads to resolve bare specifiers: a
+                # fact about this file, not an edge to anything, so never interned.
                 claims.append(self._claim(repo_id, file_id, source_id, reference, parsed))
                 continue
 
@@ -383,7 +390,9 @@ class ReferenceLinker:
         by_id = {row.file_id: row for row in file_rows}
 
         with Stopwatch("resolve") as watch:
-            claims = self._knowledge.list_unresolved_refs()
+            recorded = self._knowledge.list_unresolved_refs()
+            # Module-resolution configuration is read, never resolved itself.
+            claims = [claim for claim in recorded if not _is_module_fact(claim)]
             watch.candidates_in = len(claims)
             by_file: dict[int, list[UnresolvedRefRecord]] = {}
             for claim in claims:
@@ -842,6 +851,12 @@ def _imported_names(parsed: ParsedFile) -> dict[str, str]:
         if tail:
             imported.setdefault(tail, specifier)
     return imported
+
+
+def _is_module_fact(claim: UnresolvedRefRecord) -> bool:
+    if not claim.meta_json or MODULE_RESOLUTION not in claim.meta_json:
+        return False
+    return bool(json.loads(claim.meta_json).get(MODULE_RESOLUTION))
 
 
 def _timing(watch: Stopwatch) -> StageTiming:
