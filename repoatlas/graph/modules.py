@@ -33,10 +33,21 @@ ambiguous and resolve to nothing, as TypeScript itself treats them; a cycle, mor
 than :data:`MAX_REEXPORT_HOPS` hops or more than :data:`MAX_TRACE_STEPS` steps in all
 resolves to nothing, so no arrangement of barrels makes one lookup unbounded.
 
-Everything here is repository-local by construction: every map is keyed by the
-importing file's repository, and a path that climbs out of its repository resolves
-to nothing. A same-named package in another repository is a dependency fact
-(``DEPENDS_ON``), never an import target.
+Everything :meth:`ModuleResolver.resolve` answers is repository-local by construction:
+every map is keyed by the importing file's repository, and a path that climbs out of
+its repository resolves to nothing. A same-named package in another repository is a
+dependency fact (``DEPENDS_ON``), never an import target of these edges. Only the
+package link that ``USES`` alone reads (:mod:`repoatlas.graph.packages`) enters another
+repository's package, through :meth:`ModuleResolver.package_entry`.
+
+**Build output, for a package link only.** A published package usually names its
+entry in build output that is not in the repository (``exports: ./dist/index.mjs``).
+:meth:`ModuleResolver.package_entry` maps such an entry to source only when asked to,
+and only on the package's own evidence: the output directory holds no indexed file,
+the package's tsconfig names exactly one source root (its ``rootDir``, else its single
+``include`` directory, which is the root ``tsc`` itself would infer), exactly one
+indexed source file answers the entry's stem there, and every condition of the entry
+maps to that same file. Workspace resolution never asks, so no edge it produced changes.
 """
 
 from __future__ import annotations
@@ -61,6 +72,12 @@ MAX_TRACE_STEPS = 256
 _MAX_EXTENDS = 16
 _PROJECT_CONFIGS = ("tsconfig.json", "jsconfig.json")
 _ENTRY_FIELDS = ("source", "types", "typings", "module", "main")
+#: Glob characters: an ``include`` entry holding one after its trailing wildcard is
+#: stripped names no single directory.
+_GLOB = re.compile(r"[*?{}\[\]!]")
+#: The wildcard tails an ``include`` directory may carry: ``src``, ``src/**``,
+#: ``src/**/*`` and ``src/**/*.ts`` all name ``src``.
+_INCLUDE_TAIL = re.compile(r"(/\*\*)?(/\*[^/]*)?/?$")
 #: Build-output suffixes, longest first, mapped back to a source stem.
 _OUTPUT_SUFFIXES = (".d.mts", ".d.cts", ".d.ts", ".mjs", ".cjs", ".jsx", ".js")
 _SOURCE_SUFFIXES = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
@@ -87,6 +104,23 @@ class ModuleTarget:
     basis: str
     #: Small, sorted provenance: the tsconfig and pattern, or the package and entry.
     detail: tuple[tuple[str, Any], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PackageEntry:
+    """The file one package entry names, or why it names none.
+
+    ``reason`` is set exactly when ``file`` is ``None``: ``entry-not-exported`` (the
+    package's ``exports`` list no root), ``subpath-not-exported``, ``entry-ambiguous``
+    (its conditions lead to different files) or ``entry-unresolved``.
+    """
+
+    file: FileRow | None
+    fields: tuple[str, ...] = ()
+    #: How an entry in build output was mapped to source, as sorted pairs; empty when
+    #: the entry named source directly.
+    mapped: tuple[tuple[str, str], ...] = ()
+    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +224,11 @@ class ModuleResolver:
             row.file_id: row for rows in index.files_by_repo.values() for row in rows.values()
         }
         self._tsconfigs: dict[int, dict[str, dict[str, Any]]] = defaultdict(dict)
+        #: Each tsconfig's ``include``, kept apart: a config that records nothing else
+        #: stays invisible to import resolution, exactly as before ``include`` was read.
+        self._includes: dict[int, dict[str, list[str]]] = defaultdict(dict)
+        #: Every directory that holds an indexed file, per repository; built on demand.
+        self._occupied: dict[int, frozenset[str]] = {}
         self._packages: dict[int, dict[str, dict[str, Any]]] = defaultdict(dict)
         self._workspaces: dict[int, list[_Workspace]] = defaultdict(list)
         self._reexports: dict[int, list[_Reexport]] = defaultdict(list)
@@ -208,7 +247,11 @@ class ModuleResolver:
             if kind:
                 facts = json.loads(meta.get("facts") or "{}")
                 if kind == TSCONFIG:
-                    self._tsconfigs[origin.repo_id][origin.rel_path] = facts
+                    include = facts.pop("include", None)
+                    if include:
+                        self._includes[origin.repo_id][origin.rel_path] = include
+                    if facts:
+                        self._tsconfigs[origin.repo_id][origin.rel_path] = facts
                 elif kind == PACKAGE:
                     self._packages[origin.repo_id][_parent(origin.rel_path)] = facts
                     if facts.get("workspaces"):
@@ -369,6 +412,18 @@ class ModuleResolver:
                 return ModuleTarget(found, TSCONFIG_BASE_URL, (("tsconfig", config),))
         return None
 
+    def aliased(self, origin: FileRow, specifier: str) -> bool:
+        """Whether a ``paths`` pattern of ``origin``'s own tsconfig claims ``specifier``.
+
+        The compiler maps such a specifier through the pattern, so what it names is the
+        project's decision, not a package's, even when no mapped file is indexed.
+        """
+        config = self._project_config(origin)
+        if config is None:
+            return False
+        paths = self._options(origin.repo_id, config).get("paths") or {}
+        return _match_paths(paths, specifier) is not None
+
     def _by_workspace(self, origin: FileRow, specifier: str) -> ModuleTarget | None:
         workspace = self._workspace_of(origin)
         split = split_package(specifier)
@@ -395,38 +450,57 @@ class ModuleResolver:
     def _entry(
         self, repo_id: int, directory: str, subpath: str
     ) -> tuple[FileRow, list[str], bool] | None:
+        entry = self.package_entry(repo_id, directory, subpath)
+        if entry.file is None:
+            return None
+        return entry.file, list(entry.fields), bool(entry.mapped)
+
+    def package_entry(
+        self, repo_id: int, directory: str, subpath: str, *, build_output: bool = False
+    ) -> PackageEntry:
+        """The file the package at ``directory`` names for ``subpath``, or why none.
+
+        ``build_output`` admits the mapping from build output to source described in the
+        module docstring; only a package link asks for it.
+        """
         facts = self._packages[repo_id].get(directory, {})
         exports = facts.get("exports")
         if exports is not None:
             candidates = _export_leaves(exports, subpath)
+            if not candidates:
+                reason = "subpath-not-exported" if subpath else "entry-not-exported"
+                return PackageEntry(None, reason=reason)
         elif subpath:
             candidates = [("subpath", subpath)]
         else:
             candidates = [(f, facts[f]) for f in _ENTRY_FIELDS if isinstance(facts.get(f), str)]
             candidates = candidates or [("index", "index")]
-        found: dict[int, tuple[FileRow, list[str], bool]] = {}
+        found: dict[int, tuple[FileRow, list[str], tuple[tuple[str, str], ...]]] = {}
         for label, raw in candidates:
-            source = self._source_of(repo_id, directory, raw)
+            source = self._source_of(repo_id, directory, raw, build_output=build_output)
             if isinstance(source, _Ambiguous):
-                return None
+                return PackageEntry(None, reason="entry-ambiguous")
             if source is None:
                 continue
             row, mapped = source
             entry = found.setdefault(row.file_id, (row, [], mapped))
             entry[1].append(label)
-        if len(found) != 1:
-            return None
-        return next(iter(found.values()))
+        if len(found) > 1:
+            return PackageEntry(None, reason="entry-ambiguous")
+        if not found:
+            return PackageEntry(None, reason="entry-unresolved")
+        row, labels, mapped = next(iter(found.values()))
+        return PackageEntry(row, tuple(labels), mapped)
 
     def _source_of(
-        self, repo_id: int, directory: str, raw: str
-    ) -> tuple[FileRow, bool] | _Ambiguous | None:
+        self, repo_id: int, directory: str, raw: str, *, build_output: bool = False
+    ) -> tuple[FileRow, tuple[tuple[str, str], ...]] | _Ambiguous | None:
         path = _join(directory, raw)
         if path is None:
             return None
         direct = self._module_file(repo_id, path)
         if direct is not None:
-            return direct, False
+            return direct, ()
         suffix = next((s for s in _JS_TO_TS if path.endswith(s)), None)
         if suffix is not None:
             stem = path[: -len(suffix)]
@@ -436,7 +510,7 @@ class ModuleResolver:
                 if (row := self._index.file(repo_id, stem + ext)) is not None
             ]
             if len(beside) == 1:
-                return beside[0], False
+                return beside[0], ()
         mapped: dict[int, FileRow] = {}
         for out_dir, root_dir in self._build_dirs(repo_id, directory):
             if not _inside(path, out_dir) or path == out_dir:
@@ -454,8 +528,90 @@ class ModuleResolver:
         if len(mapped) > 1:
             return _AMBIGUOUS
         if mapped:
-            return next(iter(mapped.values())), True
+            return next(iter(mapped.values())), (("by", "outDir->rootDir"),)
+        if build_output:
+            return self._build_output(repo_id, directory, path)
         return None
+
+    def _build_output(
+        self, repo_id: int, directory: str, path: str
+    ) -> tuple[FileRow, tuple[tuple[str, str], ...]] | _Ambiguous | None:
+        """An entry in unindexed build output, mapped to the one source file it names.
+
+        ``dist/sub/index.mjs`` in a package whose tsconfig names the single source root
+        ``src`` is ``src/sub/index.*``, when exactly one indexed file answers. Anything
+        less than that -- output that is indexed, two roots, two answering files, a root
+        outside the package -- maps to nothing.
+        """
+        relative = path[len(directory) + 1 :] if directory else path
+        head, _, rest = relative.partition("/")
+        if not rest or not _inside(path, directory) or path == directory:
+            return None
+        if _join(directory, head) in self._occupied_dirs(repo_id):
+            return None  # the output is indexed: it is not build output
+        suffix = next((s for s in _OUTPUT_SUFFIXES if rest.endswith(s)), None)
+        if suffix is None:
+            return None
+        root = self._source_root(repo_id, directory)
+        if root is None:
+            return None
+        root_path, basis = root
+        stem = _join(root_path, rest[: -len(suffix)])
+        if stem is None:
+            return None
+        answering = self._sources(repo_id, stem)
+        if len(answering) > 1:
+            return _AMBIGUOUS
+        if not answering:
+            return None
+        row = answering[0]
+        return row, (("by", basis), ("from", relative), ("to", row.rel_path))
+
+    def _source_root(self, repo_id: int, directory: str) -> tuple[str, str] | None:
+        """The one source root the package's own tsconfig names, and which option named it."""
+        roots: set[tuple[str, str]] = set()
+        for config in sorted({*self._tsconfigs.get(repo_id, {}), *self._includes.get(repo_id, {})}):
+            if _parent(config) != directory:
+                continue
+            options = self._options(repo_id, config)
+            if "rootDir" in options:
+                roots.add((options["rootDir"], "tsconfig rootDir"))
+                continue
+            for entry in self._includes.get(repo_id, {}).get(config, []):
+                stripped = _INCLUDE_TAIL.sub("", entry.strip().removeprefix("./"))
+                if not stripped or _GLOB.search(stripped):
+                    return None  # an include this cannot read: the root is unknown
+                anchored = _join(directory, stripped)
+                if anchored is None:
+                    return None
+                roots.add((anchored, "tsconfig include"))
+        paths = {path for path, _ in roots}
+        if len(paths) != 1:
+            return None
+        path = paths.pop()
+        if not _inside(path, directory) or path == directory:
+            return None
+        return path, min(basis for root, basis in roots if root == path)
+
+    def _occupied_dirs(self, repo_id: int) -> frozenset[str]:
+        if repo_id not in self._occupied:
+            found: set[str] = set()
+            for rel_path in self._index.files_by_repo.get(repo_id, {}):
+                parent = _parent(rel_path)
+                while parent and parent not in found:
+                    found.add(parent)
+                    parent = _parent(parent)
+            self._occupied[repo_id] = frozenset(found)
+        return self._occupied[repo_id]
+
+    def _sources(self, repo_id: int, stem: str) -> list[FileRow]:
+        """Every indexed source file answering ``stem`` as a file or as a directory index."""
+        return [
+            row
+            for base in (stem, f"{stem}/index")
+            for suffix in _SOURCE_SUFFIXES
+            if (row := self._index.file(repo_id, base + suffix)) is not None
+        ]
 
     def _first_source(self, repo_id: int, stem: str) -> FileRow | None:
         for base in (stem, f"{stem}/index"):
