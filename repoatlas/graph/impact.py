@@ -40,7 +40,7 @@ from __future__ import annotations
 import heapq
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import IntEnum
 
@@ -59,6 +59,14 @@ from repoatlas.storage.protocols import (
 MAX_DISTANCE = 8
 #: Rows per page when a node's admitted neighbours are read.
 PAGE = 200
+#: A reached node with more admitted dependents than this is a hub: it stays a candidate
+#: with its exact fan-out, shows :data:`REPRESENTATIVES` of them spread over units, and the
+#: rest are counted, not followed. Fixed on the neutral fixtures, before any benchmark
+#: probe; for reference, a symbol's fan-out in LVL is 27 at the 99th percentile.
+HUB = 24
+REPRESENTATIVES = 6
+#: The most far files a hub's spread is grouped over before it is reported partial.
+MAX_GROUPS = 64
 #: The most alternative predecessors a candidate keeps.
 MAX_ALTERNATIVES = 5
 #: The most members a seed is read with.
@@ -271,6 +279,21 @@ class Node:
         return found
 
 
+@dataclass(frozen=True, slots=True)
+class Hub:
+    """A reached node with more dependents than an answer can show."""
+
+    fanout: int
+    units: dict[str, int]
+    units_partial: bool
+    #: Far entities the representatives reached.
+    shown: int
+
+    @property
+    def collapsed(self) -> int:
+        return max(0, self.fanout - self.shown)
+
+
 @dataclass(slots=True)
 class WalkResult:
     seeds: list[Node]
@@ -283,6 +306,8 @@ class WalkResult:
     unexpanded: int = 0
     #: Whether a seed's members were more than were read.
     members_cut: bool = False
+    #: Hubs by entity id.
+    hubs: dict[int, Hub] = field(default_factory=dict)
 
     @property
     def complete(self) -> bool:
@@ -332,6 +357,7 @@ class ImpactWalk:
         *,
         limits: WorkLimits | None = None,
         max_distance: int = MAX_DISTANCE,
+        unit: Callable[[str, str | None, str | None], str] | None = None,
     ) -> None:
         self.work = Work(limits or WorkLimits())
         self._neighbourhood = Neighbourhood(knowledge, self.work)
@@ -342,6 +368,9 @@ class ImpactWalk:
         self._reached: dict[int, Node] = {}
         self._depth_cut = 0
         self._members_cut = False
+        self._hubs: dict[int, Hub] = {}
+        #: The unit of a node from its key, repository slug and path.
+        self._unit = unit or (lambda key, slug, path: f"{slug}:." if slug else key)
 
     # -- seeds ------------------------------------------------------------------
 
@@ -399,6 +428,7 @@ class ImpactWalk:
                 1 for n in self._reached.values() if not n.expanded and not n.leaf and not n.seed
             ),
             members_cut=self._members_cut,
+            hubs=dict(self._hubs),
         )
 
     def members(
@@ -421,13 +451,25 @@ class ImpactWalk:
         )
         for rule, families in rules_for(node):
             after = None
+            limit = PAGE
+            if not node.seed and not rule.outgoing:
+                # A probe one row past the hub bound: a node this size is read whole.
+                limit = HUB + 1
+                probe = self._neighbourhood.page(node.entity_id, rule, confinement, limit=limit)
+                if len(probe) > HUB and self._hub(node, rule, confinement, families):
+                    continue
+                for row in probe:
+                    self._reach(node, row, families[row.type])
+                if len(probe) < limit or self.work.exhausted is not None:
+                    continue
+                after, limit = probe[-1].cursor, PAGE
             while True:
                 rows = self._neighbourhood.page(
-                    node.entity_id, rule, confinement, after=after, limit=PAGE
+                    node.entity_id, rule, confinement, after=after, limit=limit
                 )
                 for row in rows:
                     self._reach(node, row, families[row.type])
-                if len(rows) < PAGE or self.work.exhausted is not None:
+                if len(rows) < limit or self.work.exhausted is not None:
                     break
                 after = rows[-1].cursor
         if (
@@ -438,6 +480,50 @@ class ImpactWalk:
             and node.role is ImpactRole.DEPENDENT
         ):
             self._container(node)
+
+    def _hub(
+        self,
+        node: Node,
+        rule: NeighborRule,
+        confinement: Confinement,
+        families: dict[EdgeType, Family],
+    ) -> bool:
+        """Collapse ``node`` if it has more dependents than :data:`HUB`; ``False`` if not."""
+        assert node.entity_id is not None
+        counts = self._neighbourhood.counts([node.entity_id], rule, confinement)
+        count = counts.get(node.entity_id) if counts is not None else None
+        if count is None or count.far <= HUB:
+            return False
+        groups, partial = self._neighbourhood.distribution(
+            node.entity_id, rule, confinement, max_groups=MAX_GROUPS
+        )
+        units: dict[str, int] = {}
+        queues: dict[str, list[tuple[int | None, str | None]]] = {}
+        for group in groups:
+            slug = self.slug_of(group.repo_id)
+            unit = self._unit(f"{slug}:{group.path}", slug, group.path)
+            units[unit] = units.get(unit, 0) + group.far
+            queues.setdefault(unit, []).append((group.repo_id, group.path))
+        # Largest units first, then by name; within a unit, non-test files first.
+        for queue in queues.values():
+            queue.sort(key=lambda g: is_test_path(g[1]))
+        order = sorted(queues, key=lambda u: (-units[u], u))
+        chosen: list[tuple[int | None, str | None]] = []
+        while len(chosen) < REPRESENTATIVES and any(queues[u] for u in order):
+            for unit in order:
+                if queues[unit] and len(chosen) < REPRESENTATIVES:
+                    chosen.append(queues[unit].pop(0))
+        rows = self._neighbourhood.rows_for(
+            node.entity_id, rule, confinement, groups=chosen, per_group=1
+        )
+        shown = set()
+        for row in rows:
+            self._reach(node, row, families[row.type])
+            shown.add(row.far_id)
+        self._hubs[node.entity_id] = Hub(
+            fanout=count.far, units=units, units_partial=partial, shown=len(shown)
+        )
+        return True
 
     def _reach(self, near: Node, row: NeighborRow, family: Family) -> None:
         if row.far_id in self._reached and self._reached[row.far_id].seed:
@@ -473,6 +559,15 @@ class ImpactWalk:
             leaf=family.leaf or is_test_path(row.far_path),
         )
         self._offer(candidate)
+
+    def page(
+        self, entity_id: int, rule: NeighborRule, confinement: Confinement, *, limit: int
+    ) -> list[NeighborRow]:
+        """One charged page of a node's neighbours, for steps beside the walk (packages)."""
+        return self._neighbourhood.page(entity_id, rule, confinement, limit=limit)
+
+    def repo_id(self, slug: str) -> int | None:
+        return self._slug_ids.get(slug)
 
     def slug_of(self, repo_id: int | None) -> str | None:
         return next((s for s, i in self._slug_ids.items() if i == repo_id), None)
