@@ -234,7 +234,7 @@ class ModuleResolver:
         self._packages: dict[int, dict[str, dict[str, Any]]] = defaultdict(dict)
         self._workspaces: dict[int, list[_Workspace]] = defaultdict(list)
         self._reexports: dict[int, list[_Reexport]] = defaultdict(list)
-        self._effective: dict[tuple[int, str], dict[str, Any]] = {}
+        self._effective: dict[tuple[int, str], tuple[dict[str, Any], int]] = {}
         #: What each (repository, directory, specifier) resolved to in this pass. A
         #: specifier's target depends on the importing file only through its repository and
         #: its directory: relative paths are joined to the directory, the project config is
@@ -350,21 +350,39 @@ class ModuleResolver:
                 return None
             directory = _parent(directory)
 
-    def _options(self, repo_id: int, config: str, depth: int = 0) -> dict[str, Any]:
-        """Effective ``compilerOptions`` for one config, each path anchored where declared."""
+    def _options(self, repo_id: int, config: str) -> dict[str, Any]:
+        """Effective ``compilerOptions`` for one config, each path anchored where declared.
+
+        The answer is the one following this config's own ``extends`` chain gives: a cycle
+        reads an empty parent rather than looping, and a chain longer than
+        :data:`_MAX_EXTENDS` ends there. An answer is remembered for another config's chain
+        only when neither cut it short and the chain still fits the bound from there, so
+        no config's options depend on which config was asked about first.
+        """
+        return self._chain(repo_id, config, frozenset(), 0)[0]
+
+    def _chain(
+        self, repo_id: int, config: str, visiting: frozenset[str], depth: int
+    ) -> tuple[dict[str, Any], int | None]:
+        """The options, and how many ``extends`` links lie below; ``None`` when cut short."""
         key = (repo_id, config)
-        if key in self._effective:
-            return self._effective[key]
+        known = self._effective.get(key)
+        if known is not None and depth + known[1] <= _MAX_EXTENDS:
+            return known
         own = self._tsconfigs.get(repo_id, {}).get(config)
-        if own is None or depth > _MAX_EXTENDS:
-            return {}
-        self._effective[key] = {}  # a cycle reads an empty parent rather than looping
+        if own is None:
+            return {}, 0
+        if depth > _MAX_EXTENDS or config in visiting:
+            return {}, None
         merged: dict[str, Any] = {}
+        below: int | None = 0
         directory = _parent(config)
         for parent in own.get("extends", []):
             target = self._extends(repo_id, directory, parent)
             if target is not None:
-                merged.update(self._options(repo_id, target, depth + 1))
+                options, links = self._chain(repo_id, target, visiting | {config}, depth + 1)
+                merged.update(options)
+                below = None if links is None or below is None else max(below, links + 1)
         for option in ("baseUrl", "rootDir", "outDir"):
             if option in own:
                 anchored = _join(directory, own[option])
@@ -374,8 +392,9 @@ class ModuleResolver:
             merged["paths"] = own["paths"]
             merged["pathsBase"] = directory
             merged["pathsConfig"] = config
-        self._effective[key] = merged
-        return merged
+        if below is not None:
+            self._effective[key] = (merged, below)
+        return merged, below
 
     def _extends(self, repo_id: int, directory: str, value: str) -> str | None:
         configs = self._tsconfigs.get(repo_id, {})

@@ -21,6 +21,13 @@ Every file passed through is kept, in order, with the name it exports the use by
 chain can say which name each hop spells. Wholesale re-exports (``export *``) that lead
 to two different declarations answer nothing, as they do for the import graph.
 
+Each use gets the answer a trace from it alone would give, whatever was traced before it
+in the same pass. A remembered answer is reused only when walking it again would stay
+within the hop and step bounds from where it is reached, and it is charged the steps and
+depth that walk would take; an answer a cycle or a bound cut short is never remembered.
+So the result is a function of the indexed facts, not of the order claims are read in,
+which is what lets a subset of uses be resolved again and agree with a whole pass.
+
 A specifier resolves within its own repository first, always. Only one that names no
 file there may name a package another repository provides, and only on the evidence
 :class:`~repoatlas.graph.packages.PackageLinks` requires; the name is then traced from
@@ -42,6 +49,16 @@ from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.parsers.ts_uses import USES_EXPORTS
 from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
+
+
+@dataclass(frozen=True, slots=True)
+class _Traced:
+    """A remembered answer, with what walking to it cost: steps, and hops below its start."""
+
+    found: UseDefinition | None
+    reason: str | None
+    steps: int
+    depth: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,8 +118,10 @@ class UseResolver:
             table = export_table(claim)
             if table is not None:
                 self._tables[claim.file_id] = table
-        self._traced: dict[tuple[int, str], tuple[UseDefinition | None, str | None]] = {}
+        self._traced: dict[tuple[int, str], _Traced] = {}
+        #: Steps the current use's trace has taken, and the deepest hop it has reached.
         self._steps = 0
+        self._reach = 0
         #: Why each unresolved use stayed unresolved; measurement only.
         self.unresolved: Counter[str] = Counter()
 
@@ -128,7 +147,7 @@ class UseResolver:
                 return None
             definition: UseDefinition | None = UseDefinition(module, None, None)
         else:
-            self._steps = 0
+            self._steps = self._reach = 0
             definition, reason = self._trace(module, name, frozenset(), 0)[:2]
             if definition is None:
                 self.unresolved[reason or "not-exported"] += 1
@@ -156,17 +175,33 @@ class UseResolver:
     def _trace(
         self, module: FileRow, name: str, visiting: frozenset[tuple[int, str]], depth: int
     ) -> tuple[UseDefinition | None, str | None, bool]:
-        """The definition, why there is none, and whether a cycle or a bound cut the search."""
+        """The definition, why there is none, and whether a cycle or a bound cut the search.
+
+        A remembered answer stands in for walking again only when that walk would fit the
+        bounds from here, and is charged what the walk would cost (see the module
+        docstring). It cannot stand in for a cycle either: an answer is remembered only
+        when nothing cut its walk, so nothing below it leads back to it.
+        """
         key = (module.file_id, name)
-        if key in self._traced:
-            found, reason = self._traced[key]
-            return found, reason, False
+        known = self._traced.get(key)
+        if (
+            known is not None
+            and self._steps + known.steps <= MAX_TRACE_STEPS
+            and depth + known.depth <= MAX_REEXPORT_HOPS
+        ):
+            self._steps += known.steps
+            self._reach = max(self._reach, depth + known.depth)
+            return known.found, known.reason, False
         if key in visiting or depth > MAX_REEXPORT_HOPS or self._steps >= MAX_TRACE_STEPS:
             return None, "bound", True
+        start, reach = self._steps, self._reach
         self._steps += 1
+        self._reach = depth
         found, reason, cut = self._trace_once(module, name, visiting | {key}, depth)
+        below = self._reach - depth
+        self._reach = max(reach, self._reach)
         if not cut:
-            self._traced[key] = (found, reason)
+            self._traced[key] = _Traced(found, reason, self._steps - start, below)
         return found, reason, cut
 
     def _trace_once(

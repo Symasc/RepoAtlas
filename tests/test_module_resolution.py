@@ -499,3 +499,57 @@ def test_barrels_that_all_export_each_other_stay_within_the_step_budget() -> Non
     modules, rows = _resolver({f: [g for g in files if g != f] for f in files}, {})
     assert modules.definition(rows["m0"], "absent") is None
     assert modules.steps <= MAX_TRACE_STEPS
+
+
+def _extends_cycle() -> tuple[ModuleResolver, dict[str, FileRow]]:
+    """Two tsconfigs, in ``one/`` and ``two/``, extend each other; only ``one`` sets baseUrl."""
+    from repoatlas.models.parsing import EdgeType, EntityType
+    from repoatlas.parsers.module_facts import MODULE_RESOLUTION, TSCONFIG
+    from repoatlas.storage.protocols import UnresolvedRefRecord
+
+    paths = ["one/tsconfig.json", "two/tsconfig.json", "one/app.ts", "two/app.ts", "one/lib/x.ts"]
+    rows = {
+        path: FileRow(
+            file_id=i + 1,
+            file_entity_id=100 + i,
+            repo_id=1,
+            repo_name="r",
+            repo_slug="r",
+            repo_path=Path("/nowhere/r"),
+            rel_path=path,
+        )
+        for i, path in enumerate(paths)
+    }
+    facts = {
+        "one/tsconfig.json": {"extends": ["../two/tsconfig.json"], "baseUrl": "."},
+        "two/tsconfig.json": {"extends": ["../one/tsconfig.json"]},
+    }
+    claims = [
+        UnresolvedRefRecord(
+            repo_id=1,
+            file_id=rows[config].file_id,
+            src_id=rows[config].file_entity_id,
+            edge_type=EdgeType.CONFIGURES,
+            target_kind=EntityType.CONFIG,
+            target_key=f"module-resolution:{TSCONFIG}",
+            meta_json=json.dumps({MODULE_RESOLUTION: TSCONFIG, "facts": json.dumps(value)}),
+        )
+        for config, value in facts.items()
+    ]
+    return ModuleResolver(ResolutionIndex.build(list(rows.values()), []), claims, {}), rows
+
+
+def test_an_extends_cycle_gives_each_config_its_own_chain_whatever_was_asked_first() -> None:
+    """``two`` inherits ``one``'s baseUrl through the cycle, even after ``one`` was asked about.
+
+    Asking about ``one`` first walks ``two`` with ``one`` already open, where it reads an
+    empty parent; that cut-short answer must not become ``two``'s own.
+    """
+    expected = ("one/lib/x.ts", "tsconfig-base-url", {"tsconfig": "two/tsconfig.json"})
+
+    modules, rows = _extends_cycle()
+    assert resolved(modules.resolve(rows["two/app.ts"], "lib/x")) == expected
+
+    modules, rows = _extends_cycle()
+    assert resolved(modules.resolve(rows["one/app.ts"], "lib/x"))
+    assert resolved(modules.resolve(rows["two/app.ts"], "lib/x")) == expected
