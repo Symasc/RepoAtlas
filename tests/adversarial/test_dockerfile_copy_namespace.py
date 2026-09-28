@@ -41,7 +41,8 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections import Counter
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -756,6 +757,43 @@ def test_an_external_image_in_copy_from_is_not_a_dependency() -> None:
 # -- §50 cost ------------------------------------------------------------------
 
 
+def test_the_namespace_check_reads_each_instructions_flags_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§50, counted rather than timed: one flag scan and one domain decision per
+    instruction, never one per source operand, whether or not the sources are
+    suppressed. A count is the claim itself; a stopwatch only approximates it."""
+    from repoatlas.parsers import dockerfile
+
+    calls: Counter[str] = Counter()
+
+    def counted(name: str, real: Callable[..., object]) -> Callable[..., object]:
+        def wrapper(*args: object, **kwargs: object) -> object:
+            calls[name] += 1
+            return real(*args, **kwargs)
+
+        return wrapper
+
+    monkeypatch.setattr(dockerfile, "split_flags", counted("flags", dockerfile.split_flags))
+    monkeypatch.setattr(dockerfile, "source_domain", counted("domain", dockerfile.source_domain))
+
+    def scans(source: str) -> dict[str, int]:
+        calls.clear()
+        parse(source)
+        return dict(calls)
+
+    operands = " ".join(f"src/m{i}.js" for i in range(20))
+    local = "FROM node:22\n" + "".join(f"COPY {operands} /app/{i}/\n" for i in range(10))
+    staged = "FROM node:22 AS b\nFROM node:22\n" + "".join(
+        f"COPY --from=b {operands} /app/{i}/\n" for i in range(10)
+    )
+    # Ten COPY instructions of twenty sources each: ten domain decisions, and one
+    # flag scan per instruction (each FROM scans its own flags too).
+    assert scans(local) == {"flags": 11, "domain": 10}
+    assert scans(staged) == {"flags": 12, "domain": 10}
+
+
+@pytest.mark.timing
 def test_the_namespace_check_costs_nothing_measurable() -> None:
     """§50. One flag scan per instruction, not per operand and not per candidate."""
     local = "FROM node:22\n" + "".join(f"COPY src/m{i}.js /app/m{i}.js\n" for i in range(100))

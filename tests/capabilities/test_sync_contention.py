@@ -148,6 +148,7 @@ def test_the_index_stays_usable_and_the_retry_succeeds(initialized: Workspace) -
     assert _sync(service).status is SyncStatus.COMPLETED
 
 
+@pytest.mark.timing
 def test_the_wait_is_v1s_own_timeout_and_no_longer(initialized: Workspace) -> None:
     """The capability passes V1's configured timeout through and adds none."""
     import time

@@ -61,6 +61,7 @@ def _stage(evidence: EvidenceSet, name: str):
 
 
 @pytest.mark.parametrize("question", QUESTIONS)
+@pytest.mark.timing
 def test_retrieval_completes_well_inside_the_budget(measured: Workspace, question: str) -> None:
     started = time.perf_counter()
     evidence = _retrieve(measured, question)
@@ -76,6 +77,7 @@ def test_retrieval_completes_well_inside_the_budget(measured: Workspace, questio
     assert elapsed_ms < RETRIEVAL_BUDGET_MS
 
 
+@pytest.mark.timing
 def test_the_trace_accounts_for_the_time_actually_spent(measured: Workspace) -> None:
     """A trace that omits a stage would make a future regression invisible."""
     started = time.perf_counter()
@@ -146,6 +148,7 @@ def test_the_evidence_set_never_exceeds_either_budget(measured: Workspace) -> No
         assert evidence.trace.token_estimate <= limits.token_budget
 
 
+@pytest.mark.timing
 def test_repeated_retrieval_does_not_degrade(measured: Workspace) -> None:
     """A cache that grows unboundedly, or per-call index rebuilding, shows up as a
     late run costing far more than an early one."""
@@ -163,6 +166,7 @@ def test_repeated_retrieval_does_not_degrade(measured: Workspace) -> None:
 # -- sync ---------------------------------------------------------------------
 
 
+@pytest.mark.timing
 def test_a_full_index_of_the_fixture_set_is_quick(
     workspace: Workspace, workspace_root: Path, tmp_path: Path
 ) -> None:
@@ -176,6 +180,7 @@ def test_a_full_index_of_the_fixture_set_is_quick(
     assert elapsed < FULL_SYNC_BUDGET_S
 
 
+@pytest.mark.timing
 def test_an_unchanged_sync_costs_far_less_than_the_first(
     measured: Workspace, workspace_root: Path
 ) -> None:

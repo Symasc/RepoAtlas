@@ -7,6 +7,7 @@ Real work repositories are never used (V1_SPEC §19).
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -15,6 +16,30 @@ from pathlib import Path
 import pytest
 from repoatlas.config.settings import Settings
 from repoatlas.services.workspace import Workspace, open_workspace
+
+
+def _isolate_worker_state() -> None:
+    """Give each pytest-xdist worker its own copy of the state the run was pointed at.
+
+    A run is isolated from the operator's real RepoAtlas state by XDG_CONFIG_HOME,
+    XDG_DATA_HOME, REPOATLAS_CONFIG and REPOATLAS_DB. Workers inherit one environment,
+    so under ``-n`` they would all share it; each worker instead appends its own id to
+    whichever of those the run set. Outside xdist this does nothing.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    if not worker:
+        return
+    for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME"):
+        if value := os.environ.get(name):
+            os.environ[name] = str(Path(value) / worker)
+    for name in ("REPOATLAS_CONFIG", "REPOATLAS_DB"):
+        if value := os.environ.get(name):
+            path = Path(value)
+            os.environ[name] = str(path.parent / worker / path.name)
+
+
+# Before any fixture or test module reads the environment.
+_isolate_worker_state()
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "repos"
 

@@ -611,6 +611,7 @@ def test_a_waiting_opener_observes_the_finished_migration(tmp_path: Path) -> Non
     assert out == f"OK {SCHEMA_VERSION}", out
 
 
+@pytest.mark.timing
 def test_a_reader_of_a_current_database_is_not_blocked_by_a_writer(tmp_path: Path) -> None:
     """Migrations must not be serialized behind the sync writer lock: readers
     open the database too, and `locate` must not queue behind a `sync`."""
