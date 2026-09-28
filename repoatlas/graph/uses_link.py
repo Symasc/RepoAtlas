@@ -54,7 +54,7 @@ from repoatlas.storage.sqlite.stores import SqliteDependencyStore, SqliteKnowled
 
 #: Changed whenever what a use resolves to changes for the same facts, so edges kept
 #: from before the change are never trusted: the next sync resolves every use again.
-USES_RESOLUTION_VERSION = "2"
+USES_RESOLUTION_VERSION = "3"
 COMPLETE = f"complete:{USES_RESOLUTION_VERSION}"
 PENDING = "pending"
 

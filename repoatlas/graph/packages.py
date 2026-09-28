@@ -5,8 +5,10 @@ business (:mod:`repoatlas.graph.modules`). One that does not may still name sour
 RepoAtlas holds: a package that another managed repository provides. A use of a name
 imported from it is then a use of the declaration that package exports, and following
 it is how a change in one repository reaches the exact declarations that consume it in
-another. This module decides when that is proven, and it decides it only on what the
-two repositories' own files state:
+another. A repository is not a package manager's boundary: a path or a workspace may
+lead from one repository's manifest into another's, and a package so declared is as
+much the consumer's as one it names by version. This module decides when the link is
+proven, and it decides it only on what the repositories' own files state:
 
 1. the specifier is a package name, never a path: a relative or absolute specifier is
    the import graph's alone and never leaves its repository;
@@ -14,29 +16,40 @@ two repositories' own files state:
    its project's tsconfig claims the specifier, and none of its own manifests provides
    the package;
 3. the nearest manifest at or above the importing file that *declares* the package is
-   the consumer's evidence. A declaration that names another package (``npm:``) or a
-   location (``workspace:``, ``file:``, ``link:``, ``portal:``) is not evidence for a
-   package some other repository provides;
-4. exactly one manifest in all the other repositories provides the name. Two -- in two
-   repositories or in one -- is an ambiguity, never a choice;
-5. that package's entry for the specifier's subpath is exactly one indexed file
+   the consumer's evidence, and every row of it for the package is read as the target
+   it names (:mod:`repoatlas.graph.declared`). Another package (an alias), a remote
+   source or an unreadable form joins nothing. A path pins the provider: it must lead,
+   followed from that manifest, to the directory of an indexed manifest providing the
+   package, in whichever repository that is. Otherwise, a version names the package
+   wherever it is provided, and then exactly one manifest in all the other
+   repositories must provide the name: two -- in two repositories or in one -- is an
+   ambiguity, never a choice;
+4. that package's entry for the specifier's subpath is exactly one indexed file
    (:meth:`~repoatlas.graph.modules.ModuleResolver.package_entry`).
 
-Anything short of all five is a named refusal, not a guess: the name joins nothing.
-What each step established is recorded on the edge (``crossing``), so every repository
-crossing can be read back to the manifest lines and the entry that proved it.
+Anything short of all four is a named refusal, not a guess: the name joins nothing, and
+a pin that fails never falls back to the name. What each step established is recorded
+on the edge (``crossing``), so every repository crossing can be read back to the
+manifest lines and the entry that proved it; a pinned one also says what pinned it
+(``resolved_by``).
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import PurePosixPath
 from typing import Any
 
 from repoatlas.dependencies.normalize import NPM, normalize
+from repoatlas.graph.declared import (
+    REFUSED_AS,
+    TargetKind,
+    classify_dependency_target,
+    path_target,
+)
 from repoatlas.graph.modules import ModuleResolver, split_package
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models.dependencies import DependencyRecord
@@ -46,10 +59,6 @@ from repoatlas.storage.protocols import FileRow
 PACKAGE_BASIS = "package"
 #: The resolution key holding a crossing's evidence; the impact walk crosses on nothing else.
 CROSSING = "crossing"
-
-#: Declarations that name something other than a package another repository provides.
-_ALIASED = ("npm:",)
-_LOCATED = ("workspace:", "file:", "link:", "portal:")
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,19 +71,25 @@ class PackageLink:
 
 
 @dataclass(frozen=True, slots=True)
-class _Provision:
+class Provision:
+    """A manifest that provides a package: where, on which line, under which name."""
+
     repo_id: int
     directory: str
     manifest: str
     line: int
     name: str
+    normalized: str
 
 
 @dataclass(frozen=True, slots=True)
 class _Declaration:
+    """The first row a manifest declares a package with, and every constraint it does."""
+
     manifest: str
     line: int
     constraint: str | None
+    constraints: tuple[str, ...] = ()
 
 
 @lru_cache(maxsize=1 << 16)
@@ -99,9 +114,10 @@ class PackageLinks:
             for rows in index.files_by_repo.values()
             for row in rows.values()
         }
-        self._provided: dict[str, list[_Provision]] = defaultdict(list)
+        self._provided: dict[str, list[Provision]] = defaultdict(list)
         self._provided_in: dict[int, set[str]] = defaultdict(set)
         self._declared: dict[tuple[int, str], dict[str, _Declaration]] = defaultdict(dict)
+        constraints: dict[tuple[int, str, str], set[str]] = defaultdict(set)
         located = [
             (record, manifest)
             for record in records
@@ -119,21 +135,32 @@ class PackageLinks:
         )
         for record, manifest in located:
             if record.role == "provided":
-                self._provided[record.normalized_name].append(
-                    _Provision(
-                        record.repo_id,
-                        _parent(manifest),
-                        manifest,
-                        record.line_start,
-                        record.name,
-                    )
+                provision = Provision(
+                    record.repo_id,
+                    _parent(manifest),
+                    manifest,
+                    record.line_start,
+                    record.name,
+                    record.normalized_name,
                 )
+                self._provided[record.normalized_name].append(provision)
                 self._provided_in[record.repo_id].add(record.normalized_name)
             elif record.role == "declared":
                 self._declared[(record.repo_id, _parent(manifest))].setdefault(
                     record.normalized_name,
                     _Declaration(manifest, record.line_start, record.constraint),
                 )
+                constraints[(record.repo_id, _parent(manifest), record.normalized_name)].add(
+                    (record.constraint or "").strip()
+                )
+        for (repo_id, directory), names in self._declared.items():
+            for name, first in names.items():
+                every = tuple(sorted(constraints[(repo_id, directory, name)]))
+                names[name] = _Declaration(first.manifest, first.line, first.constraint, every)
+        self._targets = ProviderTargets(
+            {repo_id: str(path) for path, repo_id in index.repo_roots},
+            [p for provisions in self._provided.values() for p in provisions],
+        )
         self._memo: dict[tuple[int, str, str], PackageLink | str] = {}
 
     def resolve(self, origin: FileRow, specifier: str) -> PackageLink | str:
@@ -162,17 +189,35 @@ class PackageLinks:
         declaration = self._declaration(origin, wanted)
         if declaration is None:
             return "dependency-absent"
-        constraint = (declaration.constraint or "").strip()
-        if constraint.startswith(_ALIASED):
-            return "dependency-aliased"
-        if constraint.startswith(_LOCATED):
-            return "dependency-protocol"
-        providers = [p for p in self._provided.get(wanted, []) if p.repo_id != origin.repo_id]
-        if not providers:
-            return "provider-absent"
-        if len(providers) > 1:
-            return "provider-ambiguous"
-        provider = providers[0]
+        targets = [classify_dependency_target(c, wanted) for c in declaration.constraints]
+        for target in targets:
+            refused = REFUSED_AS.get(target.kind)
+            if refused is not None:
+                return refused
+        pins: dict[Provision, dict[str, str]] = {}
+        for target in targets:
+            if target.kind is TargetKind.PATH:
+                found = self._targets.by_path(
+                    origin.repo_id, declaration.manifest, target.path or "", wanted
+                )
+            elif target.kind is TargetKind.WORKSPACE:
+                return "dependency-protocol"
+            else:
+                continue
+            if isinstance(found, str):
+                return found
+            pins.setdefault(*found)
+        if len(pins) > 1:
+            return "provider-ambiguous"  # two pins that disagree
+        if pins:
+            provider, pinned = next(iter(pins.items()))
+        else:
+            providers = [p for p in self._provided.get(wanted, []) if p.repo_id != origin.repo_id]
+            if not providers:
+                return "provider-absent"
+            if len(providers) > 1:
+                return "provider-ambiguous"
+            provider, pinned = providers[0], {}
         entry = self._modules.package_entry(
             provider.repo_id, provider.directory, subpath, build_output=True
         )
@@ -192,6 +237,7 @@ class PackageLinks:
             crossing["constraint"] = declaration.constraint
         if entry.mapped:
             crossing["entry_mapped"] = dict(entry.mapped)
+        crossing.update(pinned)
         return PackageLink(entry.file, crossing)
 
     def _declaration(self, origin: FileRow, wanted: str) -> _Declaration | None:
@@ -204,3 +250,56 @@ class PackageLinks:
             if not directory:
                 return None
             directory = _parent(directory)
+
+
+class ProviderTargets:
+    """Where a path declaration leads, across every indexed repository.
+
+    Shared by package links and by the package-level dependents of a change, so both
+    take a declaration to name the same provider.
+    """
+
+    def __init__(self, roots: Mapping[int, str], provisions: Iterable[Provision]) -> None:
+        #: Each repository's absolute root, innermost first: a path lands in the first
+        #: that holds it, never in the repository around that one.
+        self._roots = sorted(
+            ((root, repo_id) for repo_id, root in roots.items()),
+            key=lambda item: (-len(PurePosixPath(item[0]).parts), item[0]),
+        )
+        self._root_of = dict(roots)
+        #: The provision of each manifest directory, where a path declaration may lead.
+        self._at: dict[tuple[int, str], Provision] = {}
+        for provision in provisions:
+            self._at.setdefault((provision.repo_id, provision.directory), provision)
+
+    def by_path(
+        self, repo_id: int, manifest: str, path: str, wanted: str
+    ) -> tuple[Provision, dict[str, str]] | str:
+        """The manifest a path declared in ``manifest`` leads to, or why none provides ``wanted``.
+
+        ``path-outside-index`` when it lands under no indexed repository,
+        ``path-no-package`` when no manifest providing a package is indexed in exactly
+        that directory (a directory above or below one, a file, a tarball), and
+        ``dependency-elsewhere`` when the manifest there provides another package.
+        """
+        root = self._root_of.get(repo_id)
+        if root is None:
+            return "path-outside-index"
+        owner = self._owner(path_target(root, _parent(manifest), path))
+        if owner is None:
+            return "path-outside-index"
+        provision = self._at.get(owner)
+        if provision is None:
+            return "path-no-package"
+        if provision.normalized != wanted:
+            return "dependency-elsewhere"
+        return provision, {"resolved_by": "path"}
+
+    def _owner(self, target: str) -> tuple[int, str] | None:
+        """The innermost indexed repository holding ``target``, and the path within it."""
+        for root, repo_id in self._roots:
+            if target == root:
+                return repo_id, ""
+            if target.startswith(root + "/"):
+                return repo_id, target[len(root) + 1 :]
+        return None

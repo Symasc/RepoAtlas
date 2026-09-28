@@ -22,6 +22,11 @@ task; every file states the relationship it exists to prove.
 * ``provider`` and ``consumer`` (I6, I7, I10): a package another repository declares and
   uses, at its root entry, through a renamed re-export, and at a ``./sub`` subpath.
   ``dup`` (I7) is a second repository that can be made to provide the same name.
+* ``ipath``, ``iprov`` and ``iwrong`` (I19, I20): a package another repository declares by
+  a ``file:`` path, and the repository of another name the path can be pointed at.
+* ``imeta`` (I21, I22): a workspace whose members are repositories nested inside it -- a
+  provider and a consumer declaring it by ``workspace:*`` -- and a second provider of the
+  same name that can be nested there too.
 """
 
 from __future__ import annotations
@@ -193,6 +198,34 @@ def dup_repo(name: str) -> dict[str, str]:
     return {
         "package.json": manifest(name=name, version="2.0.0", main="src/index.ts"),
         "src/index.ts": "export const Pea = 99;\n",
+    }
+
+
+def internal_provider(name: str = "@inc/internal") -> dict[str, str]:
+    return {
+        "package.json": manifest(name=name, version="1.0.0", main="src/index.ts"),
+        "src/index.ts": "export function internalTool() {\n  return 1;\n}\n",
+    }
+
+
+USE_INTERNAL = (
+    'import { internalTool } from "@inc/internal";\n'
+    "export function useInternal() {\n  return internalTool();\n}\n"
+)
+
+
+def internal_consumer(constraint: str) -> dict[str, str]:
+    return {
+        "package.json": manifest(name="iconsumer", dependencies={"@inc/internal": constraint}),
+        "src/use.ts": USE_INTERNAL,
+    }
+
+
+def meta_repo() -> dict[str, str]:
+    """The workspace root; its members are the repositories nested inside it."""
+    return {
+        "pnpm-workspace.yaml": 'packages:\n  - "apps/*"\n  - "packages/*"\n',
+        "package.json": manifest(name="imeta-root", private=True),
     }
 
 
