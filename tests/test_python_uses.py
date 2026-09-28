@@ -121,11 +121,18 @@ def test_what_resolves_to_nothing_says_why(pyfix: Workspace) -> None:
     }
     assert refusals(pyfix, "pyfix", f"{R}/star_user.py") == {"User": "star-deferred"}
     assert refusals(pyfix, "pyfix", f"{R}/star_before.py") == {}
+    # P6: `tasks.py` beside `src/` is no module of a src layout
+    assert refusals(pyfix, "pyfix", f"{R}/outside.py") == {"tasks.build": "module-not-found"}
 
 
 def test_p7_a_flat_project_roots_at_itself_and_scripts_are_no_root(pyfix: Workspace) -> None:
     assert repo_uses(pyfix, "app.py") == {("app.py#p7", "fixture_pkg/models.py#User", "type")}
     assert refusals(pyfix, "flatfix", "app.py") == {"bar.bar": "module-not-found"}
+    # nor is a package's own directory: `import models` beside `models.py` names nothing
+    assert repo_uses(pyfix, "fixture_pkg/implicit.py") == set()
+    assert refusals(pyfix, "flatfix", "fixture_pkg/implicit.py") == {
+        "models.User": "module-not-found"
+    }
 
 
 def test_p12_a_project_is_a_boundary_inside_one_repository(pyfix: Workspace) -> None:
@@ -135,3 +142,11 @@ def test_p12_a_project_is_a_boundary_inside_one_repository(pyfix: Workspace) -> 
         ("beta/src/beta/service.py#use", "beta/src/app/__init__.py#App", "type"),
     }
     assert refusals(pyfix, "mono", "beta/src/beta/service.py") == {"Thing": "project-boundary"}
+
+
+def test_p12_a_project_nested_in_a_package_is_out_of_the_outer_roots_reach(
+    pyfix: Workspace,
+) -> None:
+    """The outer flat root spells `fixture_pkg.vendored`, but another project owns it."""
+    assert repo_uses(pyfix, "fixture_pkg/nested_user.py") == set()
+    assert refusals(pyfix, "flatfix", "fixture_pkg/nested_user.py") == {"V": "project-boundary"}
