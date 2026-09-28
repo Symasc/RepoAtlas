@@ -1542,6 +1542,21 @@ which makes it **idempotent**: running it twice gives the same graph as running 
 incremental sync equal a full reindex (§9) even though cross-repository edges depend on repositories the current
 sync never touched.
 
+Declaration uses (`USES`) are the exception, because resolving every one of them again was most of what a one-file
+sync cost. Their edges are kept between syncs and replaced only for the consumer files a change can reach
+(`repoatlas/graph/uses_link.py`). As each file is written, the sync notes what changed that a use can depend on:
+
+- the file's own claims;
+- the uses that landed in it, whose target entities are written again with new ids;
+- its export surface, whose readers the `use_reads` table records;
+- a file added or deleted, or a module-resolution fact changed, which reaches the whole repository and every
+  repository declaring a package it provides;
+- its declared and provided packages.
+
+Everything else keeps its edges, because nothing else it reads changed. A run that cannot trust the kept edges
+resolves every use: a first index, a database from before this stage, a run that died before its commit (the
+`uses_links` marker still says `pending`), or a change to how uses resolve.
+
 | Reference kind | How it resolves |
 |---|---|
 | environment variable, module, command, config key | interned as a global entity in the per-file pass |
@@ -3826,6 +3841,7 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | Jinja neutralized with same-length filler | Strip Jinja, or blank whole lines | Preserving every character position keeps YAML line *and* column marks identical to the original file, so a Salt fact cites the line a human would point at. Stripping shifts every position after the first `{{` |
 | An `.sls` top-level key is a state or config data, decided structurally | Treat every `.sls` as states, or infer from the path | Salt itself distinguishes them only through the top file, which RepoAtlas cannot read. What *is* in the text is whether the key declares a `module.function`; that test is deterministic and is what lets `pillar['service']['host']` resolve to the line defining it |
 | Two link passes, the global one idempotent by delete-and-rebuild | Incrementally patch cross-repository edges | Cross-repository edges depend on repositories the current sync never touched. Rebuilding from the standing claims is the only cheap way to keep "incremental sync equals full reindex" true for them (§9) |
+| `USES` edges kept and replaced per consumer file | Rebuild them with the rest of the global pass | Rebuilding every use doubled a one-file sync. What a use reads is known exactly — its own claims, the export tables it traced (recorded in `use_reads`), its repository's files and module facts, the package rows a link consults — so a change reaches a known set of files and the invariant still holds; anything the sync cannot vouch for makes it resolve every use (§6) |
 | Cross-file symbol references resolved only through a written import | Resolve on name equality within the repository | Name equality is not evidence (V1_SPEC §2). The import is the proof, and it is already in the file, so requiring it costs nothing and removes a whole class of wrong edges |
 | `salt://` sources resolved at confidence < 1.0 | Resolve at full confidence, or not at all | `file_roots` is not readable, so no `salt://` mapping is ever proven. Refusing to resolve would lose a genuinely useful link; resolving silently at 1.0 would overstate it. The confidence value carries the distinction |
 | `unresolved_refs` retained after a successful resolution | Delete rows once resolved | The row is the file's durable claim, not a work queue. Keeping it is what makes the global pass rebuildable and what lets a repository added later gain its edges without a reparse |

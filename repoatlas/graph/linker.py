@@ -20,6 +20,13 @@ graph as running it once, which is what lets an incremental sync equal a full
 reindex (V1_SPEC §12). It is also **global by necessity** — a change in one
 repository can create or invalidate a cross-repository edge in another.
 
+``USES`` edges are the one exception to rebuilding everything. They are kept between
+syncs and replaced only for the consumer files a change can reach, because resolving
+every declaration use again was most of what a one-file sync cost; which files those
+are, and why nothing outside them can have changed, is in
+:mod:`repoatlas.graph.uses_link`. A pass that cannot trust the kept edges resolves
+every use, so the invariant holds for them too.
+
 Because it is a *replacement*, it is split in two: :meth:`prepare_global` computes
 the whole new graph while writing nothing, and :meth:`commit_global` swaps it in
 inside a single transaction. Deleting the old graph and inserting the new one used
@@ -39,7 +46,14 @@ from repoatlas.graph.http_claims import HttpClaimPlan, plan_http_claims
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
 from repoatlas.graph.uses import use_resolution
-from repoatlas.graph.uses_link import UsesPlan, UsesScope, apply_uses, plan_uses, stored_scope
+from repoatlas.graph.uses_link import (
+    UsesChangeLog,
+    UsesPlan,
+    UsesScope,
+    apply_uses,
+    plan_uses,
+    stored_scope,
+)
 from repoatlas.models import http
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.parsing import (
@@ -403,7 +417,7 @@ class ReferenceLinker:
         """
         return self.commit_global(self.prepare_global())
 
-    def prepare_global(self, uses: UsesScope | None = None) -> GlobalPlan:
+    def prepare_global(self, uses: UsesChangeLog | None = None) -> GlobalPlan:
         """Compute the complete replacement graph. **Writes nothing.**
 
         Everything expensive happens here: reading every file row and symbol,
@@ -413,9 +427,9 @@ class ReferenceLinker:
         is the first half of why a failed link pass can no longer publish an empty
         graph (ARCHITECTURE.md §9).
 
-        ``USES`` claims are the exception to "every": ``uses`` names the consumer files
-        whose uses to resolve again, and the rest keep their edges
-        (:mod:`repoatlas.graph.uses_link`). Without it, or when the stored ``USES``
+        ``USES`` claims are the exception to "every": ``uses``, what this run changed,
+        decides the consumer files whose uses to resolve again, and the rest keep their
+        edges (:mod:`repoatlas.graph.uses_link`). Without it, or when the stored ``USES``
         edges are not known complete, every use is resolved.
 
         Instrumented per stage so the traversal's cost is measurable without
@@ -486,7 +500,9 @@ class ReferenceLinker:
 
         with Stopwatch("uses") as watch:
             scope = (
-                uses or stored_scope(self._knowledge) or UsesScope.everything("every use requested")
+                uses.scope()
+                if uses is not None
+                else stored_scope(self._knowledge) or UsesScope.everything("every use requested")
             )
             uses_plan = plan_uses(
                 self._knowledge, index, records, producer=GLOBAL_PARSER, scope=scope

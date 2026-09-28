@@ -9,19 +9,32 @@ task; every file states the relationship it exists to prove.
   thirteen -- one past :data:`~repoatlas.graph.modules.MAX_REEXPORT_HOPS` -- so ``deep``'s
   use resolves to nothing however the pass reached it. ``deep.ts`` sorts first, so a fresh
   index resolves it before ``shallow.ts``, and re-indexing it alone reverses that order.
+* ``mono`` (I1-I5, I8, I9): a workspace whose package ``@mono/kit`` is a barrel -- two
+  ``export *``, a renamed re-export, a default re-exported by name and an ``export * as``
+  -- and an app that uses it, a tsconfig ``paths`` alias, a relative import, and an
+  import of a file that does not exist yet. ``later.ts`` uses ``Later``, which ``a.ts``
+  declares below a function whose body an edit grows; ``other.ts`` uses only ``Beta``, so
+  it reads ``a.ts`` and lands in ``b.ts``; ``unrelated.ts`` uses nothing.
+* ``provider`` and ``consumer`` (I6, I7, I10): a package another repository declares and
+  uses, at its root entry, through a renamed re-export, and at a ``./sub`` subpath.
+  ``dup`` (I7) is a second repository that can be made to provide the same name.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from repoatlas.config.settings import Settings
+from repoatlas.models.telemetry import UsesWork
 from repoatlas.services.init_service import initialize
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace
+from tests.conftest import fact_snapshot, init_git_repository
 from tests.impact_corpus import use_edges
 
 CHAIN_LENGTH = 14
@@ -39,6 +52,108 @@ def chain_repo() -> dict[str, str]:
         'import { Deep } from "./chain/c07";\nexport function useShallow() {\n  return Deep;\n}\n'
     )
     return files
+
+
+def manifest(**fields: Any) -> str:
+    """A package manifest, indented so each field sits on a line of its own."""
+    return json.dumps(fields, indent=2) + "\n"
+
+
+def mono_repo() -> dict[str, str]:
+    return {
+        "package.json": manifest(name="mono-root", private=True, workspaces=["packages/*"]),
+        "tsconfig.json": json.dumps(
+            {"compilerOptions": {"baseUrl": ".", "paths": {"@app/*": ["apps/web/src/*"]}}}
+        ),
+        "packages/kit/package.json": manifest(name="@mono/kit", exports={".": "./src/index.ts"}),
+        "packages/kit/src/index.ts": (
+            'export * from "./a";\n'
+            'export * from "./b";\n'
+            'export { Gamma as Renamed } from "./c";\n'
+            'export { default as Def } from "./d";\n'
+            'export * as NS from "./ns";\n'
+        ),
+        "packages/kit/src/a.ts": (
+            "export const Alpha = 1;\n"
+            "export function helper() {\n"
+            "  return Alpha;\n"
+            "}\n"
+            "export const Later = 2;\n"
+        ),
+        "packages/kit/src/b.ts": "export const Beta = 2;\n",
+        "packages/kit/src/c.ts": "export const Gamma = 3;\n",
+        "packages/kit/src/d.ts": "export default function makeDefault() {\n  return 4;\n}\n",
+        "packages/kit/src/ns.ts": "export const Nested = 5;\n",
+        "apps/web/src/consumer.ts": (
+            'import { Alpha, Beta, Renamed, Def, NS } from "@mono/kit";\n'
+            'import { util } from "@app/util";\n'
+            'import { local } from "./local";\n'
+            'import { Fresh } from "./fresh";\n'
+            "export function useAlpha() {\n  return Alpha;\n}\n"
+            "export function useBeta() {\n  return Beta;\n}\n"
+            "export function useRenamed() {\n  return Renamed;\n}\n"
+            "export function useDef() {\n  return Def();\n}\n"
+            "export function useNamespace() {\n  return NS;\n}\n"
+            "export function useUtil() {\n  return util + local;\n}\n"
+            "export function useFresh() {\n  return Fresh;\n}\n"
+        ),
+        "apps/web/src/later.ts": (
+            'import { Later } from "@mono/kit";\nexport function useLater() {\n  return Later;\n}\n'
+        ),
+        "apps/web/src/other.ts": (
+            'import { Beta } from "@mono/kit";\nexport function useOther() {\n  return Beta;\n}\n'
+        ),
+        "apps/web/src/util.ts": "export const util = 6;\n",
+        "apps/web/src/alt/util.ts": "export const util = 7;\n",
+        "apps/web/src/local.ts": "export const local = 8;\nexport const Beta = 9;\n",
+        "apps/web/src/unrelated.ts": "export function lonely() {\n  return 1;\n}\n",
+    }
+
+
+#: The provider's manifest, and the same with ``./sub`` moved to another file.
+PROVIDER_MANIFEST = manifest(
+    name="@fx/provider",
+    version="1.0.0",
+    exports={".": "./src/index.ts", "./sub": "./src/sub.ts"},
+)
+PROVIDER_MANIFEST_MOVED = manifest(
+    name="@fx/provider",
+    version="1.0.0",
+    exports={".": "./src/index.ts", "./sub": "./src/sub2.ts"},
+)
+
+
+def provider_repo() -> dict[str, str]:
+    return {
+        "package.json": PROVIDER_MANIFEST,
+        "src/index.ts": 'export { Pee as Pea } from "./pee";\nexport const Top = 1;\n',
+        "src/pee.ts": "export const Pee = 1;\n",
+        "src/pee2.ts": "export const Pee = 10;\n",
+        "src/sub.ts": "export const Sub = 2;\n",
+        "src/sub2.ts": "export const Sub = 3;\n",
+    }
+
+
+def consumer_repo() -> dict[str, str]:
+    return {
+        "package.json": manifest(
+            name="fx-consumer", private=True, dependencies={"@fx/provider": "^1.0.0"}
+        ),
+        "src/use.ts": (
+            'import { Pea, Top } from "@fx/provider";\n'
+            'import { Sub } from "@fx/provider/sub";\n'
+            "export function usePea() {\n  return Pea + Top;\n}\n"
+            "export function useSub() {\n  return Sub;\n}\n"
+        ),
+        "src/bystander.ts": "export const Quiet = 1;\n",
+    }
+
+
+def dup_repo(name: str) -> dict[str, str]:
+    return {
+        "package.json": manifest(name=name, version="2.0.0", main="src/index.ts"),
+        "src/index.ts": "export const Pea = 99;\n",
+    }
 
 
 def use_snapshot(workspace: Workspace) -> list[str]:
@@ -71,9 +186,24 @@ def append(root: Path, repo: str, path: str, text: str) -> None:
     target.write_text(target.read_text(encoding="utf-8") + text, encoding="utf-8")
 
 
-def sync_all(workspace: Workspace, root: Path) -> None:
-    """One ordinary sync of everything under the managed root."""
-    sync(workspace, workspace.resolver().resolve(root))
+def sync_all(workspace: Workspace, root: Path) -> UsesWork:
+    """One ordinary sync of everything under the managed root; what its USES stage did."""
+    report = sync(workspace, workspace.resolver().resolve(root))
+    assert report.link_trace is not None and report.link_trace.uses is not None
+    return report.link_trace.uses
+
+
+def use_edge_rows(workspace: Workspace, path: str) -> list[tuple[int, int, int]]:
+    """(row id, source, target) of the global pass's ``USES`` edges asserted by one file."""
+    rows = workspace.database.execute(
+        """
+        SELECT e.id, e.src_id, e.dst_id FROM edges e JOIN files f ON f.id = e.file_id
+        WHERE e.type = 'USES' AND e.parser = 'linker:global' AND f.rel_path = ?
+        ORDER BY e.id
+        """,
+        (path,),
+    ).fetchall()
+    return [(row["id"], row["src_id"], row["dst_id"]) for row in rows]
 
 
 @contextmanager
@@ -94,3 +224,23 @@ def fresh_index(settings: Settings, root: Path, tmp_path: Path, tag: str) -> Ite
         yield fresh
     finally:
         fresh.close()
+
+
+def add_repo(root: Path, name: str, files: dict[str, str]) -> None:
+    """A new repository under the managed root, found by the next sync."""
+    for relative, content in files.items():
+        edit(root, name, relative, content)
+    init_git_repository(root / name)
+
+
+def remove_repo(root: Path, name: str) -> None:
+    shutil.rmtree(root / name)
+
+
+def assert_equals_fresh(
+    workspace: Workspace, settings: Settings, root: Path, tmp_path: Path, tag: str
+) -> None:
+    """The invariant: this incrementally synced state is what a fresh index writes."""
+    with fresh_index(settings, root, tmp_path, tag) as fresh:
+        assert fact_snapshot(workspace) == fact_snapshot(fresh)
+        assert read_snapshot(workspace) == read_snapshot(fresh)

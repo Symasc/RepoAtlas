@@ -45,8 +45,8 @@ from repoatlas.discovery.languages import detect_language, is_lockfile, is_manif
 from repoatlas.embeddings.protocol import EmbeddingModel, EmbeddingUnavailable
 from repoatlas.gitstate.client import GitClient
 from repoatlas.graph.keys import file_key, repository_key, symbol_key
-from repoatlas.graph.linker import GlobalLinkResult, ReferenceLinker
-from repoatlas.graph.uses_link import PENDING, UsesScope, stored_scope
+from repoatlas.graph.linker import GLOBAL_PARSER, GlobalLinkResult, ReferenceLinker
+from repoatlas.graph.uses_link import PENDING, UsesChangeLog, stored_scope
 from repoatlas.indexing.chunking import chunk_content
 from repoatlas.models.dependencies import DependencyRecord, DependencyReport
 from repoatlas.models.parsing import (
@@ -157,6 +157,8 @@ class SyncEngine:
         self._settings = settings
         self._git = git or GitClient()
         self._linker = ReferenceLinker(knowledge, dependencies)
+        #: What the run in progress changed that USES edges depend on; ``None`` outside one.
+        self._uses: UsesChangeLog | None = None
 
     @property
     def facts_version(self) -> str:
@@ -180,6 +182,8 @@ class SyncEngine:
         """
         if repo.id is None or repo.path.is_dir():
             return False
+        if self._uses is not None:
+            self._uses.repository_removing(repo.id)
         self._repositories.delete(repo.id)
         return True
 
@@ -256,6 +260,10 @@ class SyncEngine:
         )
 
         # Deletion first: a file's facts must never outlive the file.
+        if self._uses is not None:
+            self._uses.files_deleting(repo_id, plan.deleted_file_ids)
+            if plan.new:
+                self._uses.files_added(repo_id)
         self._files.delete_many(plan.deleted_file_ids)
 
         diagnostics: list[ParseDiagnostic] = _enumeration_diagnostics(len(incomplete))
@@ -431,6 +439,7 @@ class SyncEngine:
         # and its facts inseparable (ARCHITECTURE.md §9).
         with self._knowledge.transaction():
             file_id = self._files.upsert(repo.id, record)
+            uses = self._uses.before(file_id) if self._uses is not None else None
 
             entities: list[EntityRecord] = [self._file_entity(repo, file_id, rel_path)]
             for symbol in parsed.symbols:
@@ -479,6 +488,8 @@ class SyncEngine:
             )
 
             dependency_count = self._write_dependencies(repo.id, file_id, dependencies)
+            if self._uses is not None:
+                self._uses.after(repo.id, file_id, uses)
 
         return _FileOutcome(
             language=parsed.language if parser else language,
@@ -500,9 +511,12 @@ class SyncEngine:
         assert repo.id is not None
         with self._knowledge.transaction():
             file_id = self._files.upsert(repo.id, record)
+            uses = self._uses.before(file_id) if self._uses is not None else None
             self._knowledge.replace_file_facts(
                 file_id, FileFacts(entities=(self._file_entity(repo, file_id, rel_path),))
             )
+            if self._uses is not None:
+                self._uses.after(repo.id, file_id, uses)
 
     def _index_oversized(
         self,
@@ -733,15 +747,34 @@ class SyncEngine:
         The caller must already hold the writer lock; see
         :func:`repoatlas.sync.lock.writer_lock`.
         """
+        # USES edges are kept between syncs (repoatlas.graph.uses_link). Which of them
+        # this run must replace is gathered as files are written, unless the state they
+        # were left in is not known complete; and until this run's link commit they are
+        # recorded as not known complete, so a run that dies before it leaves the next
+        # one resolving every use.
+        stored = stored_scope(self._knowledge)
+        self._uses = UsesChangeLog(
+            self._knowledge,
+            self._dependencies,
+            producer=GLOBAL_PARSER,
+            everything=stored.reason if stored is not None else None,
+        )
+        self._knowledge.set_uses_links_state(PENDING)
+        try:
+            return self._run(repositories, full=full, scope=scope, embed_repo_ids=embed_repo_ids)
+        finally:
+            self._uses = None
+
+    def _run(
+        self,
+        repositories: Sequence[Repository],
+        *,
+        full: bool,
+        scope: str,
+        embed_repo_ids: Sequence[int] | None,
+    ) -> SyncReport:
         reports: list[RepositorySyncReport] = []
         completions: list[SyncCompletion] = []
-
-        # USES edges are kept between syncs (repoatlas.graph.uses_link). Which of them
-        # this run must replace is decided from the state they were left in, and until
-        # this run's link commit they are recorded as not known complete, so a run that
-        # dies before it leaves the next one resolving every use.
-        uses = stored_scope(self._knowledge) or UsesScope.everything("every use requested")
-        self._knowledge.set_uses_links_state(PENDING)
 
         for repo in repositories:
             # Scope decides which repositories a run may forget, exactly as it
@@ -767,7 +800,7 @@ class SyncEngine:
 
         # Computed outside the transaction: this is the expensive half, and none
         # of it touches the graph it is going to replace.
-        plan = self._linker.prepare_global(uses)
+        plan = self._linker.prepare_global(self._uses)
 
         with self._knowledge.transaction():
             link = self._linker.commit_global(plan)
