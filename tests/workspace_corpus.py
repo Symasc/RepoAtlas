@@ -5,6 +5,8 @@ package states the shape it exists to prove:
 
 * ``@fixture/shared``: source entries in ``exports``, a renaming barrel, an exported
   subpath, and a file at the package root that ``exports`` does not list (W1, W3, W4, W8);
+  one app per way of declaring it, each using its ``Top``: the declarations that name the
+  member or a version of it (W2), and those that name something else (W2b);
 * ``@fixture/built``: every entry in build output that is not indexed, mapped back through
   the one source root its tsconfig ``include`` names -- the shape of a package whose
   ``tsc`` has not run (W5);
@@ -176,6 +178,77 @@ WS: dict[str, str] = {
         "export function useKit() {\n  return kitTool();\n}\n"
     ),
 }
+
+SHARED = "@fixture/shared"
+
+#: W2: consumers whose declaration names the member itself, or only a version of it.
+ACCEPTED: dict[str, dict[str, dict[str, str]]] = {
+    "star": {"dependencies": {SHARED: "workspace:*"}},
+    "caret": {"dependencies": {SHARED: "workspace:^"}},
+    "tilde": {"dependencies": {SHARED: "workspace:~"}},
+    "exact": {"dependencies": {SHARED: "workspace:1.0.0"}},
+    "workspace-alias": {"dependencies": {SHARED: f"workspace:{SHARED}@*"}},
+    "npm-same": {"dependencies": {SHARED: f"npm:{SHARED}@1.0.0"}},
+    "workspace-path": {"dependencies": {SHARED: "workspace:../../packages/shared"}},
+    "link": {"dependencies": {SHARED: "link:../../packages/shared"}},
+    "file": {"dependencies": {SHARED: "file:../../packages/shared/"}},
+    "portal": {"dependencies": {SHARED: "portal:../../packages/shared"}},
+    "semver": {"dependencies": {SHARED: "^1.0.0"}},
+    "catalog": {"dependencies": {SHARED: "catalog:"}},
+    "undeclared": {},
+    "peer-and-dev": {"peerDependencies": {SHARED: "*"}, "devDependencies": {SHARED: "workspace:*"}},
+}
+
+#: W2b: consumers whose declaration names something else, and why the member is refused.
+REFUSED: dict[str, tuple[dict[str, dict[str, str]], str]] = {
+    "npm-other": ({"dependencies": {SHARED: "npm:@fixture/other@1.0.0"}}, "dependency-aliased"),
+    "workspace-other": (
+        {"dependencies": {SHARED: "workspace:@fixture/other@*"}},
+        "dependency-aliased",
+    ),
+    "link-other": ({"dependencies": {SHARED: "link:../../packages/built"}}, "dependency-elsewhere"),
+    "file-outside": (
+        {"dependencies": {SHARED: "file:../../../outside/shared"}},
+        "dependency-elsewhere",
+    ),
+    "tarball": ({"dependencies": {SHARED: "file:../../vendor/shared.tgz"}}, "dependency-elsewhere"),
+    "git": (
+        {"dependencies": {SHARED: "git+https://example.invalid/shared.git"}},
+        "dependency-elsewhere",
+    ),
+    "peer-and-npm": (
+        {"peerDependencies": {SHARED: "*"}, "devDependencies": {SHARED: "npm:@fixture/other@1"}},
+        "dependency-aliased",
+    ),
+    "unreadable": ({"dependencies": {SHARED: "workspace:some/form"}}, "dependency-unreadable"),
+}
+
+USE_TOP = 'import { Top } from "@fixture/shared";\nexport function useTop() {\n  return Top;\n}\n'
+
+
+def declaring_consumers() -> dict[str, str]:
+    """One app per declaration, each using the shared package's ``Top`` in ``src/use.ts``.
+
+    ``nested`` declares the member by workspace, and ``nested/sub`` -- no member, but in
+    the workspace -- aliases it away: the nearest manifest decides, never a farther one.
+    """
+    files: dict[str, str] = {}
+    declarations = {**ACCEPTED, **{name: fields for name, (fields, _) in REFUSED.items()}}
+    for name, fields in declarations.items():
+        files[f"apps/{name}/package.json"] = manifest(name=f"decl-{name}", **fields)
+        files[f"apps/{name}/src/use.ts"] = USE_TOP
+    files["apps/nested/package.json"] = manifest(
+        name="decl-nested", dependencies={SHARED: "workspace:*"}
+    )
+    files["apps/nested/src/use.ts"] = USE_TOP
+    files["apps/nested/sub/package.json"] = manifest(
+        name="decl-nested-sub", dependencies={SHARED: "npm:@fixture/other@1.0.0"}
+    )
+    files["apps/nested/sub/src/use.ts"] = USE_TOP
+    return files
+
+
+WS.update(declaring_consumers())
 
 #: W10: another repository providing the same name as the workspace member.
 ELSEWHERE: dict[str, str] = {

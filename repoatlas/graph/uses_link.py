@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from repoatlas.dependencies.normalize import NPM
-from repoatlas.graph.modules import ModuleResolver, binding_pairs
+from repoatlas.graph.modules import ModuleResolver, binding_pairs, declared_constraints
 from repoatlas.graph.packages import CROSSING, PackageLinks
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.graph.uses import UseResolver, declared_entity, table_from_meta, use_resolution
@@ -359,7 +359,9 @@ def use_resolver(
     knowledge: SqliteKnowledgeStore, index: ResolutionIndex, records: Sequence[DependencyRecord]
 ) -> UseResolver:
     """The resolver a pass resolves uses with, built from indexed facts alone."""
-    modules = ModuleResolver(index, knowledge.list_module_facts(), {})
+    modules = ModuleResolver(
+        index, knowledge.list_module_facts(), {}, declared=declared_constraints(index, records)
+    )
     return UseResolver(modules, index, _Tables(knowledge), PackageLinks(modules, index, records))
 
 
