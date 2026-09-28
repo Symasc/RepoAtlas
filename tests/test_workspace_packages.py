@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from repoatlas.capabilities.service import CapabilityService
 from repoatlas.config.settings import Settings
+from repoatlas.graph.modules import declared_against
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.graph.uses_link import use_resolver
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
@@ -24,7 +25,7 @@ from repoatlas.models.impact import ImpactRequest
 from repoatlas.models.parsing import USES_EXPORT_TABLE, EdgeType
 from repoatlas.services.workspace import Workspace, open_workspace
 from tests.impact_corpus import build
-from tests.workspace_corpus import REPOS, repo_uses
+from tests.workspace_corpus import ACCEPTED, REFUSED, REPOS, repo_uses
 
 APP = "ws:apps/app/src"
 SHARED = "ws:packages/shared/src"
@@ -96,6 +97,54 @@ def test_w1_a_root_import_is_a_use_of_the_member_s_declaration(
     assert "crossing" not in top
     # the consuming declaration, never the importing file
     assert not [e for e in edges if e["source"] == "ws:apps/app/src/consumer.ts"]
+
+
+@pytest.mark.parametrize("app", [*ACCEPTED, "nested"])
+def test_w2_a_declaration_naming_the_member_or_a_version_of_it_resolves(
+    edges: list[dict[str, Any]], app: str
+) -> None:
+    top = edge(edges, f"ws:apps/{app}/src/use.ts#useTop", f"{SHARED}/index.ts#Top")
+    assert top["basis"] == "workspace-package"
+
+
+@pytest.mark.parametrize(
+    ("app", "why"),
+    [*((app, why) for app, (_, why) in REFUSED.items()), ("nested/sub", "dependency-aliased")],
+)
+def test_w2b_a_declaration_naming_anything_else_refuses_the_member(
+    indexed: Workspace, edges: list[dict[str, Any]], app: str, why: str
+) -> None:
+    assert from_source(edges, f"ws:apps/{app}/src/use.ts#useTop") == set()
+    assert refusals(indexed, "ws", f"apps/{app}/src/use.ts") == {"Top": f"workspace:{why}"}
+
+
+@pytest.mark.parametrize(
+    ("constraint", "why"),
+    [
+        ("", None),
+        ("latest", None),
+        (">=1.0.0 <2", None),
+        ("workspace:", None),
+        ("workspace:^1.2.0", None),
+        ("workspace:@Fixture/Shared@*", None),
+        ("npm:@fixture/shared", None),
+        ("catalog:backend", None),
+        ("file:.", None),
+        ("../../x", "dependency-elsewhere"),
+        ("npm:shared@1.0.0", "dependency-aliased"),
+        ("workspace:other@^1", "dependency-aliased"),
+        ("link:/abs/shared", "dependency-elsewhere"),
+        ("owner/shared", "dependency-elsewhere"),
+        ("github:owner/shared", "dependency-elsewhere"),
+        ("jsr:@fixture/shared@1", "dependency-elsewhere"),
+        ("workspace:@fixture/shared", "dependency-unreadable"),
+    ],
+)
+def test_a_declaration_is_read_as_the_target_it_names(constraint: str, why: str | None) -> None:
+    # the member is the declaring manifest's own directory here
+    assert declared_against(
+        constraint, "@fixture/shared", "packages/shared", "packages/shared"
+    ) == (why)
 
 
 def test_w3_an_alias_of_a_renamed_re_export_keeps_every_name(edges: list[dict[str, Any]]) -> None:

@@ -59,12 +59,15 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import PurePosixPath
 from typing import Any
 
+from repoatlas.dependencies.normalize import NPM, normalize
 from repoatlas.graph.resolution import ResolutionIndex, _normalize
+from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION, PACKAGE, TSCONFIG, WORKSPACE
 from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
 
@@ -87,6 +90,14 @@ _INCLUDE_TAIL = re.compile(r"(/\*\*)?(/\*[^/]*)?/?$")
 _OUTPUT_SUFFIXES = (".d.mts", ".d.cts", ".d.ts", ".mjs", ".cjs", ".jsx", ".js")
 _SOURCE_SUFFIXES = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
 _JS_TO_TS = {".js": (".ts", ".tsx"), ".mjs": (".mts",), ".cjs": (".cts",), ".jsx": (".tsx",)}
+
+#: Declarations that name a directory, read from the declaring manifest's directory.
+_PATH_PROTOCOLS = frozenset({"file", "link", "portal"})
+#: A version, never a location: a ``catalog:`` entry is a range kept in the workspace file.
+_VERSION_PROTOCOLS = frozenset({"catalog"})
+
+#: What each package every manifest declares asks for, by (repository, manifest directory).
+Declared = Mapping[tuple[int, str], Mapping[str, tuple[str, ...]]]
 
 RELATIVE = "relative"
 TSCONFIG_PATHS = "tsconfig-paths"
@@ -224,9 +235,14 @@ class ModuleResolver:
         index: ResolutionIndex,
         claims: list[UnresolvedRefRecord],
         exported: dict[int, dict[str, list[int]]],
+        *,
+        declared: Declared | None = None,
     ) -> None:
         self._index = index
         self._exported = exported
+        #: The importer's declarations a workspace member must not contradict; ``None``
+        #: when the caller has none to give, and then no member is refused for one.
+        self._declared = declared
         self._by_id: dict[int, FileRow] = {
             row.file_id: row for rows in index.files_by_repo.values() for row in rows.values()
         }
@@ -253,7 +269,7 @@ class ModuleResolver:
         #: Re-export steps taken by the current lookup, and by all lookups so far.
         self._steps = 0
         self.steps = 0
-        declared: list[tuple[int, str, list[str]]] = []
+        workspaces: list[tuple[int, str, list[str]]] = []
         for claim in claims:
             meta = json.loads(claim.meta_json) if claim.meta_json else {}
             origin = self._by_id.get(claim.file_id)
@@ -271,11 +287,11 @@ class ModuleResolver:
                 elif kind == PACKAGE:
                     self._packages[origin.repo_id][_parent(origin.rel_path)] = facts
                     if facts.get("workspaces"):
-                        declared.append(
+                        workspaces.append(
                             (origin.repo_id, _parent(origin.rel_path), facts["workspaces"])
                         )
                 elif kind == WORKSPACE and facts.get("packages"):
-                    declared.append((origin.repo_id, _parent(origin.rel_path), facts["packages"]))
+                    workspaces.append((origin.repo_id, _parent(origin.rel_path), facts["packages"]))
             elif meta.get("role") == "re-export" and meta.get("reexport"):
                 self._reexports[claim.file_id].append(
                     _Reexport(
@@ -288,7 +304,7 @@ class ModuleResolver:
                         namespace=meta.get("namespace"),
                     )
                 )
-        for repo_id, root, globs in sorted(declared):
+        for repo_id, root, globs in sorted(workspaces):
             self._workspaces[repo_id].append(self._members(repo_id, root, globs))
         for reexports in self._reexports.values():
             reexports.sort(key=lambda r: (r.kind, r.specifier, r.names, r.namespace or ""))
@@ -495,6 +511,9 @@ class ModuleResolver:
         if len(homes) > 1:
             return "provider-ambiguous"  # two members share the name: never a guess
         directory = homes[0]
+        contradicted = self._contradicted(origin, name, directory)
+        if contradicted is not None:
+            return contradicted
         entry = self.package_entry(origin.repo_id, directory, subpath, build_output=True)
         if entry.file is None:
             return entry.reason or "entry-unresolved"
@@ -506,6 +525,27 @@ class ModuleResolver:
         if entry.mapped:
             detail.append(("mapped", dict(entry.mapped)["by"]))
         return ModuleTarget(entry.file, WORKSPACE_PACKAGE, tuple(sorted(detail)))
+
+    def _contradicted(self, origin: FileRow, name: str, directory: str) -> str | None:
+        """Why the importer's declaration of ``name`` names something other than the member.
+
+        The declaration is every row for the name in the nearest manifest at or above the
+        importing file that declares it, whatever its group: a manifest that declares the
+        name twice is contradicted by either. No declaration contradicts nothing.
+        """
+        if self._declared is None:
+            return None
+        wanted = normalize(NPM, name)
+        here = _parent(origin.rel_path)
+        while (constraints := self._declared.get((origin.repo_id, here), {}).get(wanted)) is None:
+            if not here:
+                return None
+            here = _parent(here)
+        for constraint in constraints:
+            why = declared_against(constraint, wanted, here, directory)
+            if why is not None:
+                return why
+        return None
 
     def package_entry(
         self, repo_id: int, directory: str, subpath: str, *, build_output: bool = False
@@ -765,6 +805,69 @@ class ModuleResolver:
         if len(found_all) != 1:
             return None, cut_any  # not re-exported, or two star exports disagree
         return _through(module, next(iter(found_all.values()))), cut_any
+
+
+def declared_constraints(index: ResolutionIndex, records: Sequence[DependencyRecord]) -> Declared:
+    """Each npm package every manifest declares, and every constraint it is declared with."""
+    paths = {
+        row.file_id: row.rel_path for rows in index.files_by_repo.values() for row in rows.values()
+    }
+    found: dict[tuple[int, str], dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    for record in records:
+        manifest = paths.get(record.file_id)
+        if record.ecosystem != NPM or record.role != "declared" or manifest is None:
+            continue
+        found[(record.repo_id, _parent(manifest))][record.normalized_name].add(
+            (record.constraint or "").strip()
+        )
+    return {
+        key: {name: tuple(sorted(values)) for name, values in names.items()}
+        for key, names in found.items()
+    }
+
+
+def declared_against(constraint: str, wanted: str, manifest: str, member: str) -> str | None:
+    """Why one declaration of ``wanted`` names something other than the workspace member.
+
+    ``manifest`` is the declaring manifest's directory and ``member`` the member's, both
+    repository-relative. ``None`` when the declaration names the member, or only a version
+    of it: a range, a tag, ``workspace:*``/``^``/``~``/a range, a ``catalog:`` entry, or
+    an alias spelling the same name. Otherwise ``dependency-aliased`` (``npm:`` or a
+    ``workspace:`` alias of another name), ``dependency-elsewhere`` (a path to another
+    directory -- including one outside the repository, which may well hold a package,
+    only never this member -- or a remote source) or ``dependency-unreadable``.
+    """
+    protocol, colon, rest = constraint.partition(":")
+    if not colon:
+        if constraint.startswith((".", "/", "~/")):
+            return _elsewhere(manifest, constraint, member)
+        # `owner/repo` is a remote source; a range or a tag never holds a slash
+        return "dependency-elsewhere" if "/" in constraint else None
+    if protocol in _VERSION_PROTOCOLS:
+        return None
+    if protocol == "npm":
+        return None if _alias_name(rest) == wanted else "dependency-aliased"
+    if protocol in _PATH_PROTOCOLS:
+        return _elsewhere(manifest, rest, member)
+    if protocol != "workspace":
+        return "dependency-elsewhere"
+    if rest.startswith((".", "/")):
+        return _elsewhere(manifest, rest, member)
+    if "@" in rest[1:]:
+        return None if _alias_name(rest) == wanted else "dependency-aliased"
+    return "dependency-unreadable" if "/" in rest or ":" in rest else None
+
+
+def _alias_name(value: str) -> str:
+    """The package ``pkg@range``, ``@scope/pkg@range`` or ``pkg`` names, normalized."""
+    scoped = value.startswith("@")
+    name = value[1:].partition("@")[0] if scoped else value.partition("@")[0]
+    return normalize(NPM, f"@{name}" if scoped else name)
+
+
+def _elsewhere(manifest: str, path: str, member: str) -> str | None:
+    target = _join(manifest, path.rstrip("/"))
+    return None if target is not None and target == member else "dependency-elsewhere"
 
 
 def _through(module: FileRow, definition: Definition) -> Definition:
