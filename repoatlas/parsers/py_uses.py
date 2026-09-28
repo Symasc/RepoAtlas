@@ -62,6 +62,8 @@ from repoatlas.parsers.ts_uses import USES_EXPORTS
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 _COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 _TYPING = frozenset({"typing", "typing_extensions"})
+#: Where a statement, an ``except`` handler or a ``case`` holds the statements inside it.
+_STATEMENT_LISTS = ("body", "orelse", "finalbody", "handlers", "cases")
 #: The longest forward reference read, and how deeply one may nest another.
 _MAX_FORWARD = 1_000
 _MAX_FORWARD_DEPTH = 4
@@ -318,17 +320,17 @@ class PythonUseAnalysis:
         #: (line, column, name, decision) for every name read, when asked: what a test
         #: holds against CPython's own symbol table.
         self.decisions: list[tuple[int, int, str, str]] | None = [] if record else None
-        self._guards = _typing_guards(tree)
-        self._module_bindings(tree)
+        self._guards, rebinds = _survey(tree)
+        self._module_bindings(tree, rebinds=rebinds)
         self.exports = self._export_table()
         self._body(tree.body, [_Scope("module")], None)
 
     # -- module scope ----------------------------------------------------------
 
-    def _module_bindings(self, tree: ast.Module) -> None:
+    def _module_bindings(self, tree: ast.Module, *, rebinds: bool) -> None:
         sites: dict[str, list[_Site]] = {}
         self._sites(tree.body, sites, conditional=False, type_only=False)
-        for line, name in _global_rebinds(tree):
+        for line, name in _global_rebinds(tree) if rebinds else ():
             sites.setdefault(name, []).append(_Site("other", line, conditional=True))
         stars = [line for line, _ in self.stars]
         for name, found in sites.items():
@@ -840,16 +842,34 @@ def _global_rebinds(tree: ast.Module) -> Iterator[tuple[int, str]]:
                 yield node.lineno, name
 
 
-def _typing_guards(tree: ast.Module) -> tuple[frozenset[str], frozenset[str]]:
-    """Names this file binds to ``TYPE_CHECKING``, and to the ``typing`` module itself."""
+def _survey(tree: ast.Module) -> tuple[tuple[frozenset[str], frozenset[str]], bool]:
+    """One walk of the file's statements: its ``TYPE_CHECKING`` guards, and whether it says
+    ``global``.
+
+    The guards are the names it binds to ``TYPE_CHECKING`` and to the ``typing`` module
+    itself. Without a ``global`` statement no function rebinds a module name, and the walk
+    over every function body that would find one is skipped. Imports and ``global`` are
+    statements, and statements are only ever held in these lists, so no expression is
+    visited.
+    """
     names: set[str] = set()
     modules: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module in _TYPING:
-            names.update(a.asname or a.name for a in node.names if a.name == "TYPE_CHECKING")
+    rebinds = False
+    pending: list[ast.AST] = list(tree.body)
+    while pending:
+        node = pending.pop()
+        for held in _STATEMENT_LISTS:
+            inner = getattr(node, held, None)
+            if isinstance(inner, list):
+                pending.extend(inner)
+        if isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module in _TYPING:
+                names.update(a.asname or a.name for a in node.names if a.name == "TYPE_CHECKING")
         elif isinstance(node, ast.Import):
             modules.update(a.asname or a.name for a in node.names if a.name in _TYPING)
-    return frozenset(names), frozenset(modules)
+        elif isinstance(node, ast.Global):
+            rebinds = True
+    return (frozenset(names), frozenset(modules)), rebinds
 
 
 def python_use_references(
