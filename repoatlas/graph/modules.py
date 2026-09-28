@@ -298,7 +298,8 @@ class ModuleResolver:
                         self._tsconfigs[origin.repo_id][origin.rel_path] = facts
                 elif kind == PACKAGE:
                     self._packages[origin.repo_id][_parent(origin.rel_path)] = facts
-                if (workspace := workspace_declaration(kind, facts, origin)) is not None:
+                workspace = workspace_declaration(kind, facts, origin.repo_id, origin.rel_path)
+                if workspace is not None:
                     workspaces.append((origin.repo_id, workspace.root, list(workspace.globs)))
                     declarations.append(workspace)
             elif meta.get("role") == "re-export" and meta.get("reexport"):
@@ -818,9 +819,9 @@ class ModuleResolver:
 
 
 def workspace_declaration(
-    kind: str, facts: Mapping[str, Any], origin: FileRow
+    kind: str, facts: Mapping[str, Any], repo_id: int, rel_path: str
 ) -> WorkspaceDeclaration | None:
-    """The workspace a module-resolution fact declares, if it declares one."""
+    """The workspace the module-resolution fact of one file declares, if it declares one."""
     if kind == PACKAGE:
         globs = facts.get("workspaces")
     elif kind == WORKSPACE:
@@ -829,7 +830,7 @@ def workspace_declaration(
         return None
     if not globs:
         return None
-    return WorkspaceDeclaration(origin.repo_id, origin.rel_path, tuple(globs))
+    return WorkspaceDeclaration(repo_id, rel_path, tuple(globs))
 
 
 def member_matcher(globs: Sequence[str]) -> Callable[[str], bool]:
