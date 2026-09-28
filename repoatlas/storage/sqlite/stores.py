@@ -999,6 +999,27 @@ class SqliteKnowledgeStore:
             for row in rows
         ]
 
+    def count_keys_with_prefix(
+        self, prefix: str, *, exclude_types: Sequence[EntityType] = ()
+    ) -> int:
+        """How many entities have a natural key beginning with ``prefix``.
+
+        A key names what it is part of -- ``sym:<repo>:<path>:<qualified>:<line>`` and
+        ``file:<repo>:<path>`` -- so a prefix counts a file's declarations, a
+        declaration's members or a directory's files exactly. A range on the key
+        index rather than ``LIKE``, which would scan and fold case.
+        """
+        params: list[object] = [prefix, prefix + "\U0010ffff"]
+        excluded = ""
+        if exclude_types:
+            excluded = f" AND type NOT IN ({','.join('?' * len(exclude_types))})"
+            params.extend(str(t) for t in exclude_types)
+        row = self._db.execute(
+            f"SELECT COUNT(*) FROM entities WHERE key >= ? AND key < ?{excluded}",  # noqa: S608
+            tuple(params),
+        ).fetchone()
+        return int(row[0])
+
     def entities_with_key_prefix(
         self, prefix: str, *, exclude_types: Sequence[EntityType] = (), limit: int
     ) -> list[EntityIdentity]:
@@ -1344,6 +1365,32 @@ class SqliteKnowledgeStore:
             tuple(entity_ids),
         ).fetchall()
         return {int(row["id"]): _entity_identity(row) for row in rows}
+
+    def provided_manifests(self, repository_slugs: Sequence[str]) -> dict[str, tuple[str, ...]]:
+        """Each repository's manifests that provide a package, by path, in one query.
+
+        The facts a walk derives its units from (:mod:`repoatlas.graph.units`): a
+        ``provided`` row is a manifest publishing a name, recorded by the
+        dependency parsers. A repository with none is absent from the result.
+        """
+        if not repository_slugs:
+            return {}
+        placeholders = ",".join("?" * len(repository_slugs))
+        rows = self._db.execute(
+            f"""
+            SELECT DISTINCT r.slug, f.rel_path
+            FROM dependencies d
+            JOIN files f ON f.id = d.file_id
+            JOIN repositories r ON r.id = d.repo_id
+            WHERE d.role = 'provided' AND r.slug IN ({placeholders})
+            ORDER BY r.slug, f.rel_path
+            """,  # noqa: S608 - placeholders are generated counts, values are bound
+            tuple(repository_slugs),
+        ).fetchall()
+        found: dict[str, list[str]] = {}
+        for row in rows:
+            found.setdefault(row["slug"], []).append(row["rel_path"])
+        return {slug: tuple(paths) for slug, paths in found.items()}
 
     def chunks_for_file(self, file_id: int, line_start: int, line_end: int) -> list[ChunkHit]:
         """Indexed chunks overlapping a line range of one file.

@@ -89,6 +89,8 @@ from repoatlas.capabilities.errors import (
     capability_error,
 )
 from repoatlas.capabilities.evidence_shaping import LINE_SEPARATOR
+from repoatlas.capabilities.impact import POLICY as IMPACT_POLICY
+from repoatlas.capabilities.impact import SeedResolver
 from repoatlas.capabilities.indexed_source import WHOLE_FILE_END, indexed_line_map
 from repoatlas.capabilities.inspection import (
     ShapedInspection,
@@ -183,6 +185,7 @@ from repoatlas.models.http_inventory import (
     HttpOperationsResponse,
     OperationBasis,
 )
+from repoatlas.models.impact import ImpactRequest, ImpactResponse, ImpactSummary, SeedStatus
 from repoatlas.models.inspection import (
     Coverage,
     InspectedFile,
@@ -930,6 +933,55 @@ class CapabilityService:
                 entries=entries,
                 truncated=truncated,
                 limits=limits,
+            )
+
+    def impact(self, request: ImpactRequest) -> ImpactResponse:
+        """What a change to one thing may reach, by which indexed paths, in rank order.
+
+        Deterministic throughout, like ``relationships``: the seed resolves to exactly
+        one thing or nothing is followed, and every step returned is an indexed edge
+        or a fact derived from spans or manifests. Nothing is recorded in the
+        investigation's ledger and no source text is returned: each step names the
+        file and lines that prove it, and reading them is the caller's part.
+        """
+        with self._operation():
+            registered = self._workspace.repositories.list_all()
+            resolution = resolve_context(request.context, registered)
+            session = (
+                self._sessions.get(request.investigation_id)
+                if request.investigation_id is not None
+                else self._sessions.create()
+            )
+            scope = {repo.slug: repo.id for repo in resolution.repositories if repo.id is not None}
+            with self._workspace.database.read_snapshot():
+                seeds = SeedResolver(self._workspace.knowledge, self._workspace.search, scope)
+                seed = seeds.resolve(request.seed)
+            facts = current_facts_version(self._workspace)
+            drawn = [seed.model.repository] if seed.model.repository else []
+            covered = self._covering_repositories(resolution, drawn)
+            freshness = index_freshness(
+                [
+                    repository_freshness_for(self._workspace, r, depth=request.depth, facts=facts)
+                    for r in covered
+                ],
+                depth=request.depth,
+            )
+            return ImpactResponse(
+                investigation_id=session.id,
+                context=ContextView(
+                    context=request.context,
+                    scope=resolution.scope,
+                    repositories=tuple(sorted(repo.slug for repo in resolution.repositories)),
+                    primary=resolution.primary.slug if resolution.primary else None,
+                    reason=resolution.reason,
+                ),
+                seed=seed.model,
+                # A resolved seed has not been walked yet: saying "complete" with no
+                # candidates would read as "nothing is affected".
+                summary=ImpactSummary(
+                    policy=IMPACT_POLICY, complete=seed.model.status is not SeedStatus.RESOLVED
+                ),
+                freshness=freshness,
             )
 
     def dependencies(self, request: DependenciesRequest) -> DependenciesResponse:

@@ -299,6 +299,8 @@ def test_the_public_callable_surface_is_only_the_intended_operations() -> None:
         "search",
         "inspect",
         "relationships",
+        # change impact: shipped with the change-impact engine
+        "impact",
         "dependencies",
         "http_operations",
         "verify_grounding",
