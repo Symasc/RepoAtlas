@@ -1018,6 +1018,7 @@ class CapabilityService:
                         [*answer.candidates, *answer.tests],
                         directories,
                         scoped=resolution.scope is CapabilityScope.REPOSITORY,
+                        roots={r.id: str(r.path) for r in registered if r.id is not None},
                     )
                     if more:
                         reasons = dict(answer.omitted.by_reason)

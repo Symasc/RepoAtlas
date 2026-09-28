@@ -271,3 +271,36 @@ def test_each_declaration_naming_no_indexed_provider_joins_nothing(
     assert not [e for e in edges if e["source"].startswith(f"paths:{directory}/")]
     local, reason = why
     assert refusals(indexed, "paths", f"{directory}/use.ts") == {local: f"package:{reason}"}
+
+
+# -- package-level dependents ----------------------------------------------------------
+
+
+def impact_packages(workspace: Workspace, seed: str) -> dict[str, Any]:
+    response = CapabilityService(workspace).impact(
+        ImpactRequest(context=CapabilityContext(scope=CapabilityScope.GLOBAL), seed=seed)
+    )
+    return {p.dependent: p for p in response.packages}
+
+
+def test_xw15_a_member_used_only_as_a_whole_stays_a_coarse_dependent(indexed: Workspace) -> None:
+    packages = impact_packages(indexed, "sym:mono/packages/solo:src/index.ts:soloTool:1")
+    solo = packages["mono/apps/nested-app:."]
+    assert (solo.package, solo.crosses_repository, solo.exact_consumers, solo.consumers) == (
+        "npm:@fixture/solo",
+        True,
+        "unresolved",
+        (),
+    )
+    assert solo.declared_at == "mono/apps/nested-app/package.json:5"
+    assert solo.unresolved_consumers == 1  # pick: a computed member
+
+
+def test_a_dependent_is_listed_only_when_its_declaration_names_the_provider(
+    indexed: Workspace,
+) -> None:
+    # every `paths` package declares @fixture/plain, which only `plain` provides: the ones
+    # whose declaration names a remote source, a workspace no file declares, or a path to
+    # anything but `plain` itself are not its dependents
+    listed = set(impact_packages(indexed, "sym:plain:src/index.ts:plainTool:1"))
+    assert listed == {"paths:semver-plain", "paths:npm-same"}

@@ -38,6 +38,7 @@ manifest lines and the entry that proved it; a pinned one also says what pinned 
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -57,10 +58,12 @@ from repoatlas.graph.modules import (
     WorkspaceDeclaration,
     member_matcher,
     split_package,
+    workspace_declaration,
 )
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models.dependencies import DependencyRecord
-from repoatlas.storage.protocols import FileRow
+from repoatlas.parsers.module_facts import MODULE_RESOLUTION
+from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
 
 #: The ``basis`` a ``USES`` edge's resolution records when a package link proved it.
 PACKAGE_BASIS = "package"
@@ -373,3 +376,34 @@ class ProviderTargets:
             if target.startswith(root + "/"):
                 return repo_id, target[len(root) + 1 :]
         return None
+
+
+def stored_targets(
+    records: Sequence[DependencyRecord],
+    facts: Sequence[UnresolvedRefRecord],
+    paths: Mapping[int, str],
+    roots: Mapping[int, str],
+    slugs: Mapping[int, str],
+) -> ProviderTargets:
+    """The targets a package link reads, rebuilt from stored rows to answer a query.
+
+    ``records`` are the dependency rows, ``facts`` the module-resolution claims, and
+    ``paths`` each of their files' repository-relative path.
+    """
+    provisions = [
+        Provision(r.repo_id, _parent(path), path, r.line_start, r.name, r.normalized_name)
+        for r in records
+        if r.ecosystem == NPM and r.role == "provided" and (path := paths.get(r.file_id))
+    ]
+    provisions.sort(key=lambda p: (slugs.get(p.repo_id, ""), p.manifest, p.line, p.name))
+    workspaces: list[WorkspaceDeclaration] = []
+    for claim in facts:
+        meta = json.loads(claim.meta_json) if claim.meta_json else {}
+        kind, path = meta.get(MODULE_RESOLUTION), paths.get(claim.file_id)
+        if not kind or path is None:
+            continue
+        declared = json.loads(meta.get("facts") or "{}")
+        found = workspace_declaration(kind, declared, claim.repo_id, path)
+        if found is not None:
+            workspaces.append(found)
+    return ProviderTargets(roots, provisions, workspaces, slugs)

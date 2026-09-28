@@ -26,9 +26,10 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
+from repoatlas.graph.declared import REFUSED_AS, TargetKind, classify_dependency_target
 from repoatlas.graph.impact import ImpactWalk, Node, Tier, WalkResult, is_test_path
 from repoatlas.graph.keys import file_key, package_key
-from repoatlas.graph.packages import CROSSING
+from repoatlas.graph.packages import CROSSING, ProviderTargets, stored_targets
 from repoatlas.graph.units import package_directories, unit_of
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.impact import (
@@ -663,7 +664,6 @@ MAX_PACKAGES = 8
 #: The most exact consumers one package entry points at.
 MAX_CONSUMERS = 3
 #: Declarations that name another package, or a location, rather than the provider's.
-_NOT_THE_PROVIDER = ("npm:", "workspace:", "file:", "link:", "portal:")
 OUTSIDE_SCOPE = "outside scope"
 
 
@@ -716,6 +716,7 @@ def package_dependents(
     directories: Mapping[str, Sequence[str]],
     *,
     scoped: bool = False,
+    roots: Mapping[int, str] | None = None,
 ) -> tuple[tuple[PackageImpact, ...], int]:
     """Units and repositories depending on a package the change reaches; coarse by construction.
 
@@ -726,8 +727,9 @@ def package_dependents(
     the linker's repository-to-repository edge -- drawn only when exactly one other
     managed repository provides the name -- is asserted by the same manifest and line,
     and only when that repository neither provides the name itself nor declares it as
-    something else (an ``npm:`` alias, a workspace or path protocol): a shared name alone
-    is never enough. And every package an exact path crossed, whichever it is.
+    anything but that package, read as a package link reads it: an alias of another, a
+    remote source, or a path or workspace leading to another provider. A shared name
+    alone is never enough. And every package an exact path crossed, whichever it is.
 
     Across repositories an entry counts only what crossed into the dependent through that
     very package and declaration -- never whatever else was found there -- and points at
@@ -741,7 +743,7 @@ def package_dependents(
     repo_id = walk.repo_id(slug) if slug else None
     if slug is not None and path is not None and repo_id is not None and walk.work.query():
         for entry in _seed_package(
-            knowledge, dependencies, walk, slug, path, repo_id, returned, directories
+            knowledge, dependencies, walk, slug, path, repo_id, returned, directories, roots or {}
         ):
             found.setdefault((entry.package, entry.declared_at), entry)
     for (package, declared), crossing in crossed.items():
@@ -793,8 +795,8 @@ def _exact(
             and c.step.crossing.declared_by == entry.declared_at
         )[:MAX_CONSUMERS]
     )
-    provider = walk.repo_id(entry.provided_by.split("/", 1)[0])
-    dependent = walk.repo_id(entry.declared_at.split("/", 1)[0])
+    provider = walk.repository_at(entry.provided_by)
+    dependent = walk.repository_at(entry.declared_at)
     unresolved = None
     if provider is not None and dependent is not None and walk.work.query():
         unresolved = knowledge.count_whole_module_uses(
@@ -823,6 +825,7 @@ def _seed_package(
     repo_id: int,
     returned: Sequence[ImpactCandidate],
     directories: Mapping[str, Sequence[str]],
+    roots: Mapping[int, str],
 ) -> list[PackageImpact]:
     """The seed's own package, and every unit or repository declaring it (see above)."""
     provided = [r for r in dependencies.list_for_repos([repo_id]) if r.role == "provided"]
@@ -844,6 +847,7 @@ def _seed_package(
             evidenced.add((row.far_repo_id, row.file_path, row.line_start))
     providing = next(m for _, m in within if m.rpartition("/")[0] == nearest)
     providing_unit = unit_of(f"{slug}:{providing}", slug, providing, directories)
+    targets = _Targets(knowledge, dependencies, walk, roots)
     found: list[PackageImpact] = []
     for record, manifest in sorted(within, key=lambda item: (item[1], item[0].normalized_name)):
         if manifest.rpartition("/")[0] != nearest:
@@ -861,7 +865,9 @@ def _seed_package(
             crosses = other != repo_id
             if crosses and (other, row.file_path, row.line_start) not in evidenced:
                 continue
-            if crosses and not _declares_the_provider(declared_elsewhere, other, row, name):
+            if crosses and not _declares_the_provider(
+                declared_elsewhere, other, row, name, (repo_id, nearest), targets
+            ):
                 continue
             if not crosses and (not unique_here or row.file_path == manifest):
                 continue
@@ -906,22 +912,81 @@ def _declares_the_provider(
     repo_id: int | None,
     row: NeighborRow,
     name: tuple[str, str],
+    provider: tuple[int, str],
+    targets: _Targets,
 ) -> bool:
     """Whether a repository's declaration is of the package the seed's repository provides.
 
     Not when that repository provides the same name itself (two providers: which one it
-    uses is not ours to pick), nor when its declaration names another package or a
-    location for it.
+    uses is not ours to pick), nor when its manifest declares it as anything but that
+    package. Every row the manifest declares the name with is read as the target it
+    names (:mod:`repoatlas.graph.declared`), as a package link reads it: an alias of
+    another package, a remote source or an unreadable form is not it, and a path or a
+    workspace must lead to ``provider``, the seed's own providing manifest (repository,
+    directory).
     """
     mine = [r for r in records if r.repo_id == repo_id and (r.ecosystem, r.normalized_name) == name]
-    if any(r.role == "provided" for r in mine):
+    if repo_id is None or row.file_path is None or any(r.role == "provided" for r in mine):
         return False
-    declared = [
-        r
-        for r in mine
-        if r.role == "declared" and r.file_id == row.file_id and r.line_start == row.line_start
-    ]
-    return not any((r.constraint or "").strip().startswith(_NOT_THE_PROVIDER) for r in declared)
+    for record in mine:
+        if record.role != "declared" or record.file_id != row.file_id:
+            continue
+        target = classify_dependency_target(record.constraint or "", name[1])
+        if target.kind in REFUSED_AS:
+            return False
+        if target.kind not in (TargetKind.PATH, TargetKind.WORKSPACE):
+            continue
+        found = targets()
+        if found is None:
+            return False
+        pinned = (
+            found.by_path(repo_id, row.file_path, target.path or "", name[1])
+            if target.kind is TargetKind.PATH
+            else found.by_workspace(repo_id, row.file_path, name[1])
+        )
+        if isinstance(pinned, str) or (pinned[0].repo_id, pinned[0].directory) != provider:
+            return False
+    return True
+
+
+class _Targets:
+    """Where paths and workspaces lead (:class:`ProviderTargets`), read once when first asked.
+
+    Only a declaration that pins its provider asks, so an answer with none reads nothing
+    more; the read is charged, and ``None`` when the budget refuses it.
+    """
+
+    def __init__(
+        self,
+        knowledge: KnowledgeStore,
+        dependencies: DependencyStore,
+        walk: ImpactWalk,
+        roots: Mapping[int, str],
+    ) -> None:
+        self._knowledge = knowledge
+        self._dependencies = dependencies
+        self._walk = walk
+        self._roots = roots
+        self._built: ProviderTargets | None = None
+        self._asked = False
+
+    def __call__(self) -> ProviderTargets | None:
+        if not self._asked:
+            self._asked = True
+            if self._walk.work.query():
+                records = self._dependencies.list_for_repos(None)
+                facts = self._knowledge.list_module_facts()
+                files = sorted({r.file_id for r in records} | {c.file_id for c in facts})
+                places = self._knowledge.file_locations(files)
+                slugs = {i: s for i in self._roots if (s := self._walk.slug_of(i)) is not None}
+                self._built = stored_targets(
+                    records,
+                    facts,
+                    {file_id: path for file_id, (_, path) in places.items()},
+                    self._roots,
+                    slugs,
+                )
+        return self._built
 
 
 #: The most package declarations one step reads.

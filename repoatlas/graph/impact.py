@@ -604,6 +604,15 @@ class ImpactWalk:
     def slug_of(self, repo_id: int | None) -> str | None:
         return next((s for s, i in self._slug_ids.items() if i == repo_id), None)
 
+    def repository_at(self, located: str) -> int | None:
+        """The repository a ``<slug>/<path>`` names: the longest slug it starts with.
+
+        A slug may hold a ``/`` -- a repository nested inside another is named by its
+        path from the root -- and a nested repository's files are never its parent's.
+        """
+        found = [(len(s), i) for s, i in self._slug_ids.items() if located.startswith(s + "/")]
+        return max(found)[1] if found else None
+
     def _member(self, parent: Node, member: EntityIdentity) -> None:
         if member.entity_id in self._reached:
             return
