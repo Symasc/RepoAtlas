@@ -24,6 +24,7 @@ from repoatlas.models.parsing import EdgeDirection, EdgeType, EntityType, Neighb
 from repoatlas.models.repository import FileState, IndexedFile, Repository, SyncStatus
 from repoatlas.storage.protocols import (
     ChunkHit,
+    Confinement,
     EdgeRecord,
     EntityDescription,
     EntityIdentity,
@@ -31,7 +32,12 @@ from repoatlas.storage.protocols import (
     FileFacts,
     FileRow,
     HttpEdgeRow,
+    NeighborCount,
+    NeighborCursor,
     NeighborEdge,
+    NeighborGroup,
+    NeighborRow,
+    NeighborRule,
     SymbolRow,
     SyncCompletion,
     UnresolvedRefRecord,
@@ -992,6 +998,264 @@ class SqliteKnowledgeStore:
             )
             for row in rows
         ]
+
+    def entities_with_key_prefix(
+        self, prefix: str, *, exclude_types: Sequence[EntityType] = (), limit: int
+    ) -> list[EntityIdentity]:
+        """At most ``limit`` entities whose natural key begins with ``prefix``, by key."""
+        params: list[object] = [prefix, prefix + "\U0010ffff"]
+        excluded = ""
+        if exclude_types:
+            excluded = f" AND e.type NOT IN ({','.join('?' * len(exclude_types))})"
+            params.extend(str(t) for t in exclude_types)
+        params.append(limit)
+        rows = self._db.execute(
+            f"""{_ENTITY_IDENTITY_SELECT}
+            WHERE e.key >= ? AND e.key < ?{excluded}
+            ORDER BY e.key, e.id
+            LIMIT ?""",
+            tuple(params),
+        ).fetchall()
+        return [_entity_identity(row) for row in rows]
+
+    # -- bounded neighbour retrieval (the change-impact walk) -----------------
+    #
+    # A hub's size must not decide how much work one question does. So nothing here
+    # fetches "every neighbour, then cuts": a count is a COUNT, a page is a keyset
+    # page, a distribution is grouped and bounded, and representatives are fetched
+    # by name. Admission and confinement are part of every query's WHERE clause, so
+    # what is counted, paged or grouped is what the walk may follow, and a limit
+    # never falls on edges the walk would have discarded.
+
+    def _impact_scope(
+        self, rule: NeighborRule, confinement: Confinement, near_ids: Sequence[int]
+    ) -> tuple[str, str, str, list[object]]:
+        """The near and far columns, and the FROM/WHERE one rule's admitted edges share."""
+        near, far = ("src", "dst") if rule.outgoing else ("dst", "src")
+        kinds = sorted(str(t) for t in rule.edge_types)
+        params: list[object] = [*near_ids, *kinds]
+        constrained = ""
+        for edge_type, entity_types in rule.far_types:
+            constrained += (
+                f" AND (e.type != ? OR {far}.type IN ({','.join('?' * len(entity_types))}))"
+            )
+            params.extend([str(edge_type), *(str(t) for t in entity_types)])
+        if rule.uses_replace_file_facts:
+            # The far end is a file asserting a file-level import or call; its own USES,
+            # or a declaration's in it, to the same entity replaces that fact.
+            constrained += f"""
+              AND NOT (e.type IN ('REFERENCES', 'CALLS') AND {far}.type = 'file' AND EXISTS (
+                  SELECT 1 FROM edges u JOIN entities ue ON ue.id = u.src_id
+                  WHERE u.type = 'USES' AND u.dst_id = e.{near}_id
+                    AND ue.file_id = {far}.file_id))"""  # noqa: S608 - column names only
+        crossing = ""
+        if confinement.crossing:
+            crossed = sorted(str(t) for t in confinement.crossing)
+            crossing = f" OR e.type IN ({','.join('?' * len(crossed))})"
+            params.extend(crossed)
+        home = ""
+        if confinement.home_repo_id is not None:
+            moves = ""
+            if confinement.crossing and confinement.crossing_moves_home:
+                crossed = sorted(str(t) for t in confinement.crossing)
+                moves = (
+                    f" OR (e.type IN ({','.join('?' * len(crossed))})"
+                    " AND src.repo_id IS NOT NULL AND dst.repo_id IS NOT NULL"
+                    " AND src.repo_id != dst.repo_id)"
+                )
+            home = f" AND ({far}.repo_id IS NULL OR {far}.repo_id = ?{moves})"
+            params.append(confinement.home_repo_id)
+            if moves:
+                params.extend(sorted(str(t) for t in confinement.crossing))
+        where = f"""
+            FROM edges e
+            JOIN entities src ON src.id = e.src_id
+            JOIN entities dst ON dst.id = e.dst_id
+            LEFT JOIN files af ON af.id = e.file_id
+            LEFT JOIN files ff ON ff.id = {far}.file_id
+            LEFT JOIN repositories fr ON fr.id = {far}.repo_id
+            WHERE e.{near}_id IN ({",".join("?" * len(near_ids))})
+              AND e.type IN ({",".join("?" * len(kinds))}){constrained}
+              AND e.src_id != e.dst_id
+              AND (src.repo_id IS NULL OR dst.repo_id IS NULL
+                   OR src.repo_id = dst.repo_id{crossing}){home}
+        """
+        return near, far, where, params
+
+    @staticmethod
+    def _impact_columns(near: str, far: str) -> str:
+        return f"""
+            e.id AS edge_id, e.type AS type, e.{near}_id AS near_id, e.{far}_id AS far_id,
+            {far}.key AS far_key, {far}.type AS far_type, {far}.name AS far_name,
+            {far}.qualified_name AS far_qualified_name, {far}.repo_id AS far_repo_id,
+            {far}.file_id AS far_file_id, ff.rel_path AS far_path,
+            {far}.line_start AS far_line_start, {far}.line_end AS far_line_end,
+            e.file_id AS file_id, af.repo_id AS file_repo_id, af.rel_path AS file_path,
+            e.line_start AS line_start,
+            e.line_end AS line_end, e.parser AS parser, e.resolution AS resolution
+        """
+
+    #: The natural order of a bounded query: facts about the repositories, so the same
+    #: question over the same repositories pages identically after any rebuild. The
+    #: row id breaks ties only between copies of one relationship.
+    _IMPACT_ORDER = (
+        "e.type, {far}.key, COALESCE(af.rel_path, ''), COALESCE(e.line_start, 0), "
+        "COALESCE(e.line_end, 0), e.id"
+    )
+
+    @staticmethod
+    def _impact_row(row: sqlite3.Row, rule: NeighborRule) -> NeighborRow:
+        return NeighborRow(
+            edge_id=row["edge_id"],
+            type=EdgeType(row["type"]),
+            near_id=row["near_id"],
+            far_id=row["far_id"],
+            outgoing=rule.outgoing,
+            far_key=row["far_key"],
+            far_type=EntityType(row["far_type"]),
+            far_name=row["far_name"],
+            far_qualified_name=row["far_qualified_name"],
+            far_repo_id=row["far_repo_id"],
+            far_file_id=row["far_file_id"],
+            far_path=row["far_path"],
+            far_line_start=row["far_line_start"],
+            far_line_end=row["far_line_end"],
+            file_id=row["file_id"],
+            file_repo_id=row["file_repo_id"],
+            file_path=row["file_path"],
+            line_start=row["line_start"],
+            line_end=row["line_end"],
+            parser=row["parser"],
+            resolution=row["resolution"],
+        )
+
+    def impact_counts(
+        self, near_ids: Sequence[int], rule: NeighborRule, confinement: Confinement
+    ) -> dict[int, NeighborCount]:
+        """Exactly how many far entities and relationships each node offers; one query."""
+        if not near_ids:
+            return {}
+        near, far, where, params = self._impact_scope(rule, confinement, near_ids)
+        rows = self._db.execute(
+            f"""
+            SELECT near_id, COUNT(DISTINCT far_id) AS far, COUNT(*) AS relationships FROM (
+                SELECT DISTINCT e.{near}_id AS near_id, e.{far}_id AS far_id, e.type, e.file_id,
+                       e.line_start, e.line_end
+                {where}
+            ) GROUP BY near_id
+            """,  # noqa: S608 - placeholders are generated counts, values are bound
+            tuple(params),
+        ).fetchall()
+        return {
+            row["near_id"]: NeighborCount(
+                near_id=row["near_id"], far=row["far"], relationships=row["relationships"]
+            )
+            for row in rows
+        }
+
+    def impact_page(
+        self,
+        near_id: int,
+        rule: NeighborRule,
+        confinement: Confinement,
+        *,
+        after: NeighborCursor | None,
+        limit: int,
+    ) -> list[NeighborRow]:
+        """At most ``limit`` admitted relationships, strictly after ``after``, in natural order."""
+        if limit <= 0:
+            return []
+        near, far, where, params = self._impact_scope(rule, confinement, [near_id])
+        keyset = ""
+        if after is not None:
+            keyset = (
+                f" AND (e.type, {far}.key, COALESCE(af.rel_path, ''), COALESCE(e.line_start, 0),"
+                " COALESCE(e.line_end, 0), e.id) > (?, ?, ?, ?, ?, ?)"
+            )
+            params.extend(
+                [
+                    str(after.type),
+                    after.far_key,
+                    after.file_path,
+                    after.line_start,
+                    after.line_end,
+                    after.edge_id,
+                ]
+            )
+        params.append(limit)
+        rows = self._db.execute(
+            f"""
+            SELECT {self._impact_columns(near, far)}
+            {where}{keyset}
+            ORDER BY {self._IMPACT_ORDER.format(far=far)}
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [self._impact_row(row, rule) for row in rows]
+
+    def impact_distribution(
+        self, near_id: int, rule: NeighborRule, confinement: Confinement, *, max_groups: int
+    ) -> tuple[list[NeighborGroup], bool]:
+        """Far entities per far file, largest first, at most ``max_groups`` of them.
+
+        The second value says the groups did not all fit: the list is then partial
+        and says so, rather than a count that looks complete.
+        """
+        _, far, where, params = self._impact_scope(rule, confinement, [near_id])
+        params.append(max_groups + 1)
+        rows = self._db.execute(
+            f"""
+            SELECT {far}.repo_id AS repo_id, ff.rel_path AS path,
+                   COUNT(DISTINCT e.{far}_id) AS far
+            {where}
+            GROUP BY {far}.repo_id, ff.rel_path
+            ORDER BY far DESC, COALESCE(MIN(fr.slug), ''), COALESCE(ff.rel_path, '')
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        groups = [
+            NeighborGroup(repo_id=row["repo_id"], path=row["path"], far=row["far"])
+            for row in rows[:max_groups]
+        ]
+        return groups, len(rows) > max_groups
+
+    def impact_rows_for(
+        self,
+        near_id: int,
+        rule: NeighborRule,
+        confinement: Confinement,
+        *,
+        groups: Sequence[tuple[int | None, str | None]],
+        per_group: int,
+    ) -> list[NeighborRow]:
+        """The first ``per_group`` relationships, in natural order, reaching each named file."""
+        if not groups or per_group <= 0:
+            return []
+        near, far, where, params = self._impact_scope(rule, confinement, [near_id])
+        values = ",".join("(?, ?)" for _ in groups)
+        for repo_id, path in groups:
+            params.extend([repo_id if repo_id is not None else 0, path or ""])
+        params.append(per_group)
+        rows = self._db.execute(
+            f"""
+            SELECT * FROM (
+                SELECT {self._impact_columns(near, far)},
+                       ROW_NUMBER() OVER (
+                           PARTITION BY COALESCE({far}.repo_id, 0), COALESCE(ff.rel_path, '')
+                           ORDER BY {self._IMPACT_ORDER.format(far=far)}
+                       ) AS rank
+                {where}
+                  AND (COALESCE({far}.repo_id, 0), COALESCE(ff.rel_path, '')) IN (VALUES {values})
+            )
+            WHERE rank <= ?
+            ORDER BY type, far_key, COALESCE(file_path, ''), COALESCE(line_start, 0),
+                     COALESCE(line_end, 0), edge_id
+            """,  # noqa: S608 - placeholders are generated counts, values are bound
+            tuple(params),
+        ).fetchall()
+        return [self._impact_row(row, rule) for row in rows]
 
     def describe_entities(
         self, entity_ids: Sequence[int], *, path_prefix: str | None = None
