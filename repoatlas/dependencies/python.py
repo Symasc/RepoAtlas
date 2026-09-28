@@ -33,6 +33,7 @@ from repoatlas.models.parsing import (
     ParseDiagnostic,
     Severity,
 )
+from repoatlas.parsers.interpreter import interpreter_tag
 from repoatlas.parsers.marks import line_at, split_lines
 
 _REQUIREMENTS = re.compile(r"^requirements.*\.txt$")
@@ -64,7 +65,9 @@ class PyProjectParser:
     ecosystem = PYPI
     kind: DependencyKind = "manifest"
     name = "pyproject"
-    version = "2"  # 2: line numbers follow the shared source-line model
+    # 2: line numbers follow the shared source-line model. +pyX.Y: read with the
+    # running interpreter's standard library (repoatlas.parsers.interpreter).
+    version = f"2+{interpreter_tag()}"
 
     def supports(self, path: Path) -> bool:
         return path.name == "pyproject.toml"
@@ -237,7 +240,9 @@ class SetupPyParser:
     ecosystem = PYPI
     kind: DependencyKind = "manifest"
     name = "setup-py"
-    version = "2"  # 2: line numbers follow the shared source-line model
+    # 2: line numbers follow the shared source-line model. +pyX.Y: read with the
+    # running interpreter's standard library (repoatlas.parsers.interpreter).
+    version = f"2+{interpreter_tag()}"
 
     def supports(self, path: Path) -> bool:
         return path.name == "setup.py"
@@ -418,7 +423,9 @@ class UvLockParser:
     ecosystem = PYPI
     kind: DependencyKind = "lockfile"
     name = "python-lock"
-    version = "2"  # 2: line numbers follow the shared source-line model
+    # 2: line numbers follow the shared source-line model. +pyX.Y: read with the
+    # running interpreter's standard library (repoatlas.parsers.interpreter).
+    version = f"2+{interpreter_tag()}"
 
     def supports(self, path: Path) -> bool:
         return path.name in {"uv.lock", "poetry.lock"}
