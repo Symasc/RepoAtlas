@@ -26,12 +26,19 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
+from repoatlas.graph.impact import ImpactWalk, Node, Tier, WalkResult
 from repoatlas.graph.keys import file_key
 from repoatlas.graph.units import package_directories, unit_of
 from repoatlas.models.impact import (
     MAX_SEED_CANDIDATES,
     Granularity,
+    ImpactCandidate,
+    ImpactOmitted,
+    ImpactRole,
     ImpactSeed,
+    ImpactStep,
+    ImpactSummary,
+    ImpactWork,
     SeedBasis,
     SeedCandidate,
     SeedStatus,
@@ -292,3 +299,206 @@ def _unique(found: Sequence[EntityIdentity]) -> list[EntityIdentity]:
     """One identity per entity row, in a fixed order."""
     by_id = {identity.entity_id: identity for identity in found}
     return sorted(by_id.values(), key=_candidate_order)
+
+
+# -- the walk, and the answer built from it ------------------------------------------
+
+
+def seed_nodes(
+    seed: Seed, walk: ImpactWalk, home: int | None
+) -> tuple[list[Node], list[tuple[Node, EntityIdentity]]]:
+    """The walk's starting nodes and the members that change with them."""
+    identity = seed.identity
+    if identity is not None:
+        node = walk.node_of(identity, home)
+        slug, path = identity.repository_slug, identity.path
+        prefixes: list[str] = []
+        if identity.type is EntityType.REPOSITORY and identity.qualified_name:
+            prefixes = [file_key(identity.qualified_name, ""), f"sym:{identity.qualified_name}:"]
+        elif slug is not None and path is not None:
+            if identity.type is EntityType.FILE:
+                prefixes = [f"sym:{slug}:{path}:"]
+            elif identity.qualified_name:
+                prefixes = [f"sym:{slug}:{path}:{identity.qualified_name}."]
+        members = [
+            (node, member)
+            for prefix in prefixes
+            for member in walk.members(prefix, exclude_types=(EntityType.MODULE,))
+            if member.entity_id != identity.entity_id
+        ]
+        return [node], members
+    assert seed.directory is not None
+    slug, path = seed.directory
+    node = Node(
+        entity_id=None,
+        key=f"{slug}:{path}/",
+        type=None,
+        name=path,
+        qualified_name=None,
+        repo_id=home,
+        path=path,
+        lines=None,
+        home=home,
+    )
+    members = [
+        (node, member)
+        for prefix in (file_key(slug, path) + "/", f"sym:{slug}:{path}/")
+        for member in walk.members(prefix, exclude_types=(EntityType.MODULE,))
+    ]
+    return [node], members
+
+
+_BASIS = {Tier.EXACT: "exact", Tier.CONTAINMENT: "containment", Tier.FILE: "file"}
+
+
+def display(node: Node) -> str:
+    if node.type is EntityType.FILE or (node.entity_id is None and node.path):
+        return node.path or node.key
+    if node.repo_id is None and node.path is None:
+        return node.key
+    return node.qualified_name or node.name
+
+
+def assemble(
+    result: WalkResult,
+    walk: ImpactWalk,
+    *,
+    max_candidates: int,
+    full: bool,
+    directories: Mapping[str, Sequence[str]],
+) -> tuple[tuple[ImpactCandidate, ...], ImpactOmitted, ImpactSummary]:
+    """The ranked candidates, closed under their paths, and what was left out, counted."""
+    ranked = sorted(result.reached.values(), key=lambda n: n.rank)
+    selected: dict[int, Node] = {}
+    cut: list[Node] = []
+    for node in ranked:
+        if node.role is ImpactRole.MEMBER:
+            continue  # a member is returned only as a step on some candidate's path
+        need = [a for a in reversed(node.ancestors()) if a.entity_id not in selected]
+        need.append(node)
+        if len(selected) + len(need) > max_candidates:
+            cut.append(node)
+            continue
+        for item in need:
+            assert item.entity_id is not None
+            selected[item.entity_id] = item
+    ordered = sorted(selected.values(), key=lambda n: n.rank)
+    ids = {node.entity_id: index for index, node in enumerate(ordered, start=1)}
+
+    def unit(node: Node) -> str:
+        return unit_of(node.key, walk.slug_of(node.repo_id), node.path, directories)
+
+    def path_of(node: Node) -> list[Node]:
+        chain = [node, *node.ancestors()]
+        seed = node
+        while seed.parent is not None:
+            seed = seed.parent
+        return [seed, *reversed(chain)]
+
+    candidates = []
+    for node in ordered:
+        nodes = path_of(node)
+        boundaries: list[str] = []
+        last: str | None = None
+        for item in nodes:
+            if item.repo_id is None and item.entity_id is not None:
+                continue  # a shared node belongs to no unit
+            here = (
+                unit(item)
+                if item.entity_id is not None
+                else f"{walk.slug_of(item.repo_id)}:{item.path}/"
+            )
+            if last is not None and here != last:
+                boundaries.append(f"{last} -> {here}")
+            last = here
+        step = node.step
+        assert step is not None
+        row = step.row
+        resolution = step.resolution
+        at = None
+        lines = None
+        if row is not None and row.file_path is not None:
+            at = f"{walk.slug_of(row.file_repo_id)}/{row.file_path}"
+            if row.line_start is not None:
+                lines = (row.line_start, row.line_end or row.line_start)
+        parent = node.parent
+        candidates.append(
+            ImpactCandidate(
+                id=ids[node.entity_id],
+                entity=node.key,
+                type=node.type or EntityType.FILE,
+                name=node.name,
+                repository=walk.slug_of(node.repo_id),
+                path=node.path,
+                lines=node.lines,
+                unit=unit(node),
+                role=node.role,
+                distance=node.distance,
+                from_=ids.get(parent.entity_id, 0) if parent is not None and not parent.seed else 0,
+                step=ImpactStep(
+                    edge=step.edge_type,
+                    derived=step.derived,
+                    reading=step.reading,
+                    use=_text(resolution.get("use")),
+                    at=at,
+                    lines=lines,
+                    parser=row.parser if row is not None else None,
+                    syntax=_text(resolution.get("syntax")),
+                    via=tuple(str(v) for v in _list(resolution.get("via"))),
+                    via_names=tuple(str(v) for v in _list(resolution.get("via_names"))),
+                    resolution=resolution or None if full else None,
+                ),
+                boundaries=tuple(boundaries),
+                basis=_BASIS[node.tier],
+                chain=" -> ".join(
+                    [
+                        display(nodes[0]),
+                        *(f"{display(n)} ({n.step.reading})" for n in nodes[1:] if n.step),
+                    ]
+                ),
+                alt_paths=tuple(
+                    sorted(ids[a.entity_id] for a in node.alternatives if a.entity_id in ids)
+                )
+                if full
+                else (),
+            )
+        )
+
+    by_reason: dict[str, int] = {}
+    if cut:
+        by_reason["budget"] = len(cut)
+    if result.depth_cut:
+        by_reason["depth"] = result.depth_cut
+    if result.unexpanded or result.members_cut:
+        by_reason["work"] = result.unexpanded + (1 if result.members_cut else 0)
+    by_unit: dict[str, int] = {}
+    for node in cut:
+        by_unit[unit(node)] = by_unit.get(unit(node), 0) + 1
+    units = {c.unit for c in candidates if c.unit}
+    summary = ImpactSummary(
+        reached=len(result.reached),
+        returned=len(candidates),
+        units=len(units),
+        cross_unit=sum(1 for c in candidates if c.boundaries),
+        complete=result.complete,
+        work=ImpactWork(
+            expanded=result.work.expanded,
+            rows=result.work.rows,
+            queries=result.work.queries,
+            exhausted=result.work.exhausted,
+        ),
+        policy=POLICY,
+    )
+    return (
+        tuple(candidates),
+        ImpactOmitted(by_reason=by_reason, by_unit=dict(sorted(by_unit.items()))),
+        summary,
+    )
+
+
+def _text(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _list(value: object) -> list[object]:
+    return value if isinstance(value, list) else []
