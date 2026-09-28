@@ -90,6 +90,18 @@ capabilities:
       reader, a Salt state and a shell script all touch it, so the walk is not
       empty.
 
+  - id: impact
+    tool: repoatlas_impact
+    arguments: {context: {scope: global}, seed: "env:SERVICE_HOST"}
+    expect:
+      fields: [investigation_id, context, seed, candidates, tests, packages, hubs, unresolved, omitted, summary, freshness]
+      non_empty: [candidates]
+      investigation: minted
+    notes: >-
+      SERVICE_HOST is read by the fixture ecosystem's Python module and shell
+      script, so what a change to it reaches is not empty. Nothing is recorded in
+      the investigation, but the call still names the one it belongs to.
+
   - id: dependencies
     tool: repoatlas_dependencies
     arguments: {context: {scope: global}, limit: 3}

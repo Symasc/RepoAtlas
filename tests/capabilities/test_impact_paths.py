@@ -154,3 +154,34 @@ def test_a_directory_seed_walks_from_everything_beneath_it(indexed: Workspace) -
         (2, "sym:tree:src/client.ts:listPath:2", "dependent", "containment", "USES"),
         (1, "file:tree:src/client.ts", "dependent", "file", "IMPORTS"),
     ]
+
+
+def test_compact_leaves_out_empty_fields_and_full_adds_resolutions(indexed: Workspace) -> None:
+    seed = "sym:symbols:src/limits.ts:LIMIT:1"
+    compact_request = ImpactRequest(context=GLOBAL, seed=seed)
+    full_request = ImpactRequest(context=GLOBAL, seed=seed, presentation="full")  # type: ignore[arg-type]
+    service = CapabilityService(indexed)
+    compact = present(compact_request, service.impact(compact_request))
+    full = present(full_request, service.impact(full_request))
+    sections = {
+        "investigation_id",
+        "context",
+        "seed",
+        "candidates",
+        "tests",
+        "packages",
+        "hubs",
+        "unresolved",
+        "omitted",
+        "summary",
+        "freshness",
+    }
+    assert set(compact) == sections == set(full)
+    for candidate in compact["candidates"]:
+        assert "from" in candidate and "from_" not in candidate
+        assert not any(value in ([], {}, None) for value in candidate.values())
+        assert "resolution" not in candidate["step"]
+    assert all("from" in c for c in full["candidates"])
+    stepped = [c for c in full["candidates"] if "edge" in c["step"] and c["step"]["edge"]]
+    assert stepped and all(c["step"]["resolution"] for c in stepped)
+    assert len(json.dumps(compact)) < len(json.dumps(full))

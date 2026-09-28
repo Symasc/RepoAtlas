@@ -1,4 +1,4 @@
-"""The nine capabilities, as tool declarations. No repository intelligence.
+"""The ten capabilities, as tool declarations. No repository intelligence.
 
 Every entry here is four facts: a protocol name, a description an agent reads
 before choosing, the V2 request model that validates its arguments, and the
@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from repoatlas.models.capability_io import RepositoriesRequest, StatusRequest
 from repoatlas.models.dependency_inventory import DependenciesRequest
 from repoatlas.models.http_inventory import HttpOperationsRequest
+from repoatlas.models.impact import ImpactRequest
 from repoatlas.models.inspection import InspectRequest
 from repoatlas.models.relationships import RelationshipsRequest
 from repoatlas.models.search import SearchRequest
@@ -56,7 +57,7 @@ class ToolSpec:
     #: to a function, so this module never holds a callable that could acquire a
     #: wrapper with behaviour of its own.
     capability: str
-    #: Whether the capability may change the index. True for eight of nine;
+    #: Whether the capability may change the index. True for nine of ten;
     #: ``sync`` is the exception and is the whole of Slice I.
     read_only: bool
 
@@ -147,6 +148,26 @@ RELATIONSHIPS = ToolSpec(
     read_only=True,
 )
 
+IMPACT = ToolSpec(
+    name=f"{NAMESPACE}_impact",
+    title="Trace change impact",
+    description=(
+        "Given what changes (the seed), return what may be affected, ranked. Each "
+        "candidate carries the one indexed step joining it to its predecessor (the edge, "
+        "and the file and lines to read) and its whole path as a chain. Deterministic and "
+        "lean: nothing is scored, recorded or quoted, so read the lines a step names to "
+        "decide. Tests, hubs "
+        "(dependents counted, not listed), importers that cannot be narrowed to a "
+        "declaration, and package-level dependents (coarse: a unit or repository that "
+        "declares the package) are separate sections, and omitted counts what was left "
+        "out. A seed that names more than one thing lists its candidates and follows "
+        "nothing."
+    ),
+    request=ImpactRequest,
+    capability="impact",
+    read_only=True,
+)
+
 DEPENDENCIES = ToolSpec(
     name=f"{NAMESPACE}_dependencies",
     title="Read indexed dependencies",
@@ -220,6 +241,7 @@ TOOLS: tuple[ToolSpec, ...] = (
     STATUS,
     SEARCH,
     INSPECT,
+    IMPACT,
     RELATIONSHIPS,
     DEPENDENCIES,
     HTTP_OPERATIONS,

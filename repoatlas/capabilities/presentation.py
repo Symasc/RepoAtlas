@@ -32,6 +32,7 @@ from repoatlas.models.compact import (
     CompactSource,
 )
 from repoatlas.models.freshness import IndexFreshness, severity
+from repoatlas.models.impact import ImpactResponse
 from repoatlas.models.inspection import InspectResponse
 from repoatlas.models.relationships import RelationshipsResponse
 from repoatlas.models.search import SearchResponse
@@ -42,8 +43,36 @@ def present(request: BaseModel, response: BaseModel) -> dict[str, Any]:
     """The JSON payload for ``response``, in the presentation ``request`` asked for."""
     if getattr(request, "presentation", Presentation.FULL) is not Presentation.COMPACT:
         return response.model_dump(mode="json")
+    if isinstance(response, ImpactResponse):
+        return compact_impact(response)
     # Null fields are omitted in the compact form, as its description says.
     return compact(response).model_dump(mode="json", exclude_none=True)
+
+
+def compact_impact(response: ImpactResponse) -> dict[str, Any]:
+    """An impact answer with its empty fields left out, sections kept.
+
+    Every top-level section stays, empty or not, so an answer always has the same
+    keys; inside candidates, steps and summaries an empty list, empty mapping or null
+    is left out. Freshness is written for the repositories the answer draws on.
+    """
+    payload = response.model_dump(mode="json", exclude_none=True)
+    drawn = {c.repository for c in (*response.candidates, *response.tests) if c.repository}
+    if response.seed.repository:
+        drawn.add(response.seed.repository)
+    payload["freshness"] = _freshness(response.freshness, drawn).model_dump(
+        mode="json", exclude_none=True
+    )
+    return {key: _pruned(value) if key != "freshness" else value for key, value in payload.items()}
+
+
+def _pruned(value: Any) -> Any:
+    if isinstance(value, dict):
+        kept = {k: _pruned(v) for k, v in value.items()}
+        return {k: v for k, v in kept.items() if v not in ({}, [], None)}
+    if isinstance(value, list):
+        return [_pruned(v) for v in value]
+    return value
 
 
 def compact(response: BaseModel) -> BaseModel:

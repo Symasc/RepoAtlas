@@ -582,16 +582,17 @@ def test_case_17_grounding_is_importable_and_is_what_verification_uses() -> None
 # ---------------------------------------------------------------------------
 
 
-def test_case_11_the_transport_publishes_exactly_nine_tools() -> None:
+def test_case_11_the_transport_publishes_exactly_ten_tools() -> None:
     """CASE 11. The public inventory, which removal must not have touched."""
     from repoatlas.mcp.tools import TOOLS
 
-    assert len(TOOLS) == 9
+    assert len(TOOLS) == 10
     assert {spec.name for spec in TOOLS} == {
         "repoatlas_repositories",
         "repoatlas_status",
         "repoatlas_search",
         "repoatlas_inspect",
+        "repoatlas_impact",
         "repoatlas_relationships",
         "repoatlas_dependencies",
         "repoatlas_http_operations",
@@ -765,7 +766,7 @@ def test_case_13_the_transport_serves_a_session_with_sockets_denied(
     )
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    assert report["tools"] == 9
+    assert report["tools"] == 10
     assert report["evidence"] > 0
     assert report["repositories"] > 0
 

@@ -46,9 +46,9 @@ SEED_DESCRIPTION = (
     "scope; otherwise the response lists the candidates and follows nothing."
 )
 IMPACT_PRESENTATION_DESCRIPTION = (
-    "`compact` (the default) writes each step's edge, reading, lines and syntax. "
-    "`full` adds each step's recorded resolution and up to five alternative "
-    "predecessors per candidate."
+    "`compact` (the default) leaves out empty fields, and freshness for repositories "
+    "the answer does not draw on. `full` adds each step's recorded resolution and up "
+    "to five alternative predecessors per candidate."
 )
 
 
@@ -207,7 +207,7 @@ class ImpactStep(BaseModel):
 class ImpactCandidate(BaseModel):
     """One thing the change may reach, with the step from its predecessor."""
 
-    model_config = ConfigDict(frozen=True, populate_by_name=True)
+    model_config = ConfigDict(frozen=True, populate_by_name=True, serialize_by_alias=True)
 
     id: int
     entity: str

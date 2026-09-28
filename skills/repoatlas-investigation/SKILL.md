@@ -16,12 +16,13 @@ Use the smallest evidence set that lets you make the next decision. RepoAtlas re
 | Exact symbol or literal | Search that spelling; quote a standalone literal such as `"settled"`. Use `source_preview:true` for behavior, and `presentation:"compact"` for less repeated metadata. |
 | A known route or client family | `repoatlas_http_operations`, filtered by repository, route_prefix, method, owner or within_path. Reuse a sufficient earlier inventory. |
 | Which repository contains a feature | Global search; global dependencies for a known package; bounded global HTTP discovery for a known route shape. |
+| What a change to one thing may affect | `repoatlas_impact` with what changes (a returned key, a name or a path), then read the lines each step names. |
 | A supported indexed relationship | `repoatlas_relationships` using the returned key and needed edge types/direction. |
 | Package consumers or providers | `repoatlas_dependencies` with `name` (not `package`). Distinguish declared, locked and provided facts. |
 | Repository identity or freshness is unclear | `repoatlas_repositories` or `repoatlas_status`. Do not rediscover a known scope on every task. |
 | Unsupported construct or missing usable indexed source | Focused direct source inspection, with explicit external-source attribution. Do not first make graph calls known to be unsupported. |
 
-Do not call all nine tools on every question. Inspect or expand only what the answer still needs. An entire short guard may be useful; an entire large file usually is not. One declaration plus one precise inspect is often better than repeated searches.
+Do not call all ten tools on every question. Inspect or expand only what the answer still needs. An entire short guard may be useful; an entire large file usually is not. One declaration plus one precise inspect is often better than repeated searches.
 
 Search results retain ranked order. Equal public `tier`/`match` values do **not** mean their internal ranks are tied. Reciprocal-rank fusion orders results within tiers after path and exact qualified-symbol precedence. Associative results are leads rather than deterministic matches. Tests can be the correct evidence; do not discard them merely because they are tests.
 
