@@ -8,7 +8,8 @@ binding or layout rule it exists to prove.
   chains, a package ``__init__`` that re-exports (under a second name, and a submodule),
   shadowing, ``TYPE_CHECKING``, every use form, PEP 695 type parameters, star imports,
   proven calls, an unrelated same-named class, and a test calling a consumer.
-* ``flatfix`` is a flat-layout project with a ``scripts/`` directory that is no root.
+* ``flatfix`` is a flat-layout project with a ``scripts/`` directory that is no root, a
+  package whose own directory is no root either, and a project nested inside a package.
 * ``mono`` is one Git repository holding two projects, ``alpha`` and ``beta``, each
   with its own top-level ``app``: a project is a boundary, whatever repository it is in.
 """
@@ -135,6 +136,9 @@ PYFIX: dict[str, str] = {
     ),
     # P19: a same-named class nothing imports
     f"{PKG}/unrelated.py": "class User:\n    pass\n",
+    # P6: the project's own directory is no root of a src layout
+    "tasks.py": "def build():\n    return 1\n",
+    f"{PKG}/outside.py": "import tasks\ndef p6():\n    return tasks.build()\n",
     # P18: a test of a consumer
     "tests/test_consumer.py": (
         "from fixture_pkg.abs_user import p2\ndef test_p2():\n    p2(None, None)\n"
@@ -146,6 +150,14 @@ FLATFIX: dict[str, str] = {
     "fixture_pkg/__init__.py": "",
     "fixture_pkg/models.py": "class User:\n    pass\n",
     "scripts/bar.py": "def bar():\n    return 1\n",
+    # A package's own directory is no root: no implicit relative import
+    "fixture_pkg/implicit.py": "import models\ndef p7b():\n    return models.User\n",
+    # A project nested in a package is out of the outer project's reach
+    "fixture_pkg/vendored/pyproject.toml": '[project]\nname = "vendored"\n',
+    "fixture_pkg/vendored/__init__.py": "class V:\n    pass\n",
+    "fixture_pkg/nested_user.py": (
+        "from fixture_pkg.vendored import V\ndef p12c(v: V):\n    return v\n"
+    ),
     "app.py": (
         "from fixture_pkg.models import User\nimport bar\ndef p7(u: User):\n    return bar.bar()\n"
     ),
