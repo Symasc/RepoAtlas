@@ -9,7 +9,8 @@
 -- repositories, the manifest evidence), so such an edge can be read back to what
 -- proved it.
 --
--- NULL on every edge a file asserts on its own and on every literal resolution.
--- Written only by the global pass, which rebuilds all of its edges on every sync, so
--- an upgraded database needs no backfill: the next sync writes it.
+-- NULL on every other edge. Written with the edge it describes, by the pass that
+-- writes that edge; the parser-version change that introduces these edges reparses
+-- every file they come from, and the global pass rebuilds all of its edges on every
+-- sync, so an upgraded database needs no backfill: the next sync writes it.
 ALTER TABLE edges ADD COLUMN resolution TEXT;

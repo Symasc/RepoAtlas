@@ -37,6 +37,7 @@ from repoatlas.parsers.treesitter import (
     string_literal,
     walk,
 )
+from repoatlas.parsers.ts_uses import USE_NODES, UseAnalysis, UseSite, use_references
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from tree_sitter import Node
@@ -93,6 +94,7 @@ class _Walker:
         http: TypeScriptHttp | None = None,
         nest: NestDeclarations | None = None,
         wrappers: FetchWrappers | None = None,
+        uses: UseAnalysis | None = None,
     ) -> None:
         self._source = source
         self._language = language
@@ -106,6 +108,12 @@ class _Walker:
         #: Object literals a named function returns, by span: their function-valued
         #: properties are that function's methods (see :meth:`_returned_object`).
         self._returned: set[tuple[int, int]] = set()
+        self._uses = uses
+        #: Each use of a module-scope name, with the declaration it belongs to.
+        self.uses: list[tuple[str | None, UseSite]] = []
+        #: The module-scope binding whose initializer is being visited, if any: it owns
+        #: the uses there, though the calls there stay the file's (see :meth:`_use`).
+        self._binding: str | None = None
 
     # -- scope ---------------------------------------------------------------
 
@@ -128,6 +136,10 @@ class _Walker:
     def _visit(self, node: Node, *, exported: bool = False) -> None:
         kind = node.type
 
+        if kind in USE_NODES and self._uses is not None:
+            site = self._uses.sites.get((node.start_byte, node.end_byte, kind))
+            if site is not None:
+                self._use(site)
         if kind == "import_statement":
             self._import_statement(node)
             return
@@ -537,8 +549,30 @@ class _Walker:
                 self._scope.append(name)
                 self._visit_children(declarator)
                 self._scope.pop()
+            elif top_level and _module_scope(node):
+                previous, self._binding = self._binding, name
+                self._visit_children(declarator)
+                self._binding = previous
             else:
                 self._visit_children(declarator)
+
+    def _use(self, site: UseSite) -> None:
+        """Attribute one use of a module-scope name to the declaration it sits in.
+
+        The innermost enclosing named declaration, as for a call; failing that, the
+        module-scope binding whose initializer holds it; failing that, the file.
+
+        A callee this file declares stays a call only when the call graph gives it to
+        the same declaration, which it resolves exactly within the file. A callee bound
+        by an import is always recorded as a use as well: the call graph follows an
+        imported name only as far as its own trace goes, which stops at a default or
+        a renamed re-export, while this use is followed under every name it passes by
+        (repoatlas.graph.uses).
+        """
+        source = self._current if self._scope else self._binding
+        if site.use == "call" and site.binding.kind == "local" and source == self._current:
+            return
+        self.uses.append((source, site))
 
     # -- calls, requires and environment variables ---------------------------
 
@@ -637,6 +671,14 @@ class _Walker:
         return f"{label} {name}{arguments}".strip()
 
 
+def _module_scope(declaration: Node) -> bool:
+    """Whether a variable declaration sits at the top of the module, exported or not."""
+    parent = declaration.parent
+    while parent is not None and parent.type in {"export_statement", "ambient_declaration"}:
+        parent = parent.parent
+    return parent is not None and parent.type == "program"
+
+
 def _operand(node: Node) -> Node:
     """``node`` with parentheses, ``as`` and ``satisfies`` looked through."""
     while node.type in _TRANSPARENT:
@@ -672,7 +714,9 @@ class TypeScriptParser:
     #    ``imported:local`` pairs), and re-exports what they pass on (``*``, a
     #    namespace, or ``imported:exported`` pairs), so the global pass can follow a
     #    named import through re-exporting barrels to the file that defines it.
-    version = "9"
+    # 10: declarations' uses of module-scope names (USES), and the file's export
+    #    table for following them through barrels (repoatlas.parsers.ts_uses).
+    version = "10"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
@@ -703,7 +747,10 @@ class TypeScriptParser:
         http = TypeScriptHttp(source, tree.root_node)
         nest = NestDeclarations(source, tree.root_node, http.counts)
         wrappers = FetchWrappers(source, tree.root_node, http.counts)
-        walker = _Walker(source, grammar, http, nest, wrappers)
+        # Uses are proven by scoping, and a tree the grammar had to recover may have
+        # lost a declaration: such a file states no uses at all.
+        uses = None if has_error(tree) else UseAnalysis(source, tree.root_node)
+        walker = _Walker(source, grammar, http, nest, wrappers, uses)
         walker.run(tree.root_node)
 
         whole_file_start, whole_file_last = whole_file_span(content)
@@ -731,6 +778,15 @@ class TypeScriptParser:
             parser=self.name,
             parser_version=self.version,
             symbols=(module, *walker.symbols),
-            references=(*walker.references, *nest.references(), *wrappers.declarations()),
+            references=(
+                *walker.references,
+                *nest.references(),
+                *wrappers.declarations(),
+                *(
+                    use_references(walker.uses, walker.symbols, uses.exports)
+                    if uses is not None
+                    else ()
+                ),
+            ),
             diagnostics=diagnostics,
         )

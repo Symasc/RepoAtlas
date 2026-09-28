@@ -480,4 +480,6 @@ def test_edge_types_are_appended_and_existing_values_are_unchanged() -> None:
         "DECLARES_HTTP_DEPLOYMENT",
         "EXPOSES_HTTP_ENDPOINT",
         "CALLS_HTTP_ENDPOINT",
+        # A declaration's use of a module-scope name (change impact).
+        "USES",
     )
