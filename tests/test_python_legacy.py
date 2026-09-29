@@ -71,12 +71,12 @@ def test_only_the_root_requirements_file_of_a_metadata_less_repository_declares(
     workspace: Workspace, tmp_path: Path, repository: str, why: str
 ) -> None:
     linked = build(workspace, tmp_path, pick(HYBRID, "explicit-auth", repository))
-    assert refusals(linked, repository, SERVICE) == dict.fromkeys(NAMES, why)
     assert not [
         e
         for e in edges(linked)
         if e["source"].startswith(f"{repository}:") and e["target"].startswith("explicit-auth:")
     ]
+    assert refusals(linked, repository, SERVICE) == dict.fromkeys(NAMES, why)
 
 
 # -- the legacy convention: a metadata-less repository holding the module (C2) ---------
@@ -169,13 +169,13 @@ def test_a_requirement_joins_nothing_it_does_not_name_or_cannot_single_out(
     workspace: Workspace, tmp_path: Path, repositories: tuple[str, ...], consumer: str, why: str
 ) -> None:
     linked = _legacy(workspace, tmp_path, *repositories)
-    names = NAMES if "Thing" not in LEGACY[consumer][SERVICE] else ("Thing",)
-    assert refusals(linked, consumer, SERVICE) == dict.fromkeys(names, why)
     assert not [
         e
         for e in edges(linked)
         if e["source"].startswith(f"{consumer}:") and not e["target"].startswith(f"{consumer}:")
     ]
+    names = NAMES if "Thing" not in LEGACY[consumer][SERVICE] else ("Thing",)
+    assert refusals(linked, consumer, SERVICE) == dict.fromkeys(names, why)
 
 
 def test_r11_a_module_at_the_root_is_held_as_well_as_a_package(
