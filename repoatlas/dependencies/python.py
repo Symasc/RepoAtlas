@@ -34,11 +34,11 @@ from repoatlas.models.parsing import (
     Severity,
 )
 from repoatlas.parsers.interpreter import interpreter_tag
-from repoatlas.parsers.marks import line_at, split_lines
+from repoatlas.parsers.marks import line_at
+from repoatlas.parsers.requirements import requirement_lines
 from repoatlas.parsers.setuptools_project import cfg_values
 
 _REQUIREMENTS = re.compile(r"^requirements.*\.txt$")
-_OPTIONS = frozenset({"-r", "--requirement", "-c", "--constraint", "-e", "--editable"})
 _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 
 
@@ -379,11 +379,8 @@ class RequirementsParser:
             group = stem.removeprefix("requirements-")
 
         declared: list[DeclaredDependency] = []
-        for number, line in enumerate(split_lines(content), start=1):
-            text = line.strip()
-            if not text or text.startswith("#") or text.split(" ", 1)[0] in _OPTIONS:
-                continue
-            if text.startswith("-"):
+        for number, kind, text in requirement_lines(content):
+            if kind != "requirement":
                 continue
             parsed = python_requirement(text)
             if parsed is None:
