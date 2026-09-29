@@ -40,6 +40,10 @@ WORKSPACE = "workspace"
 PYTHON_PROJECT = "python-project"
 #: A setuptools ``setup.cfg`` or ``setup.py`` (repoatlas.parsers.setuptools_project).
 PYTHON_SETUPTOOLS = "python-setuptools"
+#: A requirements file a repository's root ``requirements.txt`` reaches through ``-r``, the
+#: root included (repoatlas.parsers.requirements): recorded by the sync for the files it
+#: reaches, never by a parser for a file of some name (repoatlas.graph.py_requirements).
+PYTHON_REQUIREMENTS = "python-requirements"
 
 #: Larger than any hand-written configuration; beyond it a file contributes nothing.
 _MAX_BYTES = 256 * 1024

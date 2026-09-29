@@ -58,7 +58,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from fnmatch import fnmatchcase
 from functools import lru_cache
@@ -68,7 +68,12 @@ from typing import Any
 from repoatlas.dependencies.normalize import PYPI, normalize
 from repoatlas.graph.modules import ModuleTarget
 from repoatlas.graph.resolution import ResolutionIndex, _normalize
-from repoatlas.parsers.module_facts import MODULE_RESOLUTION, PYTHON_PROJECT, PYTHON_SETUPTOOLS
+from repoatlas.parsers.module_facts import (
+    MODULE_RESOLUTION,
+    PYTHON_PROJECT,
+    PYTHON_REQUIREMENTS,
+    PYTHON_SETUPTOOLS,
+)
 from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
 
 PYTHON_RELATIVE = "python-relative"
@@ -181,12 +186,19 @@ class PythonModules:
         self.stated: dict[tuple[int, str], tuple[str, dict[str, Any]]] = {}
         #: Every setuptools source by (repository, directory): its path, and what it states.
         setuptools: dict[tuple[int, str], dict[str, dict[str, Any]]] = defaultdict(dict)
+        #: What each file a root requirements.txt reaches states, by repository and path:
+        #: facts about declarations, never about a project (repoatlas.graph.py_requirements).
+        self._requirements: dict[int, dict[str, dict[str, Any]]] = defaultdict(dict)
         for claim in facts:
             meta = json.loads(claim.meta_json) if claim.meta_json else {}
             row = by_id.get(claim.file_id)
             if row is not None and meta.get(MODULE_RESOLUTION) == PYTHON_SETUPTOOLS:
                 place = (row.repo_id, _parent(row.rel_path))
                 setuptools[place][row.rel_path] = json.loads(meta.get("facts") or "{}")
+                continue
+            if row is not None and meta.get(MODULE_RESOLUTION) == PYTHON_REQUIREMENTS:
+                stated = json.loads(meta.get("facts") or "{}")
+                self._requirements[row.repo_id][row.rel_path] = stated
                 continue
             if row is None or meta.get(MODULE_RESOLUTION) != PYTHON_PROJECT:
                 continue
@@ -324,6 +336,15 @@ class PythonModules:
         if repository is None or not repository.implicit or repo_id in self._stating:
             return False
         return not any(self._file(repo_id, name) for name in ("setup.py", "setup.cfg"))
+
+    def requirements(self, repo_id: int) -> Mapping[str, Mapping[str, Any]]:
+        """What each file a repository's root ``requirements.txt`` reaches through ``-r``
+        states, by path (:mod:`repoatlas.graph.py_requirements`)."""
+        return self._requirements.get(repo_id, {})
+
+    def indexed(self, repo_id: int, rel_path: str) -> bool:
+        """Whether a repository indexes a file at ``rel_path``."""
+        return self._file(repo_id, rel_path) is not None
 
     def project_of(self, repo_id: int, rel_path: str) -> Project | None:
         """The innermost project whose directory holds ``rel_path``, if any."""

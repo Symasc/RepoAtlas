@@ -33,10 +33,12 @@ same transaction (ARCHITECTURE.md §9).
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from repoatlas.config.settings import Settings
 from repoatlas.containment import ContentStatus, FileContent, RepositoryBoundary
@@ -46,11 +48,13 @@ from repoatlas.embeddings.protocol import EmbeddingModel, EmbeddingUnavailable
 from repoatlas.gitstate.client import GitClient
 from repoatlas.graph.keys import file_key, repository_key, symbol_key
 from repoatlas.graph.linker import GLOBAL_PARSER, GlobalLinkResult, ReferenceLinker
+from repoatlas.graph.py_requirements import REQUIREMENTS_FACTS, ROOT, reach, requirements_meta
 from repoatlas.graph.uses_link import PENDING, UsesChangeLog, stored_scope
 from repoatlas.indexing.chunking import chunk_content
 from repoatlas.models.dependencies import DependencyRecord, DependencyReport
 from repoatlas.models.parsing import (
     ENUMERATION_INCOMPLETE,
+    EdgeType,
     EntityType,
     ParsedFile,
     ParseDiagnostic,
@@ -59,7 +63,14 @@ from repoatlas.models.parsing import (
 from repoatlas.models.reports import RepositorySyncReport, SyncReport
 from repoatlas.models.repository import IndexedFile, Repository, repository_slug
 from repoatlas.parsers.registry import ParserRegistry
-from repoatlas.storage.protocols import ChunkRecord, EntityRecord, FileFacts, SyncCompletion
+from repoatlas.parsers.requirements import REQUIREMENTS_FACTS_VERSION, requirements_facts
+from repoatlas.storage.protocols import (
+    ChunkRecord,
+    EntityRecord,
+    FileFacts,
+    SyncCompletion,
+    UnresolvedRefRecord,
+)
 from repoatlas.storage.sqlite.stores import (
     SqliteDependencyStore,
     SqliteFileStore,
@@ -302,6 +313,7 @@ class SyncEngine:
             if outcome.language:
                 languages.add(outcome.language)
 
+        self._materialize_requirements(repo, boundary)
         self._knowledge.gc_orphan_entities()
 
         self._repositories.update_detected_metadata(
@@ -335,6 +347,88 @@ class SyncEngine:
             diagnostics=tuple(diagnostics),
         )
         return report, completion
+
+    def _materialize_requirements(self, repo: Repository, boundary: RepositoryBoundary) -> None:
+        """Record the requirements of every file the root ``requirements.txt`` reaches through
+        ``-r``, and of no other (:mod:`repoatlas.graph.py_requirements`).
+
+        A file is a requirements file only because another file includes it, so no parser can
+        tell from the file alone: this runs once the repository's files are written, on every
+        sync, and follows the includes through what the repository indexes. A reached file's
+        requirements are read from its content and kept while that content is indexed --
+        writing the file again drops them, and they are read again here -- and a file no longer
+        reached loses them. What is recorded is a function of the working tree alone, exactly
+        what a fresh index records.
+
+        A file is read through the repository boundary, and only as the bytes the index holds
+        for it: one changed since it was indexed, or that is not text, holds no requirements
+        until a sync indexes it again.
+        """
+        assert repo.id is not None
+        states = self._files.list_states(repo.id)
+        stored = {
+            path: meta
+            for _, path, meta in self._knowledge.list_facts_of_kind(REQUIREMENTS_FACTS, repo.id)
+        }
+        loaded: dict[str, dict[str, Any] | None] = {}
+
+        def load(path: str) -> dict[str, Any] | None:
+            if path not in loaded:
+                state = states[path]
+                loaded[path] = self._requirements_of(
+                    boundary, path, state.content_hash, stored.get(path)
+                )
+            return loaded[path]
+
+        reached = reach(load, states.__contains__).files if ROOT in states else ()
+        wanted = {
+            found.path: requirements_meta(facts)
+            for found in reached
+            if (facts := loaded.get(found.path)) is not None
+        }
+        written = sorted(path for path, meta in wanted.items() if stored.get(path) != meta)
+        dropped = sorted(set(stored) - set(wanted))
+        if not written and not dropped:
+            return
+        claims: list[UnresolvedRefRecord] = []
+        for path in written:
+            file_id = states[path].file_id
+            source = self._knowledge.find_file_entity(file_id, file_key(repo.slug, path))
+            if source is None:
+                continue
+            claims.append(
+                UnresolvedRefRecord(
+                    repo_id=repo.id,
+                    file_id=file_id,
+                    src_id=source,
+                    edge_type=EdgeType.CONFIGURES,
+                    target_kind=EntityType.CONFIG,
+                    target_key=REQUIREMENTS_FACTS,
+                    line_start=1,
+                    line_end=1,
+                    meta_json=wanted[path],
+                )
+            )
+        self._knowledge.replace_facts_of_kind(
+            REQUIREMENTS_FACTS, [states[path].file_id for path in (*written, *dropped)], claims
+        )
+
+    def _requirements_of(
+        self, boundary: RepositoryBoundary, path: str, content_hash: str, stored: str | None
+    ) -> dict[str, Any] | None:
+        """A reached file's requirements facts: the ones recorded while its content is
+        unchanged, else read now, or ``None`` when its indexed bytes cannot be read as text."""
+        if stored:
+            facts = json.loads(json.loads(stored).get("facts") or "{}")
+            if facts.get("v") == REQUIREMENTS_FACTS_VERSION:
+                return facts
+        raw = boundary.read_content(path, max_bytes=self._settings.indexing.max_file_bytes).data
+        if raw is None or hash_bytes(raw) != content_hash or b"\0" in raw[:BINARY_SNIFF_BYTES]:
+            return None
+        try:
+            return requirements_facts(path, raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            return None
 
     @staticmethod
     def _note_manifest(rel_path: str, manifests: set[str], lockfiles: set[str]) -> None:

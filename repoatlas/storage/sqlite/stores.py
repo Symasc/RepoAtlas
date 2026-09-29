@@ -758,6 +758,37 @@ class SqliteKnowledgeStore:
         rows = self._db.execute(sql + " ORDER BY u.id", params).fetchall()
         return [_claim(row) for row in rows]
 
+    def list_facts_of_kind(
+        self, target_key: str, repo_id: int | None = None
+    ) -> list[tuple[int, str, str]]:
+        """Every module-resolution fact of one kind (``target_key``), as (repository, file,
+        meta): all of them, or one repository's."""
+        sql = (
+            "SELECT u.repo_id, f.rel_path, u.meta_json FROM unresolved_refs u "
+            "JOIN files f ON f.id = u.file_id WHERE u.target_kind = ? AND u.target_key = ?"
+        )
+        params: tuple[object, ...] = (str(EntityType.CONFIG), target_key)
+        if repo_id is not None:
+            sql += " AND u.repo_id = ?"
+            params = (*params, repo_id)
+        rows = self._db.execute(sql + " ORDER BY u.repo_id, f.rel_path", params).fetchall()
+        return [(int(row["repo_id"]), str(row["rel_path"]), row["meta_json"] or "") for row in rows]
+
+    def replace_facts_of_kind(
+        self, target_key: str, file_ids: Sequence[int], facts: Sequence[UnresolvedRefRecord]
+    ) -> None:
+        """Replace the module-resolution facts of one kind these files state with ``facts``,
+        each a fact of one of them, atomically. Every other claim of theirs is kept."""
+        with self._db.transaction() as conn:
+            for chunk in _chunks(sorted(set(file_ids))):
+                placeholders = ",".join("?" * len(chunk))
+                conn.execute(
+                    "DELETE FROM unresolved_refs WHERE target_kind = ? AND target_key = ? "  # noqa: S608 - placeholders are generated counts, values are bound
+                    f"AND file_id IN ({placeholders})",
+                    (str(EntityType.CONFIG), target_key, *chunk),
+                )
+            self.add_unresolved_refs(facts)
+
     def list_export_tables(self, file_ids: Sequence[int] | None) -> dict[int, str]:
         """Each file's export-table claim (:mod:`repoatlas.parsers.ts_uses`), as its raw meta.
 

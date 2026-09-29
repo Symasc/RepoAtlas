@@ -22,10 +22,14 @@ importing project's own declaration of a dependency, read here, and nothing else
    otherwise being ``dependency-unread`` and an ``extras_require`` never declaring; or, when its
    repository states nothing about packaging
    (:meth:`~repoatlas.graph.py_modules.PythonModules.metadata_less`), in the
-   repository's root ``requirements.txt``, and in no other requirements file. A name
-   Poetry's tables declare, or a PEP 508 direct reference (``name @ ...``), is a form
-   this does not read: ``dependency-unread``, never a version. A requirements line
-   naming a URL or a VCS source (``git+https://...``, ``file:...``) declares nothing;
+   repository's root ``requirements.txt`` and every local file its ``-r`` lines reach,
+   whatever it is called (:mod:`repoatlas.graph.py_requirements`), and in no other
+   requirements file: the first requirement of a name in pip's reading order is the
+   declaration, written where that requirement is. A name Poetry's tables declare, or a PEP
+   508 direct reference (``name @ ...``), is a form this does not read: ``dependency-unread``,
+   never a version; so is a name those files do not declare when one they include was not
+   read. A requirements line naming a URL or a VCS source (``git+https://...``,
+   ``file:...``) declares nothing;
 3. **the provider it names.** A ``[tool.uv.sources]`` entry for the name -- the
    project's own, or else its workspace root's, which uv applies to every member that
    does not override it -- pins it (a root ``requirements.txt`` has none):
@@ -52,10 +56,11 @@ repositories that state nothing about packaging. The import is then linked, on b
 ``python-requirements-legacy``, only when all of this holds, and refused with the first
 reason otherwise:
 
-* the importer's repository is metadata-less itself, and its root ``requirements.txt`` has
-  a row whose **legacy key** (:func:`legacy_key`: ASCII lowercase, ``_`` for ``-``, and
-  nothing else -- never PEP 503) equals the imported top-level name's
-  (``dependency-absent``; a direct reference is ``dependency-unread``);
+* the importer's repository is metadata-less itself, and its root ``requirements.txt``, or
+  a file it reaches, has a row whose **legacy key** (:func:`legacy_key`: ASCII lowercase,
+  ``_`` for ``-``, and nothing else -- never PEP 503) equals the imported top-level name's
+  (``dependency-absent``, or ``dependency-unread`` when an include was not read; a direct
+  reference is ``dependency-unread``);
 * no indexed manifest provides that row's distribution, PEP 503-normalised as P2 reads
   it: metadata that names it and does not ship the module overrides the convention
   (``dependency-elsewhere``);
@@ -92,6 +97,7 @@ from repoatlas.graph.declared import path_target, root_path
 from repoatlas.graph.modules import ModuleTarget, member_matcher
 from repoatlas.graph.packages import ProviderTargets, Provision
 from repoatlas.graph.py_modules import REPOSITORY_ROOT, Project, PythonModules, Root, root_detail
+from repoatlas.graph.py_requirements import reach
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION, PYTHON_PROJECT
@@ -153,6 +159,18 @@ class _Declaration:
     line: int
     constraint: str | None
     constraints: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Requirement:
+    """A requirement a metadata-less repository's root ``requirements.txt`` reaches, and the
+    file it is written in: the root itself, or one the root includes."""
+
+    manifest: str
+    line_start: int
+    name: str
+    normalized_name: str
+    constraint: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,11 +439,17 @@ class PythonPackageLinks:
             )
         )
         provisions: list[Provision] = []
-        #: Each metadata-less repository's root requirement rows, in line order.
-        self._required: dict[int, list[DependencyRecord]] = defaultdict(list)
+        #: Each metadata-less repository's requirements, the root's and those of every file it
+        #: reaches, in pip's reading order.
+        self._required: dict[int, list[_Requirement]] = defaultdict(list)
+        #: Metadata-less repositories whose root delegates to a file not read.
+        self._incomplete: set[int] = set()
+        #: Each metadata-less repository's root requirements.txt rows.
+        rooted: dict[int, list[DependencyRecord]] = defaultdict(list)
         # By (repository, declaring project's manifest): a pyproject's own path, or the
-        # implicit project's for a metadata-less repository's root requirements.txt.
-        first: dict[tuple[int, str], dict[str, tuple[DependencyRecord, str]]] = defaultdict(dict)
+        # implicit project's for a metadata-less repository's root requirements.txt. Each
+        # name's first declaration, as (manifest, line, constraint).
+        first: dict[tuple[int, str], dict[str, tuple[str, int, str | None]]] = defaultdict(dict)
         constraints: dict[tuple[int, str, str], set[str]] = defaultdict(set)
         for record, manifest in located:
             if record.role == "provided":
@@ -445,10 +469,8 @@ class PythonPackageLinks:
             if PurePosixPath(manifest).name == "pyproject.toml":
                 owner = manifest
             elif manifest == REQUIREMENTS and modules.metadata_less(record.repo_id):
-                if (record.constraint or "").strip().startswith(_URL_FORM):
-                    continue
-                owner = REPOSITORY_ROOT
-                self._required[record.repo_id].append(record)
+                rooted[record.repo_id].append(record)  # read with what the root reaches, below
+                continue
             elif record.group == "main" and PurePosixPath(manifest).name in _SETUPTOOLS:
                 # install_requires, of the one source that states the project's dependencies
                 project = modules.project_of(record.repo_id, manifest)
@@ -457,19 +479,32 @@ class PythonPackageLinks:
                 owner = project.manifest
             else:
                 continue
-            first[(record.repo_id, owner)].setdefault(record.normalized_name, (record, manifest))
+            first[(record.repo_id, owner)].setdefault(
+                record.normalized_name, (manifest, record.line_start, record.constraint)
+            )
             constraints[(record.repo_id, owner, record.normalized_name)].add(
                 (record.constraint or "").strip()
             )
+        reaching = {repo_id for repo_id in index.files_by_repo if modules.requirements(repo_id)}
+        for repo_id in sorted(set(rooted) | reaching):
+            if not modules.metadata_less(repo_id):
+                continue
+            for requirement in self._reached(repo_id, rooted.get(repo_id, [])):
+                key = (repo_id, REPOSITORY_ROOT)
+                first[key].setdefault(
+                    requirement.normalized_name,
+                    (requirement.manifest, requirement.line_start, requirement.constraint),
+                )
+                constraints[(*key, requirement.normalized_name)].add(
+                    (requirement.constraint or "").strip()
+                )
+                self._required[repo_id].append(requirement)
         self._declared: dict[tuple[int, str], dict[str, _Declaration]] = {
             key: {
                 name: _Declaration(
-                    manifest,
-                    record.line_start,
-                    record.constraint,
-                    tuple(sorted(constraints[(key[0], key[1], name)])),
+                    manifest, line, constraint, tuple(sorted(constraints[(key[0], key[1], name)]))
                 )
-                for name, (record, manifest) in names.items()
+                for name, (manifest, line, constraint) in names.items()
             }
             for key, names in first.items()
         }
@@ -480,6 +515,44 @@ class PythonPackageLinks:
             index.repo_slugs,
         )
         self._memo: dict[tuple[int, str, str], PythonLink | str | None] = {}
+
+    def _reached(self, repo_id: int, rooted: Sequence[DependencyRecord]) -> list[_Requirement]:
+        """A metadata-less repository's requirements in pip's reading order: its root
+        ``requirements.txt`` rows, and the requirements of every file those ``-r`` lines
+        reach (:mod:`repoatlas.graph.py_requirements`), each where it is written. A URL or VCS
+        line declares nothing."""
+        facts = self._modules.requirements(repo_id)
+        found = reach(facts.get, lambda path: self._modules.indexed(repo_id, path))
+        if found.incomplete:
+            self._incomplete.add(repo_id)
+        ordered: list[tuple[tuple[int, ...], _Requirement]] = [
+            (
+                (row.line_start,),
+                _Requirement(
+                    REQUIREMENTS, row.line_start, row.name, row.normalized_name, row.constraint
+                ),
+            )
+            for row in rooted
+        ]
+        for reached in found.files[1:]:  # the root's own requirements are its rows
+            for line, name, constraint in facts[reached.path].get("requires", []):
+                requirement = _Requirement(
+                    reached.path, line, name, normalize(PYPI, name), constraint
+                )
+                ordered.append(((*reached.chain, line), requirement))
+        ordered.sort(key=lambda item: item[0])
+        return [
+            requirement
+            for _, requirement in ordered
+            if not (requirement.constraint or "").strip().startswith(_URL_FORM)
+        ]
+
+    def _absent(self, own: Project) -> str:
+        """Why a project declares nothing of a name: it does not, or -- a metadata-less
+        repository whose root delegates to a file not read -- it may, where that is unread."""
+        if own.manifest == REPOSITORY_ROOT and own.repo_id in self._incomplete:
+            return "dependency-unread"
+        return "dependency-absent"
 
     def resolve(self, origin: FileRow, spec: str) -> PythonLink | str | None:
         """The module ``spec`` names in another project, why it names none, or ``None``
@@ -545,7 +618,7 @@ class PythonPackageLinks:
         if self.targets.unread(own.repo_id, own.directory, wanted, constraints):
             return "dependency-unread"
         if declaration is None:
-            return "dependency-absent"
+            return self._absent(own)
         # a repository with no pyproject is no uv project: nothing pins its requirements
         implicit = own.manifest == REPOSITORY_ROOT
         pinned = None if implicit else self.targets.pinned(own.repo_id, own.directory, wanted)
@@ -587,7 +660,7 @@ class PythonPackageLinks:
         wanted = legacy_key(head)
         rows = [r for r in self._required.get(own.repo_id, ()) if legacy_key(r.name) == wanted]
         if not rows:
-            return "dependency-absent"
+            return self._absent(own)
         if any((r.constraint or "").strip().startswith("@") for r in rows):
             return "dependency-unread"
         row = rows[0]
@@ -610,16 +683,17 @@ class PythonPackageLinks:
     def _legacy_link(
         self,
         provider: Project,
-        row: DependencyRecord,
+        row: _Requirement,
         held: FileRow,
         module: FileRow,
         root: Root,
         parts: Sequence[str],
     ) -> PythonLink:
-        """What proved a legacy link: the requirement, as written and where, and the file
-        that holds the module -- never a manifest, since the provider has none."""
+        """What proved a legacy link: the requirement, as written and where -- the root
+        ``requirements.txt`` or the file it reaches that states it -- and the file that holds
+        the module, never a manifest, since the provider has none."""
         package = f"{PYPI}:{row.name}"
-        declared_at = f"{REQUIREMENTS}:{row.line_start}"
+        declared_at = f"{row.manifest}:{row.line_start}"
         detail: list[tuple[str, Any]] = [
             *root_detail(root, provider),
             ("package", package),
