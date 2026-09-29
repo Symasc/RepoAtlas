@@ -44,6 +44,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import PurePosixPath
+from typing import Any
 
 from repoatlas.graph.modules import ModuleTarget
 from repoatlas.graph.resolution import ResolutionIndex, _normalize
@@ -56,6 +57,11 @@ PYTHON_ROOT = "python-root"
 REPOSITORY_ROOT = "repository-root"
 
 _PACKAGE_FILES = ("__init__.py", "__init__.pyi")
+#: Top-level directories a discovered layout never ships: a project's own tooling.
+_NOT_SHIPPED = frozenset(
+    {"tests", "test", "docs", "doc", "examples", "example", "scripts", "benchmarks", "tools"}
+    | {"build", "dist"}
+)
 
 
 @lru_cache(maxsize=1 << 16)
@@ -110,12 +116,15 @@ class PythonModules:
         self._index = index
         by_id = {row.file_id: row for rows in index.files_by_repo.values() for row in rows.values()}
         self._repos: dict[int, _Repository] = defaultdict(_Repository)
+        #: Every project fact by (repository, directory), a virtual workspace root's too.
+        self.stated: dict[tuple[int, str], tuple[str, dict[str, Any]]] = {}
         for claim in facts:
             meta = json.loads(claim.meta_json) if claim.meta_json else {}
             row = by_id.get(claim.file_id)
             if row is None or meta.get(MODULE_RESOLUTION) != PYTHON_PROJECT:
                 continue
             stated = json.loads(meta.get("facts") or "{}")
+            self.stated[(row.repo_id, _parent(row.rel_path))] = (row.rel_path, stated)
             if stated.get("virtual"):
                 continue  # a workspace root with no project of its own owns no modules
             packages = stated.get("packages")
@@ -138,6 +147,7 @@ class PythonModules:
         self._dirs: dict[int, frozenset[str]] = {}
         self._roots: dict[tuple[int, str], list[Root] | str] = {}
         self._resolved: dict[tuple[int, str, str], ModuleTarget | str] = {}
+        self._shipping: dict[str, list[Project]] | None = None
 
     # -- projects and roots ------------------------------------------------------
 
@@ -362,12 +372,28 @@ class PythonModules:
         if isinstance(roots, str):
             return roots
         head = parts[0]
+        found = self._head(project.repo_id, roots, head)
+        if isinstance(found, str):
+            if found == "module-not-found" and self._elsewhere(origin, project, head):
+                return "project-boundary"
+            return found
+        top, root = found
+        shadow = self._script_shadow(origin, root, head, top)
+        if shadow is not None:
+            return shadow
+        target = self._walk(top, parts[1:])
+        if isinstance(target, str):
+            return target
+        return target, root_detail(root, project)
+
+    def _head(self, repo_id: int, roots: Sequence[Root], head: str) -> tuple[FileRow, Root] | str:
+        """The one top-level module ``head`` names in ``roots``, or why none does."""
         found: dict[int, tuple[FileRow, Root]] = {}
         namespace = False
         for root in roots:
             if root.names is not None and head not in root.names:
                 continue
-            top = self._top_level(origin.repo_id, root.path, head)
+            top = self._top_level(repo_id, root.path, head)
             if isinstance(top, FileRow):
                 found.setdefault(top.file_id, (top, root))
             elif top == "namespace-package":
@@ -375,20 +401,83 @@ class PythonModules:
         if len(found) > 1:
             return "module-ambiguous"
         if not found:
-            if namespace:
-                return "namespace-package"
-            elsewhere = self._elsewhere(origin, project, head)
-            return "project-boundary" if elsewhere else "module-not-found"
-        top, root = next(iter(found.values()))
-        shadow = self._script_shadow(origin, root, head, top)
-        if shadow is not None:
-            return shadow
+            return "namespace-package" if namespace else "module-not-found"
+        return next(iter(found.values()))
+
+    # -- what a project provides to others ---------------------------------------
+
+    def holds(self, project: Project, head: str) -> bool:
+        """Whether the project's own roots hold a top-level module ``head`` at all.
+
+        An import of one the project holds is the project's to resolve, whatever it then
+        finds -- another project nested inside it included; only one it lacks may be
+        another project's.
+        """
+        roots = self.roots(project)
+        return isinstance(roots, list) and not isinstance(
+            self._head(project.repo_id, roots, head), str
+        )
+
+    def resolve_in(self, project: Project, parts: Sequence[str]) -> tuple[FileRow, Root] | str:
+        """The module ``parts`` names inside ``project``, imported from another project.
+
+        As within the project itself: its own roots, then submodules of regular
+        packages, and the module must be the project's own.
+        """
+        roots = self.roots(project)
+        if isinstance(roots, str):
+            return roots
+        found = self._head(project.repo_id, roots, parts[0])
+        if isinstance(found, str):
+            return found
+        top, root = found
         target = self._walk(top, parts[1:])
         if isinstance(target, str):
             return target
-        detail = [("root", root.path or "."), ("root_basis", root.basis)]
-        detail.append(("project", project.manifest))
-        return target, detail
+        if self.project_of(target.repo_id, target.rel_path) != project:
+            return "project-boundary"
+        return target, root
+
+    def providing(self, head: str) -> list[Project]:
+        """Every project, in any repository, that ships a top-level module ``head``."""
+        if self._shipping is None:
+            shipping: dict[str, list[Project]] = defaultdict(list)
+            for repo_id in sorted(self._repos):
+                projects = self._repos[repo_id].projects
+                for directory in sorted(projects):
+                    for name in sorted(self.shipped(projects[directory])):
+                        shipping[name].append(projects[directory])
+            self._shipping = dict(shipping)
+        return self._shipping.get(head, [])
+
+    def shipped(self, project: Project) -> frozenset[str]:
+        """The top-level modules a project ships, as far as its layout says.
+
+        An explicit layout ships what it names. A discovered one ships every regular
+        package under its roots and, under ``src/``, every module too -- never a flat
+        project's own top-level scripts, nor its tests, docs, examples or tooling. The
+        implicit project of a repository with none is no distribution and ships nothing.
+        """
+        roots = self.roots(project)
+        if isinstance(roots, str) or project.manifest == REPOSITORY_ROOT:
+            return frozenset()
+        names: set[str] = set()
+        for root in roots:
+            listed = root.names
+            for name in (
+                sorted(listed) if listed is not None else self._children(project.repo_id, root.path)
+            ):
+                if listed is None and (name in _NOT_SHIPPED or not name.isidentifier()):
+                    continue
+                top = self._top_level(project.repo_id, root.path, name)
+                if not isinstance(top, FileRow):
+                    continue
+                package = PurePosixPath(top.rel_path).name in _PACKAGE_FILES
+                if listed is None and root.basis == "flat-layout" and not package:
+                    continue
+                if self.project_of(top.repo_id, top.rel_path) == project:
+                    names.add(name)
+        return frozenset(names)
 
     def _script_shadow(self, origin: FileRow, root: Root, head: str, top: FileRow) -> str | None:
         """Run as a script, a file outside every package sees its own directory first."""
@@ -416,3 +505,8 @@ class PythonModules:
                 if isinstance(self._top_level(origin.repo_id, root.path, head), FileRow):
                     return True
         return False
+
+
+def root_detail(root: Root, project: Project) -> list[tuple[str, str]]:
+    """How a module was placed: the root it was found under, why that is one, the project."""
+    return [("root", root.path or "."), ("root_basis", root.basis), ("project", project.manifest)]

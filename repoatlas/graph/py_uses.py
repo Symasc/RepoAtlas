@@ -20,9 +20,11 @@ followed through each module's export table, under Python's own rules:
 
 Every trace is bounded and remembered exactly as a TypeScript one
 (:class:`~repoatlas.graph.uses.BoundedTrace`), so what a use resolves to is a function of
-the indexed facts and never of the order uses are read in. No use resolves outside its
-own project here: another project -- in the same repository or not -- is reached only
-on dependency evidence, which this version does not read.
+the indexed facts and never of the order uses are read in. A module the importer's own
+project does not hold may be another project's -- in the same repository or not -- and
+is then reached only on the importer's dependency declaration
+(:mod:`repoatlas.graph.py_packages`); the trace continues inside the provider under the
+provider's own rules, and never crosses into a third project from there.
 """
 
 from __future__ import annotations
@@ -32,13 +34,17 @@ from collections.abc import Callable
 from typing import Any
 
 from repoatlas.graph.modules import ModuleTarget
+from repoatlas.graph.packages import CROSSING
 from repoatlas.graph.py_modules import PythonModules
+from repoatlas.graph.py_packages import PythonLink, PythonPackageLinks
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.graph.uses import BoundedTrace, UseDefinition, _through, declared_entity
 from repoatlas.storage.protocols import FileRow
 
 #: The prefix every Python reason is counted under, beside the TypeScript ones.
 PYTHON = "python"
+#: The refusals within the importer's own project that another project may answer.
+_LINKABLE = frozenset({"module-not-found", "project-boundary"})
 
 
 class PythonUseResolver(BoundedTrace):
@@ -49,10 +55,12 @@ class PythonUseResolver(BoundedTrace):
         modules: PythonModules,
         index: ResolutionIndex,
         tables: Callable[[int], dict[str, Any] | None],
+        links: PythonPackageLinks | None = None,
     ) -> None:
         super().__init__(tables)
         self._modules = modules
         self._index = index
+        self._links = links
         #: Uses resolved, by how their module was found; measurement only.
         self.resolved: Counter[str] = Counter()
 
@@ -60,6 +68,13 @@ class PythonUseResolver(BoundedTrace):
         """The used entity's id and how it was reached, or ``None`` with the reason counted."""
         spec = meta.get("module") or ""
         target = self._modules.resolve(origin, spec)
+        link: PythonLink | None = None
+        if isinstance(target, str) and target in _LINKABLE and self._links is not None:
+            found = self._links.resolve(origin, spec)
+            if isinstance(found, PythonLink):
+                target, link = found.target, found
+            elif found is not None:
+                return self._refused(found)
         if isinstance(target, str):
             return self._refused(target)
         self._begin(origin)
@@ -87,14 +102,19 @@ class PythonUseResolver(BoundedTrace):
                 found, reason, dotted = self._attribute(found, part, step, loaded)
                 if found is None:
                     return self._refused(reason or "not-exported")
-        return self._resolved(target, meta, found, stopped)
+        return self._resolved(target, meta, found, stopped, link)
 
     def _refused(self, why: str) -> None:
         self.unresolved[f"{PYTHON}:{why}"] += 1
         return None
 
     def _resolved(
-        self, target: ModuleTarget, meta: dict[str, str], found: UseDefinition, stopped: bool
+        self,
+        target: ModuleTarget,
+        meta: dict[str, str],
+        found: UseDefinition,
+        stopped: bool,
+        link: PythonLink | None,
     ) -> tuple[int, dict[str, Any]]:
         self.resolved[target.basis] += 1
         fields: dict[str, Any] = {
@@ -113,6 +133,8 @@ class PythonUseResolver(BoundedTrace):
             # The chain reached a declaration before its end: the use is of that
             # declaration, as the receiver of the rest.
             fields.update({"use": "value", "form": "receiver"})
+        if link is not None and link.crossing is not None:
+            fields[CROSSING] = dict(link.crossing)
         entity = found.symbol_id
         if entity is None:
             fields["namespace"] = True
