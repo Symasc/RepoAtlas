@@ -35,6 +35,7 @@ from repoatlas.models.parsing import (
 )
 from repoatlas.parsers.interpreter import interpreter_tag
 from repoatlas.parsers.marks import line_at, split_lines
+from repoatlas.parsers.setuptools_project import cfg_places
 
 _REQUIREMENTS = re.compile(r"^requirements.*\.txt$")
 _OPTIONS = frozenset({"-r", "--requirement", "-c", "--constraint", "-e", "--editable"})
@@ -513,13 +514,26 @@ class SetupPyParser:
             )
 
 
+def _cfg_option_line(content: str, section: str, option: str, default_section: str) -> int | None:
+    """The line an option is written on, as ``configparser`` read it: its option names are
+    lowercased, and a ``[DEFAULT]`` value counts for every section."""
+    places = cfg_places(content)
+    for where in (section, default_section):
+        found = [n for (at, key), n in places.items() if at == where and key.lower() == option]
+        if found:
+            return min(found)
+    return None
+
+
 class SetupCfgParser:
-    """``setup.cfg`` — ``[options] install_requires``."""
+    """``setup.cfg`` — ``[metadata] name`` and ``[options] install_requires``."""
 
     ecosystem = PYPI
     kind: DependencyKind = "manifest"
     name = "setup-cfg"
-    version = "2"  # 2: line numbers follow the shared source-line model
+    # 2: line numbers follow the shared source-line model. 3: the provided name's line is
+    # its own option's, read from the file's syntax (repoatlas.parsers.setuptools_project).
+    version = "3"
 
     def supports(self, path: Path) -> bool:
         return path.name == "setup.cfg"
@@ -539,7 +553,8 @@ class SetupCfgParser:
         provides: list[ProvidedPackage] = []
 
         name = config.get("metadata", "name", fallback=None)
-        if name:
+        line = _cfg_option_line(content, "metadata", "name", config.default_section)
+        if name and line is not None:
             provides.append(
                 ProvidedPackage(
                     ecosystem=PYPI,
@@ -547,7 +562,7 @@ class SetupCfgParser:
                     normalized_name=normalize(PYPI, name),
                     version=config.get("metadata", "version", fallback=None),
                     manifest_path=path.as_posix(),
-                    line=_find_line(content, f"name = {name}"),
+                    line=line,
                 )
             )
 

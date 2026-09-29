@@ -38,6 +38,8 @@ PACKAGE = "package"
 WORKSPACE = "workspace"
 #: A Python project's ``pyproject.toml`` (repoatlas.parsers.python_project).
 PYTHON_PROJECT = "python-project"
+#: A setuptools ``setup.cfg`` or ``setup.py`` (repoatlas.parsers.setuptools_project).
+PYTHON_SETUPTOOLS = "python-setuptools"
 
 #: Larger than any hand-written configuration; beyond it a file contributes nothing.
 _MAX_BYTES = 256 * 1024
