@@ -65,7 +65,7 @@ from repoatlas.storage.sqlite.stores import SqliteDependencyStore, SqliteKnowled
 
 #: Changed whenever what a use resolves to changes for the same facts, so edges kept
 #: from before the change are never trusted: the next sync resolves every use again.
-USES_RESOLUTION_VERSION = "5"
+USES_RESOLUTION_VERSION = "6"
 COMPLETE = f"complete:{USES_RESOLUTION_VERSION}"
 #: The ecosystems whose declarations and provisions a package link reads.
 LINKED_ECOSYSTEMS = (NPM, PYPI)
