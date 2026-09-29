@@ -10,6 +10,8 @@ binding or layout rule it exists to prove.
   proven calls, an unrelated same-named class, and a test calling a consumer.
 * ``flatfix`` is a flat-layout project with a ``scripts/`` directory that is no root, a
   package whose own directory is no root either, and a project nested inside a package.
+* ``flitfix`` is a flit project whose ``[tool.flit.module]`` names a module that is not
+  its distribution name, beside a package spelled like the distribution.
 * ``mono`` is one Git repository holding two projects, ``alpha`` and ``beta``, each
   with its own top-level ``app``: a project is a boundary, whatever repository it is in.
 """
@@ -160,6 +162,22 @@ FLATFIX: dict[str, str] = {
     ),
     "app.py": (
         "from fixture_pkg.models import User\nimport bar\ndef p7(u: User):\n    return bar.bar()\n"
+    ),
+}
+
+FLITFIX: dict[str, str] = {
+    # the distribution is `flit-dist`; the module flit ships is the one it names
+    "pyproject.toml": (
+        '[project]\nname = "flit-dist"\nversion = "1.0"\n'
+        '[build-system]\nrequires = ["flit_core"]\nbuild-backend = "flit_core.buildapi"\n'
+        '[tool.flit.module]\nname = "flit_pkg"\n'
+    ),
+    "src/flit_pkg/__init__.py": "from .models import Widget\n",
+    "src/flit_pkg/models.py": "class Widget:\n    pass\n",
+    "src/flit_dist/__init__.py": "class Decoy:\n    pass\n",
+    "checks/test_widget.py": (
+        "from flit_pkg import Widget\nfrom flit_dist import Decoy\n"
+        "def test_widget(w: Widget, d: Decoy):\n    return w\n"
     ),
 }
 

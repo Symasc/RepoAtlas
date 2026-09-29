@@ -60,18 +60,44 @@ def test_a_malformed_hatch_packages_list_is_unread() -> None:
     assert facts(content) == {"name": "d", "unread": ["tool.hatch.build.targets.wheel.packages"]}
 
 
-def test_poetry_names_the_project_and_its_path_dependencies() -> None:
+def test_poetry_names_the_project_and_every_name_it_declares() -> None:
     content = (
         '[tool.poetry]\nname = "svc"\npackages = [{include = "svc", from = "src"}]\n'
         "[tool.poetry.dependencies]\n"
         'python = "^3.12"\n'
         'Internal_Auth = {path = "../auth", develop = true}\n'
+        'requests = "^2"\n'
         '[tool.poetry.group.dev.dependencies]\nhelpers = {path = "../helpers"}\n'
     )
     assert facts(content) == {
         "name": "svc",
         "unread": ["tool.poetry.packages"],
-        "poetry_paths": {"Internal_Auth": "../auth", "helpers": "../helpers"},
+        "poetry_dependencies": ["Internal_Auth", "helpers", "requests"],
+    }
+
+
+def test_flit_module_is_the_layout_read_and_a_malformed_one_is_unread() -> None:
+    content = (
+        '[project]\nname = "Fixture-Dist"\n'
+        '[build-system]\nrequires = ["flit_core"]\nbuild-backend = "flit_core.buildapi"\n'
+        '[tool.flit.module]\nname = "fixture_pkg"\n'
+    )
+    assert facts(content) == {
+        "name": "Fixture-Dist",
+        "backend": "flit_core.buildapi",
+        "flit_module": "fixture_pkg",
+    }
+    assert facts('[project]\nname = "d"\n[tool.flit.module]\nname = 3\n') == {
+        "name": "d",
+        "unread": ["tool.flit.module.name"],
+    }
+
+
+def test_a_workspace_root_with_no_project_is_recorded_as_virtual() -> None:
+    content = '[tool.uv.workspace]\nmembers = ["packages/*"]\n'
+    assert facts(content) == {
+        "virtual": True,
+        "uv_workspace": {"members": ["packages/*"], "exclude": []},
     }
 
 
@@ -83,6 +109,8 @@ def test_uv_sources_and_workspace_are_recorded_by_distribution() -> None:
         "shared = { workspace = true }\n"
         'remote = { git = "https://example.invalid/r" }\n'
         'split = [{ path = "../a", marker = "sys_platform == \'linux\'" }]\n'
+        'guarded = { path = "../g", marker = "sys_platform == \'linux\'" }\n'
+        'other_ws = { workspace = "../elsewhere" }\n'
         '[tool.uv.workspace]\nmembers = ["packages/*"]\nexclude = ["packages/old"]\n'
     )
     assert facts(content) == {
@@ -92,6 +120,8 @@ def test_uv_sources_and_workspace_are_recorded_by_distribution() -> None:
             "shared": {"workspace": True},
             "remote": {"other": "git"},
             "split": {"other": "multiple"},
+            "guarded": {"other": "marker"},
+            "other_ws": {"other": "workspace-path"},
         },
         "uv_workspace": {"members": ["packages/*"], "exclude": ["packages/old"]},
     }
