@@ -151,6 +151,7 @@ class PythonModules:
         self._shipping: dict[str, list[Project]] | None = None
         #: Repositories stating any Python project fact.
         self._stating = frozenset(repo_id for repo_id, _ in self.stated)
+        self._unclaimed: dict[str, list[Project]] | None = None
 
     # -- projects and roots ------------------------------------------------------
 
@@ -465,6 +466,35 @@ class PythonModules:
                         shipping[name].append(projects[directory])
             self._shipping = dict(shipping)
         return self._shipping.get(head, [])
+
+    def unclaimed(self, head: str) -> list[Project]:
+        """Every metadata-less repository whose own root holds a top-level ``head`` itself.
+
+        A regular package, a module, a stub or a namespace portion, looked up exactly as
+        written, case and all, in the repository's root, and only while its implicit
+        project's root is that directory: a ``src/`` the repository states nothing about is
+        never taken for one. Such a repository ships nothing (:meth:`shipped`): no metadata
+        names a distribution for it, and only a requirement can reach it
+        (:mod:`repoatlas.graph.py_packages`).
+        """
+        if self._unclaimed is None:
+            found: dict[str, list[Project]] = defaultdict(list)
+            for repo_id in sorted(self._repos):
+                if not self.metadata_less(repo_id):
+                    continue
+                project = self._repos[repo_id].projects[""]
+                if self.roots(project) != [Root("", REPOSITORY_ROOT)]:
+                    continue
+                for name in self._children(repo_id, ""):
+                    if name.isidentifier() and self._top_level(repo_id, "", name) is not None:
+                        found[name].append(project)
+            self._unclaimed = dict(found)
+        return self._unclaimed.get(head, [])
+
+    def held(self, project: Project, name: str) -> FileRow | None:
+        """The file that makes ``name`` a top-level module in the project's own directory."""
+        found = self._top_level(project.repo_id, project.directory, name)
+        return found if isinstance(found, FileRow) else None
 
     def shipped(self, project: Project) -> frozenset[str]:
         """The top-level modules a project ships, as far as its layout says.
