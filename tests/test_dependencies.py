@@ -106,6 +106,67 @@ def test_pyproject_records_the_package_it_provides_and_what_it_declares() -> Non
     assert groups == {"common-lib": (">=1.0", "main"), "pytest": (">=8", "optional:dev")}
 
 
+def _declared_lines(content: str) -> list[tuple[str, str, int]]:
+    report = PyProjectParser().parse(Path("pyproject.toml"), content)
+    return [(d.name, d.group, d.line) for d in report.declared]
+
+
+def test_d1_a_requirement_is_found_at_its_entry_not_in_the_project_name() -> None:
+    content = '[project]\nname = "fixture-app"\ndependencies = [\n    "fixture",\n]\n'
+    assert _declared_lines(content) == [("fixture", "main", 4)]
+
+
+def test_d2_a_requirement_is_found_at_its_own_entry_not_a_longer_one() -> None:
+    content = '[project]\nname = "app"\ndependencies = [\n    "fixture-extra",\n    "fixture",\n]\n'
+    assert _declared_lines(content) == [("fixture-extra", "main", 4), ("fixture", "main", 5)]
+
+
+def test_d3_a_requirement_with_a_constraint_is_found_at_its_entry() -> None:
+    content = '[project]\nname = "fixture-app"\ndependencies = [\n    "fixture>=1.2",\n]\n'
+    report = PyProjectParser().parse(Path("pyproject.toml"), content)
+    assert [(d.name, d.constraint, d.line) for d in report.declared] == [("fixture", ">=1.2", 4)]
+
+
+def test_d4_an_optional_requirement_is_found_at_its_own_entry() -> None:
+    content = (
+        '[project]\nname = "fixture-app"\ndependencies = ["fixture"]\n'
+        "[project.optional-dependencies]\n"
+        'dev = [\n    "fixture-extra",\n    "fixture>=2",\n]\n'
+        'docs = ["fixture"]\n'
+    )
+    assert _declared_lines(content) == [
+        ("fixture", "main", 3),
+        ("fixture-extra", "optional:dev", 6),
+        ("fixture", "optional:dev", 7),
+        ("fixture", "optional:docs", 9),
+    ]
+
+
+def test_requirement_lines_follow_the_toml_syntax_not_the_text() -> None:
+    """Strings, comments, quoted and dotted keys and inline tables that mention the name."""
+    content = (
+        '[project]\nname = "fixture-app"\n'
+        'description = """\n[project]\ndependencies = ["fixture"]\n"""\n'  # 3-6
+        "# fixture is what this needs\n"  # 7
+        'keywords = [\'fixture\', "a \\"quoted\\" word"]\n'  # 8
+        '"dependencies" = ["fixture-extra", # fixture\n  "fixture"]\n'  # 9-10
+        "optional-dependencies = { dev = [\n  'fixture',\n], test = [] }\n"  # 11-13
+        "urls.home = 'https://example.invalid/fixture'\n"  # 14
+    )
+    assert _declared_lines(content) == [
+        ("fixture-extra", "main", 9),
+        ("fixture", "main", 10),
+        ("fixture", "optional:dev", 12),
+    ]
+
+
+def test_requirement_lines_under_a_dotted_root_key() -> None:
+    content = (
+        'title = "fixture"\nproject.name = "fixture-app"\nproject.dependencies = [\n"fixture"]\n'
+    )
+    assert _declared_lines(content) == [("fixture", "main", 4)]
+
+
 def test_poetry_table_is_read_as_well_as_pep621() -> None:
     report = PyProjectParser().parse(
         Path("pyproject.toml"),

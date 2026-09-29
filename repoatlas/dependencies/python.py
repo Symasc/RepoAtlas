@@ -38,11 +38,148 @@ from repoatlas.parsers.marks import line_at, split_lines
 
 _REQUIREMENTS = re.compile(r"^requirements.*\.txt$")
 _OPTIONS = frozenset({"-r", "--requirement", "-c", "--constraint", "-e", "--editable"})
+_BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 
 
 def _find_line(content: str, needle: str, start: int = 0) -> int:
     index = content.find(needle, start)
     return line_at(content, index) if index != -1 else 1
+
+
+class _ArrayItems:
+    """Where each element of every array in a TOML document starts, by the array's key path.
+
+    ``tomllib`` gives values but no positions, and searching the file for a requirement's
+    text finds ``"flask"`` in ``name = "flaskr"``. This walks the document's syntax
+    instead -- table headers, dotted and quoted keys, inline tables, arrays, the four kinds
+    of string, comments -- and records each element's offset with its value when it is a
+    string. It only ever reads text ``tomllib`` has accepted, so it diagnoses nothing.
+    """
+
+    def __init__(self, content: str) -> None:
+        self._text = content
+        self._at = 0
+        #: Each array's elements, as (offset, the string it holds or ``None``).
+        self.items: dict[tuple[str, ...], list[tuple[int, str | None]]] = {}
+
+    def walk(self) -> dict[tuple[str, ...], list[tuple[int, str | None]]]:
+        table: tuple[str, ...] = ()
+        text = self._text
+        while True:
+            self._skip(newlines=True)
+            if self._at >= len(text):
+                return self.items
+            if text[self._at] == "[":
+                width = 2 if text.startswith("[[", self._at) else 1
+                self._at += width
+                table = self._key()
+                self._skip()
+                self._at += width
+            else:
+                key = self._key()
+                self._skip()
+                self._at += 1  # "="
+                self._skip()
+                self._value(table + key)
+
+    def _skip(self, *, newlines: bool = False) -> None:
+        text = self._text
+        while self._at < len(text):
+            char = text[self._at]
+            if char in " \t" or (newlines and char in "\r\n"):
+                self._at += 1
+            elif char == "#":
+                while self._at < len(text) and text[self._at] not in "\r\n":
+                    self._at += 1
+            else:
+                return
+
+    def _key(self) -> tuple[str, ...]:
+        parts: list[str] = []
+        while True:
+            self._skip()
+            if self._text[self._at] in "\"'":
+                parts.append(self._string())
+            else:
+                found = _BARE_KEY.match(self._text, self._at)
+                if found is None:
+                    raise ValueError("key expected")
+                parts.append(found.group())
+                self._at = found.end()
+            self._skip()
+            if self._text[self._at] != ".":
+                return tuple(parts)
+            self._at += 1
+
+    def _value(self, path: tuple[str, ...]) -> str | None:
+        text = self._text
+        char = text[self._at]
+        if char in "\"'":
+            return self._string()
+        if char == "[":
+            self._at += 1
+            items: list[tuple[int, str | None]] = []
+            self.items[path] = items
+            while True:
+                self._skip(newlines=True)
+                if text[self._at] == "]":
+                    self._at += 1
+                    return None
+                start = self._at
+                items.append((start, self._value((*path, str(len(items))))))
+                self._skip(newlines=True)
+                if text[self._at] == ",":
+                    self._at += 1
+        if char == "{":
+            self._at += 1
+            while True:
+                self._skip()
+                if text[self._at] == "}":
+                    self._at += 1
+                    return None
+                key = self._key()
+                self._skip()
+                self._at += 1  # "="
+                self._skip()
+                self._value(path + key)
+                self._skip()
+                if text[self._at] == ",":
+                    self._at += 1
+        while self._at < len(text) and text[self._at] not in ",]}#\r\n":
+            self._at += 1  # a number, a boolean or a date
+        return None
+
+    def _string(self) -> str:
+        """The string starting here, decoded as ``tomllib`` decodes it."""
+        text, start = self._text, self._at
+        quote = text[start]
+        if text.startswith(quote * 3, start):
+            at = start + 3
+            while True:
+                if quote == '"' and text[at] == "\\":
+                    at += 2
+                elif text.startswith(quote * 3, at):
+                    run = 3
+                    while run < 5 and at + run < len(text) and text[at + run] == quote:
+                        run += 1
+                    at += run
+                    break
+                else:
+                    at += 1
+        else:
+            at = start + 1
+            while text[at] != quote:
+                at += 2 if quote == '"' and text[at] == "\\" else 1
+            at += 1
+        self._at = at
+        return str(tomllib.loads(f"v = {text[start:at]}")["v"])
+
+
+def _item_line(content: str, items: list[tuple[int, str | None]], index: int, value: str) -> int:
+    """The line array element ``index`` starts on, when it holds the ``value`` read there."""
+    if index < len(items) and items[index][1] == value:
+        return line_at(content, items[index][0])
+    return 1
 
 
 def _declared(
@@ -65,9 +202,10 @@ class PyProjectParser:
     ecosystem = PYPI
     kind: DependencyKind = "manifest"
     name = "pyproject"
-    # 2: line numbers follow the shared source-line model. +pyX.Y: read with the
+    # 2: line numbers follow the shared source-line model. 3: a PEP 621 requirement's
+    # line is its own array element's, read from the TOML syntax. +pyX.Y: read with the
     # running interpreter's standard library (repoatlas.parsers.interpreter).
-    version = f"2+{interpreter_tag()}"
+    version = f"3+{interpreter_tag()}"
 
     def supports(self, path: Path) -> bool:
         return path.name == "pyproject.toml"
@@ -124,17 +262,24 @@ class PyProjectParser:
             )
 
         dependencies = project.get("dependencies")
-        if isinstance(dependencies, list):
-            for specifier in dependencies:
-                self._requirement(specifier, "main", path, content, declared)
-
         optional = project.get("optional-dependencies")
+        if not isinstance(dependencies, list) and not isinstance(optional, dict):
+            return
+        items = _ArrayItems(content).walk()
+        if isinstance(dependencies, list):
+            places = items.get(("project", "dependencies"), [])
+            for index, specifier in enumerate(dependencies):
+                self._requirement(specifier, "main", path, content, places, index, declared)
+
         if isinstance(optional, dict):
             for group, entries in optional.items():
                 if not isinstance(entries, list):
                     continue
-                for specifier in entries:
-                    self._requirement(specifier, f"optional:{group}", path, content, declared)
+                places = items.get(("project", "optional-dependencies", group), [])
+                for index, specifier in enumerate(entries):
+                    self._requirement(
+                        specifier, f"optional:{group}", path, content, places, index, declared
+                    )
 
     def _poetry(
         self,
@@ -190,6 +335,8 @@ class PyProjectParser:
         group: str,
         path: Path,
         content: str,
+        places: list[tuple[int, str | None]],
+        index: int,
         declared: list[DeclaredDependency],
     ) -> None:
         if not isinstance(specifier, str):
@@ -198,7 +345,8 @@ class PyProjectParser:
         if parsed is None:
             return
         name, constraint = parsed
-        declared.append(_declared(name, constraint, group, path, _find_line(content, specifier)))
+        line = _item_line(content, places, index, specifier)
+        declared.append(_declared(name, constraint, group, path, line))
 
 
 class RequirementsParser:
