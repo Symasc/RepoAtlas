@@ -21,8 +21,11 @@ from tests.incremental_corpus import (
     edit,
     remove_repo,
     sync_all,
+    use_edge_rows,
 )
 from tests.python_corpus import PKG, PYFIX, refusals
+from tests.python_legacy_corpus import AUTH_MODELS, AUTH_PACKAGE, LEGACY, pick, service_uses
+from tests.python_legacy_corpus import SERVICE as LEGACY_SERVICE
 from tests.python_packages_corpus import (
     SERVICE,
     TWINS,
@@ -255,3 +258,202 @@ def test_a_workspace_source_removed_leaves_its_members_to_the_version_rule(
     assert refusals(uvws, "uvws", app) == {"helper": "provider-ambiguous"}
     assert not [e for e in edges(uvws) if e["source"] == f"uvws:{app}#run"]
     _equal(uvws, settings, tmp_path, "unsourced")
+
+
+# -- the legacy convention: requirements naming a module a metadata-less repository holds --
+
+LEGACY_MODELS = "auth-provider:fixture_auth/models.py"
+AUTH_NAMES = ("User", "make")
+#: A metadata-less repository holding other modules, and one nested deep inside it.
+BYSTANDER = {"tools/__init__.py": "", "tools/cli.py": "def main():\n    return 0\n"}
+
+
+@pytest.fixture
+def legacy(workspace: Workspace, tmp_path: Path) -> Workspace:
+    """``basic`` requires ``fixture-auth``, which ``auth-provider`` alone holds."""
+    corpus = {**pick(LEGACY, "auth-provider", "basic"), "bystander": BYSTANDER}
+    return build(workspace, tmp_path, corpus)
+
+
+def _linked(workspace: Workspace) -> bool:
+    return repository_uses(workspace, "basic") == service_uses(
+        "basic", "auth-provider", "fixture_auth/models.py"
+    )
+
+
+def test_r17_r19_a_legacy_provider_appears_and_goes(
+    workspace: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    linked = build(workspace, tmp_path, pick(LEGACY, "basic"))
+    root = tmp_path / "repos"
+    assert refusals(linked, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "module-not-found"
+    )
+    add_repo(root, "auth-provider", AUTH_PACKAGE)
+    assert sync_all(linked, root).mode == "incremental"
+    assert _linked(linked)
+    _equal(linked, settings, tmp_path, "provided")
+
+    remove_repo(root, "auth-provider")
+    sync_all(linked, root)
+    assert refusals(linked, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "module-not-found"
+    )
+    _equal(linked, settings, tmp_path, "unprovided")
+
+
+def test_r19_a_legacy_package_renamed_and_back(
+    legacy: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    for path, text in AUTH_PACKAGE.items():
+        edit(root, "auth-provider", path.replace("fixture_auth", "renamed_auth"), text)
+        (root / "auth-provider" / path).unlink()
+    sync_all(legacy, root)
+    assert refusals(legacy, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "module-not-found"
+    )
+    _equal(legacy, settings, tmp_path, "renamed")
+
+    for path, text in AUTH_PACKAGE.items():
+        edit(root, "auth-provider", path, text)
+        (root / "auth-provider" / path.replace("fixture_auth", "renamed_auth")).unlink()
+    sync_all(legacy, root)
+    assert _linked(legacy)
+    _equal(legacy, settings, tmp_path, "named")
+
+
+def test_r18_a_second_legacy_provider_appears_and_goes(
+    legacy: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    """In a repository of its own, and at the root of one already indexed."""
+    root = tmp_path / "repos"
+    add_repo(root, "auth-twin", AUTH_PACKAGE)
+    sync_all(legacy, root)
+    assert refusals(legacy, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "provider-ambiguous"
+    )
+    _equal(legacy, settings, tmp_path, "twin")
+    remove_repo(root, "auth-twin")
+    sync_all(legacy, root)
+    assert _linked(legacy)
+
+    edit(root, "bystander", "fixture_auth/__init__.py", "")
+    edit(root, "bystander", "fixture_auth/models.py", AUTH_MODELS)
+    sync_all(legacy, root)
+    assert refusals(legacy, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "provider-ambiguous"
+    )
+    _equal(legacy, settings, tmp_path, "beside")
+    for path in ("fixture_auth/__init__.py", "fixture_auth/models.py"):
+        (root / "bystander" / path).unlink()
+    sync_all(legacy, root)
+    assert _linked(legacy)
+    _equal(legacy, settings, tmp_path, "alone")
+
+
+def test_r20_a_requirement_renamed_and_back(
+    legacy: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    edit(root, "basic", "requirements.txt", "fixture-client\n")
+    assert sync_all(legacy, root).mode == "incremental"
+    assert refusals(legacy, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "dependency-absent"
+    )
+    _equal(legacy, settings, tmp_path, "unrequired")
+    edit(root, "basic", "requirements.txt", "requests\nFixture_Auth\n")
+    sync_all(legacy, root)
+    assert _linked(legacy)
+    _equal(legacy, settings, tmp_path, "required")
+
+
+@pytest.mark.parametrize(
+    ("path", "text"),
+    [
+        ("setup.py", "from setuptools import setup\n\nsetup(name='auth')\n"),  # not metadata-less
+        ("src/other/__init__.py", ""),  # R25: src/ becomes the root
+    ],
+)
+def test_the_provider_s_root_changing_meaning_withdraws_the_link_and_restores_it(
+    legacy: Workspace, settings: Settings, tmp_path: Path, path: str, text: str
+) -> None:
+    root = tmp_path / "repos"
+    edit(root, "auth-provider", path, text)
+    sync_all(legacy, root)
+    assert refusals(legacy, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "module-not-found"
+    )
+    _equal(legacy, settings, tmp_path, "rebased")
+    (root / "auth-provider" / path).unlink()
+    sync_all(legacy, root)
+    assert _linked(legacy)
+    _equal(legacy, settings, tmp_path, "restored")
+
+
+def test_r21_a_project_shipping_the_module_appears_and_goes(
+    legacy: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    """Under another distribution name, from ``src/``: the project decides, and refuses."""
+    root = tmp_path / "repos"
+    explicit = {
+        "pyproject.toml": '[project]\nname = "auth-core"\n',
+        **{f"src/{path}": text for path, text in AUTH_PACKAGE.items()},
+    }
+    add_repo(root, "auth-core", explicit)
+    sync_all(legacy, root)
+    assert refusals(legacy, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "dependency-absent"
+    )
+    _equal(legacy, settings, tmp_path, "shipped")
+    remove_repo(root, "auth-core")
+    sync_all(legacy, root)
+    assert _linked(legacy)
+    _equal(legacy, settings, tmp_path, "unshipped")
+
+
+def test_a_name_nested_below_a_top_level_head_resolves_no_requiring_repository_again(
+    legacy: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    """``pkg/fixture_auth/`` gives ``pkg``, not ``fixture_auth``; ``fixture_auth/extra.py`` at
+    a repository's root gives ``fixture_auth``, and resolves ``basic`` again."""
+    root = tmp_path / "repos"
+    before = use_edge_rows(legacy, LEGACY_SERVICE)
+    assert before
+    edit(root, "bystander", "pkg/fixture_auth/__init__.py", "")
+    edit(root, "bystander", "pkg/fixture_auth/helpers.py", "def help():\n    return 1\n")
+    work = sync_all(legacy, root)
+    assert (work.mode, work.package) == ("incremental", 0)
+    assert use_edge_rows(legacy, LEGACY_SERVICE) == before
+    assert _linked(legacy)
+    _equal(legacy, settings, tmp_path, "nested")
+
+    edit(root, "auth-provider", "fixture_auth/extra.py", "def extra():\n    return 2\n")
+    work = sync_all(legacy, root)
+    assert work.package > 0
+    after = use_edge_rows(legacy, LEGACY_SERVICE)
+    assert [row[1:] for row in after] == [row[1:] for row in before]
+    assert [row[0] for row in after] != [row[0] for row in before]
+    _equal(legacy, settings, tmp_path, "top-level")
+
+
+def test_a_tool_only_project_file_becoming_a_project_withdraws_the_link_and_back(
+    legacy: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    """Configuration alone states no project: the link stands. Once the file states one, the
+    project ships ``fixture_auth`` as another distribution, and the requirement names neither."""
+    root = tmp_path / "repos"
+    tool = "[tool.ruff]\nline-length = 100\n"
+    edit(root, "auth-provider", "pyproject.toml", tool)
+    sync_all(legacy, root)
+    assert _linked(legacy)
+    edit(root, "auth-provider", "pyproject.toml", f'[project]\nname = "auth-lib"\n{tool}')
+    sync_all(legacy, root)
+    assert refusals(legacy, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "dependency-absent"
+    )
+    _equal(legacy, settings, tmp_path, "project")
+    edit(root, "auth-provider", "pyproject.toml", tool)
+    sync_all(legacy, root)
+    assert _linked(legacy)
+    _equal(legacy, settings, tmp_path, "configuration")

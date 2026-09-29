@@ -861,6 +861,13 @@ class SqliteKnowledgeStore:
             found.update(int(row["id"]) for row in rows)
         return found
 
+    def files_of_repository(self, repo_id: int) -> list[tuple[int, str]]:
+        """(id, repository-relative path) of every indexed file of one repository, by path."""
+        rows = self._db.execute(
+            "SELECT id, rel_path FROM files WHERE repo_id = ? ORDER BY rel_path", (repo_id,)
+        ).fetchall()
+        return [(int(row["id"]), str(row["rel_path"])) for row in rows]
+
     def nested_repositories(self, repo_ids: Sequence[int]) -> set[int]:
         """Repositories whose root lies inside the root of any of these repositories."""
         found: set[int] = set()
@@ -1934,6 +1941,25 @@ class SqliteDependencyStore:
                 "WHERE role = 'declared' AND ecosystem = ? "
                 f"AND normalized_name IN ({placeholders})",
                 (ecosystem, *chunk),
+            ).fetchall()
+            found.update(int(row["repo_id"]) for row in rows)
+        return found
+
+    def repositories_requiring(self, keys: Sequence[str]) -> set[int]:
+        """Repositories whose root ``requirements.txt`` declares a PyPI name with any of these
+        legacy keys (:func:`repoatlas.graph.py_packages.legacy_key`): ASCII lowercase, ``_``
+        for ``-`` -- which SQLite's own ``lower`` and ``replace`` compute exactly."""
+        found: set[int] = set()
+        ordered = sorted(set(keys))
+        for start in range(0, len(ordered), _CHUNK):
+            chunk = ordered[start : start + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._db.execute(
+                "SELECT DISTINCT d.repo_id FROM dependencies d JOIN files f ON f.id = d.file_id "  # noqa: S608 - placeholders are generated counts, values are bound
+                "WHERE d.role = 'declared' AND d.ecosystem = 'pypi' "
+                "AND f.rel_path = 'requirements.txt' "
+                f"AND replace(lower(d.name), '_', '-') IN ({placeholders})",
+                tuple(chunk),
             ).fetchall()
             found.update(int(row["repo_id"]) for row in rows)
         return found
