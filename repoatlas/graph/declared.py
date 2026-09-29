@@ -33,6 +33,7 @@ from __future__ import annotations
 import enum
 import posixpath
 from dataclasses import dataclass
+from pathlib import PurePath
 
 from repoatlas.dependencies.normalize import NPM, normalize
 
@@ -121,3 +122,12 @@ def path_target(root: str, manifest_dir: str, path: str) -> str:
     on disk; that the result lies in some indexed repository is the caller's to prove.
     """
     return posixpath.normpath(posixpath.join(root, manifest_dir, path.rstrip("/")))
+
+
+def root_path(path: PurePath) -> str:
+    """A repository's root as :func:`path_target` reads it: forward slashes on every host.
+
+    ``str()`` of a Windows path keeps its backslashes, which ``posixpath`` reads as part
+    of one name, so ``..`` would climb out of the root's text instead of its directory.
+    """
+    return path.as_posix()

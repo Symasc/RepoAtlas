@@ -7,8 +7,16 @@ all share; these pin what each spelling names.
 
 from __future__ import annotations
 
+from pathlib import PureWindowsPath
+
 import pytest
-from repoatlas.graph.declared import TargetKind, classify_dependency_target, path_target
+from repoatlas.graph.declared import (
+    TargetKind,
+    classify_dependency_target,
+    path_target,
+    root_path,
+)
+from repoatlas.graph.packages import ProviderTargets, Provision
 
 WANTED = "@fixture/shared"
 
@@ -77,3 +85,16 @@ def test_a_path_is_followed_from_the_manifest_without_reading_the_disk(
     manifest_dir: str, path: str, expected: str
 ) -> None:
     assert path_target("/work/consumer", manifest_dir, path) == expected
+
+
+def test_a_windows_root_is_followed_as_a_directory_not_as_text() -> None:
+    consumer = root_path(PureWindowsPath(r"C:\ws\consumer"))
+    provider = root_path(PureWindowsPath(r"C:\ws\provider"))
+    assert consumer == "C:/ws/consumer"
+    assert path_target(consumer, "", "../provider") == "C:/ws/provider"
+    targets = ProviderTargets(
+        {1: consumer, 2: provider}, [Provision(2, "", "package.json", 2, "p", "p")]
+    )
+    found = targets.by_path(1, "package.json", "../provider", "p")
+    assert not isinstance(found, str)
+    assert (found[0].repo_id, found[1]) == (2, {"resolved_by": "path"})

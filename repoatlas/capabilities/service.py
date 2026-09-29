@@ -155,6 +155,7 @@ from repoatlas.errors import (
     SyncInProgressError,
 )
 from repoatlas.freshness import index_freshness
+from repoatlas.graph.declared import root_path
 from repoatlas.graph.impact import ImpactWalk
 from repoatlas.graph.keys import is_positional
 from repoatlas.graph.linker import plan_repository_http
@@ -1018,7 +1019,7 @@ class CapabilityService:
                         [*answer.candidates, *answer.tests],
                         directories,
                         scoped=resolution.scope is CapabilityScope.REPOSITORY,
-                        roots={r.id: str(r.path) for r in registered if r.id is not None},
+                        roots={r.id: root_path(r.path) for r in registered if r.id is not None},
                     )
                     if more:
                         reasons = dict(answer.omitted.by_reason)
