@@ -15,7 +15,11 @@ importing project's own declaration of a dependency, read here, and nothing else
    declaration of it, never shipped by what its directories hold; and one whose sources
    disagree about its name is ``project-metadata-conflict``;
 2. **the declaration.** The importer's project declares that project's distribution,
-   PEP 503-normalised, in its ``pyproject.toml``'s PEP 621 dependencies -- or, when its
+   PEP 503-normalised, in its ``pyproject.toml``'s PEP 621 dependencies; in the
+   ``install_requires`` of the ``setup.py`` or ``setup.cfg`` that states its dependencies
+   (:attr:`~repoatlas.graph.py_modules.Project.requires_source`: its own directory's, never
+   a nested one's, and never beside a ``[project]`` table stating them), one stated
+   otherwise being ``dependency-unread`` and an ``extras_require`` never declaring; or, when its
    repository states nothing about packaging
    (:meth:`~repoatlas.graph.py_modules.PythonModules.metadata_less`), in the
    repository's root ``requirements.txt``, and in no other requirements file. A name
@@ -108,6 +112,8 @@ _URL_FORM = ("+", ":")
 #: setuptools reads the name from (a static ``[project]`` first, then ``setup()``'s keyword
 #: over ``setup.cfg``).
 _PROVIDES_FIRST = {"pyproject.toml": 0, "setup.py": 1, "setup.cfg": 2}
+#: The setuptools files a project's ``install_requires`` may be stated in.
+_SETUPTOOLS = frozenset({"setup.py", "setup.cfg"})
 
 #: What a uv source other than a path or this workspace is refused as.
 _OTHER_SOURCES = {
@@ -443,6 +449,12 @@ class PythonPackageLinks:
                     continue
                 owner = REPOSITORY_ROOT
                 self._required[record.repo_id].append(record)
+            elif record.group == "main" and PurePosixPath(manifest).name in _SETUPTOOLS:
+                # install_requires, of the one source that states the project's dependencies
+                project = modules.project_of(record.repo_id, manifest)
+                if project is None or project.requires_source != manifest:
+                    continue
+                owner = project.manifest
             else:
                 continue
             first[(record.repo_id, owner)].setdefault(record.normalized_name, (record, manifest))
@@ -526,6 +538,8 @@ class PythonPackageLinks:
         self, own: Project, wanted: str
     ) -> tuple[Provision, _Declaration, dict[str, str]] | str:
         """The provider the project's declaration of ``wanted`` names, or why none."""
+        if own.requires_refused is not None:
+            return own.requires_refused
         declaration = self._declared.get((own.repo_id, own.manifest), {}).get(wanted)
         constraints = declaration.constraints if declaration is not None else ()
         if self.targets.unread(own.repo_id, own.directory, wanted, constraints):
