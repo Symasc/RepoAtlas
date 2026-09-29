@@ -35,7 +35,7 @@ from repoatlas.models.parsing import (
 )
 from repoatlas.parsers.interpreter import interpreter_tag
 from repoatlas.parsers.marks import line_at, split_lines
-from repoatlas.parsers.setuptools_project import cfg_places
+from repoatlas.parsers.setuptools_project import cfg_values
 
 _REQUIREMENTS = re.compile(r"^requirements.*\.txt$")
 _OPTIONS = frozenset({"-r", "--requirement", "-c", "--constraint", "-e", "--editable"})
@@ -514,15 +514,23 @@ class SetupPyParser:
             )
 
 
-def _cfg_option_line(content: str, section: str, option: str, default_section: str) -> int | None:
-    """The line an option is written on, as ``configparser`` read it: its option names are
-    lowercased, and a ``[DEFAULT]`` value counts for every section."""
-    places = cfg_places(content)
+def _cfg_option(
+    content: str, section: str, option: str, default_section: str
+) -> tuple[int, list[tuple[int, str]]] | None:
+    """Where an option is written and each line of its value, as ``configparser`` read it:
+    its option names are lowercased, and a ``[DEFAULT]`` value counts for every section."""
+    values = cfg_values(content)
     for where in (section, default_section):
-        found = [n for (at, key), n in places.items() if at == where and key.lower() == option]
+        found = [v for (at, key), v in values.items() if at == where and key.lower() == option]
         if found:
             return min(found)
     return None
+
+
+def _cfg_option_line(content: str, section: str, option: str, default_section: str) -> int | None:
+    """The line an option is written on (:func:`_cfg_option`)."""
+    found = _cfg_option(content, section, option, default_section)
+    return found[0] if found is not None else None
 
 
 class SetupCfgParser:
@@ -533,7 +541,8 @@ class SetupCfgParser:
     name = "setup-cfg"
     # 2: line numbers follow the shared source-line model. 3: the provided name's line is
     # its own option's, read from the file's syntax (repoatlas.parsers.setuptools_project).
-    version = "3"
+    # 4: so is each requirement's: the value line it is written on.
+    version = "4"
 
     def supports(self, path: Path) -> bool:
         return path.name == "setup.cfg"
@@ -572,16 +581,23 @@ class SetupCfgParser:
             ("options", "tests_require", "test"),
         ):
             raw = config.get(section, option, fallback="")
-            for specifier in raw.splitlines():
+            entries = [entry.strip() for entry in raw.splitlines() if entry.strip()]
+            written = _cfg_option(content, section, option, config.default_section)
+            # Each entry's own value line, when the file's syntax gives exactly the entries
+            # configparser read; otherwise the option's line -- never a search for the text,
+            # which finds `Flask` in `name = Flask-Moment`.
+            lines = (
+                [number for number, _ in written[1]]
+                if written is not None and [text for _, text in written[1]] == entries
+                else None
+            )
+            for index, specifier in enumerate(entries):
                 parsed = python_requirement(specifier)
                 if parsed is None:
                     continue
                 dependency, constraint = parsed
-                declared.append(
-                    _declared(
-                        dependency, constraint, group, path, _find_line(content, specifier.strip())
-                    )
-                )
+                line = lines[index] if lines is not None else written[0] if written else 1
+                declared.append(_declared(dependency, constraint, group, path, line))
 
         return DependencyReport(
             ecosystem=self.ecosystem,
