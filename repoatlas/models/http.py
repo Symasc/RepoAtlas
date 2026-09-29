@@ -225,6 +225,22 @@ def deployment_base(value: str) -> str | None:
     return parsed.origin + path
 
 
+def swagger2_base(scheme: str, host: str, base_path: str) -> str | None:
+    """A Swagger 2 base — ``scheme://host`` + ``basePath`` — in canonical form, or ``None``.
+
+    The one rule every Swagger 2 source shares, so that a specification document and a
+    template written in code compose the same identity from the same three fields. The
+    host must be a bare authority (no path, credentials, query, fragment or template)
+    and the base path rooted. No ``host`` at all is the caller's to refuse: the API is
+    then served wherever the document itself was fetched from.
+    """
+    if scheme not in _SCHEMES or not host.strip() or any(char in host for char in "/@?#{}\\"):
+        return None
+    if not base_path.startswith("/"):
+        return None
+    return deployment_base(f"{scheme}://{host}{base_path}")
+
+
 def compose(deployment: str, path: str) -> str:
     """The absolute URL a route has under a deployment: literal append.
 

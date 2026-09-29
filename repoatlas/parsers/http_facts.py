@@ -67,6 +67,11 @@ HTTP_REQUESTER_CALL = "http-requester-call"
 #: request stays visible and is never matched, because transport code forwards
 #: whole paths through ``fetch``.
 HTTP_LOCAL_CALL = "http-local-call"
+#: A handler served at an absolute endpoint: a route of an application whose published
+#: base the source states. One side of the cross-repository join
+#: (:mod:`repoatlas.graph.http_crossings`), whatever stated the base: ``identity_source``
+#: names it, and nothing downstream reads anything more specific.
+HTTP_EXPOSED_ENDPOINT = "http-exposed-endpoint"
 
 #: ``transport`` values of :data:`HTTP_LOCAL_CALL`.
 TRANSPORT_WRAPPER = "wrapper"
