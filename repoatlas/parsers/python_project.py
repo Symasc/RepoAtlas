@@ -19,6 +19,10 @@ Recorded, and nothing else:
   import name -- a distribution is not a module (``internal-auth`` may ship
   ``internal_auth``, or ``auth``, or both);
 * ``backend``: ``[build-system] build-backend``;
+* ``dependencies``: with a ``[project]`` table, ``static`` -- its ``dependencies`` are the
+  project's, stated or not, and setuptools reads no other source for them -- or, when
+  ``dynamic`` names them, ``unread`` if ``[tool.setuptools.dynamic]`` reads them from a file,
+  else ``dynamic``: a ``setup.py`` or ``setup.cfg`` may state them;
 * ``packages``: hatchling's ``[tool.hatch.build.targets.wheel] packages``, and
   ``flit_module``: flit's ``[tool.flit.module] name``, the module the project ships --
   the two explicit layouts this version reads;
@@ -132,6 +136,12 @@ def project_facts(document: dict[str, Any]) -> dict[str, Any] | None:
         facts["name"] = name
     if isinstance(build, dict) and isinstance(build.get("build-backend"), str):
         facts["backend"] = build["build-backend"]
+    if isinstance(project, dict):
+        facts["dependencies"] = "static"
+        if "dependencies" in (_strings(project.get("dynamic")) or []):
+            # setuptools reads them from [tool.setuptools.dynamic] (a file), else setup()
+            files = _table(document, ("tool", "setuptools", "dynamic")) or {}
+            facts["dependencies"] = "unread" if "dependencies" in files else "dynamic"
     wheel = _table(document, ("tool", "hatch", "build", "targets", "wheel"))
     if wheel is not None and "packages" in wheel:
         packages = _strings(wheel["packages"])
@@ -176,9 +186,9 @@ class PythonProjectParser:
     """
 
     name = "python-project"
-    # 2: flit's module, a virtual workspace root, Poetry's declared names. +pyX.Y: read
-    # with the running interpreter's `tomllib`.
-    version = f"2+{interpreter_tag()}"
+    # 2: flit's module, a virtual workspace root, Poetry's declared names. 3: whether
+    # [project] states its dependencies. +pyX.Y: read with the running interpreter's `tomllib`.
+    version = f"3+{interpreter_tag()}"
     language = ""
 
     def supports(self, path: Path) -> bool:

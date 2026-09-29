@@ -349,11 +349,12 @@ class PythonParser:
     # 5: declarations' uses of the names they import or the module declares, and the
     #    file's export table (repoatlas.parsers.py_uses).
     # 6: a setup.py records what its one static setup() call states about its project
-    #    (repoatlas.parsers.setuptools_project).
+    #    (repoatlas.parsers.setuptools_project). 7: and whether it reads the call's
+    #    install_requires.
     # +pyX.Y: `ast` is the running interpreter's, and what it accepts moves with the
     #    interpreter (repoatlas.parsers.interpreter), so facts parsed by another one
     #    are never kept.
-    version = f"6+{interpreter_tag()}"
+    version = f"7+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:

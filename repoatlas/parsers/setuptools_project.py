@@ -19,6 +19,9 @@ static layout rules need:
   ``packages``, as ``find:`` or ``find_namespace:`` with ``[options.packages.find]``
   ``include``/``exclude``, or a list; ``py_modules``, a list of names. ``where`` must be the
   ``package_dir`` root, as setuptools' own documentation requires;
+* ``requires``: ``true`` when ``[options] install_requires`` is stated in a shape read -- one
+  requirement a line, or one alone on the option's line, each where :func:`cfg_values` finds
+  it; the requirements themselves are the dependency layer's rows;
 * ``unread``: the fields stated in a shape this does not read -- a key spelled another way
   (``Name``, ``package-dir``), a directive (``attr:``, ``file:``), an interpolation, a
   mapping of another package, a ``where`` elsewhere. A field this does not read is never
@@ -32,13 +35,16 @@ only when it calls ``setup`` as bound at module level from ``setuptools`` or
 ``distutils.core`` (``from setuptools import setup``, ``import setuptools`` then
 ``setuptools.setup``). Its keywords are read only when that is its one ``setup()`` call, an
 expression statement of the module itself, with no ``**`` -- ``if cond: setup(...)`` or two
-calls may pass either -- and only as literals: ``name`` a string, ``package_dir`` the root
+calls may pass either -- and only as literals: ``name`` a string, ``install_requires`` a list
+of requirement strings (and no ``requires`` beside it), ``package_dir`` the root
 mapping ``{"": "src"}``, ``packages`` a list or ``find_packages(...)`` /
 ``find_namespace_packages(...)`` with literal ``where``/``include``/``exclude``,
 ``py_modules`` a list of names. A name bound to a string elsewhere, an f-string, a call, a
 computed dictionary: each is **unread**, never evaluated -- there is no constant propagation
-here. A ``setup()`` that states no name and no layout, the shim modern projects keep beside
-their ``setup.cfg``, records that it is setuptools metadata and nothing else.
+here. A ``setup()`` that states no name, no layout and no ``install_requires``, the shim modern
+projects keep beside their ``setup.cfg``, records that it is setuptools metadata and nothing
+else. Whether ``install_requires`` is read is decided apart from the name and the layout, so
+an unread one never makes either unread.
 """
 
 from __future__ import annotations
@@ -168,6 +174,11 @@ def setup_cfg_facts(content: str) -> dict[str, Any] | None:
                 facts["name"] = value
             else:
                 unread.append("metadata.name")
+    requires = _cfg_requires(parser, content)
+    if requires is True:
+        facts["requires"] = True
+    elif requires is False:
+        unread.append("options.install_requires")
     if parser.has_section("options"):
         keys = list(parser["options"])
         stated = {key: parser["options"][key] for key in LAYOUT_KEYS if key in keys}
@@ -182,6 +193,38 @@ def setup_cfg_facts(content: str) -> dict[str, Any] | None:
     if unread:
         facts["unread"] = unread
     return facts
+
+
+def _requirements(entries: list[str]) -> bool:
+    """Whether every entry is one requirement, as the dependency layer reads it."""
+    # here, not at the top: the dependency layer imports this module (cfg_values)
+    from repoatlas.dependencies.normalize import python_requirement
+
+    return all("#" not in entry and python_requirement(entry) is not None for entry in entries)
+
+
+def _cfg_requires(parser: configparser.ConfigParser, content: str) -> bool | None:
+    """Whether ``[options] install_requires`` is stated in a shape read (``True``), stated in
+    another (``False``: a spelling, a directive, an interpolation, a one-line list setuptools
+    would split on ``;``, an entry this does not locate), or not stated (``None``)."""
+    if not parser.has_section("options"):
+        return None
+    keys = list(parser["options"])
+    if _variant(keys, "install_requires"):
+        return False
+    if "install_requires" not in keys:
+        return None
+    value = parser["options"]["install_requires"]
+    stripped = value.strip()
+    if "%" in value or stripped.startswith(_DIRECTIVES):
+        return False
+    if "\n" not in value and any(separator in value for separator in ";,"):  # one line
+        return False
+    entries = [entry.strip() for entry in value.splitlines() if entry.strip()]
+    written = cfg_values(content).get(("options", "install_requires"))
+    if written is None or [text for _, text in written[1]] != entries:
+        return False
+    return _requirements(entries)
 
 
 def _layout(parser: configparser.ConfigParser, raw: dict[str, str]) -> dict[str, Any] | None:
@@ -305,10 +348,16 @@ def setup_py_facts(tree: ast.Module) -> dict[str, Any] | None:
     if not bound:
         return None
     facts: dict[str, Any] = {"metadata": True}
+    top = {id(statement.value) for statement in tree.body if isinstance(statement, ast.Expr)}
+    requires = _setup_requires(bound, named, top)
+    if requires is True:
+        facts["requires"] = True
+    unread: list[str] = ["setup.install_requires"] if requires is False else []
     stated = set().union(*(_stated(call) for call in (*bound, *named)))
     if not stated:
+        if unread:
+            facts["unread"] = unread
         return facts  # the shim: a setup() stating no name and no layout
-    top = {id(statement.value) for statement in tree.body if isinstance(statement, ast.Expr)}
     [call, *others] = bound
     if (
         others
@@ -316,10 +365,9 @@ def setup_py_facts(tree: ast.Module) -> dict[str, Any] | None:
         or id(call) not in top
         or None in {keyword.arg for keyword in call.keywords}
     ):
-        facts["unread"] = sorted(f"setup.{field}" for field in stated)
+        facts["unread"] = sorted([*unread, *(f"setup.{field}" for field in stated)])
         return facts
     keywords = {keyword.arg: keyword.value for keyword in call.keywords}
-    unread: list[str] = []
     name = keywords.get("name")
     if name is not None:
         if isinstance(name, ast.Constant) and isinstance(name.value, str) and name.value:
@@ -333,8 +381,30 @@ def setup_py_facts(tree: ast.Module) -> dict[str, Any] | None:
         else:
             facts["layout"] = layout
     if unread:
-        facts["unread"] = unread
+        facts["unread"] = sorted(unread)
     return facts
+
+
+def _setup_requires(bound: list[ast.Call], named: list[ast.Call], top: set[int]) -> bool | None:
+    """Whether the one static setup() states ``install_requires`` as a literal list of
+    requirements (``True``), whether some call may state it otherwise (``False``: computed, a
+    ``**``, a second or conditional call, an unbound ``setup``, a ``requires`` beside it whose
+    rows the dependency layer reads alike), or whether none does (``None``)."""
+    stating = [
+        call
+        for call in (*bound, *named)
+        if any(keyword.arg in (None, "install_requires") for keyword in call.keywords)
+    ]
+    if not stating:
+        return None
+    [call, *others] = bound
+    if others or stating != [call] or id(call) not in top:
+        return False
+    keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+    if None in keywords or "requires" in keywords:
+        return False
+    listed = _literals(keywords["install_requires"])
+    return listed is not None and _requirements([entry.strip() for entry in listed])
 
 
 def _setup_layout(
@@ -443,7 +513,7 @@ class SetuptoolsProjectParser:
     """
 
     name = "setuptools-project"
-    version = "1"
+    version = "2"  # 2: whether [options] install_requires is read
     language = ""
 
     def supports(self, path: Path) -> bool:
