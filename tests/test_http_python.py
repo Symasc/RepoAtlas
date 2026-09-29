@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedFile, ParsedReference
+from repoatlas.parsers.http_facts import HTTP_CLIENT_CALL, PENDING_FACT
 from repoatlas.parsers.python import PythonParser
 
 _HTTP_KINDS = {EntityType.HTTP_ROUTE, EntityType.HTTP_DEPLOYMENT, EntityType.HTTP_ENDPOINT}
@@ -304,14 +305,20 @@ def test_an_absolute_requests_call_names_an_endpoint_and_its_route() -> None:
             ).json()
         """
     )
-    assert {(r.edge_type, r.target_key) for r in references} == {
+    # The claim for the cross-repository join rides beside the facts
+    # (tests/test_http_python_calls.py); the facts themselves are unchanged.
+    facts = [r for r in references if PENDING_FACT not in r.meta]
+    assert {(r.edge_type, r.target_key) for r in facts} == {
         (EdgeType.CALLS_HTTP_ENDPOINT, "GET https://api.example.com/hello/me"),
         (EdgeType.CALLS_HTTP_ROUTE, "GET /hello/me"),
     }
-    for reference in references:
+    for reference in facts:
         assert reference.source_symbol == "get_me"
         assert (reference.line_start, reference.line_end) == (5, 6)
         assert reference.meta == {"source": "requests", "provenance": "exact"}
+    assert [r.meta[PENDING_FACT] for r in references if PENDING_FACT in r.meta] == [
+        HTTP_CLIENT_CALL
+    ]
 
 
 def test_a_dynamic_base_url_proves_no_route_and_no_endpoint() -> None:

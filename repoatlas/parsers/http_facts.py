@@ -72,6 +72,9 @@ HTTP_LOCAL_CALL = "http-local-call"
 #: (:mod:`repoatlas.graph.http_crossings`), whatever stated the base: ``identity_source``
 #: names it, and nothing downstream reads anything more specific.
 HTTP_EXPOSED_ENDPOINT = "http-exposed-endpoint"
+#: A request whose origin and path shape the source states: a literal URL, a module
+#: constant, or an f-string on a literal or constant origin. The other side of the join.
+HTTP_CLIENT_CALL = "http-client-call"
 
 #: ``transport`` values of :data:`HTTP_LOCAL_CALL`.
 TRANSPORT_WRAPPER = "wrapper"

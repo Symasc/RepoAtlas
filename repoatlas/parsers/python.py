@@ -354,10 +354,12 @@ class PythonParser:
     # 8: a Flask application's routes are exposed at the base its flasgger Swagger 2
     #    template publishes, with a claim for the cross-repository HTTP join
     #    (repoatlas.parsers.http_python).
+    # 9: and each request whose origin and path shape it states — a literal, a module
+    #    constant, an f-string on a known origin — is the join's other claim.
     # +pyX.Y: `ast` is the running interpreter's, and what it accepts moves with the
     #    interpreter (repoatlas.parsers.interpreter), so facts parsed by another one
     #    are never kept.
-    version = f"8+{interpreter_tag()}"
+    version = f"9+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
