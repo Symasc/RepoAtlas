@@ -38,6 +38,28 @@ importing project's own declaration of a dependency, read here, and nothing else
 4. **agreement.** That provider must be the project shipping the module. Two projects
    shipping it that both pass is ``provider-ambiguous``.
 
+**When no project ships the module** -- step 1 finds none -- a metadata-less repository may
+still hold it, and its importer may still require it by the legacy convention of
+repositories that state nothing about packaging. The import is then linked, on basis
+``python-requirements-legacy``, only when all of this holds, and refused with the first
+reason otherwise:
+
+* the importer's repository is metadata-less itself, and its root ``requirements.txt`` has
+  a row whose **legacy key** (:func:`legacy_key`: ASCII lowercase, ``_`` for ``-``, and
+  nothing else -- never PEP 503) equals the imported top-level name's
+  (``dependency-absent``; a direct reference is ``dependency-unread``);
+* no indexed manifest provides that row's distribution, PEP 503-normalised as P2 reads
+  it: metadata that names it and does not ship the module overrides the convention
+  (``dependency-elsewhere``);
+* exactly one other metadata-less repository holds the module in its own root
+  (:meth:`~repoatlas.graph.py_modules.PythonModules.unclaimed`; two, a namespace portion
+  counted, is ``provider-ambiguous``), where it is found as the importer's own would be.
+
+A shared name alone never joins, nor a directory beside another: the requirement is the
+evidence, and the provider only has to be the one repository it can mean. A metadata-less
+repository provides no distribution: nothing is recorded for it but this link, whose
+crossing names the requirement and the file that holds the module.
+
 The module is then found inside the provider's own roots, and the trace continues there
 under the provider's own rules. The edge records what each step established -- the
 declaration, the provision, the pin -- and, when the provider is in another repository,
@@ -49,6 +71,7 @@ top-level module, and wins at run time; nothing indexed can show it.
 from __future__ import annotations
 
 import json
+import string
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -68,8 +91,11 @@ from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
 
 #: The ``basis`` of a module another project provides, on the evidence above.
 PYTHON_DEPENDENCY = "python-dependency"
+#: The ``basis`` of a module a metadata-less repository holds, required by the convention.
+PYTHON_REQUIREMENTS_LEGACY = "python-requirements-legacy"
 #: The one requirements file a metadata-less repository's implicit project declares by.
 REQUIREMENTS = "requirements.txt"
+_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
 #: How a requirements row read from a URL or VCS line begins: the parser takes ``git``,
 #: ``https`` or ``file`` for its name, which names no distribution.
 _URL_FORM = ("+", ":")
@@ -80,6 +106,13 @@ _OTHER_SOURCES = {
     "url": "dependency-elsewhere",
     "index": "dependency-elsewhere",
 }
+
+
+def legacy_key(name: str) -> str:
+    """The legacy convention's key for a requirement or an import: ASCII lowercase, then
+    ``_`` for ``-``. Two names agree only when their keys are equal; never PEP 503, which
+    also folds ``.`` and runs of separators."""
+    return name.translate(_ASCII_LOWER).replace("_", "-")
 
 
 @lru_cache(maxsize=1 << 16)
@@ -363,6 +396,8 @@ class PythonPackageLinks:
             )
         )
         provisions: list[Provision] = []
+        #: Each metadata-less repository's root requirement rows, in line order.
+        self._required: dict[int, list[DependencyRecord]] = defaultdict(list)
         # By (repository, declaring project's manifest): a pyproject's own path, or the
         # implicit project's for a metadata-less repository's root requirements.txt.
         first: dict[tuple[int, str], dict[str, tuple[DependencyRecord, str]]] = defaultdict(dict)
@@ -388,6 +423,7 @@ class PythonPackageLinks:
                 if (record.constraint or "").strip().startswith(_URL_FORM):
                     continue
                 owner = REPOSITORY_ROOT
+                self._required[record.repo_id].append(record)
             else:
                 continue
             first[(record.repo_id, owner)].setdefault(record.normalized_name, (record, manifest))
@@ -416,7 +452,8 @@ class PythonPackageLinks:
 
     def resolve(self, origin: FileRow, spec: str) -> PythonLink | str | None:
         """The module ``spec`` names in another project, why it names none, or ``None``
-        when no other indexed project ships its top-level module at all."""
+        when no other indexed project ships its top-level module, and no metadata-less
+        repository holds it for a metadata-less importer, at all."""
         key = (origin.repo_id, _parent(origin.rel_path), spec)
         if key not in self._memo:
             self._memo[key] = self._resolve(origin, spec)
@@ -431,7 +468,8 @@ class PythonPackageLinks:
             return None
         candidates = [p for p in self._modules.providing(parts[0]) if p != own]
         if not candidates:
-            return None
+            # only where no project ships it: a verdict above is never rescued here
+            return self._legacy(own, parts)
         accepted: list[tuple[Project, Provision, _Declaration, dict[str, str]]] = []
         refusals: list[str] = []
         for candidate in candidates:
@@ -486,6 +524,80 @@ class PythonPackageLinks:
         if len(providers) > 1:
             return "provider-ambiguous"
         return providers[0], declaration, {}
+
+    def _legacy(self, own: Project, parts: Sequence[str]) -> PythonLink | str | None:
+        """The module a metadata-less repository holds, as the importer's root requirement
+        of it by the legacy convention names it (see the module docstring); ``None`` when
+        the importer is no such repository, or no other one holds the module at all."""
+        if own.manifest != REPOSITORY_ROOT or not self._modules.metadata_less(own.repo_id):
+            return None
+        head = parts[0]
+        holders = [p for p in self._modules.unclaimed(head) if p.repo_id != own.repo_id]
+        if not holders:
+            return None
+        wanted = legacy_key(head)
+        rows = [r for r in self._required.get(own.repo_id, ()) if legacy_key(r.name) == wanted]
+        if not rows:
+            return "dependency-absent"
+        if any((r.constraint or "").strip().startswith("@") for r in rows):
+            return "dependency-unread"
+        row = rows[0]
+        if any(
+            (p.repo_id, p.directory) != (own.repo_id, own.directory)
+            for p in self.targets.provisions(row.normalized_name)
+        ):
+            return "dependency-elsewhere"
+        if len(holders) > 1:
+            return "provider-ambiguous"
+        [provider] = holders
+        placed = self._modules.resolve_in(provider, parts)
+        if isinstance(placed, str):
+            return placed
+        module, root = placed
+        held = self._modules.held(provider, head)
+        assert held is not None  # resolve_in found it there
+        return self._legacy_link(provider, row, held, module, root, parts)
+
+    def _legacy_link(
+        self,
+        provider: Project,
+        row: DependencyRecord,
+        held: FileRow,
+        module: FileRow,
+        root: Root,
+        parts: Sequence[str],
+    ) -> PythonLink:
+        """What proved a legacy link: the requirement, as written and where, and the file
+        that holds the module -- never a manifest, since the provider has none."""
+        package = f"{PYPI}:{row.name}"
+        declared_at = f"{REQUIREMENTS}:{row.line_start}"
+        detail: list[tuple[str, Any]] = [
+            *root_detail(root, provider),
+            ("package", package),
+            ("declared_at", declared_at),
+            ("provided_at", held.rel_path),
+        ]
+        if row.constraint:
+            detail.append(("constraint", row.constraint))
+        crossing: dict[str, Any] = {
+            "package": package,
+            "provider": self._index.repo_slugs.get(provider.repo_id, ""),
+            "provided_at": held.rel_path,
+            "entry": module.rel_path,
+            "entry_fields": PYTHON_REQUIREMENTS_LEGACY,
+            "declared_at": declared_at,
+            "resolved_by": "requirements-legacy",
+            "requirement": row.name,
+            "legacy_requirement_key": legacy_key(row.name),
+            "import": parts[0],
+            "legacy_import_key": legacy_key(parts[0]),
+        }
+        if len(parts) > 1:
+            crossing["subpath"] = ".".join(parts[1:])
+        if row.constraint:
+            crossing["constraint"] = row.constraint
+        target = ModuleTarget(module, PYTHON_REQUIREMENTS_LEGACY, tuple(sorted(detail)))
+        return PythonLink(target, crossing)
 
     def _link(
         self,
