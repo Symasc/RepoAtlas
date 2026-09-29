@@ -259,6 +259,8 @@ class SyncEngine:
             incomplete=incomplete,
         )
         known = self._files.list_states(repo_id)
+        # What the root requirements.txt reached before this run wrote anything.
+        requirements = self._requirement_facts(repo_id)
 
         self._repositories.mark_sync_started(repo_id)
 
@@ -313,7 +315,9 @@ class SyncEngine:
             if outcome.language:
                 languages.add(outcome.language)
 
-        self._materialize_requirements(repo, boundary)
+        reached = self._materialize_requirements(repo, boundary)
+        if reached != requirements and self._uses is not None:
+            self._uses.requirements_changed(repo_id)
         self._knowledge.gc_orphan_entities()
 
         self._repositories.update_detected_metadata(
@@ -348,7 +352,16 @@ class SyncEngine:
         )
         return report, completion
 
-    def _materialize_requirements(self, repo: Repository, boundary: RepositoryBoundary) -> None:
+    def _requirement_facts(self, repo_id: int) -> dict[str, str]:
+        """The requirements facts a repository records, by the path of the file stating them."""
+        return {
+            path: meta
+            for _, path, meta in self._knowledge.list_facts_of_kind(REQUIREMENTS_FACTS, repo_id)
+        }
+
+    def _materialize_requirements(
+        self, repo: Repository, boundary: RepositoryBoundary
+    ) -> dict[str, str]:
         """Record the requirements of every file the root ``requirements.txt`` reaches through
         ``-r``, and of no other (:mod:`repoatlas.graph.py_requirements`).
 
@@ -363,13 +376,13 @@ class SyncEngine:
         A file is read through the repository boundary, and only as the bytes the index holds
         for it: one changed since it was indexed, or that is not text, holds no requirements
         until a sync indexes it again.
+
+        Returns what is recorded now, by path, which the run compares with what was recorded
+        before it: the owning repository's uses are resolved again when that differs.
         """
         assert repo.id is not None
         states = self._files.list_states(repo.id)
-        stored = {
-            path: meta
-            for _, path, meta in self._knowledge.list_facts_of_kind(REQUIREMENTS_FACTS, repo.id)
-        }
+        stored = self._requirement_facts(repo.id)
         loaded: dict[str, dict[str, Any] | None] = {}
 
         def load(path: str) -> dict[str, Any] | None:
@@ -389,7 +402,7 @@ class SyncEngine:
         written = sorted(path for path, meta in wanted.items() if stored.get(path) != meta)
         dropped = sorted(set(stored) - set(wanted))
         if not written and not dropped:
-            return
+            return wanted
         claims: list[UnresolvedRefRecord] = []
         for path in written:
             file_id = states[path].file_id
@@ -412,6 +425,7 @@ class SyncEngine:
         self._knowledge.replace_facts_of_kind(
             REQUIREMENTS_FACTS, [states[path].file_id for path in (*written, *dropped)], claims
         )
+        return wanted
 
     def _requirements_of(
         self, boundary: RepositoryBoundary, path: str, content_hash: str, stored: str | None

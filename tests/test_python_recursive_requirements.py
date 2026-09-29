@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 from repoatlas.capabilities.service import CapabilityService
+from repoatlas.config.settings import Settings
 from repoatlas.graph.py_requirements import (
     INCLUDE_CYCLE,
     INCLUDE_MISSING,
@@ -29,10 +30,18 @@ from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.impact import ImpactRequest
 from repoatlas.services.workspace import Workspace
 from tests.impact_corpus import build
+from tests.incremental_corpus import (
+    add_repo,
+    append,
+    assert_equals_fresh,
+    edit,
+    remove_repo,
+    sync_all,
+)
 from tests.python_corpus import refusals
 from tests.python_legacy_corpus import SERVICE, pick, service_uses
 from tests.python_packages_corpus import edges, uses
-from tests.python_recursive_requirements_corpus import INCLUDES
+from tests.python_recursive_requirements_corpus import AUTH, INCLUDES, OTHER
 
 PROVIDER = "explicit-auth"
 MODELS = "src/fixture_auth/models.py"
@@ -268,3 +277,150 @@ def test_an_include_refused_where_it_is_written_leaves_the_set_incomplete() -> N
 def test_a_root_holding_no_facts_includes_nothing() -> None:
     found = reach({}.get, {"requirements.txt"}.__contains__)
     assert found.files == (Reached("requirements.txt", ()),) and not found.refused
+
+
+# -- incremental = fresh (R15-R18, +T, +B) --------------------------------------------------
+
+
+def _equal(workspace: Workspace, settings: Settings, tmp_path: Path, tag: str) -> None:
+    assert_equals_fresh(workspace, settings, tmp_path / "repos", tmp_path, tag)
+
+
+def _declared_at(workspace: Workspace, consumer: str) -> str:
+    edge = _edge(workspace, consumer, PROVIDER, MODELS)
+    assert edge["crossing"]["declared_at"] == edge["declared_at"]
+    return edge["declared_at"]
+
+
+def test_r15_a_requirement_in_a_reached_file_changed_and_back(
+    workspace: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    """The leaf, two includes from the root, is the only file edited: no dependency row
+    changes, so what resolves ``nested`` again is what the sync records it reaching (RM7)."""
+    built = _build(workspace, tmp_path, PROVIDER, "nested")
+    root = tmp_path / "repos"
+    edit(root, "nested", "requirements/common.txt", "requests\n" + OTHER)
+    work = sync_all(built, root)
+    assert work.mode == "incremental"
+    assert (work.repositories_invalidated, work.package) == (1, 0), work
+    assert work.repository > 0, work
+    assert _refused(built, "nested", "dependency-absent")
+    _equal(built, settings, tmp_path, "other")
+    edit(root, "nested", "requirements/common.txt", "requests\n\nfixture-auth>=1\n")
+    sync_all(built, root)
+    assert _declared_at(built, "nested") == "requirements/common.txt:3"
+    _equal(built, settings, tmp_path, "moved")
+
+
+def test_r16_the_roots_include_removed_and_back(
+    workspace: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    """The root states no requirement before or after: only the include changes."""
+    built = _build(workspace, tmp_path, PROVIDER, "one-include")
+    root = tmp_path / "repos"
+    edit(root, "one-include", "requirements.txt", "# nothing included\n")
+    work = sync_all(built, root)
+    assert work.repository > 0, work
+    assert _refused(built, "one-include", "dependency-absent")
+    assert _facts_on(built, "one-include") == ["requirements.txt"]  # RM8: base.txt's are gone
+    _equal(built, settings, tmp_path, "removed")
+    edit(root, "one-include", "requirements.txt", "-r requirements/base.txt\n")
+    sync_all(built, root)
+    assert _declared_at(built, "one-include") == "requirements/base.txt:1"
+    _equal(built, settings, tmp_path, "back")
+
+
+def test_r17_a_reached_file_deleted_and_back(
+    workspace: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    built = _build(workspace, tmp_path, PROVIDER, "one-include")
+    root = tmp_path / "repos"
+    base = root / "one-include" / "requirements/base.txt"
+    base.unlink()
+    sync_all(built, root)
+    assert _refused(built, "one-include", "dependency-unread")
+    _equal(built, settings, tmp_path, "deleted")
+    edit(root, "one-include", "requirements/base.txt", AUTH)
+    sync_all(built, root)
+    assert _declared_at(built, "one-include") == "requirements/base.txt:1"
+    _equal(built, settings, tmp_path, "back")
+
+
+def test_r18_the_include_pointed_elsewhere_into_a_cycle_and_back(
+    workspace: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    built = _build(workspace, tmp_path, PROVIDER, "retarget")
+    root = tmp_path / "repos"
+    assert _refused(built, "retarget", "dependency-absent")
+    edit(root, "retarget", "requirements.txt", "-r requirements/b.txt\n")
+    work = sync_all(built, root)
+    assert work.repository > 0, work
+    assert _declared_at(built, "retarget") == "requirements/b.txt:1"
+    assert _facts_on(built, "retarget") == ["requirements.txt", "requirements/b.txt"]
+    _equal(built, settings, tmp_path, "b")
+    edit(root, "retarget", "requirements/b.txt", "-r a.txt\n" + AUTH)
+    edit(root, "retarget", "requirements/a.txt", "-r b.txt\n" + OTHER)
+    sync_all(built, root)
+    assert _declared_at(built, "retarget") == "requirements/b.txt:2"
+    assert _facts_on(built, "retarget") == [
+        "requirements.txt",
+        "requirements/a.txt",
+        "requirements/b.txt",
+    ]
+    _equal(built, settings, tmp_path, "cycle")
+    edit(root, "retarget", "requirements.txt", "-r requirements/a.txt\n")
+    edit(root, "retarget", "requirements/a.txt", OTHER)
+    sync_all(built, root)
+    assert _refused(built, "retarget", "dependency-absent")
+    _equal(built, settings, tmp_path, "a")
+
+
+@pytest.mark.parametrize(
+    ("provider", "consumer", "models"),
+    [
+        (PROVIDER, "one-include", MODELS),  # the project providing fixture-auth
+        ("auth-provider", "legacy-included", LEGACY_MODELS),  # the holder of fixture_auth
+    ],
+)
+def test_the_provider_of_a_name_only_included_goes_and_comes_back(
+    workspace: Workspace,
+    settings: Settings,
+    tmp_path: Path,
+    provider: str,
+    consumer: str,
+    models: str,
+) -> None:
+    """+T: the consumer requires the name in an included file only, so only the recorded
+    requirements can say it depends on the provider (RM7b)."""
+    built = _build(workspace, tmp_path, provider, consumer)
+    root = tmp_path / "repos"
+    remove_repo(root, provider)
+    sync_all(built, root)
+    assert _refused(built, consumer, "module-not-found")
+    _equal(built, settings, tmp_path, "gone")
+    add_repo(root, provider, INCLUDES[provider])
+    sync_all(built, root)
+    assert uses(built, consumer) == service_uses(consumer, provider, models)
+    _equal(built, settings, tmp_path, "back")
+
+
+@pytest.mark.parametrize(
+    ("consumer", "path", "text"),
+    [
+        ("one-include", SERVICE, "\n\ndef extra() -> None:\n    pass\n"),  # a body edit
+        ("one-include", "requirements/base.txt", "# the same requirements\n"),  # facts unchanged
+        ("unreached", "requirements/dev.txt", "requests\n"),  # a file the root does not reach
+    ],
+)
+def test_an_edit_changing_no_declaration_resolves_no_repository(
+    workspace: Workspace, settings: Settings, tmp_path: Path, consumer: str, path: str, text: str
+) -> None:
+    """+B: whatever the file, an edit changing no requirement the root reaches is its own
+    work and the uses landing in it, never a repository's."""
+    built = _build(workspace, tmp_path, PROVIDER, consumer)
+    root = tmp_path / "repos"
+    append(root, consumer, path, text)
+    work = sync_all(built, root)
+    assert work.mode == "incremental"
+    assert (work.repository, work.package) == (0, 0), work
+    _equal(built, settings, tmp_path, "edit")

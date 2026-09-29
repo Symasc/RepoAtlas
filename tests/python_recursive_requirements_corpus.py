@@ -100,6 +100,10 @@ INCLUDES: dict[str, dict[str, str]] = {
     "legacy-included": consumer(
         "-r requirements/base.txt\n", {"requirements/base.txt": "requests\nfixture-auth\n"}
     ),
+    # R18: the root points at a.txt, stating another name; b.txt, beside it, states the one
+    "retarget": consumer(
+        "-r requirements/a.txt\n", {"requirements/a.txt": OTHER, "requirements/b.txt": AUTH}
+    ),
     # +U: files the root does not reach declare nothing, whatever they are called
     "unreached": consumer(
         "requests\n",

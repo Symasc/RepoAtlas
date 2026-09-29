@@ -36,9 +36,14 @@ use can depend on, and :meth:`UsesChangeLog.scope` turns it into the files to re
   whichever repository each member is indexed as;
 * a change to a repository's declared packages, npm or PyPI: its own files; to the
   packages it provides: its own files and those of every repository declaring such a
-  package;
+  package -- a declaration a root ``requirements.txt`` reaches through ``-r`` counting as
+  one (:mod:`repoatlas.graph.py_requirements`);
+* a change to what a repository's root ``requirements.txt`` reaches -- an include added,
+  removed or pointed elsewhere, a requirement in a reached file, a reached file gone or
+  back, a cycle -- which the sync reports once it has recorded them anew
+  (:meth:`UsesChangeLog.requirements_changed`): its own files;
 * a file added or deleted, or a change to a Python project's facts: every file of each
-  repository whose root ``requirements.txt`` requires, by the legacy key
+  repository whose root ``requirements.txt``, or a file it reaches, requires, by the legacy key
   (:func:`~repoatlas.graph.py_packages.legacy_key`), a top-level module name the change
   may have given or taken -- since a Python import of another repository's module that
   no manifest provides is decided by which projects ship that name and which
@@ -64,18 +69,24 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any
 
-from repoatlas.dependencies.normalize import NPM, PYPI
+from repoatlas.dependencies.normalize import NPM, PYPI, normalize
 from repoatlas.graph.modules import ModuleResolver, binding_pairs, declared_constraints
 from repoatlas.graph.packages import CROSSING, PackageLinks
 from repoatlas.graph.py_modules import PythonModules
 from repoatlas.graph.py_packages import PythonPackageLinks, legacy_key
+from repoatlas.graph.py_requirements import REQUIREMENTS_FACTS
 from repoatlas.graph.py_uses import PythonUseResolver
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.graph.uses import UseResolver, declared_entity, table_from_meta, use_resolution
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.parsing import USES_EXPORT_TABLE, EdgeType
 from repoatlas.models.telemetry import UsesWork
-from repoatlas.parsers.module_facts import MODULE_RESOLUTION, PYTHON_PROJECT, PYTHON_SETUPTOOLS
+from repoatlas.parsers.module_facts import (
+    MODULE_RESOLUTION,
+    PYTHON_PROJECT,
+    PYTHON_REQUIREMENTS,
+    PYTHON_SETUPTOOLS,
+)
 from repoatlas.storage.protocols import EdgeRecord, SymbolRow, UnresolvedRefRecord
 from repoatlas.storage.sqlite.stores import SqliteDependencyStore, SqliteKnowledgeStore
 
@@ -287,6 +298,12 @@ class UsesChangeLog:
         self.own.add(file_id)
         self._compare(repo_id, file_id, before or FileState(), self._state(file_id))
 
+    def requirements_changed(self, repo_id: int) -> None:
+        """What the repository's root ``requirements.txt`` reaches was recorded anew and
+        differs: its declarations may, and they are read for its own files alone."""
+        if self.everything is None:
+            self.package_repositories.add(repo_id)
+
     def files_added(self, repo_id: int, paths: Sequence[str] = ()) -> None:
         if self.everything is None:
             self.repositories.add(repo_id)
@@ -342,7 +359,12 @@ class UsesChangeLog:
                 dependents |= self._dependencies.repositories_declaring(sorted(provided), ecosystem)
                 names = sorted(name for kind, name in self.packages if kind == ecosystem)
                 declaring |= self._dependencies.repositories_declaring(names, ecosystem)
-            declaring |= self._requiring()
+                if ecosystem == PYPI:
+                    dependents |= self._reaching(provided, ())
+                    declaring |= self._reaching(names, ())
+            keys = self._required_keys()
+            declaring |= self._dependencies.repositories_requiring(sorted(keys))
+            declaring |= self._reaching((), keys)
             package_files = self._knowledge.file_ids_of_repositories(sorted(declaring))
         nested = self.nested | self._knowledge.nested_repositories(sorted(self.repositories))
         repositories = dependents | self.package_repositories | nested
@@ -378,17 +400,37 @@ class UsesChangeLog:
         )
 
     def _facts(self, file_id: int) -> tuple[str, ...]:
+        """The file's module-resolution facts, but for the requirements a root
+        ``requirements.txt`` reaches: the sync records those apart, once the repository's
+        files are written, and reports their changes itself (:meth:`requirements_changed`)."""
         return tuple(
             sorted(
                 claim.meta_json or ""
                 for claim in self._knowledge.list_module_facts(file_id)
-                if claim.meta_json and MODULE_RESOLUTION in claim.meta_json
+                if claim.meta_json
+                and MODULE_RESOLUTION in claim.meta_json
+                and json.loads(claim.meta_json).get(MODULE_RESOLUTION) != PYTHON_REQUIREMENTS
             )
         )
 
-    def _requiring(self) -> set[int]:
-        """Repositories whose root requirements require a top-level head this run changed
-        (see the module docstring), by its legacy key."""
+    def _reaching(self, names: Iterable[str], keys: Iterable[str]) -> set[int]:
+        """Repositories whose root ``requirements.txt`` reaches a requirement of one of these
+        PyPI names (PEP 503) or legacy keys, as recorded for the files it reaches."""
+        names, keys = set(names), set(keys)
+        if not names and not keys:
+            return set()
+        found: set[int] = set()
+        for repo_id, _, meta in self._knowledge.list_facts_of_kind(REQUIREMENTS_FACTS):
+            facts = json.loads(json.loads(meta or "{}").get("facts") or "{}")
+            for _, name, _ in facts.get("requires", []):
+                if normalize(PYPI, name) in names or legacy_key(name) in keys:
+                    found.add(repo_id)
+                    break
+        return found
+
+    def _required_keys(self) -> set[str]:
+        """The legacy keys of the top-level heads this run changed (see the module
+        docstring): whoever requires one by the legacy convention may link otherwise."""
         if self._dependencies is None or not self.heads:
             return set()
         keys: set[str] = set()
@@ -411,7 +453,7 @@ class UsesChangeLog:
             if rebased:
                 heads |= top_level_heads(paths, rebased)
             keys |= {legacy_key(head) for head in heads}
-        return self._dependencies.repositories_requiring(sorted(keys))
+        return keys
 
     def _compare(self, repo_id: int, file_id: int, before: FileState, after: FileState) -> None:
         if before.surface != after.surface:
