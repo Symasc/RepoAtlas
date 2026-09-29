@@ -45,11 +45,12 @@ use can depend on, and :meth:`UsesChangeLog.scope` turns it into the files to re
   metadata-less repositories hold it (:mod:`repoatlas.graph.py_packages`). Those names
   are the plausible **top-level heads** of the change (:func:`top_level_heads`), never
   every name along its path: its first segment below each base a module can start from
-  -- the repository root, ``src/``, and each Python project's directory and its
-  ``src/`` -- and the names a project's facts state. Every head below a base is taken
-  only when what the base means may have changed: a root ``setup.py`` or ``setup.cfg``
-  added or deleted, a project's facts changed, or a regular package or module added or
-  deleted directly under a ``src/``.
+  -- the repository root, ``src/``, each Python project's directory and its ``src/``, and
+  every directory a setuptools layout roots -- and the names a project's facts state.
+  Every head below a base is taken only when what the base means may have changed: a
+  root ``setup.py`` or ``setup.cfg`` added or deleted, a project's facts changed (a
+  ``setup.cfg`` or ``setup.py`` stating another name or layout included), or a regular
+  package or module added or deleted directly under a ``src/``.
 
 Nothing else a use reads can change without one of these.
 """
@@ -74,7 +75,7 @@ from repoatlas.graph.uses import UseResolver, declared_entity, table_from_meta, 
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.parsing import USES_EXPORT_TABLE, EdgeType
 from repoatlas.models.telemetry import UsesWork
-from repoatlas.parsers.module_facts import MODULE_RESOLUTION, PYTHON_PROJECT
+from repoatlas.parsers.module_facts import MODULE_RESOLUTION, PYTHON_PROJECT, PYTHON_SETUPTOOLS
 from repoatlas.storage.protocols import EdgeRecord, SymbolRow, UnresolvedRefRecord
 from repoatlas.storage.sqlite.stores import SqliteDependencyStore, SqliteKnowledgeStore
 
@@ -126,6 +127,8 @@ _MODULE_SUFFIXES = (".py", ".pyi")
 _PACKAGE_FILES = frozenset({"__init__.py", "__init__.pyi"})
 #: Root files whose presence decides whether a repository is metadata-less.
 _ROOT_METADATA = frozenset({"setup.py", "setup.cfg"})
+#: The files whose facts state a Python project's name and layout.
+_PROJECT_FILES = frozenset({"pyproject.toml", *_ROOT_METADATA})
 
 
 def _directory(path: str) -> str:
@@ -178,15 +181,28 @@ def _rebased(path: str, projects: Iterable[str]) -> set[str]:
     return found
 
 
-def _layout_names(facts: Iterable[str]) -> set[str]:
-    """The top-level names Python project facts state a project ships: flit's module, and
-    each hatchling package's own name."""
-    found: set[str] = set()
+def _stated(facts: Iterable[str]) -> list[tuple[str, dict[str, Any]]]:
+    """Each Python project fact among a file's facts, by kind."""
+    found = []
     for meta_json in facts:
         meta = json.loads(meta_json) if meta_json else {}
-        if meta.get(MODULE_RESOLUTION) != PYTHON_PROJECT:
+        kind = meta.get(MODULE_RESOLUTION)
+        if kind in (PYTHON_PROJECT, PYTHON_SETUPTOOLS):
+            found.append((kind, json.loads(meta.get("facts") or "{}")))
+    return found
+
+
+def _layout_names(facts: Iterable[str]) -> set[str]:
+    """The top-level names Python project facts state a project ships: flit's module, each
+    hatchling package's own name, and the packages and modules a setuptools layout lists."""
+    found: set[str] = set()
+    for kind, stated in _stated(facts):
+        if kind == PYTHON_SETUPTOOLS:
+            layout = stated.get("layout") or {}
+            listed = layout.get("packages")
+            names = [*(listed if isinstance(listed, list) else []), *layout.get("py_modules", [])]
+            found |= {name.split(".")[0] for name in names if isinstance(name, str)}
             continue
-        stated = json.loads(meta.get("facts") or "{}")
         flit = stated.get("flit_module")
         if isinstance(flit, str):
             found.add(flit.split(".")[0])
@@ -195,6 +211,15 @@ def _layout_names(facts: Iterable[str]) -> set[str]:
             if isinstance(entry, str):
                 found.add(PurePosixPath(entry.strip().rstrip("/")).name)
     return found
+
+
+def _layout_roots(facts: Iterable[str], directory: str) -> set[str]:
+    """The directory a setuptools layout stated in ``directory`` roots its modules at."""
+    return {
+        _join(directory, stated["layout"]["root"]) if stated["layout"].get("root") else directory
+        for kind, stated in _stated(facts)
+        if kind == PYTHON_SETUPTOOLS and isinstance(stated.get("layout"), dict)
+    }
 
 
 @dataclass(slots=True)
@@ -295,8 +320,10 @@ class UsesChangeLog:
         for file_id, path in self._knowledge.files_of_repository(repo_id):
             change.touched.add(path)
             change.gone.add(path)
-            if PurePosixPath(path).name == "pyproject.toml":
-                change.names |= _layout_names(self._facts(file_id))
+            if PurePosixPath(path).name in _PROJECT_FILES:
+                facts = self._facts(file_id)
+                change.names |= _layout_names(facts)
+                change.rebased |= _layout_roots(facts, _directory(path))
 
     def scope(self) -> UsesScope:
         """The files whose uses may have changed (see the module docstring)."""
@@ -368,17 +395,21 @@ class UsesChangeLog:
         for repo_id, change in sorted(self.heads.items()):
             rows = self._knowledge.files_of_repository(repo_id)
             paths = {path for _, path in rows} | change.gone
-            projects = {_directory(p) for p in paths if PurePosixPath(p).name == "pyproject.toml"}
-            bases = {"", "src", *projects, *(_join(d, "src") for d in projects)}
+            projects = {_directory(p) for p in paths if PurePosixPath(p).name in _PROJECT_FILES}
+            heads = set(change.names)
+            stated_roots = set(change.rebased)
+            for file_id, path in rows:
+                if PurePosixPath(path).name in _PROJECT_FILES:
+                    facts = self._facts(file_id)
+                    heads |= _layout_names(facts)
+                    stated_roots |= _layout_roots(facts, _directory(path))
+            bases = {"", "src", *projects, *(_join(d, "src") for d in projects), *stated_roots}
             rebased = set(change.rebased)
             for path in change.touched:
                 rebased |= _rebased(path, projects)
-            heads = set(change.names) | top_level_heads(change.touched, bases)
+            heads |= top_level_heads(change.touched, bases)
             if rebased:
                 heads |= top_level_heads(paths, rebased)
-            for file_id, path in rows:
-                if PurePosixPath(path).name == "pyproject.toml":
-                    heads |= _layout_names(self._facts(file_id))
             keys |= {legacy_key(head) for head in heads}
         return self._dependencies.repositories_requiring(sorted(keys))
 
@@ -394,6 +425,8 @@ class UsesChangeLog:
             change.touched.add(path)
             directory = _directory(path)
             change.rebased |= {"", "src", directory, _join(directory, "src")}
+            change.rebased |= _layout_roots(before.facts, directory)
+            change.rebased |= _layout_roots(after.facts, directory)
             change.names |= _layout_names(before.facts) | _layout_names(after.facts)
         if before.packages != after.packages:
             # Declarations are read only for this repository's own files; provisions for
