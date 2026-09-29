@@ -245,16 +245,13 @@ def test_a_declaration_removed_takes_its_uses_with_it(
 def test_a_workspace_source_removed_leaves_its_members_to_the_version_rule(
     workspace: Workspace, settings: Settings, tmp_path: Path
 ) -> None:
+    """Which finds the second `lib` outside the workspace too, and joins neither."""
     uvws = build(workspace, tmp_path, {"uvws": UVWS})
     root = tmp_path / "repos"
     source = "[tool.uv.sources]\nlib = { workspace = true }\n"
     _replace(root, "pyproject.toml", source, "", repo="uvws")
     sync_all(uvws, root)
-    [edge] = [
-        e
-        for e in edges(uvws)
-        if e["source"] == "uvws:packages/app/src/app/__init__.py#run"
-        and e["basis"] == "python-dependency"
-    ]
-    assert "resolved_by" not in edge
+    app = "packages/app/src/app/__init__.py"
+    assert refusals(uvws, "uvws", app) == {"helper": "provider-ambiguous"}
+    assert not [e for e in edges(uvws) if e["source"] == f"uvws:{app}#run"]
     _equal(uvws, settings, tmp_path, "unsourced")

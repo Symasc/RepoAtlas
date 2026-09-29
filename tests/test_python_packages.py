@@ -118,6 +118,15 @@ def test_p16_two_providers_of_one_name_join_neither(workspace: Workspace, tmp_pa
     ]
 
 
+def test_p16_two_declared_projects_shipping_one_module_join_neither(xrepo: Workspace) -> None:
+    assert set(refusals(xrepo, "both", SERVICE).values()) == {"provider-ambiguous"}
+    assert not [
+        e
+        for e in edges(xrepo)
+        if e["source"].startswith("both:") and e["target"].startswith(("provider:", "shadow:"))
+    ]
+
+
 def test_p12b_a_uv_workspace_member_inherits_its_roots_source(
     workspace: Workspace, tmp_path: Path
 ) -> None:
@@ -158,7 +167,8 @@ def test_a_dependent_is_listed_only_when_its_declaration_names_the_provider(
     xrepo: Workspace,
 ) -> None:
     """A version, or a uv path to the provider, names it; a uv path anywhere else, a git
-    source, a direct reference or a Poetry table does not -- as a package link reads it."""
+    source, a direct reference or a Poetry table does not -- as a package link reads it.
+    Coarse by construction: ``both`` declares it by version, whatever else it declares."""
     response = CapabilityService(xrepo).impact(ImpactRequest(context=GLOBAL, seed=SEED))
     listed = {p.dependent for p in response.packages if p.package == "pypi:internal-fixture"}
-    assert listed == {"consumer:.", "pinned:."}
+    assert listed == {"consumer:.", "pinned:.", "both:."}
