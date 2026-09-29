@@ -9,7 +9,11 @@ importing project's own declaration of a dependency, read here, and nothing else
    importer's own, ships a top-level module of that name
    (:meth:`~repoatlas.graph.py_modules.PythonModules.shipped`). A distribution name is
    never read as a module name: the module is found on disk, and the distribution is
-   whatever the project shipping it is called;
+   whatever the project shipping it is called -- by its ``pyproject.toml``, or by the
+   ``setup.cfg`` or ``setup.py`` beside it. A project only setuptools names ships what its
+   layout states and nothing else: stating none, it is ``project-layout-unread`` to a
+   declaration of it, never shipped by what its directories hold; and one whose sources
+   disagree about its name is ``project-metadata-conflict``;
 2. **the declaration.** The importer's project declares that project's distribution,
    PEP 503-normalised, in its ``pyproject.toml``'s PEP 621 dependencies -- or, when its
    repository states nothing about packaging
@@ -99,6 +103,11 @@ _ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
 #: How a requirements row read from a URL or VCS line begins: the parser takes ``git``,
 #: ``https`` or ``file`` for its name, which names no distribution.
 _URL_FORM = ("+", ":")
+
+#: Which of one directory's manifests stands for a distribution they all provide: the one
+#: setuptools reads the name from (a static ``[project]`` first, then ``setup()``'s keyword
+#: over ``setup.cfg``).
+_PROVIDES_FIRST = {"pyproject.toml": 0, "setup.py": 1, "setup.cfg": 2}
 
 #: What a uv source other than a path or this workspace is refused as.
 _OTHER_SOURCES = {
@@ -203,7 +212,17 @@ class PythonTargets:
         self._root_of = dict(roots)
         self._slugs = dict(slugs)
         self._stated = stated
-        self._provisions = list(provisions)
+        self._provisions = sorted(
+            provisions,
+            key=lambda p: (
+                self._slugs.get(p.repo_id, ""),
+                p.directory,
+                _PROVIDES_FIRST.get(PurePosixPath(p.manifest).name, len(_PROVIDES_FIRST)),
+                p.manifest,
+                p.line,
+                p.name,
+            ),
+        )
         self._paths = ProviderTargets(roots, self._provisions, (), slugs)
         self._by_name: dict[str, list[Provision]] = defaultdict(list)
         seen: set[tuple[int, str, str]] = set()
@@ -469,12 +488,13 @@ class PythonPackageLinks:
         candidates = [p for p in self._modules.providing(parts[0]) if p != own]
         if not candidates:
             # only where no project ships it: a verdict above is never rescued here
-            return self._legacy(own, parts)
+            legacy = self._legacy(own, parts)
+            return legacy if legacy is not None else self._unstated(own, parts[0])
         accepted: list[tuple[Project, Provision, _Declaration, dict[str, str]]] = []
         refusals: list[str] = []
         for candidate in candidates:
             if candidate.name is None:
-                refusals.append("provider-unnamed")
+                refusals.append(candidate.name_refused or "provider-unnamed")
                 continue
             found = self.provider(own, normalize(PYPI, candidate.name))
             if isinstance(found, str):
@@ -483,6 +503,11 @@ class PythonPackageLinks:
             provision, declaration, evidence = found
             if (provision.repo_id, provision.directory) != (candidate.repo_id, candidate.directory):
                 refusals.append("dependency-elsewhere")
+                continue
+            if candidate.unstated:
+                # declared, and named by setuptools alone: what it ships is not stated, and
+                # what its directories hold is no evidence
+                refusals.append("project-layout-unread")
                 continue
             accepted.append((candidate, provision, declaration, evidence))
         if len(accepted) > 1:
@@ -524,6 +549,16 @@ class PythonPackageLinks:
         if len(providers) > 1:
             return "provider-ambiguous"
         return providers[0], declaration, {}
+
+    def _unstated(self, own: Project, head: str) -> str | None:
+        """``project-layout-unread`` when the importer declares a distribution only setuptools
+        names, which states nothing it ships and holds ``head`` in its own roots; else
+        ``None``, and P1's reason stands."""
+        declared = self._declared.get((own.repo_id, own.manifest), {})
+        for project in self._modules.unstated(head):
+            if project != own and normalize(PYPI, project.name or "") in declared:
+                return "project-layout-unread"
+        return None
 
     def _legacy(self, own: Project, parts: Sequence[str]) -> PythonLink | str | None:
         """The module a metadata-less repository holds, as the importer's root requirement
