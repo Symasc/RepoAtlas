@@ -1650,8 +1650,11 @@ Two repositories talk over HTTP without either one naming the other. A backend s
 calls `fetch("https://api.example.com/hello/me")`. The only thing both sides can state is the operation. So the
 operation is what the graph records, as a repository-less shared node that each side reaches with its own edge. That
 is the same shape `env:SERVICE_HOST` already has, and it inherits the same property: repositories meet on the node
-and never directly. No `web → backend` edge is ever materialized, because nothing in either repository asserts one.
-A derived shortcut would hide exactly the ambiguity and provenance an agent needs to see.
+and never directly. No `web → backend` edge is materialized on a shared route or endpoint alone, because nothing in
+either repository asserts one, and a derived shortcut would hide exactly the ambiguity and provenance an agent needs to
+see. The one exception is the cross-repository join below, which derives a `CALLS_HTTP_HANDLER` edge only when the
+service identity, the method and the route shape all agree on exactly one handler, and records the evidence of both
+sides on it.
 
 Three kinds, kept apart because each proves a different amount:
 
@@ -1667,8 +1670,8 @@ Five edge types, every one oriented *repository-owned fact → shared node*:
 |---|---|---|
 | `SERVES_HTTP_ROUTE` | handler symbol, or the specification / server file | FastAPI, Flask and Express routes; OpenAPI `paths` operations |
 | `CALLS_HTTP_ROUTE` | calling symbol or file | every statically known client call (for an absolute call, its pathname) |
-| `DECLARES_HTTP_DEPLOYMENT` | specification file | OpenAPI 3 `servers[].url`; Swagger 2 `schemes` × `host` + `basePath` |
-| `EXPOSES_HTTP_ENDPOINT` | specification file | each operation under each applicable base |
+| `DECLARES_HTTP_DEPLOYMENT` | specification file, or a Python module | OpenAPI 3 `servers[].url`; Swagger 2 `schemes` × `host` + `basePath`, in a document or a flasgger template |
+| `EXPOSES_HTTP_ENDPOINT` | specification file, or a handler symbol | each operation under each applicable base; each route of a Flask application its module publishes |
 | `CALLS_HTTP_ENDPOINT` | calling symbol or file | absolute client calls |
 
 **Sources and their limits.** Parsers extract local facts and the linker interns them, and most sides meet by key
@@ -1714,7 +1717,9 @@ Until the pass proves one, it stays a pending claim that records the declaration
   A direct `fetch` (or alias) with a rooted template is recorded too, and never matched: transport code forwards
   whole paths through `fetch`. A template whose substitutions are all in its query is decided in its own file, as a
   literal.
-- **requests and httpx**: module-level functions with absolute URLs only.
+- **requests and httpx**: module-level functions with absolute URLs only. For the cross-repository join (below) a
+  request is also read through a module constant holding a URL, or an f-string on a literal or constant origin whose
+  placeholders each fill one whole segment; that reading adds a join claim and no per-file fact.
 - **axios**: the default export's method aliases with absolute URLs only. A relative axios URL is combined with a
   `baseURL` any file may set.
 
@@ -1789,6 +1794,35 @@ it reads:
 - `GET https://…/users` gives one endpoint key.
 - A bare path is looked up under every method.
 - A bare URL is looked up under every method and as a deployment.
+
+**The cross-repository join** (`repoatlas/graph/http_crossings.py`). A request in one repository is joined to the
+handler another repository serves it with when three things agree, and on exactly one handler:
+- **the service identity.** The provider's source must state where its application is published. The one source read
+  today is a flasgger Swagger 2 template bound, in the application's own module, to that exact Flask application,
+  stating `host`, `schemes` and `basePath` (flasgger applies the template last, so those three decide the deployed
+  document; all three are required). The optional import `try: from flasgger import Swagger` / `except ImportError:
+  Swagger = None` is accepted because calling the fallback raises. Any `Swagger(...)` call the module does not make
+  readably — inside a function, without a positional application, through `**kwargs` — leaves every application in
+  it unpublished. Each route of a published application is exposed at `scheme://host` + `basePath` + route. The
+  request's origin must equal the endpoint's exactly: no alias, no localhost, no `http` for `https`, no DNS;
+- **the method**, read on both sides as for route facts. A method that cannot be read makes no claim;
+- **the route shape**, by `endpoint_matches` in `repoatlas/models/http.py`: equal segment counts, literal segments
+  byte-equal, a request's dynamic segment only against a declared parameter, and — unlike the same-repository rule
+  above — a request's concrete value against a declared parameter, as far as its converter shows: none or `string`
+  accepts any non-empty segment, `int` ASCII digits, and anything else nothing.
+
+Both sides are recorded per file as pending claims, `http-exposed-endpoint` and `http-client-call`, whose meta
+carries the lines that prove them. The exposure claim names the kind of source that stated its identity
+(`identity_source`) and nothing more specific, so another source-backed extractor would produce the same claim and
+the join would not change. The global pass decides every request claim together and never reads its own output:
+`linked`, `http-provider-ambiguous` (two handlers or two repositories agree; nothing is chosen), `same-repository`
+(the route rules above already cover it), `http-route-unmatched` (the service is published, the operation is not)
+or `http-service-unmatched`. A link is one `CALLS_HTTP_HANDLER` edge, *consumer caller → provider handler*,
+provenanced by the request's own file and lines, whose resolution records under `http` the method, the URL as
+written, the endpoint, the deployment, both repositories, and `called_at`, `base_at`, `served_at`, `identity_at`
+and `bound_at`. That record is the evidence that lets the change-impact walk (`repoatlas/graph/impact.py`) cross it, inward only: a handler's
+change may reach the requests, a request's change never reaches the handler. It says the source on both sides names
+the same operation; it does not say the request is sent, or that it reaches this deployment.
 
 **Security.** HTTP extraction reads only files the sync already admitted, so an excluded `.env` holding `API_URL`
 declares nothing and is not cross-resolved. Nothing resolves DNS, fetches a specification or `$ref`, probes an
@@ -2450,7 +2484,11 @@ transaction. `SyncEngine.run` is the boundary that guarantees old complete state
 1. **`prepare_global()`** reads every file row, symbol, standing claim and dependency record, and the HTTP routes
    files serve on their own (never a `linker:global` edge, so the pass does not depend on its own previous output),
    resolves them, and returns a `GlobalPlan` — the complete replacement graph, in memory. It **writes nothing**,
-   including no interned entities: planned endpoints are carried as natural keys, not row ids.
+   including no interned entities: planned endpoints are carried as natural keys, not row ids. The cross-repository
+   HTTP join (§5) is decided here too, from the per-file exposure and request claims alone, so every
+   `CALLS_HTTP_HANDLER` edge is replaced on every sync with the rest of the pass: an edit to either side, or to a
+   published identity, needs no invalidation of its own. The join itself is rerun over those claims, which the pass
+   already reads, on every sync; an ordinary body edit adds no invalidation anywhere.
 2. **`commit_global(plan)`** opens one transaction and, inside it, deletes every `linker:global` edge, interns the
    planned endpoints, inserts the complete new set, and collects orphans.
 

@@ -175,6 +175,39 @@ class PackageCrossing(BaseModel):
     local: str | None = None
 
 
+class HttpCrossing(BaseModel):
+    """How one step crossed from a repository serving a handler into one requesting it.
+
+    The evidence an HTTP join recorded (:mod:`repoatlas.graph.http_crossings`), each
+    part locatable as ``<repository>/<path>:<line>``. On the consumer's side: the
+    request (``called_at``) and, when its URL or base came from a module constant, that
+    constant (``base_at``). On the provider's side: the route's declaration
+    (``served_at``), the source that states where the service is published
+    (``identity_source``, ``identity_at``) and where that identity is bound to the
+    serving application (``bound_at``). The request's method and URL as written, and
+    the endpoint it reached, name the operation both sides state.
+
+    The edge runs *consumer caller → provider handler*; the step reads it inward, from
+    the handler to the request, the way a change travels. The repositories are named
+    by role, never by that direction. Source evidence, not a runtime observation.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    method: str
+    url: str
+    endpoint: str
+    deployment: str
+    provider_repository: str
+    consumer_repository: str
+    called_at: str
+    base_at: str | None = None
+    served_at: str
+    identity_source: str
+    identity_at: str | None = None
+    bound_at: str | None = None
+
+
 class ImpactStep(BaseModel):
     """The one fact connecting a candidate to its predecessor.
 
@@ -200,6 +233,8 @@ class ImpactStep(BaseModel):
     via_names: tuple[str, ...] = ()
     #: The package evidence of a step that crosses from one repository into another.
     crossing: PackageCrossing | None = None
+    #: The HTTP evidence of a step from a handler to a request in another repository.
+    http: HttpCrossing | None = None
     #: The edge's recorded resolution; ``full`` only.
     resolution: dict[str, object] | None = None
 

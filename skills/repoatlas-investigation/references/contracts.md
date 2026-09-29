@@ -241,6 +241,14 @@ If several repositories serve or expose the same node, they are all candidates. 
 
 An endpoint a specification composes from a server URL and a path has no single source span, so its edge is not citable. Cite the server and route lines, which are separately citable.
 
+**A request joined to a handler in another repository.** When a Python service's own source states where it is published (a flasgger Swagger 2 template) and a request in another repository names the same origin, method and route shape, RepoAtlas records one `CALLS_HTTP_HANDLER` edge from the calling declaration to the handler, and only when exactly one handler agrees. `repoatlas_impact` follows it from the handler (or anything the handler depends on) to the request, never the other way. The step's `http` block names both sides by role, each part as `repository/path:line`:
+
+- `consumer_repository`, `called_at` (the request) and `base_at` (the module constant its URL or base came from);
+- `provider_repository`, `served_at` (the route decorator), `identity_source`, `identity_at` (the line naming the host) and `bound_at` (where that identity is bound to the application);
+- `method`, `url` as the request writes it, `endpoint` as the service declares it, and `deployment`.
+
+Read those lines before stating the relationship, and state it as source evidence: "portal's `load_user` requests GET https://accounts.example/api/users/{user_id}, which accounts' `get_user` serves under the host its Swagger template publishes." It is not proof the request is sent at run time or reaches that deployment.
+
 ## HTTP inventory and coverage
 
 `repoatlas_http_operations` lists one repository's HTTP operations: the requests its source makes and the routes it serves or declares. Use it when the question is "which of these calls has a handler?", "which handlers has nothing calling them?" or "what does this client request?" — not as a search.

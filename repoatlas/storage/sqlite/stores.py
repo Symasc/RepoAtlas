@@ -29,6 +29,7 @@ from repoatlas.models.parsing import (
 )
 from repoatlas.models.repository import FileState, IndexedFile, Repository, SyncStatus
 from repoatlas.storage.protocols import (
+    EVIDENCE_PATHS,
     ChunkHit,
     Confinement,
     EdgeRecord,
@@ -1334,20 +1335,20 @@ class SqliteKnowledgeStore:
                   WHERE u.type = 'USES' AND u.dst_id = e.{near}_id
                     AND ue.file_id = {far}.file_id))"""  # noqa: S608 - column names only
         # Which edges may join two repositories: a crossing type, or an evidenced type
-        # whose own resolution records the package evidence (repoatlas.graph.packages).
+        # whose own resolution records the evidence (EVIDENCE_PATHS): a package link's
+        # (repoatlas.graph.packages), an HTTP join's (repoatlas.graph.http_crossings).
         crossed = sorted(str(t) for t in confinement.crossing)
-        evidenced = sorted(str(t) for t in confinement.evidenced)
+        evidenced = sorted(
+            (str(t), EVIDENCE_PATHS[t]) for t in confinement.evidenced if t in EVIDENCE_PATHS
+        )
         admitted: list[str] = []
         admitted_params: list[object] = []
         if crossed:
             admitted.append(f"e.type IN ({','.join('?' * len(crossed))})")
             admitted_params.extend(crossed)
-        if evidenced:
-            admitted.append(
-                f"(e.type IN ({','.join('?' * len(evidenced))})"
-                " AND json_extract(e.resolution, '$.crossing.package') IS NOT NULL)"
-            )
-            admitted_params.extend(evidenced)
+        for edge_type, path in evidenced:
+            admitted.append(f"(e.type = ? AND json_extract(e.resolution, '{path}') IS NOT NULL)")
+            admitted_params.append(edge_type)
         may_cross = " OR ".join(admitted)
         crossing = ""
         if may_cross:

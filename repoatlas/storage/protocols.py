@@ -358,14 +358,24 @@ class NeighborEdge(BaseModel):
         )
 
 
+#: Where, in an edge's resolution, the evidence that lets an edge of an evidenced type join
+#: two repositories is recorded: a package link's crossing record
+#: (repoatlas.graph.packages), and an HTTP join's (repoatlas.graph.http_crossings). A type
+#: with no entry here never crosses on evidence.
+EVIDENCE_PATHS: dict[EdgeType, str] = {
+    EdgeType.USES: "$.crossing.package",
+    EdgeType.CALLS_HTTP_HANDLER: "$.http.provider",
+}
+
+
 class Confinement(BaseModel):
     """Which edges the change-impact walk may follow out of the node it stands on.
 
     The rule :func:`repoatlas.graph.traversal.walk` applies to the edges it reads,
     stated as a value, and widened for the change-impact walk. An edge whose two ends
     belong to different repositories is followed only when its type is in
-    ``crossing``, or is in ``evidenced`` and the edge itself records the package
-    evidence for the crossing; and under ``home_repo_id``, only when its far end
+    ``crossing``, or is in ``evidenced`` and the edge itself records the evidence for
+    the crossing (:data:`EVIDENCE_PATHS`); and under ``home_repo_id``, only when its far end
     belongs to that repository or to none (a shared node: an environment variable, an
     HTTP operation, a package). Under ``scope_repo_ids`` the far end must belong to
     one of those repositories or to none, whatever else admits it. :meth:`admits` is

@@ -21,7 +21,7 @@ from repoatlas.graph.impact import FAMILIES
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.impact import ImpactCandidate, ImpactRequest, ImpactResponse, ImpactRole
 from repoatlas.services.workspace import Workspace, open_workspace
-from tests.impact_corpus import build, verify_steps
+from tests.impact_corpus import HTTP_API, HTTP_WEB, build, verify_steps
 from tests.xrepo_corpus import LINKING
 
 GLOBAL = CapabilityContext(scope=CapabilityScope.GLOBAL)
@@ -40,7 +40,7 @@ def _open(root: Path) -> Workspace:
         }
     )
     workspace = open_workspace(settings=settings, require_root=False)
-    return build(workspace, root, LINKING)
+    return build(workspace, root, {**LINKING, "http-api": HTTP_API, "http-web": HTTP_WEB})
 
 
 @pytest.fixture(scope="module")
@@ -132,7 +132,18 @@ def test_n6_an_edge_joining_repositories_without_its_evidence_is_never_followed(
 # -- the crossing family, in its stored direction --------------------------------------
 
 #: Each family that crosses on evidence: (seed, reached, the stored edge).
-CROSSING_CASES = {"uses": (COURSE_ROLE, CAN_EDIT, ("USES", CAN_EDIT, COURSE_ROLE))}
+CROSSING_CASES = {
+    "uses": (COURSE_ROLE, CAN_EDIT, ("USES", CAN_EDIT, COURSE_ROLE)),
+    "http": (
+        "sym:http-api:app.py:get_item:9",
+        "sym:http-web:client.py:load_item:4",
+        (
+            "CALLS_HTTP_HANDLER",
+            "sym:http-web:client.py:load_item:4",
+            "sym:http-api:app.py:get_item:9",
+        ),
+    ),
+}
 
 
 def test_every_family_that_crosses_has_a_crossing_case() -> None:

@@ -19,7 +19,7 @@ from repoatlas.graph.impact import DERIVED_READINGS, FAMILIES, MEMBER, MEMBER_OF
 from repoatlas.models.capability import CapabilityContext, CapabilityScope, Presentation
 from repoatlas.models.impact import ImpactCandidate, ImpactRequest, ImpactResponse, ImpactRole
 from repoatlas.services.workspace import Workspace, open_workspace
-from tests.impact_corpus import DIRECTION, build, verify_steps
+from tests.impact_corpus import DIRECTION, HTTP_API, HTTP_WEB, build, verify_steps
 
 GLOBAL = CapabilityContext(scope=CapabilityScope.GLOBAL)
 D = "sym:direction:"
@@ -110,6 +110,16 @@ CASES: dict[str, Case] = {
         ImpactRole.DEPENDENT,
         ("CALLS_HTTP_ROUTE", f"{D}src/client.ts:loadItems:1", "http-route:GET:/v1/items"),
     ),
+    "http": Case(
+        "sym:http-api:app.py:get_item:9",
+        "sym:http-web:client.py:load_item:4",
+        ImpactRole.DEPENDENT,
+        (
+            "CALLS_HTTP_HANDLER",
+            "sym:http-web:client.py:load_item:4",
+            "sym:http-api:app.py:get_item:9",
+        ),
+    ),
     "imports": Case(
         "file:direction:src/a.ts",
         "file:direction:src/b.ts",
@@ -131,7 +141,11 @@ def indexed(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Workspace]:
         }
     )
     workspace = open_workspace(settings=settings, require_root=False)
-    build(workspace, root, {"direction": DIRECTION})
+    build(
+        workspace,
+        root,
+        {"direction": DIRECTION, "http-api": HTTP_API, "http-web": HTTP_WEB},
+    )
     yield workspace
     workspace.close()
 

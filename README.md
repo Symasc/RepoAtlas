@@ -27,7 +27,7 @@ validated; see the checklist in [docs/V1_SPEC.md §23](docs/V1_SPEC.md#23-implem
 | Python, TypeScript/JavaScript, Bash, Salt, Jinja, YAML/JSON, Dockerfile | Ruby structure (text search and gem dependencies only) |
 | Dependency detection across pypi, npm and gem — declared *and* resolved versions | — |
 | Cross-file imports and cross-repository relationships | — |
-| HTTP routes, declared deployments and endpoints shared across repositories (OpenAPI 3, Swagger 2, FastAPI, Flask, Express, NestJS, fetch and request wrappers, requests, httpx, axios); client path templates matched by shape to routes served in their own repository | cross-repository template matching, direct `fetch` template matching, OpenAPI server variables, infrastructure manifests |
+| HTTP routes, declared deployments and endpoints shared across repositories (OpenAPI 3, Swagger 2, FastAPI, Flask, Express, NestJS, fetch and request wrappers, requests, httpx, axios); client path templates matched by shape to routes served in their own repository; Python requests joined to the Flask handler another repository serves them with, when a flasgger Swagger 2 template publishes its service, and followed by change impact | other service-identity sources (config files, FastAPI `servers`, OpenAPI files tied to handlers), TypeScript callers in the join, client objects and sessions, direct `fetch` template matching, OpenAPI server variables, infrastructure manifests |
 | Exact search, semantic search, bounded graph expansion, rank fusion | — |
 | Docker image and compose stack, read-only repository mounts | — |
 
@@ -42,7 +42,10 @@ HTTP operations are graph facts too. A backend route or OpenAPI operation and a 
 method and path meet on one shared `http-route` node, and a declared server URL plus an absolute client call meet on
 one `http-endpoint` node, so `relationships` can show both sides without either repository naming the other. These
 are static declarations: nothing is resolved, fetched or probed, and a declared deployment is not evidence that
-anything is live. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#http-routes-deployments-and-endpoints).
+anything is live. When a Python service's own source states where it is published and another repository's request
+names that origin, method and route shape, the request is joined to the one handler that serves it, and
+`repoatlas_impact` follows the join from the handler to the request with the evidence of both sides. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#http-routes-deployments-and-endpoints).
 
 Embeddings use a local [fastembed](https://github.com/qdrant/fastembed) model (`BAAI/bge-small-en-v1.5`, ONNX, no
 PyTorch, no paid API). It is **not** downloaded automatically — an ordinary `sync` never stalls on a 67 MB fetch.

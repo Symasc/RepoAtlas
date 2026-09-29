@@ -66,7 +66,7 @@ class EdgeType(enum.StrEnum):
     GENERATES = "GENERATES"
     #: HTTP linkage. Every one is stored as *repository-owned fact → shared HTTP
     #: node*; none joins two repositories directly, so two sides of an API meet
-    #: on the node and nowhere else.
+    #: on the node and nowhere else — :attr:`CALLS_HTTP_HANDLER` is the one exception.
     SERVES_HTTP_ROUTE = "SERVES_HTTP_ROUTE"
     CALLS_HTTP_ROUTE = "CALLS_HTTP_ROUTE"
     DECLARES_HTTP_DEPLOYMENT = "DECLARES_HTTP_DEPLOYMENT"
@@ -78,6 +78,12 @@ class EdgeType(enum.StrEnum):
     #: that proves it (repoatlas.parsers.ts_uses). Traversed only when asked for by
     #: name, never by search expansion, and within one repository by construction.
     USES = "USES"
+    #: A request reaches the handler another repository serves it with: *consumer
+    #: caller → provider handler*, derived by the global pass only when the service
+    #: identity, the method and the route shape all agree on exactly one handler
+    #: (repoatlas.graph.http_crossings). Its resolution records the evidence on both
+    #: sides; the change-impact walk follows it inward, from a handler to its callers.
+    CALLS_HTTP_HANDLER = "CALLS_HTTP_HANDLER"
 
 
 #: The target key of the one ``USES`` claim per file that is its export table, not a use
