@@ -58,6 +58,7 @@ from typing import Any
 
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedFile, ParsedReference
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION, PYTHON_SETUPTOOLS
+from repoatlas.parsers.requirements import python_requirement
 
 #: Larger than any hand-written project file; beyond it the file records nothing.
 _MAX_BYTES = 256 * 1024
@@ -197,9 +198,6 @@ def setup_cfg_facts(content: str) -> dict[str, Any] | None:
 
 def _requirements(entries: list[str]) -> bool:
     """Whether every entry is one requirement, as the dependency layer reads it."""
-    # here, not at the top: the dependency layer imports this module (cfg_values)
-    from repoatlas.dependencies.normalize import python_requirement
-
     return all("#" not in entry and python_requirement(entry) is not None for entry in entries)
 
 
