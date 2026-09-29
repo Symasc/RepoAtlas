@@ -46,29 +46,32 @@ def _find_line(content: str, needle: str, start: int = 0) -> int:
     return line_at(content, index) if index != -1 else 1
 
 
-class _ArrayItems:
-    """Where each element of every array in a TOML document starts, by the array's key path.
+class _TomlPlaces:
+    """Where each key's value and each array element starts in a TOML document, by key path.
 
-    ``tomllib`` gives values but no positions, and searching the file for a requirement's
-    text finds ``"flask"`` in ``name = "flaskr"``. This walks the document's syntax
-    instead -- table headers, dotted and quoted keys, inline tables, arrays, the four kinds
-    of string, comments -- and records each element's offset with its value when it is a
-    string. It only ever reads text ``tomllib`` has accepted, so it diagnoses nothing.
+    ``tomllib`` gives values but no positions, and searching the file for a value's text
+    finds ``"flask"`` in ``name = "flaskr"``, or ``name = "app"`` in another table. This
+    walks the document's syntax instead -- table headers, dotted and quoted keys, inline
+    tables, arrays, the four kinds of string, comments -- and records where each value
+    starts, with the string it holds. It only ever reads text ``tomllib`` has accepted, so
+    it diagnoses nothing.
     """
 
     def __init__(self, content: str) -> None:
         self._text = content
         self._at = 0
+        #: Each key's value, as (offset, the string it holds or ``None``).
+        self.values: dict[tuple[str, ...], tuple[int, str | None]] = {}
         #: Each array's elements, as (offset, the string it holds or ``None``).
         self.items: dict[tuple[str, ...], list[tuple[int, str | None]]] = {}
 
-    def walk(self) -> dict[tuple[str, ...], list[tuple[int, str | None]]]:
+    def walk(self) -> _TomlPlaces:
         table: tuple[str, ...] = ()
         text = self._text
         while True:
             self._skip(newlines=True)
             if self._at >= len(text):
-                return self.items
+                return self
             if text[self._at] == "[":
                 width = 2 if text.startswith("[[", self._at) else 1
                 self._at += width
@@ -80,7 +83,11 @@ class _ArrayItems:
                 self._skip()
                 self._at += 1  # "="
                 self._skip()
-                self._value(table + key)
+                self._keyed(table + key)
+
+    def _keyed(self, path: tuple[str, ...]) -> None:
+        start = self._at
+        self.values[path] = (start, self._value(path))
 
     def _skip(self, *, newlines: bool = False) -> None:
         text = self._text
@@ -141,7 +148,7 @@ class _ArrayItems:
                 self._skip()
                 self._at += 1  # "="
                 self._skip()
-                self._value(path + key)
+                self._keyed(path + key)
                 self._skip()
                 if text[self._at] == ",":
                     self._at += 1
@@ -175,11 +182,16 @@ class _ArrayItems:
         return str(tomllib.loads(f"v = {text[start:at]}")["v"])
 
 
+def _value_line(content: str, place: tuple[int, str | None] | None, value: str) -> int:
+    """The line a value starts on, when it holds the ``value`` read there."""
+    if place is not None and place[1] == value:
+        return line_at(content, place[0])
+    return 1
+
+
 def _item_line(content: str, items: list[tuple[int, str | None]], index: int, value: str) -> int:
     """The line array element ``index`` starts on, when it holds the ``value`` read there."""
-    if index < len(items) and items[index][1] == value:
-        return line_at(content, items[index][0])
-    return 1
+    return _value_line(content, items[index] if index < len(items) else None, value)
 
 
 def _declared(
@@ -203,9 +215,10 @@ class PyProjectParser:
     kind: DependencyKind = "manifest"
     name = "pyproject"
     # 2: line numbers follow the shared source-line model. 3: a PEP 621 requirement's
-    # line is its own array element's, read from the TOML syntax. +pyX.Y: read with the
-    # running interpreter's standard library (repoatlas.parsers.interpreter).
-    version = f"3+{interpreter_tag()}"
+    # line is its own array element's, read from the TOML syntax. 4: so is the line of
+    # the name [project] provides. +pyX.Y: read with the running interpreter's standard
+    # library (repoatlas.parsers.interpreter).
+    version = f"4+{interpreter_tag()}"
 
     def supports(self, path: Path) -> bool:
         return path.name == "pyproject.toml"
@@ -247,6 +260,7 @@ class PyProjectParser:
         declared: list[DeclaredDependency],
         provides: list[ProvidedPackage],
     ) -> None:
+        found = _TomlPlaces(content).walk()
         name = project.get("name")
         if isinstance(name, str):
             version = project.get("version")
@@ -257,25 +271,22 @@ class PyProjectParser:
                     normalized_name=normalize(PYPI, name),
                     version=version if isinstance(version, str) else None,
                     manifest_path=path.as_posix(),
-                    line=_find_line(content, f'name = "{name}"'),
+                    line=_value_line(content, found.values.get(("project", "name")), name),
                 )
             )
 
         dependencies = project.get("dependencies")
-        optional = project.get("optional-dependencies")
-        if not isinstance(dependencies, list) and not isinstance(optional, dict):
-            return
-        items = _ArrayItems(content).walk()
         if isinstance(dependencies, list):
-            places = items.get(("project", "dependencies"), [])
+            places = found.items.get(("project", "dependencies"), [])
             for index, specifier in enumerate(dependencies):
                 self._requirement(specifier, "main", path, content, places, index, declared)
 
+        optional = project.get("optional-dependencies")
         if isinstance(optional, dict):
             for group, entries in optional.items():
                 if not isinstance(entries, list):
                     continue
-                places = items.get(("project", "optional-dependencies", group), [])
+                places = found.items.get(("project", "optional-dependencies", group), [])
                 for index, specifier in enumerate(entries):
                     self._requirement(
                         specifier, f"optional:{group}", path, content, places, index, declared

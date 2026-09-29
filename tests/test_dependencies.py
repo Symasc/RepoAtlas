@@ -167,6 +167,41 @@ def test_requirement_lines_under_a_dotted_root_key() -> None:
     assert _declared_lines(content) == [("fixture", "main", 4)]
 
 
+def _provided_lines(content: str) -> list[tuple[str, int]]:
+    report = PyProjectParser().parse(Path("pyproject.toml"), content)
+    return [(p.name, p.line) for p in report.provides]
+
+
+def test_the_provided_name_is_found_at_project_name_not_in_a_description() -> None:
+    content = (
+        '[project]\ndescription = """\nInstall it as\nname = "fixture"\n"""\nname = "fixture"\n'
+    )
+    assert _provided_lines(content) == [("fixture", 6)]
+
+
+def test_the_provided_name_is_found_at_project_name_not_in_keywords_or_authors() -> None:
+    content = (
+        '[project]\nkeywords = ["fixture", \'name = "fixture"\']\n'
+        'authors = [{ name = "fixture" }]\n'
+        'name = "fixture"\n'
+    )
+    assert _provided_lines(content) == [("fixture", 4)]
+
+
+def test_the_provided_name_is_found_at_project_name_not_in_another_table() -> None:
+    content = (
+        '[[tool.uv.index]]\nname = "fixture"\nurl = "https://example.invalid/simple"\n'
+        '[project]\nname = "fixture"\ndependencies = ["fixture-extra"]\n'
+    )
+    assert _provided_lines(content) == [("fixture", 5)]
+
+
+def test_the_provided_name_is_found_however_it_is_spelled() -> None:
+    assert _provided_lines("[project]\nversion = '1'\nname='fixture'\n") == [("fixture", 3)]
+    inline = 'title = "fixture"\nproject = { version = "1", name = "fixture" }\n'
+    assert _provided_lines(inline) == [("fixture", 2)]
+
+
 def test_poetry_table_is_read_as_well_as_pep621() -> None:
     report = PyProjectParser().parse(
         Path("pyproject.toml"),
