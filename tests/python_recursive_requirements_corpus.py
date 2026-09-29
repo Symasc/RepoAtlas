@@ -15,6 +15,8 @@ from tests.python_legacy_corpus import AUTH_MODELS, AUTH_PACKAGE, HYBRID, consum
 
 AUTH = "fixture-auth\n"
 OTHER = "fixture-other\n"
+#: A setup.cfg stating no setuptools metadata: tool settings only.
+TOOL_CFG = "[flake8]\nmax-line-length = 100\n"
 
 INCLUDES: dict[str, dict[str, str]] = {
     "explicit-auth": HYBRID["explicit-auth"],
@@ -103,6 +105,13 @@ INCLUDES: dict[str, dict[str, str]] = {
     # R18: the root points at a.txt, stating another name; b.txt, beside it, states the one
     "retarget": consumer(
         "-r requirements/a.txt\n", {"requirements/a.txt": OTHER, "requirements/b.txt": AUTH}
+    ),
+    # P3a's R24 rule, which a root setup.cfg of tool settings alone still exercises: it makes
+    # no project, and the repository is not metadata-less, so neither the root nor a file it
+    # includes declares
+    "tool-config-root": consumer(AUTH, {"setup.cfg": TOOL_CFG}),
+    "tool-config-include": consumer(
+        "-r requirements/base.txt\n", {"setup.cfg": TOOL_CFG, "requirements/base.txt": AUTH}
     ),
     # +U: files the root does not reach declare nothing, whatever they are called
     "unreached": consumer(
