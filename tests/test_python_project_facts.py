@@ -27,7 +27,10 @@ def facts(content: str) -> dict[str, object] | None:
 
 
 def test_a_pep621_project_records_its_distribution_name_as_written() -> None:
-    assert facts('[project]\nname = "Internal-Auth"\nversion = "1"\n') == {"name": "Internal-Auth"}
+    assert facts('[project]\nname = "Internal-Auth"\nversion = "1"\n') == {
+        "name": "Internal-Auth",
+        "dependencies": "static",
+    }
 
 
 def test_hatch_wheel_packages_are_the_layout_read() -> None:
@@ -38,6 +41,7 @@ def test_hatch_wheel_packages_are_the_layout_read() -> None:
     )
     assert facts(content) == {
         "name": "demo",
+        "dependencies": "static",
         "backend": "hatchling.build",
         "packages": ["src/demo"],
     }
@@ -51,13 +55,18 @@ def test_a_layout_this_does_not_read_is_named_not_guessed() -> None:
     )
     assert facts(content) == {
         "name": "demo",
+        "dependencies": "static",
         "unread": ["tool.setuptools.package-dir", "tool.setuptools.packages"],
     }
 
 
 def test_a_malformed_hatch_packages_list_is_unread() -> None:
     content = '[project]\nname = "d"\n[tool.hatch.build.targets.wheel]\npackages = "src/d"\n'
-    assert facts(content) == {"name": "d", "unread": ["tool.hatch.build.targets.wheel.packages"]}
+    assert facts(content) == {
+        "name": "d",
+        "dependencies": "static",
+        "unread": ["tool.hatch.build.targets.wheel.packages"],
+    }
 
 
 def test_poetry_names_the_project_and_every_name_it_declares() -> None:
@@ -84,11 +93,13 @@ def test_flit_module_is_the_layout_read_and_a_malformed_one_is_unread() -> None:
     )
     assert facts(content) == {
         "name": "Fixture-Dist",
+        "dependencies": "static",
         "backend": "flit_core.buildapi",
         "flit_module": "fixture_pkg",
     }
     assert facts('[project]\nname = "d"\n[tool.flit.module]\nname = 3\n') == {
         "name": "d",
+        "dependencies": "static",
         "unread": ["tool.flit.module.name"],
     }
 
@@ -115,6 +126,7 @@ def test_uv_sources_and_workspace_are_recorded_by_distribution() -> None:
     )
     assert facts(content) == {
         "name": "app",
+        "dependencies": "static",
         "uv_sources": {
             "Internal_Auth": {"path": "../auth", "editable": True},
             "shared": {"workspace": True},
@@ -129,6 +141,20 @@ def test_uv_sources_and_workspace_are_recorded_by_distribution() -> None:
 
 def test_a_build_system_alone_makes_a_project() -> None:
     assert facts('[build-system]\nrequires = ["setuptools"]\n') == {}
+
+
+def test_whether_project_states_its_dependencies() -> None:
+    """P3c: a [project] table owns its dependencies unless `dynamic` names them; then a
+    setup.py or setup.cfg may state them, or [tool.setuptools.dynamic] reads them from a
+    file, which is not read. Without [project] nothing is recorded."""
+    project = '[project]\nname = "d"\n'
+    assert facts(project)["dependencies"] == "static"  # type: ignore[index]
+    assert facts(project + 'dependencies = ["x"]\n')["dependencies"] == "static"  # type: ignore[index]
+    dynamic = project + 'dynamic = ["version", "dependencies"]\n'
+    assert facts(dynamic)["dependencies"] == "dynamic"  # type: ignore[index]
+    files = dynamic + '[tool.setuptools.dynamic]\ndependencies = {file = ["r.txt"]}\n'
+    assert facts(files)["dependencies"] == "unread"  # type: ignore[index]
+    assert "dependencies" not in facts('[build-system]\nrequires = ["setuptools"]\n')  # type: ignore[operator]
 
 
 def test_tool_settings_alone_are_no_project() -> None:

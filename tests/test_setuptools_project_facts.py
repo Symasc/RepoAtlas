@@ -292,7 +292,7 @@ def test_a_literal_setup_call_is_read(call: str, expected: dict[str, object]) ->
         ('NAME = "x"\nsetup(name=NAME)', ["setup.name"]),  # no constant propagation
         ('suffix = "a"\nsetup(name=f"x-{suffix}")', ["setup.name"]),
         ("setup(name=get_name())", ["setup.name"]),
-        ("config = {}\nsetup(**config)", ["setup.layout", "setup.name"]),
+        ("config = {}\nsetup(**config)", ["setup.install_requires", "setup.layout", "setup.name"]),
         ('setup(name="x", package_dir=get_package_dir())', ["setup.layout"]),
         ('EXCL = ["t"]\nsetup(name="x", packages=find_packages(exclude=EXCL))', ["setup.layout"]),
         # find_packages("src") with no package_dir: the build would look for them at the root
@@ -307,6 +307,78 @@ def test_anything_setup_would_compute_is_unread(source: str, unread: list[str]) 
     found = py_facts(SETUP + source + "\n")
     assert found is not None and found.get("unread") == unread
     assert ("name" not in found and "layout" not in found) or unread == ["setup.layout"]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('setup(name="x", install_requires=["a>=1", "b"])', {"name": "x", "requires": True}),
+        ('setup(install_requires=("a",))', {"requires": True}),
+        ("setup(install_requires=[])", {"requires": True}),  # states no dependency
+        ("setup(install_requires=[\"a; python_version < '3.12'\"])", {"requires": True}),
+        # D5: nothing computed is read, and none makes the name unread
+        (
+            'REQS = ["a"]\nsetup(name="x", install_requires=REQS)',
+            {"name": "x", "unread": ["setup.install_requires"]},
+        ),
+        ('setup(install_requires=["a"] + EXTRA)', {"unread": ["setup.install_requires"]}),
+        (
+            'setup(install_requires=open("r.txt").readlines())',
+            {"unread": ["setup.install_requires"]},
+        ),
+        ('v = "1"\nsetup(install_requires=[f"a>={v}"])', {"unread": ["setup.install_requires"]}),
+        ('setup(install_requires=["a", ""])', {"unread": ["setup.install_requires"]}),
+        ('setup(install_requires=["a"], requires=["b"])', {"unread": ["setup.install_requires"]}),
+        ('if cond:\n    setup(install_requires=["a"])', {"unread": ["setup.install_requires"]}),
+        (
+            'setup(install_requires=["a"])\nsetup(name="y")',
+            {"unread": ["setup.install_requires", "setup.name"]},
+        ),
+        (
+            'setup(name="x")\nother.setup(install_requires=["a"])',
+            {"name": "x", "unread": ["setup.install_requires"]},
+        ),
+        ('setup(name="x", extras_require={"pg": ["psycopg"]})', {"name": "x"}),  # extras: never
+    ],
+)
+def test_install_requires_is_read_only_as_literal_requirements(
+    source: str, expected: dict[str, object]
+) -> None:
+    assert py_facts(SETUP + source + "\n") == {"metadata": True, **expected}
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        ("install_requires =\n    a>=1\n    b\n", {"requires": True}),
+        ("install_requires = a>=1\n", {"requires": True}),
+        (
+            "install_requires =\n    # a comment\n    a ; python_version < '3.12'\n",
+            {"requires": True},
+        ),
+        ("install_requires =\n", {"requires": True}),  # states no dependency
+        ("install_requires = file: requirements.txt\n", {"unread": ["options.install_requires"]}),
+        (
+            "install_requires = a; python_version < '3.12'\n",
+            {"unread": ["options.install_requires"]},
+        ),
+        ("install_requires = a, b\n", {"unread": ["options.install_requires"]}),
+        ("install_requires =\n    a  # the web\n", {"unread": ["options.install_requires"]}),
+        ("base = a\ninstall_requires =\n    %(base)s\n", {"unread": ["options.install_requires"]}),
+        ("install-requires =\n    a\n", {"unread": ["options.install_requires"]}),
+        ("Install_Requires =\n    a\n", {"unread": ["options.install_requires"]}),
+        ("setup_requires =\n    a\n", {}),  # D9 and the like: only install_requires
+    ],
+)
+def test_setup_cfg_install_requires_is_read_only_in_its_plain_shapes(
+    options: str, expected: dict[str, object]
+) -> None:
+    content = (
+        "[metadata]\nname = x\n\n[options]\n"
+        + options
+        + "\n[options.extras_require]\npg = psycopg\n"
+    )
+    assert facts(content) == {"metadata": True, "name": "x", **expected}
 
 
 def test_the_attribute_form_and_a_setup_inside_a_function() -> None:
