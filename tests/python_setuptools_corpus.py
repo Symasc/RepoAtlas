@@ -153,6 +153,13 @@ SETUPTOOLS: dict[str, dict[str, str]] = {
         ),
         **FLAT,
     },
+    # S11/SM1b: a name bound elsewhere, beside a setup.cfg stating the same one: setup()
+    # would pass it, and it is still never evaluated
+    "const-name-cfg": {
+        "setup.cfg": "[metadata]\nname = fixture-auth\n[options]\npackages = find:\n",
+        "setup.py": 'from setuptools import setup\n\nNAME = "fixture-auth"\nsetup(name=NAME)\n',
+        **FLAT,
+    },
     # S12: a layout setup() computes: never discovered instead
     "dyn-layout": {
         "setup.py": (

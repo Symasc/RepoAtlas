@@ -128,6 +128,7 @@ def test_s3_s15_the_module_is_found_on_disk_never_spelled_from_the_distribution(
         ("conflict-layout", "consumer", "module-not-found"),  # S10: no root is read
         ("dyn-name", "consumer", "provider-unnamed"),  # S11: setup() may override the cfg
         ("const-name", "consumer", "provider-unnamed"),  # S11: no constant propagation
+        ("const-name-cfg", "consumer", "provider-unnamed"),  # ... even where it would agree
         ("dyn-layout", "consumer", "module-not-found"),  # S12: never discovered instead
         ("where-elsewhere", "consumer", "module-not-found"),  # S26
         ("nested-app", "consumer", "module-not-found"),  # R1: no nested project (SM5)
