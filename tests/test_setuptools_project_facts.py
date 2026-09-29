@@ -15,6 +15,7 @@ from repoatlas.config.settings import Settings
 from repoatlas.dependencies.python import SetupCfgParser
 from repoatlas.models.parsing import EntityType
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION, PYTHON_SETUPTOOLS
+from repoatlas.parsers.python import PythonParser
 from repoatlas.parsers.registry import ParserRegistry
 from repoatlas.parsers.setuptools_project import SetuptoolsProjectParser, cfg_places
 from repoatlas.services.workspace import Workspace
@@ -185,3 +186,93 @@ def test_indexing_records_the_fact_and_nothing_a_reader_sees_otherwise(
         "WHERE f.rel_path = 'setup.cfg'"
     ).fetchall()
     assert "".join(row[0] for row in chunks).count("name = demo") == 1
+
+
+# -- setup.py: its one static setup() call, read with ast and never run (C2) ------------
+
+
+def py_facts(content: str, name: str = "setup.py") -> dict[str, object] | None:
+    parsed = PythonParser().parse(Path(name), content)
+    found = [r for r in parsed.references if r.meta.get(MODULE_RESOLUTION) == PYTHON_SETUPTOOLS]
+    if not found:
+        return None
+    [reference] = found
+    return json.loads(reference.meta["facts"])
+
+
+SETUP = "from setuptools import setup, find_packages\n\n"
+
+
+@pytest.mark.parametrize(
+    ("call", "expected"),
+    [
+        ('setup(name="x")', {"name": "x"}),
+        (
+            'setup(name="x", package_dir={"": "src"})',
+            {"name": "x", "layout": {"root": "src"}},
+        ),
+        ('setup(py_modules=["x"])', {"layout": {"root": "", "py_modules": ["x"]}}),
+        (
+            'setup(packages=["x", "x.sub"])',
+            {"layout": {"root": "", "packages": ["x", "x.sub"]}},
+        ),
+        (
+            'setup(package_dir={"": "src"}, packages=find_packages("src"))',
+            {"layout": {"root": "src", "packages": "find", "include": [], "exclude": []}},
+        ),
+        (
+            'setup(package_dir={"": "src"}, packages=find_packages(where="src", exclude=["t*"]))',
+            {"layout": {"root": "src", "packages": "find", "include": [], "exclude": ["t*"]}},
+        ),
+        ("setup()", {}),  # the shim: a setup.cfg states the project
+    ],
+)
+def test_a_literal_setup_call_is_read(call: str, expected: dict[str, object]) -> None:
+    assert py_facts(SETUP + call + "\n") == {"metadata": True, **expected}
+
+
+@pytest.mark.parametrize(
+    ("source", "unread"),
+    [
+        ('NAME = "x"\nsetup(name=NAME)', ["setup.name"]),  # no constant propagation
+        ('suffix = "a"\nsetup(name=f"x-{suffix}")', ["setup.name"]),
+        ("setup(name=get_name())", ["setup.name"]),
+        ("config = {}\nsetup(**config)", ["setup.layout", "setup.name"]),
+        ('setup(name="x", package_dir=get_package_dir())', ["setup.layout"]),
+        ('EXCL = ["t"]\nsetup(name="x", packages=find_packages(exclude=EXCL))', ["setup.layout"]),
+        # find_packages("src") with no package_dir: the build would look for them at the root
+        ('setup(name="x", packages=find_packages("src"))', ["setup.layout"]),
+        ('setup(name="x", package_dir={"pkg": "lib"}, packages=["pkg"])', ["setup.layout"]),
+        ('if cond:\n    setup(name="x")', ["setup.name"]),
+        ('if __name__ == "__main__":\n    setup(name="x")', ["setup.name"]),
+        ('setup(name="x")\nsetup(name="y")', ["setup.name"]),
+    ],
+)
+def test_anything_setup_would_compute_is_unread(source: str, unread: list[str]) -> None:
+    found = py_facts(SETUP + source + "\n")
+    assert found is not None and found.get("unread") == unread
+    assert ("name" not in found and "layout" not in found) or unread == ["setup.layout"]
+
+
+def test_the_attribute_form_and_a_setup_inside_a_function() -> None:
+    assert py_facts("import setuptools\n\nsetuptools.setup()\n") == {"metadata": True}
+    # markupsafe: setup() with only build keywords, inside a function, states nothing
+    source = SETUP + "def run(binary):\n    setup(cmdclass={}, ext_modules=[])\n\nrun(True)\n"
+    assert py_facts(source) == {"metadata": True}
+    aliased = 'import setuptools as st\n\nst.setup(name="x", py_modules=["x"])\n'
+    assert py_facts(aliased) == {
+        "metadata": True,
+        "name": "x",
+        "layout": {"root": "", "py_modules": ["x"]},
+    }
+
+
+def test_no_setuptools_setup_is_no_metadata() -> None:
+    assert py_facts("import django\n\ndjango.setup()\n") is None
+    assert py_facts('print("setup")\n') is None
+    assert py_facts(SETUP + 'setup(name="x")\n', name="build.py") is None
+
+
+def test_an_unbound_setup_stating_a_name_makes_the_bound_one_unreadable() -> None:
+    source = SETUP + 'setup(py_modules=["x"])\nother.setup(name="y")\n'
+    assert py_facts(source) == {"metadata": True, "unread": ["setup.layout", "setup.name"]}

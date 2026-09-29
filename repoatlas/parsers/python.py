@@ -28,6 +28,7 @@ from repoatlas.parsers.http_python import PythonHttp
 from repoatlas.parsers.interpreter import interpreter_tag
 from repoatlas.parsers.marks import whole_file_span
 from repoatlas.parsers.py_uses import PythonUseAnalysis, python_use_references
+from repoatlas.parsers.setuptools_project import setup_py_facts, setuptools_reference
 
 _SUFFIXES = frozenset({".py", ".pyi"})
 
@@ -347,10 +348,12 @@ class PythonParser:
     #    proven `requests` or `httpx` call makes, become HTTP facts.
     # 5: declarations' uses of the names they import or the module declares, and the
     #    file's export table (repoatlas.parsers.py_uses).
+    # 6: a setup.py records what its one static setup() call states about its project
+    #    (repoatlas.parsers.setuptools_project).
     # +pyX.Y: `ast` is the running interpreter's, and what it accepts moves with the
     #    interpreter (repoatlas.parsers.interpreter), so facts parsed by another one
     #    are never kept.
-    version = f"5+{interpreter_tag()}"
+    version = f"6+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
@@ -408,10 +411,15 @@ class PythonParser:
             line_end=whole_file_last,
         )
 
+        setuptools = setup_py_facts(tree) if path.name == "setup.py" else None
         return ParsedFile(
             language=self.language,
             parser=self.name,
             parser_version=self.version,
             symbols=(module_symbol, *visitor.symbols),
-            references=(*visitor.references, *uses),
+            references=(
+                *visitor.references,
+                *uses,
+                *(() if setuptools is None else (setuptools_reference(setuptools, content),)),
+            ),
         )

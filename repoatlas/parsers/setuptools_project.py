@@ -1,4 +1,4 @@
-"""What a ``setup.cfg`` states about a Python project, read statically, never run.
+"""What a ``setup.cfg`` or ``setup.py`` states about a Python project, read statically.
 
 A setuptools project states its distribution name and where its modules live in
 ``setup.cfg``, in ``setup.py`` keywords, or in ``pyproject.toml``. The ``USES`` stage
@@ -26,10 +26,24 @@ static layout rules need:
 
 Where a key is written is found by :func:`cfg_places`, which walks the file as
 ``configparser`` does -- never by searching the text for the value.
+
+A ``setup.py`` is **read with ``ast``, never run** (V1_SPEC §17), and is setuptools metadata
+only when it calls ``setup`` as bound at module level from ``setuptools`` or
+``distutils.core`` (``from setuptools import setup``, ``import setuptools`` then
+``setuptools.setup``). Its keywords are read only when that is its one ``setup()`` call, an
+expression statement of the module itself, with no ``**`` -- ``if cond: setup(...)`` or two
+calls may pass either -- and only as literals: ``name`` a string, ``package_dir`` the root
+mapping ``{"": "src"}``, ``packages`` a list or ``find_packages(...)`` /
+``find_namespace_packages(...)`` with literal ``where``/``include``/``exclude``,
+``py_modules`` a list of names. A name bound to a string elsewhere, an f-string, a call, a
+computed dictionary: each is **unread**, never evaluated -- there is no constant propagation
+here. A ``setup()`` that states no name and no layout, the shim modern projects keep beside
+their ``setup.cfg``, records that it is setuptools metadata and nothing else.
 """
 
 from __future__ import annotations
 
+import ast
 import configparser
 import json
 import re
@@ -204,6 +218,192 @@ def _layout(parser: configparser.ConfigParser, raw: dict[str, str]) -> dict[str,
             return None
         layout["py_modules"] = modules
     return layout
+
+
+def _bindings(tree: ast.Module) -> tuple[set[str], set[str], dict[str, str]]:
+    """What the module binds at its own level: names of setuptools' ``setup``, names of the
+    ``setuptools`` module, and names of its package finders (-> ``find`` or
+    ``find_namespace``)."""
+    setup: set[str] = set()
+    modules: set[str] = set()
+    finders: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.level == 0:
+            for alias in node.names:
+                local = alias.asname or alias.name
+                if node.module in ("setuptools", "distutils.core") and alias.name == "setup":
+                    setup.add(local)
+                elif node.module == "setuptools" and alias.name == "find_packages":
+                    finders[local] = "find"
+                elif node.module == "setuptools" and alias.name == "find_namespace_packages":
+                    finders[local] = "find_namespace"
+        elif isinstance(node, ast.Import):
+            modules.update(
+                alias.asname or "setuptools" for alias in node.names if alias.name == "setuptools"
+            )
+    return setup, modules, finders
+
+
+def _callee(call: ast.Call) -> tuple[str | None, str | None]:
+    """A call's callee as (name, the name it is an attribute of): ``setup(...)`` is
+    ``("setup", None)``, ``setuptools.setup(...)`` ``("setup", "setuptools")``."""
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id, None
+    if isinstance(func, ast.Attribute):
+        return func.attr, func.value.id if isinstance(func.value, ast.Name) else ""
+    return None, None
+
+
+def _literals(node: ast.AST) -> list[str] | None:
+    """A literal list or tuple of strings."""
+    if isinstance(node, ast.List | ast.Tuple) and all(
+        isinstance(element, ast.Constant) and isinstance(element.value, str)
+        for element in node.elts
+    ):
+        return [element.value for element in node.elts][:_MAX_ENTRIES]  # type: ignore[attr-defined]
+    return None
+
+
+def _stated(call: ast.Call) -> set[str]:
+    """What a setup() call may state: its name, its layout; ``**`` may state either."""
+    keys = {keyword.arg for keyword in call.keywords}
+    if None in keys:
+        return {"name", "layout"}
+    return ({"name"} if "name" in keys else set()) | (
+        {"layout"} if keys & set(LAYOUT_KEYS) else set()
+    )
+
+
+def setup_py_facts(tree: ast.Module) -> dict[str, Any] | None:
+    """What a ``setup.py``'s one static setup() call states, or ``None`` when the file calls
+    no ``setup`` bound from setuptools or distutils."""
+    setup, modules, finders = _bindings(tree)
+    bound: list[ast.Call] = []
+    named: list[ast.Call] = []  # called ``setup``, bound to something else or to nothing
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            name, owner = _callee(node)
+            if (owner is None and name in setup) or (owner in modules and name == "setup"):
+                bound.append(node)
+            elif name == "setup":
+                named.append(node)
+    if not bound:
+        return None
+    facts: dict[str, Any] = {"metadata": True}
+    stated = set().union(*(_stated(call) for call in (*bound, *named)))
+    if not stated:
+        return facts  # the shim: a setup() stating no name and no layout
+    top = {id(statement.value) for statement in tree.body if isinstance(statement, ast.Expr)}
+    [call, *others] = bound
+    if (
+        others
+        or any(_stated(c) for c in named)
+        or id(call) not in top
+        or None in {keyword.arg for keyword in call.keywords}
+    ):
+        facts["unread"] = sorted(f"setup.{field}" for field in stated)
+        return facts
+    keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+    unread: list[str] = []
+    name = keywords.get("name")
+    if name is not None:
+        if isinstance(name, ast.Constant) and isinstance(name.value, str) and name.value:
+            facts["name"] = name.value
+        else:
+            unread.append("setup.name")
+    if set(keywords) & set(LAYOUT_KEYS):
+        layout = _setup_layout(keywords, finders, modules)
+        if layout is None:
+            unread.append("setup.layout")
+        else:
+            facts["layout"] = layout
+    if unread:
+        facts["unread"] = unread
+    return facts
+
+
+def _setup_layout(
+    keywords: dict[str | None, ast.expr], finders: dict[str, str], modules: set[str]
+) -> dict[str, Any] | None:
+    """The layout setup()'s keywords state, normalised as ``[options]``'s, or ``None``."""
+    root = ""
+    if "package_dir" in keywords:
+        node = keywords["package_dir"]
+        if not (
+            isinstance(node, ast.Dict)
+            and len(node.keys) == 1
+            and isinstance(node.keys[0], ast.Constant)
+            and node.keys[0].value == ""
+            and isinstance(node.values[0], ast.Constant)
+            and isinstance(node.values[0].value, str)
+        ):
+            return None
+        found = project_path(node.values[0].value)
+        if found is None:
+            return None
+        root = found
+    layout: dict[str, Any] = {"root": root}
+    if "packages" in keywords:
+        node = keywords["packages"]
+        listed = _literals(node)
+        if listed is not None:
+            if not dotted(listed):
+                return None
+            layout["packages"] = listed
+        elif isinstance(node, ast.Call):
+            found = _finder(node, finders, modules)
+            if found is None or found[1] != root:
+                return None
+            mode, _, include, exclude = found
+            layout.update(packages=mode, include=include, exclude=exclude)
+        else:
+            return None
+    if "py_modules" in keywords:
+        listed = _literals(keywords["py_modules"])
+        if listed is None or not all(module.isidentifier() for module in listed):
+            return None
+        layout["py_modules"] = listed
+    return layout
+
+
+def _finder(
+    call: ast.Call, finders: dict[str, str], modules: set[str]
+) -> tuple[str, str, list[str], list[str]] | None:
+    """(mode, where, include, exclude) of a literal ``find_packages(...)`` call."""
+    name, owner = _callee(call)
+    if owner is None and name in finders:
+        mode = finders[name]
+    elif owner in modules and name in ("find_packages", "find_namespace_packages"):
+        mode = "find" if name == "find_packages" else "find_namespace"
+    else:
+        return None
+    order = ("where", "exclude", "include")
+    if len(call.args) > len(order) or any(isinstance(a, ast.Starred) for a in call.args):
+        return None
+    given: dict[str, ast.expr] = dict(zip(order, call.args, strict=False))
+    for keyword in call.keywords:
+        if keyword.arg not in order or keyword.arg in given:
+            return None
+        given[keyword.arg] = keyword.value
+    where = ""
+    if "where" in given:
+        node = given["where"]
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            return None
+        found = project_path(node.value)
+        if found is None:
+            return None
+        where = found
+    patterns: dict[str, list[str]] = {}
+    for key in ("include", "exclude"):
+        if key in given:
+            listed = _literals(given[key])
+            if listed is None:
+                return None
+            patterns[key] = listed
+    include = patterns.get("include", [])
+    return mode, where, [] if include == ["*"] else include, patterns.get("exclude", [])
 
 
 def setuptools_reference(facts: dict[str, Any], content: str) -> ParsedReference:
