@@ -64,16 +64,20 @@ _SECTION = re.compile(r"\[(?P<header>.+)\]")
 _OPTION = re.compile(r"(?P<option>.*?)\s*(?P<vi>=|:)\s*(?P<value>.*)$")
 
 
-def cfg_places(content: str) -> dict[tuple[str, str], int]:
-    """(section, option as written) -> the line the option is written on.
+def cfg_values(content: str) -> dict[tuple[str, str], tuple[int, list[tuple[int, str]]]]:
+    """(section, option as written) -> the line the option is written on, and each line of
+    its value that holds text, with that text stripped: the option line's own, then each
+    continuation line.
 
     Walks the file as ``configparser`` reads it: full-line ``#`` and ``;`` comments, blank
     lines, values continued on lines indented deeper than their option, section headers,
-    ``=`` or ``:`` between an option and its value.
+    ``=`` or ``:`` between an option and its value. An option written twice keeps its first
+    place and value; ``configparser`` refuses such a file anyway.
     """
-    places: dict[tuple[str, str], int] = {}
+    values: dict[tuple[str, str], tuple[int, list[tuple[int, str]]]] = {}
     section: str | None = None
     option: str | None = None
+    lines: list[tuple[int, str]] | None = None
     indent_level = 0
     for number, line in enumerate(content.splitlines(), start=1):
         stripped = line.strip()
@@ -81,18 +85,28 @@ def cfg_places(content: str) -> dict[tuple[str, str], int]:
             continue
         indent = len(line) - len(line.lstrip())
         if section is not None and option is not None and indent > indent_level:
-            continue  # a value continued
+            if lines is not None:
+                lines.append((number, stripped))  # a value continued
+            continue
         indent_level = indent
         header = _SECTION.match(stripped)
         if header:
-            section, option = header.group("header"), None
+            section, option, lines = header.group("header"), None, None
             continue
         found = _OPTION.match(stripped)
         if found and section is not None:
             key = found.group("option").rstrip()
-            places.setdefault((section, key), number)
-            option = key
-    return places
+            option, lines = key, None
+            if (section, key) not in values:
+                value = found.group("value").strip()
+                lines = [(number, value)] if value else []
+                values[(section, key)] = (number, lines)
+    return values
+
+
+def cfg_places(content: str) -> dict[tuple[str, str], int]:
+    """(section, option as written) -> the line the option is written on (:func:`cfg_values`)."""
+    return {key: line for key, (line, _) in cfg_values(content).items()}
 
 
 def cfg_list(value: str) -> list[str]:

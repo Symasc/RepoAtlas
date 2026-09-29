@@ -156,6 +156,61 @@ def test_the_provided_name_is_located_where_the_option_is_written() -> None:
     assert [(p.name, p.line) for p in inherited.provides] == [("shared", 2)]
 
 
+def declared_lines(content: str) -> list[tuple[str, str, int]]:
+    report = SetupCfgParser().parse(Path("setup.cfg"), content)
+    return [(d.name, d.group, d.line) for d in report.declared]
+
+
+def test_each_requirement_is_located_on_its_own_value_line() -> None:
+    """SetupCfgParser 4 (D2): the entry under `install_requires`, never an earlier mention of
+    the same text in `description`, `keywords` or a comment (CM3)."""
+    content = (
+        "[metadata]\nname = fixture-client\ndescription = fixture-auth integration\n"
+        "keywords = fixture-auth\n# fixture-auth>=1 was here\n\n"
+        "[options]\npackages = find:\ninstall_requires =\n    fixture-auth>=1\n"
+    )
+    assert declared_lines(content) == [("fixture-auth", "main", 10)]
+
+
+def test_overlapping_names_each_keep_their_own_line() -> None:
+    """D3: `fixture-auth` is inside `fixture-auth-extra`; each row is its own line."""
+    content = (
+        "[options]\ninstall_requires =\n    fixture-auth-extra\n    fixture-auth\n"
+        "tests_require =\n    fixture-auth\n"
+    )
+    assert declared_lines(content) == [
+        ("fixture-auth-extra", "main", 3),
+        ("fixture-auth", "main", 4),
+        ("fixture-auth", "test", 6),
+    ]
+
+
+def test_comments_blank_lines_tabs_and_a_one_line_value_keep_exact_lines() -> None:
+    """D20: full-line comments and blank lines inside the list are skipped as configparser
+    skips them, a tab indents like spaces, and a one-line value is on its option's line."""
+    content = (
+        "[options]\ninstall_requires =\n    # the web framework\n    fixture-web>=2\n\n"
+        "\tfixture-auth ; python_version < '3.12'\n    ; retired\n    fixture-db\n"
+        "setup_requires = fixture-build\n"
+    )
+    assert declared_lines(content) == [
+        ("fixture-web", "main", 4),
+        ("fixture-auth", "main", 6),
+        ("fixture-db", "main", 8),
+        ("fixture-build", "build", 9),
+    ]
+
+
+def test_a_value_the_syntax_does_not_give_verbatim_is_placed_on_its_option() -> None:
+    """Where configparser's value differs from the written lines (an interpolation), each
+    row takes the option's own line: still where it is written, never a text search."""
+    content = (
+        "[metadata]\nname = fixture-auth\n\n[options]\nbase = fixture-auth\n"
+        "install_requires =\n    %(base)s>=1\n    fixture-db\n"
+    )
+    assert declared_lines(content) == [("fixture-auth", "main", 6), ("fixture-db", "main", 6)]
+
+
 def test_indexing_records_the_fact_and_nothing_a_reader_sees_otherwise(
     settings: Settings, workspace: Workspace, tmp_path: Path
 ) -> None:
