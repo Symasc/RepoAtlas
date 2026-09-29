@@ -14,6 +14,8 @@ the declaration, pin or layout it exists to prove.
 * ``pinned``: the same, pinned by a uv ``path`` to ``../provider`` (P15);
 * ``mispinned`` / ``unpinned``: a uv ``path`` to ``../shadow``, and to nowhere: refused,
   never answered by the name (P15);
+* ``both``: declares ``internal-fixture`` and ``internal-fixture-shadow``, each a project
+  shipping ``internal_fixture``: two providers the evidence accepts, joined to neither;
 * ``distpkg``: distribution ``fixture-dist`` shipping ``fixture_pkg``; ``rightname``
   declares ``fixture-dist`` and ``wrongname`` declares ``fixture-pkg`` (P13);
 * ``unread``: declarations in forms this does not read -- Poetry, a PEP 508 direct
@@ -22,7 +24,8 @@ the declaration, pin or layout it exists to prove.
 ``TWINS`` adds a second provider of ``internal-fixture`` beside ``provider`` and
 ``consumer`` (P16). ``UVWS`` is one repository holding a uv workspace (P12b by
 workspace): a virtual root whose sources every member inherits, a member overriding
-them, and one the workspace excludes.
+them, one the workspace excludes, and a second ``lib`` outside its members, which only
+the workspace's own source tells apart.
 """
 
 from __future__ import annotations
@@ -56,10 +59,11 @@ SHADOW: dict[str, str] = {
 }
 
 
-def _consumer(extra: str = "", dependency: str = "internal-fixture>=1.0") -> dict[str, str]:
+def _consumer(extra: str = "", *dependencies: str) -> dict[str, str]:
+    declared = ", ".join(f'"{d}"' for d in dependencies or ("internal-fixture>=1.0",))
     return {
         "pyproject.toml": (
-            f'[project]\nname = "consumer-app"\ndependencies = ["{dependency}"]\n{extra}'
+            f'[project]\nname = "consumer-app"\ndependencies = [{declared}]\n{extra}'
         ),
         "src/consumer_app/__init__.py": "",
         "src/consumer_app/service.py": (
@@ -122,6 +126,7 @@ XREPO: dict[str, dict[str, str]] = {
     "pinned": _consumer('[tool.uv.sources]\ninternal-fixture = { path = "../provider" }\n'),
     "mispinned": _consumer('[tool.uv.sources]\ninternal-fixture = { path = "../shadow" }\n'),
     "unpinned": _consumer('[tool.uv.sources]\ninternal-fixture = { path = "../nowhere" }\n'),
+    "both": _consumer("", "internal-fixture>=1.0", "internal-fixture-shadow"),
     "distpkg": DISTPKG,
     "rightname": _importer("fixture-dist"),
     "wrongname": _importer("fixture-pkg"),
@@ -153,6 +158,9 @@ UVWS: dict[str, str] = {
     "packages/tool/src/tool/__init__.py": (
         "from lib import helper\ndef go():\n    return helper()\n"
     ),
+    # outside the members: another `lib`, so the name alone names two
+    "shared/lib/pyproject.toml": '[project]\nname = "lib"\n',
+    "shared/lib/src/lib/__init__.py": "def helper():\n    return 2\n",
     # excluded from the workspace: `workspace = true` has no workspace to name
     "packages/legacy/pyproject.toml": (
         '[project]\nname = "legacy"\ndependencies = ["lib"]\n'
