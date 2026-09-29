@@ -28,6 +28,7 @@ from tests.python_packages_corpus import (
 )
 
 GLOBAL = CapabilityContext(scope=CapabilityScope.GLOBAL)
+SEED = "sym:provider:src/internal_fixture/models.py:make:3"
 
 
 @pytest.fixture
@@ -142,8 +143,7 @@ def test_p12b_a_uv_workspace_member_inherits_its_roots_source(
 def test_p18_a_change_reaches_the_consumer_in_another_repository_and_its_test(
     xrepo: Workspace,
 ) -> None:
-    seed = "sym:provider:src/internal_fixture/models.py:make:3"
-    response = CapabilityService(xrepo).impact(ImpactRequest(context=GLOBAL, seed=seed))
+    response = CapabilityService(xrepo).impact(ImpactRequest(context=GLOBAL, seed=SEED))
     by_entity = {c.entity: c for c in (*response.candidates, *response.tests)}
     consumer = by_entity[f"sym:consumer:{SERVICE}:build:4"]
     assert consumer.distance == 1
@@ -152,3 +152,13 @@ def test_p18_a_change_reaches_the_consumer_in_another_repository_and_its_test(
     assert consumer.step.crossing.declared_by == "consumer/pyproject.toml:3"
     [test] = [c for c in response.tests if c.entity.startswith("sym:consumer:tests/")]
     assert (test.distance, test.from_) == (2, consumer.id)
+
+
+def test_a_dependent_is_listed_only_when_its_declaration_names_the_provider(
+    xrepo: Workspace,
+) -> None:
+    """A version, or a uv path to the provider, names it; a uv path anywhere else, a git
+    source, a direct reference or a Poetry table does not -- as a package link reads it."""
+    response = CapabilityService(xrepo).impact(ImpactRequest(context=GLOBAL, seed=SEED))
+    listed = {p.dependent for p in response.packages if p.package == "pypi:internal-fixture"}
+    assert listed == {"consumer:.", "pinned:."}

@@ -44,6 +44,7 @@ top-level module, and wins at run time; nothing indexed can show it.
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -58,7 +59,8 @@ from repoatlas.graph.packages import ProviderTargets, Provision
 from repoatlas.graph.py_modules import Project, PythonModules, Root, root_detail
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models.dependencies import DependencyRecord
-from repoatlas.storage.protocols import FileRow
+from repoatlas.parsers.module_facts import MODULE_RESOLUTION, PYTHON_PROJECT
+from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
 
 #: The ``basis`` of a module another project provides, on the evidence above.
 PYTHON_DEPENDENCY = "python-dependency"
@@ -253,6 +255,15 @@ class PythonTargets:
         slug = self._slugs.get(workspace.repo_id, "")
         return members[0], {"resolved_by": "workspace", "workspace": f"{slug}/{workspace.manifest}"}
 
+    def unread(self, repo_id: int, directory: str, wanted: str, constraints: Iterable[str]) -> bool:
+        """Whether a project declares ``wanted`` in a form this does not read: in Poetry's
+        tables, or as a PEP 508 direct reference (``name @ ...``)."""
+        stated = self._stated.get((repo_id, directory))
+        poetry = stated[1].get("poetry_dependencies") if stated is not None else None
+        if isinstance(poetry, list) and wanted in {normalize(PYPI, str(n)) for n in poetry}:
+            return True
+        return any(c.strip().startswith("@") for c in constraints)
+
     def pinned(
         self, repo_id: int, directory: str, wanted: str
     ) -> tuple[Provision, dict[str, str]] | str | None:
@@ -280,6 +291,35 @@ class PythonTargets:
     def _place(self, repo_id: int, directory: str) -> str | None:
         root = self._root_of.get(repo_id)
         return None if root is None else path_target(root, directory, "")
+
+
+def stored_python_targets(
+    records: Sequence[DependencyRecord],
+    facts: Sequence[UnresolvedRefRecord],
+    paths: Mapping[int, str],
+    roots: Mapping[int, str],
+    slugs: Mapping[int, str],
+) -> PythonTargets:
+    """The targets a Python package link reads, rebuilt from stored rows to answer a query.
+
+    As :func:`~repoatlas.graph.packages.stored_targets` rebuilds npm's: ``records`` are the
+    dependency rows, ``facts`` the module-resolution claims, and ``paths`` each of their
+    files' repository-relative path.
+    """
+    provisions = [
+        Provision(r.repo_id, _parent(path), path, r.line_start, r.name, r.normalized_name)
+        for r in records
+        if r.ecosystem == PYPI and r.role == "provided" and (path := paths.get(r.file_id))
+    ]
+    provisions.sort(key=lambda p: (slugs.get(p.repo_id, ""), p.manifest, p.line, p.name))
+    stated: dict[tuple[int, str], tuple[str, Mapping[str, Any]]] = {}
+    for claim in facts:
+        meta = json.loads(claim.meta_json) if claim.meta_json else {}
+        path = paths.get(claim.file_id)
+        if meta.get(MODULE_RESOLUTION) != PYTHON_PROJECT or path is None:
+            continue
+        stated[(claim.repo_id, _parent(path))] = (path, json.loads(meta.get("facts") or "{}"))
+    return PythonTargets(roots, provisions, stated, slugs)
 
 
 class PythonPackageLinks:
@@ -402,15 +442,12 @@ class PythonPackageLinks:
         self, own: Project, wanted: str
     ) -> tuple[Provision, _Declaration, dict[str, str]] | str:
         """The provider the project's declaration of ``wanted`` names, or why none."""
-        stated = self._modules.stated.get((own.repo_id, own.directory))
-        poetry = stated[1].get("poetry_dependencies") if stated is not None else None
-        if isinstance(poetry, list) and wanted in {normalize(PYPI, str(n)) for n in poetry}:
-            return "dependency-unread"  # a Poetry declaration: a form this does not read
         declaration = self._declared.get((own.repo_id, own.manifest), {}).get(wanted)
+        constraints = declaration.constraints if declaration is not None else ()
+        if self.targets.unread(own.repo_id, own.directory, wanted, constraints):
+            return "dependency-unread"
         if declaration is None:
             return "dependency-absent"
-        if any(c.startswith("@") for c in declaration.constraints):
-            return "dependency-unread"  # a PEP 508 direct reference
         pinned = self.targets.pinned(own.repo_id, own.directory, wanted)
         if isinstance(pinned, str):
             return pinned

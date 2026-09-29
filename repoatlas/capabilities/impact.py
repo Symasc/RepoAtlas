@@ -25,11 +25,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
+from repoatlas.dependencies.normalize import PYPI
 from repoatlas.graph.declared import REFUSED_AS, TargetKind, classify_dependency_target
 from repoatlas.graph.impact import ImpactWalk, Node, Tier, WalkResult, is_test_path
 from repoatlas.graph.keys import file_key, package_key
 from repoatlas.graph.packages import CROSSING, ProviderTargets, stored_targets
+from repoatlas.graph.py_packages import PythonTargets, stored_python_targets
 from repoatlas.graph.units import package_directories, unit_of
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.impact import (
@@ -923,11 +926,16 @@ def _declares_the_provider(
     names (:mod:`repoatlas.graph.declared`), as a package link reads it: an alias of
     another package, a remote source or an unreadable form is not it, and a path or a
     workspace must lead to ``provider``, the seed's own providing manifest (repository,
-    directory).
+    directory). A PyPI declaration is read as a Python package link reads it
+    (:func:`_python_declares`).
     """
     mine = [r for r in records if r.repo_id == repo_id and (r.ecosystem, r.normalized_name) == name]
     if repo_id is None or row.file_path is None or any(r.role == "provided" for r in mine):
         return False
+    if name[0] == PYPI:
+        return _python_declares(
+            mine, repo_id, row.file_id, row.file_path, name[1], provider, targets
+        )
     for record in mine:
         if record.role != "declared" or record.file_id != row.file_id:
             continue
@@ -949,11 +957,46 @@ def _declares_the_provider(
     return True
 
 
-class _Targets:
-    """Where paths and workspaces lead (:class:`ProviderTargets`), read once when first asked.
+def _python_declares(
+    records: Sequence[DependencyRecord],
+    repo_id: int,
+    file_id: int | None,
+    manifest: str,
+    wanted: str,
+    provider: tuple[int, str],
+    targets: _Targets,
+) -> bool:
+    """:func:`_declares_the_provider` for a PyPI declaration, read as a Python package link
+    reads it (:mod:`repoatlas.graph.py_packages`).
 
-    Only a declaration that pins its provider asks, so an answer with none reads nothing
-    more; the read is charged, and ``None`` when the budget refuses it.
+    A direct reference (``name @ ...``) or a name Poetry's tables declare is not read; a
+    ``pyproject.toml``'s uv source -- its own, or its workspace root's -- must lead to
+    ``provider``; a version names the package.
+    """
+    constraints = [
+        r.constraint or "" for r in records if r.role == "declared" and r.file_id == file_id
+    ]
+    if PurePosixPath(manifest).name != "pyproject.toml":
+        return not any(c.strip().startswith("@") for c in constraints)
+    found = targets.python()
+    if found is None:
+        return False
+    directory = manifest.rpartition("/")[0]
+    if found.unread(repo_id, directory, wanted, constraints):
+        return False
+    pinned = found.pinned(repo_id, directory, wanted)
+    if pinned is None:
+        return True
+    return not isinstance(pinned, str) and (pinned[0].repo_id, pinned[0].directory) == provider
+
+
+class _Targets:
+    """Where paths, workspaces and uv sources lead -- npm's (:class:`ProviderTargets`) and
+    Python's (:class:`PythonTargets`) -- read once when first asked.
+
+    Only a declaration that pins its provider, or a Python project's, asks, so an answer
+    with none reads nothing more; the read is charged, and ``None`` when the budget
+    refuses it.
     """
 
     def __init__(
@@ -967,10 +1010,18 @@ class _Targets:
         self._dependencies = dependencies
         self._walk = walk
         self._roots = roots
-        self._built: ProviderTargets | None = None
+        self._built: tuple[ProviderTargets, PythonTargets] | None = None
         self._asked = False
 
     def __call__(self) -> ProviderTargets | None:
+        built = self._read()
+        return None if built is None else built[0]
+
+    def python(self) -> PythonTargets | None:
+        built = self._read()
+        return None if built is None else built[1]
+
+    def _read(self) -> tuple[ProviderTargets, PythonTargets] | None:
         if not self._asked:
             self._asked = True
             if self._walk.work.query():
@@ -978,13 +1029,11 @@ class _Targets:
                 facts = self._knowledge.list_module_facts()
                 files = sorted({r.file_id for r in records} | {c.file_id for c in facts})
                 places = self._knowledge.file_locations(files)
+                paths = {file_id: path for file_id, (_, path) in places.items()}
                 slugs = {i: s for i in self._roots if (s := self._walk.slug_of(i)) is not None}
-                self._built = stored_targets(
-                    records,
-                    facts,
-                    {file_id: path for file_id, (_, path) in places.items()},
-                    self._roots,
-                    slugs,
+                self._built = (
+                    stored_targets(records, facts, paths, self._roots, slugs),
+                    stored_python_targets(records, facts, paths, self._roots, slugs),
                 )
         return self._built
 
