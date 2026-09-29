@@ -52,6 +52,7 @@ from repoatlas.graph.declared import (
     TargetKind,
     classify_dependency_target,
     path_target,
+    root_path,
 )
 from repoatlas.graph.modules import (
     ModuleResolver,
@@ -168,7 +169,7 @@ class PackageLinks:
                 every = tuple(sorted(constraints[(repo_id, directory, name)]))
                 names[name] = _Declaration(first.manifest, first.line, first.constraint, every)
         self._targets = ProviderTargets(
-            {repo_id: str(path) for path, repo_id in index.repo_roots},
+            {repo_id: root_path(path) for path, repo_id in index.repo_roots},
             [p for provisions in self._provided.values() for p in provisions],
             modules.workspace_declarations,
             index.repo_slugs,
