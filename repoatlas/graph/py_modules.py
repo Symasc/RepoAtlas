@@ -9,8 +9,9 @@ itself. This module decides roots from what the index holds, and nothing else: n
 
 **Projects.** A ``pyproject.toml`` that is a project (:mod:`repoatlas.parsers.python_project`)
 owns every file under its directory that no project nested deeper owns. A repository
-with no Python project at all is one implicit project, its root. A file outside every
-project of a repository that has projects belongs to none.
+with no Python project at all is one implicit project, its root; with no ``setup.py`` or
+``setup.cfg`` at its root either, it is *metadata-less* (:meth:`PythonModules.metadata_less`).
+A file outside every project of a repository that has projects belongs to none.
 
 **Roots.** A project's roots are the directories its hatchling ``packages`` name, which
 also limit the top-level names it provides; or, for flit's ``[tool.flit.module] name``,
@@ -148,8 +149,23 @@ class PythonModules:
         self._roots: dict[tuple[int, str], list[Root] | str] = {}
         self._resolved: dict[tuple[int, str, str], ModuleTarget | str] = {}
         self._shipping: dict[str, list[Project]] | None = None
+        #: Repositories stating any Python project fact.
+        self._stating = frozenset(repo_id for repo_id, _ in self.stated)
 
     # -- projects and roots ------------------------------------------------------
+
+    def metadata_less(self, repo_id: int) -> bool:
+        """Whether a repository states nothing about Python packaging: no project fact of
+        any kind, a virtual workspace root's included, and no ``setup.py`` or ``setup.cfg``
+        at its root, whatever they say.
+
+        Only such a repository's implicit project is declared by its root
+        ``requirements.txt`` (:mod:`repoatlas.graph.py_packages`).
+        """
+        repository = self._repos.get(repo_id)
+        if repository is None or not repository.implicit or repo_id in self._stating:
+            return False
+        return not any(self._file(repo_id, name) for name in ("setup.py", "setup.cfg"))
 
     def project_of(self, repo_id: int, rel_path: str) -> Project | None:
         """The innermost project whose directory holds ``rel_path``, if any."""

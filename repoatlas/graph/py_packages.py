@@ -11,12 +11,16 @@ importing project's own declaration of a dependency, read here, and nothing else
    never read as a module name: the module is found on disk, and the distribution is
    whatever the project shipping it is called;
 2. **the declaration.** The importer's project declares that project's distribution,
-   PEP 503-normalised, in its ``pyproject.toml``'s PEP 621 dependencies. A name Poetry's
-   tables declare, or a PEP 508 direct reference (``name @ ...``), is a form this does
-   not read: ``dependency-unread``, never a version;
+   PEP 503-normalised, in its ``pyproject.toml``'s PEP 621 dependencies -- or, when its
+   repository states nothing about packaging
+   (:meth:`~repoatlas.graph.py_modules.PythonModules.metadata_less`), in the
+   repository's root ``requirements.txt``, and in no other requirements file. A name
+   Poetry's tables declare, or a PEP 508 direct reference (``name @ ...``), is a form
+   this does not read: ``dependency-unread``, never a version. A requirements line
+   naming a URL or a VCS source (``git+https://...``, ``file:...``) declares nothing;
 3. **the provider it names.** A ``[tool.uv.sources]`` entry for the name -- the
    project's own, or else its workspace root's, which uv applies to every member that
-   does not override it -- pins it:
+   does not override it -- pins it (a root ``requirements.txt`` has none):
 
    * ``path``: followed from the manifest that declares the source, it must reach the
      directory of an indexed manifest providing the name, in whichever repository;
@@ -56,7 +60,7 @@ from repoatlas.dependencies.normalize import PYPI, normalize
 from repoatlas.graph.declared import path_target, root_path
 from repoatlas.graph.modules import ModuleTarget, member_matcher
 from repoatlas.graph.packages import ProviderTargets, Provision
-from repoatlas.graph.py_modules import Project, PythonModules, Root, root_detail
+from repoatlas.graph.py_modules import REPOSITORY_ROOT, Project, PythonModules, Root, root_detail
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION, PYTHON_PROJECT
@@ -64,6 +68,11 @@ from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
 
 #: The ``basis`` of a module another project provides, on the evidence above.
 PYTHON_DEPENDENCY = "python-dependency"
+#: The one requirements file a metadata-less repository's implicit project declares by.
+REQUIREMENTS = "requirements.txt"
+#: How a requirements row read from a URL or VCS line begins: the parser takes ``git``,
+#: ``https`` or ``file`` for its name, which names no distribution.
+_URL_FORM = ("+", ":")
 
 #: What a uv source other than a path or this workspace is refused as.
 _OTHER_SOURCES = {
@@ -354,7 +363,9 @@ class PythonPackageLinks:
             )
         )
         provisions: list[Provision] = []
-        first: dict[tuple[int, str], dict[str, DependencyRecord]] = defaultdict(dict)
+        # By (repository, declaring project's manifest): a pyproject's own path, or the
+        # implicit project's for a metadata-less repository's root requirements.txt.
+        first: dict[tuple[int, str], dict[str, tuple[DependencyRecord, str]]] = defaultdict(dict)
         constraints: dict[tuple[int, str, str], set[str]] = defaultdict(set)
         for record, manifest in located:
             if record.role == "provided":
@@ -368,20 +379,30 @@ class PythonPackageLinks:
                         record.normalized_name,
                     )
                 )
-            elif record.role == "declared" and PurePosixPath(manifest).name == "pyproject.toml":
-                first[(record.repo_id, manifest)].setdefault(record.normalized_name, record)
-                constraints[(record.repo_id, manifest, record.normalized_name)].add(
-                    (record.constraint or "").strip()
-                )
+                continue
+            if record.role != "declared":
+                continue
+            if PurePosixPath(manifest).name == "pyproject.toml":
+                owner = manifest
+            elif manifest == REQUIREMENTS and modules.metadata_less(record.repo_id):
+                if (record.constraint or "").strip().startswith(_URL_FORM):
+                    continue
+                owner = REPOSITORY_ROOT
+            else:
+                continue
+            first[(record.repo_id, owner)].setdefault(record.normalized_name, (record, manifest))
+            constraints[(record.repo_id, owner, record.normalized_name)].add(
+                (record.constraint or "").strip()
+            )
         self._declared: dict[tuple[int, str], dict[str, _Declaration]] = {
             key: {
                 name: _Declaration(
-                    key[1],
+                    manifest,
                     record.line_start,
                     record.constraint,
                     tuple(sorted(constraints[(key[0], key[1], name)])),
                 )
-                for name, record in names.items()
+                for name, (record, manifest) in names.items()
             }
             for key, names in first.items()
         }
@@ -448,7 +469,9 @@ class PythonPackageLinks:
             return "dependency-unread"
         if declaration is None:
             return "dependency-absent"
-        pinned = self.targets.pinned(own.repo_id, own.directory, wanted)
+        # a repository with no pyproject is no uv project: nothing pins its requirements
+        implicit = own.manifest == REPOSITORY_ROOT
+        pinned = None if implicit else self.targets.pinned(own.repo_id, own.directory, wanted)
         if isinstance(pinned, str):
             return pinned
         if pinned is not None:
