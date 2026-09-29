@@ -13,10 +13,13 @@ with no Python project at all is one implicit project, its root. A file outside 
 project of a repository that has projects belongs to none.
 
 **Roots.** A project's roots are the directories its hatchling ``packages`` name, which
-also limit the top-level names it provides; else ``src/`` when that holds a regular
-package or module; else the project's own directory. A project stating any other layout
-is refused (``project-layout-unread``): a layout this does not read is not guessed from
-its directories.
+also limit the top-level names it provides; or, for flit's ``[tool.flit.module] name``,
+the one directory holding that module -- the project's own or its ``src/``, as flit
+itself looks, and never both; else ``src/`` when that holds a regular package or module;
+else the project's own directory. A project stating any other layout is refused
+(``project-layout-unread``): a layout this does not read is not guessed from its
+directories, and an explicit layout that names nothing indexed is refused as well,
+never replaced by discovery.
 
 **Absolute names** resolve only in the importer's own project roots. A project is a
 boundary: another project's modules -- in this repository or any other -- are reached
@@ -79,6 +82,10 @@ class Project:
     manifest: str
     packages: tuple[str, ...] | None = None
     unread: bool = False
+    #: The distribution name as written (``[project] name``), if any.
+    name: str | None = None
+    #: flit's ``[tool.flit.module] name``: the module the project ships.
+    flit: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +116,10 @@ class PythonModules:
             if row is None or meta.get(MODULE_RESOLUTION) != PYTHON_PROJECT:
                 continue
             stated = json.loads(meta.get("facts") or "{}")
+            if stated.get("virtual"):
+                continue  # a workspace root with no project of its own owns no modules
             packages = stated.get("packages")
+            name, flit = stated.get("name"), stated.get("flit_module")
             directory = _parent(row.rel_path)
             self._repos[row.repo_id].projects[directory] = Project(
                 row.repo_id,
@@ -117,6 +127,8 @@ class PythonModules:
                 row.rel_path,
                 tuple(packages) if isinstance(packages, list) else None,
                 bool(stated.get("unread")),
+                name if isinstance(name, str) else None,
+                flit if isinstance(flit, str) else None,
             )
         for repo_id in index.files_by_repo:
             repository = self._repos[repo_id]
@@ -149,8 +161,10 @@ class PythonModules:
         return self._roots[key]
 
     def _find_roots(self, project: Project) -> list[Root] | str:
-        if project.unread:
+        if project.unread or (project.packages is not None and project.flit is not None):
             return "project-layout-unread"
+        if project.flit is not None:
+            return self._flit_root(project, project.flit)
         if project.packages is not None:
             names: dict[str, set[str]] = defaultdict(set)
             for entry in project.packages:
@@ -170,6 +184,36 @@ class PythonModules:
             return [Root(src, "src-layout")]
         basis = REPOSITORY_ROOT if project.manifest == REPOSITORY_ROOT else "flat-layout"
         return [Root(project.directory, basis)]
+
+    def _flit_root(self, project: Project, module: str) -> list[Root] | str:
+        """The one directory flit finds ``module`` in: the project's own, or its ``src/``.
+
+        In each, a package (``module/__init__.py``) before a module (``module.py``), as
+        flit looks. A module found in both is ``module-ambiguous``, in neither
+        ``project-layout-unread``; a dotted name is a module inside a namespace package,
+        refused as ``namespace-package`` where its parent is one, and as
+        ``project-layout-unread`` otherwise, since flit ships no such module.
+        """
+        parts = module.split(".")
+        if not all(part.isidentifier() for part in parts):
+            return "project-layout-unread"
+        found: list[str] = []
+        for base in (project.directory, _join(project.directory, "src")):
+            place = _join(base, "/".join(parts))
+            if self._file(project.repo_id, f"{place}/__init__.py") or self._file(
+                project.repo_id, f"{place}.py"
+            ):
+                found.append(base)
+        if len(found) > 1:
+            return "module-ambiguous"
+        if not found:
+            return "project-layout-unread"
+        if len(parts) > 1:
+            parents = [_join(found[0], "/".join(parts[:k])) for k in range(1, len(parts))]
+            if all(self._file(project.repo_id, f"{d}/__init__.py") for d in parents):
+                return "project-layout-unread"
+            return "namespace-package"
+        return [Root(found[0], "tool.flit.module.name", frozenset(parts))]
 
     def _children(self, repo_id: int, directory: str) -> list[str]:
         """Names of the modules and directories directly inside ``directory``."""

@@ -11,23 +11,28 @@ declaration is recorded here as one module-resolution fact per file, exactly as
 A ``pyproject.toml`` is a Python *project* only when it says so: a ``[project]``,
 ``[tool.poetry]`` or ``[build-system]`` table. One holding only tool settings (a
 ``[tool.ruff]`` beside a TypeScript codebase) is configuration, not a project, and
-records nothing. Recorded, and nothing else:
+records nothing -- except a uv workspace root with no project of its own, which is
+recorded as ``virtual``: it owns no modules, but its members and sources are evidence.
+Recorded, and nothing else:
 
 * ``name``: the distribution name as written, never normalised and never read as an
   import name -- a distribution is not a module (``internal-auth`` may ship
   ``internal_auth``, or ``auth``, or both);
 * ``backend``: ``[build-system] build-backend``;
-* ``packages``: hatchling's ``[tool.hatch.build.targets.wheel] packages``, the one
-  explicit layout this version reads;
+* ``packages``: hatchling's ``[tool.hatch.build.targets.wheel] packages``, and
+  ``flit_module``: flit's ``[tool.flit.module] name``, the module the project ships --
+  the two explicit layouts this version reads;
 * ``unread``: every *other* layout key present -- setuptools ``package-dir`` and
-  ``packages``, poetry ``packages``, flit ``module``, pdm ``package-dir``, uv's build
-  backend ``module-root`` and ``module-name``, hatch ``sources`` and ``only-include``. A
-  project stating a layout this does not read is refused rather than guessed at from
-  its directories;
-* ``uv_sources``, ``uv_workspace`` and ``poetry_paths``: where the project says a
-  dependency comes from, keyed by the dependency's name as written (a parser does not
-  normalise distribution names; resolution does). Recorded for resolution across
-  projects; nothing within one project reads them.
+  ``packages``, poetry ``packages``, pdm ``package-dir``, uv's build backend
+  ``module-root`` and ``module-name``, hatch ``sources`` and ``only-include``, and either
+  explicit layout in a shape it does not take. A project stating a layout this does not
+  read is refused rather than guessed at from its directories;
+* ``uv_sources`` and ``uv_workspace``: where the project says a dependency comes from,
+  keyed by the dependency's name as written (a parser does not normalise distribution
+  names; resolution does), and the workspace it roots;
+* ``poetry_dependencies``: every name Poetry's own tables declare, as written: a
+  declaration in a form resolution does not read, so named rather than taken for one
+  it does.
 
 Values are kept only in the shapes resolution reads, bounded like every module fact.
 The file is ``tomllib``'s to read, so the parser's version carries the interpreter
@@ -55,7 +60,6 @@ _UNREAD_LAYOUT: tuple[tuple[tuple[str, ...], str], ...] = (
     (("tool", "setuptools"), "packages"),
     (("tool", "setuptools"), "py-modules"),
     (("tool", "poetry"), "packages"),
-    (("tool", "flit", "module"), "name"),
     (("tool", "pdm", "build"), "package-dir"),
     (("tool", "pdm", "build"), "includes"),
     (("tool", "uv", "build-backend"), "module-root"),
@@ -86,27 +90,28 @@ def _source(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         # A list is several sources chosen by marker: no one place is named.
         return {"other": "multiple" if isinstance(value, list) else "unreadable"}
+    if "marker" in value:
+        return {"other": "marker"}  # a source for some environments only
     if isinstance(value.get("path"), str):
         return {"path": value["path"], "editable": value.get("editable") is True}
     if value.get("workspace") is True:
         return {"workspace": True}
+    if "workspace" in value:
+        return {"other": "workspace-path"}  # another workspace, by its path
     kind = next((k for k in ("git", "url", "index") if k in value), "unreadable")
     return {"other": kind}
 
 
-def _poetry_paths(poetry: dict[str, Any]) -> dict[str, str]:
+def _poetry_dependencies(poetry: dict[str, Any]) -> list[str]:
     tables = [poetry.get("dependencies"), poetry.get("dev-dependencies")]
     groups = poetry.get("group")
     if isinstance(groups, dict):
         tables.extend(g.get("dependencies") for g in groups.values() if isinstance(g, dict))
-    found: dict[str, str] = {}
+    found: set[str] = set()
     for table in tables:
-        if not isinstance(table, dict):
-            continue
-        for name, spec in list(table.items())[:_MAX_ENTRIES]:
-            if isinstance(spec, dict) and isinstance(spec.get("path"), str):
-                found[str(name)] = spec["path"]
-    return found
+        if isinstance(table, dict):
+            found.update(str(name) for name in list(table)[:_MAX_ENTRIES] if name != "python")
+    return sorted(found)
 
 
 def project_facts(document: dict[str, Any]) -> dict[str, Any] | None:
@@ -114,9 +119,12 @@ def project_facts(document: dict[str, Any]) -> dict[str, Any] | None:
     project = document.get("project")
     poetry = _table(document, ("tool", "poetry"))
     build = document.get("build-system")
-    if not isinstance(project, dict) and poetry is None and not isinstance(build, dict):
-        return None
+    workspace = _table(document, ("tool", "uv", "workspace"))
     facts: dict[str, Any] = {}
+    if not isinstance(project, dict) and poetry is None and not isinstance(build, dict):
+        if workspace is None:
+            return None
+        facts["virtual"] = True
     name = project.get("name") if isinstance(project, dict) else None
     if not isinstance(name, str) and poetry is not None:
         name = poetry.get("name")
@@ -131,6 +139,12 @@ def project_facts(document: dict[str, Any]) -> dict[str, Any] | None:
             facts.setdefault("unread", []).append("tool.hatch.build.targets.wheel.packages")
         else:
             facts["packages"] = packages
+    flit = _table(document, ("tool", "flit", "module"))
+    if flit is not None and "name" in flit:
+        if isinstance(flit["name"], str):
+            facts["flit_module"] = flit["name"]
+        else:
+            facts.setdefault("unread", []).append("tool.flit.module.name")
     for path, key in _UNREAD_LAYOUT:
         table = _table(document, path)
         if table is not None and key in table:
@@ -140,16 +154,15 @@ def project_facts(document: dict[str, Any]) -> dict[str, Any] | None:
         facts["uv_sources"] = {
             str(name): _source(value) for name, value in list(sources.items())[:_MAX_ENTRIES]
         }
-    workspace = _table(document, ("tool", "uv", "workspace"))
     if workspace is not None:
         facts["uv_workspace"] = {
             "members": _strings(workspace.get("members")) or [],
             "exclude": _strings(workspace.get("exclude")) or [],
         }
     if poetry is not None:
-        paths = _poetry_paths(poetry)
-        if paths:
-            facts["poetry_paths"] = paths
+        declared = _poetry_dependencies(poetry)
+        if declared:
+            facts["poetry_dependencies"] = declared
     return facts
 
 
@@ -163,8 +176,9 @@ class PythonProjectParser:
     """
 
     name = "python-project"
-    # +pyX.Y: read with the running interpreter's `tomllib`.
-    version = f"1+{interpreter_tag()}"
+    # 2: flit's module, a virtual workspace root, Poetry's declared names. +pyX.Y: read
+    # with the running interpreter's `tomllib`.
+    version = f"2+{interpreter_tag()}"
     language = ""
 
     def supports(self, path: Path) -> bool:

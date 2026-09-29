@@ -188,3 +188,93 @@ def test_a_submodule_is_found_only_under_a_regular_package() -> None:
     rows = tree.rows
     assert tree.modules.submodule(rows["pkg/__init__.py"], "helper") == rows["pkg/helper.py"]
     assert tree.modules.submodule(rows["plain.py"], "helper") is None
+
+
+# -- flit's `[tool.flit.module] name`: an explicit layout, read as flit reads it ---------
+
+FLIT = {"name": "fixture-dist", "backend": "flit_core.buildapi"}
+
+
+def test_flit_flat_package_roots_at_the_project_and_ships_only_its_module() -> None:
+    tree = Tree(
+        ["fixture_pkg/__init__.py", "fixture_pkg/models.py", "tasks.py", "app.py"],
+        {"pyproject.toml": {**FLIT, "flit_module": "fixture_pkg"}},
+    )
+    assert tree.resolve("app.py", "fixture_pkg.models") == "fixture_pkg/models.py"
+    assert tree.resolve("app.py", "tasks") == "<module-not-found>"
+
+
+def test_flit_src_package_roots_at_src() -> None:
+    tree = Tree(
+        ["src/fixture_pkg/__init__.py", "src/fixture_pkg/models.py", "tests/test_models.py"],
+        {"pyproject.toml": {**FLIT, "flit_module": "fixture_pkg"}},
+    )
+    assert tree.resolve("tests/test_models.py", "fixture_pkg.models") == (
+        "src/fixture_pkg/models.py"
+    )
+
+
+def test_flit_module_name_not_the_distribution_name_is_the_import_name() -> None:
+    tree = Tree(
+        ["other_mod/__init__.py", "fixture_dist/__init__.py", "app.py"],
+        {"pyproject.toml": {**FLIT, "flit_module": "other_mod"}},
+    )
+    assert tree.resolve("app.py", "other_mod") == "other_mod/__init__.py"
+    assert tree.resolve("app.py", "fixture_dist") == "<module-not-found>"
+
+
+def test_flit_module_that_is_not_indexed_refuses_the_project_without_discovery() -> None:
+    tree = Tree(
+        ["src/fixture_pkg/__init__.py", "src/fixture_pkg/models.py", "tests/test_models.py"],
+        {"pyproject.toml": {**FLIT, "flit_module": "missing"}},
+    )
+    assert tree.resolve("tests/test_models.py", "fixture_pkg.models") == ("<project-layout-unread>")
+
+
+def test_flit_module_in_both_the_project_and_src_is_ambiguous() -> None:
+    tree = Tree(
+        ["fixture_pkg/__init__.py", "src/fixture_pkg/__init__.py", "app.py"],
+        {"pyproject.toml": {**FLIT, "flit_module": "fixture_pkg"}},
+    )
+    assert tree.resolve("app.py", "fixture_pkg") == "<module-ambiguous>"
+
+
+def test_flit_dotted_module_in_a_namespace_package_is_refused() -> None:
+    tree = Tree(
+        ["ns/pkg/__init__.py", "ns/pkg/core.py", "app.py"],
+        {"pyproject.toml": {**FLIT, "flit_module": "ns.pkg"}},
+    )
+    assert tree.resolve("app.py", "ns.pkg.core") == "<namespace-package>"
+    regular = Tree(
+        ["ns/__init__.py", "ns/pkg/__init__.py", "app.py"],
+        {"pyproject.toml": {**FLIT, "flit_module": "ns.pkg"}},
+    )
+    assert regular.resolve("app.py", "ns.pkg") == "<project-layout-unread>"
+
+
+def test_flit_package_wins_over_a_module_of_its_name_beside_it() -> None:
+    tree = Tree(
+        ["fixture_pkg/__init__.py", "fixture_pkg.py", "app.py"],
+        {"pyproject.toml": {**FLIT, "flit_module": "fixture_pkg"}},
+    )
+    assert tree.resolve("app.py", "fixture_pkg") == "fixture_pkg/__init__.py"
+
+
+def test_two_explicit_layouts_are_refused() -> None:
+    tree = Tree(
+        ["src/fixture_pkg/__init__.py", "app.py"],
+        {"pyproject.toml": {**FLIT, "flit_module": "fixture_pkg", "packages": ["src/x"]}},
+    )
+    assert tree.resolve("app.py", "fixture_pkg") == "<project-layout-unread>"
+
+
+def test_a_virtual_workspace_root_owns_no_modules() -> None:
+    tree = Tree(
+        ["packages/a/src/a/__init__.py", "packages/a/src/a/core.py", "scripts/run.py"],
+        {
+            "pyproject.toml": {"virtual": True, "uv_workspace": {"members": ["packages/*"]}},
+            "packages/a/pyproject.toml": {"name": "a"},
+        },
+    )
+    assert tree.resolve("packages/a/src/a/core.py", "a") == "packages/a/src/a/__init__.py"
+    assert tree.resolve("scripts/run.py", "a") == "<no-project>"

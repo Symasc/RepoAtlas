@@ -12,14 +12,18 @@ from pathlib import Path
 import pytest
 from repoatlas.services.workspace import Workspace
 from tests.impact_corpus import build, use_edges, uses
-from tests.python_corpus import FLATFIX, MONO, PKG, PYFIX, refusals
+from tests.python_corpus import FLATFIX, FLITFIX, MONO, PKG, PYFIX, refusals
 
 R = PKG
 
 
 @pytest.fixture
 def pyfix(workspace: Workspace, tmp_path: Path) -> Workspace:
-    return build(workspace, tmp_path, {"pyfix": PYFIX, "flatfix": FLATFIX, "mono": MONO})
+    return build(
+        workspace,
+        tmp_path,
+        {"pyfix": PYFIX, "flatfix": FLATFIX, "flitfix": FLITFIX, "mono": MONO},
+    )
 
 
 def repo_uses(workspace: Workspace, prefix: str) -> set[tuple[str, str, str]]:
@@ -150,3 +154,11 @@ def test_p12_a_project_nested_in_a_package_is_out_of_the_outer_roots_reach(
     """The outer flat root spells `fixture_pkg.vendored`, but another project owns it."""
     assert repo_uses(pyfix, "fixture_pkg/nested_user.py") == set()
     assert refusals(pyfix, "flatfix", "fixture_pkg/nested_user.py") == {"V": "project-boundary"}
+
+
+def test_a_flit_module_is_the_package_its_project_ships(pyfix: Workspace) -> None:
+    """The module flit names, never one spelled like the distribution."""
+    assert repo_uses(pyfix, "checks/test_widget.py") == {
+        ("checks/test_widget.py#test_widget", "src/flit_pkg/models.py#Widget", "type")
+    }
+    assert refusals(pyfix, "flitfix", "checks/test_widget.py") == {"Decoy": "module-not-found"}
