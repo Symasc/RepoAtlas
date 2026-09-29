@@ -154,6 +154,9 @@ def test_a_module_level_request_has_no_enclosing_declaration() -> None:
         ("BASE = '/api'\n", "f'{BASE}/users/{uid}'"),
         # The base is text a placeholder is glued to, or is glued to text.
         ("BASE = 'https://a.example'\n", "f'{BASE}users/{uid}'"),
+        # Glued text would change the host, or the base path, while still reading as a URL.
+        ("BASE = 'https://a.example'\n", "f'{BASE}users/{uid}/settings'"),
+        ("BASE = 'https://a.example/api'\n", "f'{BASE}users/{uid}/settings'"),
         ("BASE = 'https://a.example'\n", "f'{BASE}{uid}'"),
         ("", "f'https://{host}/users/{uid}'"),
         ("", "f'https://a.example{path}'"),
