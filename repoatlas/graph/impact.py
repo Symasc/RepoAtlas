@@ -26,7 +26,8 @@ candidate's predecessors rank before it.
 **Confinement.** A walk has a home repository: the seed's, else the context's. It leaves
 it only by a direct edge of a crossing type (:data:`CROSS_REPOSITORY_EDGES`), or by an
 edge of a family that crosses on evidence (:attr:`Family.crosses`) and records that
-evidence itself -- a ``USES`` edge a package link proved (:mod:`repoatlas.graph.packages`)
+evidence itself -- a ``USES`` edge a package link proved (:mod:`repoatlas.graph.packages`),
+a ``CALLS_HTTP_HANDLER`` edge an HTTP join proved (:mod:`repoatlas.graph.http_crossings`)
 -- and never through a shared node: the same environment variable read in two
 repositories does not join them. A crossing moves the home to the far end's repository,
 so the walk goes on there exactly as it would have started there; a shared node keeps
@@ -112,7 +113,8 @@ class Family:
     #: and its importers are reached precisely through their uses.
     whole_only: bool = False
     #: The evidence on which an edge of this family may join two repositories, edge by
-    #: edge: ``package``, a package link's ``crossing`` record. ``None``: it never does.
+    #: edge: ``package``, a package link's ``crossing`` record; ``http``, an HTTP join's
+    #: ``http`` record (repoatlas.storage.protocols.EVIDENCE_PATHS). ``None``: it never does.
     crosses: str | None = None
 
 
@@ -176,6 +178,17 @@ FAMILIES: tuple[Family, ...] = (
         Tier.EXACT,
         "requests",
         near=frozenset({EntityType.HTTP_ROUTE}),
+    ),
+    # A request reaches a handler another repository serves: the handler changes, so the
+    # request may be affected. Only inward, from the handler: its callers do not change it.
+    Family(
+        "http",
+        EdgeType.CALLS_HTTP_HANDLER,
+        IN,
+        ImpactRole.DEPENDENT,
+        Tier.EXACT,
+        "requests over HTTP",
+        crosses="http",
     ),
     Family(
         "imports",

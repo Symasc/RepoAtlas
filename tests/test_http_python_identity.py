@@ -350,3 +350,11 @@ def test_a_sync_stores_the_exposure_on_the_shared_node_and_keeps_the_claim(
     assert claim["target_key"] == "GET https://accounts.example/users/<user_id>"
     assert claim["line_start"] == 13
     assert json.loads(claim["meta_json"])["identity_at"] == "8"
+
+
+def test_a_rebinding_after_the_optional_import_proves_nothing() -> None:
+    """Every other binding must be the failed import's constant fallback."""
+    source = _app().replace(
+        "app = Flask(__name__)\n", "Swagger = wrap(Swagger)\napp = Flask(__name__)\n"
+    )
+    assert _claims(source) == []

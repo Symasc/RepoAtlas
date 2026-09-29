@@ -479,6 +479,57 @@ def route_template(
     return template
 
 
+#: A declared parameter's converter, where its spelling names one: ``<int:id>``.
+_CONVERTER = re.compile(r"<([A-Za-z_]\w*):[A-Za-z_]\w*>")
+#: Converters that accept any one non-empty segment: none at all, and ``string``.
+_ANY_SEGMENT: frozenset[str | None] = frozenset({None, "string"})
+
+
+def endpoint_matches(segments: Sequence[str | None], path: str) -> bool:
+    """Whether a request's path can reach a declared endpoint path under the same origin.
+
+    ``segments`` is the request's path by segment, ``None`` where one value fills it.
+    Wider than :func:`template_matches` in one respect only, and deliberately: a
+    concrete value in the request (``/users/123``) reaches a declared parameter
+    (``/users/<user_id>``), because that is what serving a parameter means. Everything
+    else stays as narrow:
+
+    * the segment count must be equal, so no value spans a ``/``;
+    * literal segments are byte-equal, and a request's dynamic segment never matches a
+      declared literal;
+    * a parameter accepts what its converter accepts, as far as static text shows it:
+      no converter or ``string`` accepts any one non-empty segment, ``int`` a run of
+      ASCII digits or a dynamic value, and any other (``path``, ``float``, ``uuid``, a
+      custom one) accepts nothing here;
+    * parameter names are never compared.
+
+    Several declared paths may match one request — ``/users/me`` and
+    ``/users/<user_id>`` both match ``/users/me`` — and choosing between them is not
+    this function's to do: callers refuse the ambiguity.
+    """
+    if not path.startswith("/"):
+        return False
+    declared = path[1:].split("/")
+    if len(declared) != len(segments):
+        return False
+    for mine, theirs in zip(segments, declared, strict=True):
+        if not is_parameter_segment(theirs):
+            if mine is None or mine != theirs:
+                return False
+            continue
+        converted = _CONVERTER.fullmatch(theirs)
+        converter = converted.group(1) if converted else None
+        if converter in _ANY_SEGMENT:
+            if mine == "":
+                return False
+        elif converter == "int":
+            if mine is not None and not (mine.isascii() and mine.isdigit()):
+                return False
+        else:
+            return False
+    return True
+
+
 def template_matches(template: RouteTemplate, path: str) -> bool:
     """Whether a declared route ``path`` has ``template``'s shape.
 

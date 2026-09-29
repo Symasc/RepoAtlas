@@ -116,6 +116,34 @@ SYMBOLS: dict[str, str] = {
 }
 
 
+#: A service and a client of it in two repositories: the HTTP join is made across
+#: repositories only, so its impact cases need the pair (http-api, http-web).
+HTTP_API = {
+    "app.py": (
+        "from flask import Flask\n"
+        "from flasgger import Swagger\n"
+        "\n"
+        "app = Flask(__name__)\n"
+        'Swagger(app, template={"host": "http-pair.example", "basePath": "/", '
+        '"schemes": ["https"]})\n'
+        "\n"
+        "\n"
+        '@app.route("/items/<item_id>")\n'
+        "def get_item(item_id):\n"  # 9
+        "    return item_id\n"
+    )
+}
+HTTP_WEB = {
+    "client.py": (
+        "import requests\n"
+        "\n"
+        "\n"
+        "def load_item(item_id):\n"  # 4
+        '    return requests.get(f"https://http-pair.example/items/{item_id}")\n'
+    )
+}
+
+
 def make_repo(root: Path, name: str, files: dict[str, str]) -> Path:
     repo = root / name
     for relative, content in files.items():

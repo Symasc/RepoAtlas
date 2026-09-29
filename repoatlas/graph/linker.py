@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
 from repoatlas.graph.http_claims import HttpClaimPlan, plan_http_claims
+from repoatlas.graph.http_crossings import HttpCrossingPlan, plan_http_crossings
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
 from repoatlas.graph.uses import use_resolution
@@ -162,6 +163,8 @@ class GlobalPlan:
     dependencies: tuple[PendingEdge, ...] = ()
     #: What the pending HTTP facts established, and why each one did or did not.
     http: HttpClaimPlan = field(default_factory=HttpClaimPlan)
+    #: Which requests reach a handler another repository serves, and why the rest do not.
+    http_crossings: HttpCrossingPlan = field(default_factory=HttpCrossingPlan)
     #: The ``USES`` edges to replace, and whose (repoatlas.graph.uses_link).
     uses: UsesPlan | None = None
     resolved: int = 0
@@ -492,10 +495,14 @@ class ReferenceLinker:
                 pending, index, file_rows, producer=GLOBAL_PARSER, served_routes=served
             )
             edges.extend(decided.edges)
+            # The one HTTP decision that joins two repositories: exposure and request
+            # claims, both per file, never this pass's previous output.
+            crossings = plan_http_crossings(pending, file_rows, producer=GLOBAL_PARSER)
+            edges.extend(crossings.edges)
             resolved += decided.resolved
             unresolved += decided.unresolved
             watch.candidates_out = resolved
-            watch.detail = f"{unresolved} still unresolved; {decided.detail}"
+            watch.detail = f"{unresolved} still unresolved; {decided.detail}; {crossings.detail}"
         stages.append(_timing(watch))
 
         with Stopwatch("uses") as watch:
@@ -523,6 +530,7 @@ class ReferenceLinker:
             edges=tuple(edges),
             dependencies=tuple(dependencies),
             http=decided,
+            http_crossings=crossings,
             uses=uses_plan,
             resolved=resolved,
             unresolved=unresolved,

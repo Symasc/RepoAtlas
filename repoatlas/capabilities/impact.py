@@ -29,6 +29,7 @@ from pathlib import PurePosixPath
 
 from repoatlas.dependencies.normalize import PYPI
 from repoatlas.graph.declared import REFUSED_AS, TargetKind, classify_dependency_target
+from repoatlas.graph.http_crossings import HTTP_CROSSING
 from repoatlas.graph.impact import ImpactWalk, Node, Tier, WalkResult, is_test_path
 from repoatlas.graph.keys import file_key, package_key
 from repoatlas.graph.packages import CROSSING, ProviderTargets, stored_targets
@@ -38,6 +39,7 @@ from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.impact import (
     MAX_SEED_CANDIDATES,
     Granularity,
+    HttpCrossing,
     HubImpact,
     ImpactCandidate,
     ImpactOmitted,
@@ -477,16 +479,24 @@ def assemble(
         return walk.slug_of(node.repo_id) if node.repo_id is not None else None
 
     def reading(node: Node) -> str:
-        """The step's reading; a crossing also says which repositories, and by what package."""
+        """The step's reading; a crossing also says which repositories, and through what."""
         assert node.step is not None
-        crossing = node.step.resolution.get(CROSSING)
-        if not isinstance(crossing, dict) or node.step.row is None:
+        if node.step.row is None:
             return node.step.reading
         consumer = walk.slug_of(node.step.row.file_repo_id)
-        return (
-            f"{node.step.reading}, {crossing.get('provider')} -> {consumer}"
-            f" via {crossing.get('package')}"
-        )
+        crossing = node.step.resolution.get(CROSSING)
+        if isinstance(crossing, dict):
+            return (
+                f"{node.step.reading}, {crossing.get('provider')} -> {consumer}"
+                f" via {crossing.get('package')}"
+            )
+        request = node.step.resolution.get(HTTP_CROSSING)
+        if isinstance(request, dict):
+            return (
+                f"{node.step.reading}, {request.get('provider')} -> {consumer}"
+                f" via {request.get('method')} {request.get('url')}"
+            )
+        return node.step.reading
 
     tests = [n for n in ranked if is_test_path(n.path) and n.role is not ImpactRole.MEMBER]
     loose = [n for n in ranked if _is_unresolved(n) and not is_test_path(n.path)]
@@ -545,6 +555,7 @@ def assemble(
             if row.line_start is not None:
                 lines = (row.line_start, row.line_end or row.line_start)
         crossing = _crossing(resolution, walk.slug_of(row.file_repo_id) if row else None, row)
+        http = _http_crossing(resolution, walk.slug_of(row.file_repo_id) if row else None)
         via = tuple(str(v) for v in _list(resolution.get("via")))
         if crossing is not None:
             via = tuple(f"{crossing.from_repository}/{v}" for v in via)
@@ -573,6 +584,7 @@ def assemble(
                 via=via,
                 via_names=tuple(str(v) for v in _list(resolution.get("via_names"))),
                 crossing=crossing,
+                http=http,
                 resolution=(resolution or None) if full else None,
             ),
             boundaries=tuple(boundaries),
@@ -1080,6 +1092,33 @@ def _crossing(
         declared_as=_text(resolution.get("name")),
         imported_as=_text(resolution.get("imported")),
         local=_text(resolution.get("local")),
+    )
+
+
+def _http_crossing(resolution: Mapping[str, object], consumer: str | None) -> HttpCrossing | None:
+    """A step's HTTP evidence, each part spelled where it can be read, or ``None``."""
+    record = resolution.get(HTTP_CROSSING)
+    if not isinstance(record, dict) or consumer is None:
+        return None
+    provider = str(record.get("provider") or "")
+
+    def at(repository: str, key: str) -> str | None:
+        value = record.get(key)
+        return f"{repository}/{value}" if isinstance(value, str) else None
+
+    return HttpCrossing(
+        method=str(record.get("method")),
+        url=str(record.get("url")),
+        endpoint=str(record.get("endpoint")),
+        deployment=str(record.get("deployment")),
+        provider_repository=provider,
+        consumer_repository=consumer,
+        called_at=at(consumer, "called_at") or "",
+        base_at=at(consumer, "base_at"),
+        served_at=at(provider, "served_at") or "",
+        identity_source=str(record.get("identity_source")),
+        identity_at=at(provider, "identity_at"),
+        bound_at=at(provider, "bound_at"),
     )
 
 
