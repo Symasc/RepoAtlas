@@ -323,12 +323,10 @@ def _swagger_base(root: dict[str, _Field], scheme: str) -> str | None:
     was fetched from, which is not knowable from the repository.
     """
     host = _scalar(root["host"].value) if "host" in root else None
-    if host is None or any(char in host for char in "/@?#{}\\") or not host.strip():
-        return None
     base_path = _scalar(root["basePath"].value) if "basePath" in root else "/"
-    if base_path is None or not base_path.startswith("/"):
+    if host is None or base_path is None:
         return None
-    return http.deployment_base(f"{scheme}://{host}{base_path}")
+    return http.swagger2_base(scheme, host, base_path)
 
 
 def _endpoints(

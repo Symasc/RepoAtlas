@@ -33,6 +33,18 @@ Application-level routes are taken as served at the root, which is what the file
 states; an application mounted under a prefix from *another* file is a known
 limitation.
 
+**Where an application is published** is read from one source only: a flasgger
+Swagger 2 template bound to that exact Flask application in its own module, stating
+``host``, ``schemes`` and ``basePath`` — the document flasgger serves as the
+deployed Swagger, from which the template's three fields override any other
+configuration. Each route of the application is then *exposed* at
+``scheme://host`` + ``basePath`` + route, and recorded both as an
+``EXPOSES_HTTP_ENDPOINT`` fact on the shared endpoint node and as an
+:data:`~repoatlas.parsers.http_facts.HTTP_EXPOSED_ENDPOINT` claim carrying the
+lines that prove it. The claim is generic on purpose: it names the identity's
+source kind and nothing about flasgger, so another source-backed extractor produces
+the same claim.
+
 Parsed, never imported: this reads the syntax tree only (V1_SPEC §17).
 """
 
@@ -40,11 +52,16 @@ from __future__ import annotations
 
 import ast
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedReference
-from repoatlas.parsers.http_facts import http_reference
+from repoatlas.parsers.http_facts import (
+    HTTP_EXPOSED_ENDPOINT,
+    http_reference,
+    pending_reference,
+)
 
 _FASTAPI_VERBS = {
     "get": "GET",
@@ -67,7 +84,7 @@ _CLIENT_VERBS = {
     "delete": "DELETE",
 }
 
-_LIBRARIES = frozenset({"fastapi", "flask", "requests", "httpx"})
+_LIBRARIES = frozenset({"fastapi", "flask", "requests", "httpx", "flasgger"})
 _CLIENT_LIBRARIES = frozenset({"requests", "httpx"})
 
 _FASTAPI_APP = "fastapi-app"
@@ -81,6 +98,15 @@ _CONSTRUCTORS = {
     "flask.Flask": _FLASK_APP,
     "flask.Blueprint": _FLASK_BLUEPRINT,
 }
+
+#: The one callable that binds a published identity to a Flask application.
+_SWAGGER = "flasgger.Swagger"
+#: ``identity_source`` of the identity a flasgger Swagger 2 template states.
+FLASGGER_SWAGGER2 = "flasgger-swagger2"
+#: The template fields that decide a Swagger 2 base; all three must be stated.
+_TEMPLATE_FIELDS = ("host", "basePath", "schemes")
+#: What catching the failed import of an optional dependency looks like.
+_IMPORT_ERRORS = frozenset({"ImportError", "ModuleNotFoundError"})
 
 #: Deep enough for any literal someone writes by hand; shallow enough that an
 #: adversarial chain of ``+`` cannot recurse the parser into the ground.
@@ -147,6 +173,19 @@ def _binding_counts(tree: ast.Module) -> Counter[str] | None:
     return counts
 
 
+@dataclass(frozen=True, slots=True)
+class _Deployment:
+    """A base location the module states an application is published at."""
+
+    base: str
+    #: The kind of source that stated it (``identity_source``).
+    source: str
+    #: The line of the literal naming the host: the identity's citable part.
+    identity_at: int
+    #: The line that binds the identity to the application.
+    bound_at: int
+
+
 @dataclass(slots=True)
 class _Receiver:
     """A name proven to hold a framework application, router or blueprint."""
@@ -155,10 +194,38 @@ class _Receiver:
     #: The router's or blueprint's own prefix. ``None`` for a blueprint that
     #: declares none; always ``""`` or a prefix for a FastAPI router.
     prefix: str | None = None
-    #: Prefixes this file mounts it under (a ``None`` entry: the blueprint's own).
-    mounts: list[str | None] = field(default_factory=list)
+    #: Where this file mounts it: the prefix (a ``None`` entry: the blueprint's own)
+    #: and the name of the application it is mounted on.
+    mounts: list[tuple[str | None, str]] = field(default_factory=list)
     #: Cleared when something makes its served paths unknowable from here.
     usable: bool = True
+    #: Where an application is published, when its own module states it.
+    deployments: tuple[_Deployment, ...] = ()
+
+
+def _module_statements(tree: ast.Module) -> Iterator[ast.stmt]:
+    """Statements that run at module level: the body, and module-level ``if``/``try`` bodies.
+
+    Function and class bodies are not module level, and neither is a loop's: a loop
+    body may run any number of times, which is not "the only binding".
+    """
+    stack = list(reversed(tree.body))
+    while stack:
+        statement = stack.pop()
+        yield statement
+        if isinstance(statement, ast.If):
+            stack.extend(reversed([*statement.body, *statement.orelse]))
+        elif isinstance(statement, ast.Try):
+            handled = [inner for handler in statement.handlers for inner in handler.body]
+            stack.extend(
+                reversed([*statement.body, *handled, *statement.orelse, *statement.finalbody])
+            )
+
+
+def _catches_import_error(handler: ast.ExceptHandler) -> bool:
+    caught = handler.type
+    names = caught.elts if isinstance(caught, ast.Tuple) else [caught]
+    return any(isinstance(name, ast.Name) and name.id in _IMPORT_ERRORS for name in names)
 
 
 def _dynamic(call: ast.Call) -> bool:
@@ -234,8 +301,10 @@ class PythonHttp:
         if counts is None:
             return
         self._imports(tree, counts)
+        self._optional_imports(tree, counts)
         self._constructors(tree, counts)
         self._mounts(tree)
+        self._identities(tree, counts)
 
     # -- what the module proves ---------------------------------------------------
 
@@ -253,6 +322,42 @@ class PythonHttp:
                     local = alias.asname or alias.name
                     if counts[local] == 1:
                         self._names[local] = f"{statement.module}.{alias.name}"
+
+    def _optional_imports(self, tree: ast.Module, counts: Counter[str]) -> None:
+        """``try: from flasgger import Swagger`` / ``except ImportError: Swagger = None``.
+
+        The name has more than one binding, but every other one is ``None`` or
+        ``False`` in a handler of that very import's failure. Calling either raises,
+        so any call through the name that runs is a call to flasgger's. Read for
+        flasgger only: it is the one optional dependency this module reads.
+        """
+        for statement in tree.body:
+            if not isinstance(statement, ast.Try):
+                continue
+            imported = [
+                alias.asname or alias.name
+                for node in statement.body
+                if isinstance(node, ast.ImportFrom) and node.module == "flasgger" and not node.level
+                for alias in node.names
+                if alias.name == "Swagger"
+            ]
+            if len(imported) != 1:
+                continue
+            local = imported[0]
+            fallbacks = sum(
+                1
+                for handler in statement.handlers
+                if _catches_import_error(handler)
+                for node in handler.body
+                if isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == local
+                and isinstance(node.value, ast.Constant)
+                and node.value.value in (None, False)
+            )
+            if fallbacks and counts[local] == 1 + fallbacks:
+                self._names[local] = _SWAGGER
 
     def _resolve(self, node: ast.expr) -> str | None:
         """``module.attr`` a callee provably names, or ``None``."""
@@ -322,19 +427,25 @@ class PythonHttp:
             if owner is None:
                 continue
             if func.attr == "include_router" and owner.kind in {_FASTAPI_APP, _FASTAPI_ROUTER}:
-                self._mount(owner, call, "router", _FASTAPI_ROUTER, "prefix")
+                self._mount(func.value.id, owner, call, "router", _FASTAPI_ROUTER, "prefix")
             elif func.attr == "register_blueprint" and owner.kind in {
                 _FLASK_APP,
                 _FLASK_BLUEPRINT,
             }:
-                self._mount(owner, call, "blueprint", _FLASK_BLUEPRINT, "url_prefix")
+                self._mount(func.value.id, owner, call, "blueprint", _FLASK_BLUEPRINT, "url_prefix")
             elif func.attr == "mount" and owner.kind == _FASTAPI_APP:
                 for argument in (*call.args, *(keyword.value for keyword in call.keywords)):
                     if isinstance(argument, ast.Name) and argument.id in self._receivers:
                         self._receivers[argument.id].usable = False
 
     def _mount(
-        self, owner: _Receiver, call: ast.Call, parameter: str, child_kind: str, prefix_name: str
+        self,
+        owner_name: str,
+        owner: _Receiver,
+        call: ast.Call,
+        parameter: str,
+        child_kind: str,
+        prefix_name: str,
     ) -> None:
         argument = _argument(call, 0, parameter)
         child = self._receivers.get(argument.id) if isinstance(argument, ast.Name) else None
@@ -347,13 +458,134 @@ class PythonHttp:
             return
         keywords = _keywords(call)
         if prefix_name not in keywords:
-            child.mounts.append("" if child_kind == _FASTAPI_ROUTER else None)
+            child.mounts.append(("" if child_kind == _FASTAPI_ROUTER else None, owner_name))
             return
         prefix = static_string(keywords[prefix_name])
         if prefix is None or (child_kind == _FASTAPI_ROUTER and not _fastapi_prefix(prefix)):
             child.usable = False
             return
-        child.mounts.append(prefix)
+        child.mounts.append((prefix, owner_name))
+
+    # -- where an application is published -------------------------------------------
+
+    def _identities(self, tree: ast.Module, counts: Counter[str]) -> None:
+        """Deployments of each Flask application, from its flasgger Swagger 2 template.
+
+        Every ``Swagger(...)`` call in the module must be readable, or none is used:
+        a call this cannot read — inside a function, without a positional
+        application, through ``**kwargs`` — may bind any application here.
+        """
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and self._resolve(node.func) == _SWAGGER
+        ]
+        if not calls:
+            return
+        module_level: set[int] = set()
+        dicts: dict[str, ast.Dict] = {}
+        for statement in _module_statements(tree):
+            value = getattr(statement, "value", None)
+            if isinstance(statement, (ast.Expr, ast.Assign, ast.AnnAssign)) and isinstance(
+                value, ast.Call
+            ):
+                module_level.add(id(value))
+            if (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+                and isinstance(statement.value, ast.Dict)
+                and counts[statement.targets[0].id] == 1
+            ):
+                dicts[statement.targets[0].id] = statement.value
+        bound: dict[str, list[ast.Call]] = {}
+        for call in calls:
+            first = call.args[0] if call.args else None
+            if (
+                id(call) not in module_level
+                or _dynamic(call)
+                or len(call.args) != 1
+                or not isinstance(first, ast.Name)
+                or "app" in _keywords(call)
+            ):
+                return
+            bound.setdefault(first.id, []).append(call)
+        for name, found in bound.items():
+            receiver = self._receivers.get(name)
+            if receiver is None or receiver.kind != _FLASK_APP or len(found) != 1:
+                continue
+            receiver.deployments = self._template_deployments(found[0], dicts)
+
+    @staticmethod
+    def _template_deployments(
+        call: ast.Call, dicts: dict[str, ast.Dict]
+    ) -> tuple[_Deployment, ...]:
+        """The bases a ``Swagger(app, template=…)`` call states, or none.
+
+        flasgger applies the template last, so its ``host``, ``basePath`` and
+        ``schemes`` decide the published document whatever the configuration says —
+        which holds only for the fields the template states: all three are required.
+        """
+        keywords = _keywords(call)
+        if "template_file" in keywords or "template" not in keywords:
+            return ()
+        template = keywords["template"]
+        if isinstance(template, ast.Name):
+            template = dicts.get(template.id)
+        if not isinstance(template, ast.Dict) or any(key is None for key in template.keys):
+            return ()
+        names = [static_string(key) for key in template.keys]
+        if None in names or len(set(names)) != len(names):
+            return ()
+        fields = {name: value for name, value in zip(names, template.values, strict=True) if name}
+        if "openapi" in fields or (
+            "swagger" in fields and static_string(fields["swagger"]) != "2.0"
+        ):
+            return ()
+        if any(name not in fields for name in _TEMPLATE_FIELDS):
+            return ()
+        host = static_string(fields["host"])
+        base_path = static_string(fields["basePath"])
+        schemes = fields["schemes"]
+        if host is None or base_path is None or not isinstance(schemes, (ast.List, ast.Tuple)):
+            return ()
+        written = [static_string(element) for element in schemes.elts]
+        if not written or None in written:
+            return ()
+        identity_at = next(
+            key.lineno
+            for key, name in zip(template.keys, names, strict=True)
+            if key is not None and name == "host"
+        )
+        found: list[_Deployment] = []
+        for scheme in dict.fromkeys(written):
+            base = http.swagger2_base(scheme or "", host, base_path)
+            if base is None:
+                return ()
+            found.append(_Deployment(base, FLASGGER_SWAGGER2, identity_at, call.lineno))
+        return tuple(found)
+
+    def deployment_references(self) -> list[ParsedReference]:
+        """Each proven deployment, declared by the module that states it.
+
+        Composed, as a Swagger 2 base always is: ``schemes``, ``host`` and
+        ``basePath`` are three literals, usually on three lines.
+        """
+        found: list[ParsedReference] = []
+        for receiver in self._receivers.values():
+            for deployment in receiver.deployments:
+                found.append(
+                    http_reference(
+                        EdgeType.DECLARES_HTTP_DEPLOYMENT,
+                        EntityType.HTTP_DEPLOYMENT,
+                        deployment.base,
+                        deployment.identity_at,
+                        deployment.identity_at,
+                        source="flask",
+                        composed=True,
+                    )
+                )
+        return found
 
     # -- routes ---------------------------------------------------------------------
 
@@ -377,7 +609,7 @@ class PythonHttp:
             methods, path = declared
             source = "fastapi" if receiver.kind in {_FASTAPI_APP, _FASTAPI_ROUTER} else "flask"
             start, end = decorator.lineno, decorator.end_lineno or decorator.lineno
-            for served, composed in self._served(receiver, path):
+            for served, composed, owners in self._served(func.value.id, receiver, path):
                 for method in methods:
                     found.append(
                         http_reference(
@@ -391,6 +623,64 @@ class PythonHttp:
                             source_symbol=qualified,
                         )
                     )
+                    found.extend(
+                        self._exposures(owners, method, served, start, end, source, qualified)
+                    )
+        return found
+
+    def _exposures(
+        self,
+        owners: tuple[str, ...],
+        method: str,
+        served: str,
+        start: int,
+        end: int,
+        source: str,
+        qualified: str,
+    ) -> list[ParsedReference]:
+        """Where a served route is published: a fact and the claim that proves it.
+
+        The fact is composed — the base and the route are written apart — so it has no
+        lines. The claim keeps every line the join cites: the decorator's own span,
+        and, in its meta, the identity's and the binding's.
+        """
+        found: list[ParsedReference] = []
+        for owner in owners:
+            receiver = self._receivers.get(owner)
+            for deployment in receiver.deployments if receiver is not None else ():
+                body = http.endpoint_body(method, http.compose(deployment.base, served))
+                if http.canonical_endpoint(body) is None:
+                    continue
+                found.append(
+                    http_reference(
+                        EdgeType.EXPOSES_HTTP_ENDPOINT,
+                        EntityType.HTTP_ENDPOINT,
+                        body,
+                        start,
+                        end,
+                        source=source,
+                        composed=True,
+                        source_symbol=qualified,
+                    )
+                )
+                found.append(
+                    pending_reference(
+                        EdgeType.EXPOSES_HTTP_ENDPOINT,
+                        EntityType.HTTP_ENDPOINT,
+                        body,
+                        start,
+                        end,
+                        role=HTTP_EXPOSED_ENDPOINT,
+                        source_symbol=qualified,
+                        method=method,
+                        route=served,
+                        deployment=deployment.base,
+                        identity_source=deployment.source,
+                        identity_at=str(deployment.identity_at),
+                        bound_at=str(deployment.bound_at),
+                        source=source,
+                    )
+                )
         return found
 
     @staticmethod
@@ -426,13 +716,15 @@ class PythonHttp:
         return methods, path
 
     @staticmethod
-    def _served(receiver: _Receiver, path: str) -> list[tuple[str, bool]]:
-        """Every path this route is served at, and whether it was composed."""
+    def _served(
+        name: str, receiver: _Receiver, path: str
+    ) -> list[tuple[str, bool, tuple[str, ...]]]:
+        """Every path this route is served at, whether it was composed, and by which apps."""
         if receiver.kind in {_FASTAPI_APP, _FLASK_APP}:
             served = http.route_path(path)
-            return [(served, False)] if served is not None else []
-        found: list[tuple[str, bool]] = []
-        for mount in dict.fromkeys(receiver.mounts):
+            return [(served, False, (name,))] if served is not None else []
+        found: dict[str, list[str]] = {}
+        for mount, owner in dict.fromkeys(receiver.mounts):
             if receiver.kind == _FASTAPI_ROUTER:
                 if path and not path.startswith("/"):
                     continue
@@ -440,9 +732,11 @@ class PythonHttp:
             else:
                 full = _flask_join(mount if mount is not None else receiver.prefix, path)
             served = http.route_path(full) if full else None
-            if served is not None and (served, True) not in found:
-                found.append((served, True))
-        return found
+            if served is not None:
+                owners = found.setdefault(served, [])
+                if owner not in owners:
+                    owners.append(owner)
+        return [(served, True, tuple(owners)) for served, owners in found.items()]
 
     # -- client calls ---------------------------------------------------------------
 

@@ -351,10 +351,13 @@ class PythonParser:
     # 6: a setup.py records what its one static setup() call states about its project
     #    (repoatlas.parsers.setuptools_project). 7: and whether it reads the call's
     #    install_requires.
+    # 8: a Flask application's routes are exposed at the base its flasgger Swagger 2
+    #    template publishes, with a claim for the cross-repository HTTP join
+    #    (repoatlas.parsers.http_python).
     # +pyX.Y: `ast` is the running interpreter's, and what it accepts moves with the
     #    interpreter (repoatlas.parsers.interpreter), so facts parsed by another one
     #    are never kept.
-    version = f"7+{interpreter_tag()}"
+    version = f"8+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
@@ -390,7 +393,8 @@ class PythonParser:
                 diagnostics=(ParseDiagnostic(severity=Severity.ERROR, message=PARSE_FAILED),),
             )
 
-        visitor = _Visitor(module_name, PythonHttp(tree))
+        http = PythonHttp(tree)
+        visitor = _Visitor(module_name, http)
         visitor.visit(tree)
         try:
             uses = python_use_references(
@@ -420,6 +424,7 @@ class PythonParser:
             symbols=(module_symbol, *visitor.symbols),
             references=(
                 *visitor.references,
+                *http.deployment_references(),
                 *uses,
                 *(() if setuptools is None else (setuptools_reference(setuptools, content),)),
             ),
