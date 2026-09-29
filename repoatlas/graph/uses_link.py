@@ -34,8 +34,9 @@ use can depend on, and :meth:`UsesChangeLog.scope` turns it into the files to re
   every file of each repository nested inside it, since a workspace it declares may hold
   them, and a package link resolves a ``workspace:`` declaration by that workspace
   whichever repository each member is indexed as;
-* a change to a repository's declared packages: its own files; to the packages it
-  provides: its own files and those of every repository declaring such a package.
+* a change to a repository's declared packages, npm or PyPI: its own files; to the
+  packages it provides: its own files and those of every repository declaring such a
+  package.
 
 Nothing else a use reads can change without one of these.
 """
@@ -47,7 +48,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from repoatlas.dependencies.normalize import NPM
+from repoatlas.dependencies.normalize import NPM, PYPI
 from repoatlas.graph.modules import ModuleResolver, binding_pairs, declared_constraints
 from repoatlas.graph.packages import CROSSING, PackageLinks
 from repoatlas.graph.py_modules import PythonModules
@@ -66,6 +67,8 @@ from repoatlas.storage.sqlite.stores import SqliteDependencyStore, SqliteKnowled
 #: from before the change are never trusted: the next sync resolves every use again.
 USES_RESOLUTION_VERSION = "5"
 COMPLETE = f"complete:{USES_RESOLUTION_VERSION}"
+#: The ecosystems whose declarations and provisions a package link reads.
+LINKED_ECOSYSTEMS = (NPM, PYPI)
 PENDING = "pending"
 
 
@@ -99,8 +102,9 @@ class FileState:
     surface: str = "none"
     #: Its module-resolution facts, as recorded.
     facts: tuple[str, ...] = ()
-    #: Its npm declared and provided rows (role, name, display name, constraint, line).
-    packages: tuple[tuple[str, str, str, str, int], ...] = ()
+    #: Its npm and PyPI declared and provided rows
+    #: (ecosystem, role, name, display name, constraint, line).
+    packages: tuple[tuple[str, str, str, str, str, int], ...] = ()
 
 
 class UsesChangeLog:
@@ -132,8 +136,8 @@ class UsesChangeLog:
         self.repositories: set[int] = set()
         #: Repositories whose declared or provided packages changed.
         self.package_repositories: set[int] = set()
-        #: Package names whose providers changed.
-        self.packages: set[str] = set()
+        #: Packages, as (ecosystem, name), whose providers changed.
+        self.packages: set[tuple[str, str]] = set()
         #: Repositories nested inside a repository forgotten in this run, found before it is.
         self.nested: set[int] = set()
 
@@ -172,7 +176,9 @@ class UsesChangeLog:
             return
         self.nested |= self._knowledge.nested_repositories([repo_id])
         if self._dependencies is not None:
-            self.packages |= self._dependencies.names_provided_by([repo_id], NPM)
+            for ecosystem in LINKED_ECOSYSTEMS:
+                provided = self._dependencies.names_provided_by([repo_id], ecosystem)
+                self.packages |= {(ecosystem, name) for name in provided}
 
     def scope(self) -> UsesScope:
         """The files whose uses may have changed (see the module docstring)."""
@@ -184,11 +190,14 @@ class UsesChangeLog:
         dependents = set(self.repositories)
         package_files: set[int] = set()
         if self._dependencies is not None:
-            provided = self._dependencies.names_provided_by(sorted(dependents), NPM)
-            dependents |= self._dependencies.repositories_declaring(sorted(provided), NPM)
-            package_files = self._knowledge.file_ids_of_repositories(
-                sorted(self._dependencies.repositories_declaring(sorted(self.packages), NPM))
-            )
+            changed = sorted(dependents)
+            declaring: set[int] = set()
+            for ecosystem in LINKED_ECOSYSTEMS:
+                provided = self._dependencies.names_provided_by(changed, ecosystem)
+                dependents |= self._dependencies.repositories_declaring(sorted(provided), ecosystem)
+                names = sorted(name for kind, name in self.packages if kind == ecosystem)
+                declaring |= self._dependencies.repositories_declaring(names, ecosystem)
+            package_files = self._knowledge.file_ids_of_repositories(sorted(declaring))
         nested = self.nested | self._knowledge.nested_repositories(sorted(self.repositories))
         repositories = dependents | self.package_repositories | nested
         repository_files = self._knowledge.file_ids_of_repositories(sorted(repositories))
@@ -218,7 +227,11 @@ class UsesChangeLog:
                 )
             ),
             packages=(
-                self._dependencies.package_rows_for_file(file_id, NPM)
+                tuple(
+                    (ecosystem, *row)
+                    for ecosystem in LINKED_ECOSYSTEMS
+                    for row in self._dependencies.package_rows_for_file(file_id, ecosystem)
+                )
                 if self._dependencies is not None
                 else ()
             ),
@@ -233,10 +246,10 @@ class UsesChangeLog:
             # Declarations are read only for this repository's own files; provisions for
             # them too (``provided-locally``), and for every file declaring the package.
             self.package_repositories.add(repo_id)
-            provided = {row for row in before.packages if row[0] == "provided"} ^ {
-                row for row in after.packages if row[0] == "provided"
+            provided = {row for row in before.packages if row[1] == "provided"} ^ {
+                row for row in after.packages if row[1] == "provided"
             }
-            self.packages |= {row[1] for row in provided}
+            self.packages |= {(row[0], row[2]) for row in provided}
 
 
 def export_surface(file_id: int, meta_json: str | None, symbols: Sequence[SymbolRow]) -> str:
