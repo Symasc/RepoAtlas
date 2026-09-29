@@ -263,7 +263,7 @@ class SyncEngine:
         if self._uses is not None:
             self._uses.files_deleting(repo_id, plan.deleted_file_ids)
             if plan.new:
-                self._uses.files_added(repo_id)
+                self._uses.files_added(repo_id, [added.rel_path for added in plan.new])
         self._files.delete_many(plan.deleted_file_ids)
 
         diagnostics: list[ParseDiagnostic] = _enumeration_diagnostics(len(incomplete))

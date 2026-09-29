@@ -36,7 +36,20 @@ use can depend on, and :meth:`UsesChangeLog.scope` turns it into the files to re
   whichever repository each member is indexed as;
 * a change to a repository's declared packages, npm or PyPI: its own files; to the
   packages it provides: its own files and those of every repository declaring such a
-  package.
+  package;
+* a file added or deleted, or a change to a Python project's facts: every file of each
+  repository whose root ``requirements.txt`` requires, by the legacy key
+  (:func:`~repoatlas.graph.py_packages.legacy_key`), a top-level module name the change
+  may have given or taken -- since a Python import of another repository's module that
+  no manifest provides is decided by which projects ship that name and which
+  metadata-less repositories hold it (:mod:`repoatlas.graph.py_packages`). Those names
+  are the plausible **top-level heads** of the change (:func:`top_level_heads`), never
+  every name along its path: its first segment below each base a module can start from
+  -- the repository root, ``src/``, and each Python project's directory and its
+  ``src/`` -- and the names a project's facts state. Every head below a base is taken
+  only when what the base means may have changed: a root ``setup.py`` or ``setup.cfg``
+  added or deleted, a project's facts changed, or a regular package or module added or
+  deleted directly under a ``src/``.
 
 Nothing else a use reads can change without one of these.
 """
@@ -44,22 +57,24 @@ Nothing else a use reads can change without one of these.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections import defaultdict
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Any
 
 from repoatlas.dependencies.normalize import NPM, PYPI
 from repoatlas.graph.modules import ModuleResolver, binding_pairs, declared_constraints
 from repoatlas.graph.packages import CROSSING, PackageLinks
 from repoatlas.graph.py_modules import PythonModules
-from repoatlas.graph.py_packages import PythonPackageLinks
+from repoatlas.graph.py_packages import PythonPackageLinks, legacy_key
 from repoatlas.graph.py_uses import PythonUseResolver
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.graph.uses import UseResolver, declared_entity, table_from_meta, use_resolution
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.parsing import USES_EXPORT_TABLE, EdgeType
 from repoatlas.models.telemetry import UsesWork
-from repoatlas.parsers.module_facts import MODULE_RESOLUTION
+from repoatlas.parsers.module_facts import MODULE_RESOLUTION, PYTHON_PROJECT
 from repoatlas.storage.protocols import EdgeRecord, SymbolRow, UnresolvedRefRecord
 from repoatlas.storage.sqlite.stores import SqliteDependencyStore, SqliteKnowledgeStore
 
@@ -107,6 +122,96 @@ class FileState:
     packages: tuple[tuple[str, str, str, str, str, int], ...] = ()
 
 
+_MODULE_SUFFIXES = (".py", ".pyi")
+_PACKAGE_FILES = frozenset({"__init__.py", "__init__.pyi"})
+#: Root files whose presence decides whether a repository is metadata-less.
+_ROOT_METADATA = frozenset({"setup.py", "setup.cfg"})
+
+
+def _directory(path: str) -> str:
+    parent = str(PurePosixPath(path).parent)
+    return "" if parent == "." else parent
+
+
+def _join(base: str, name: str) -> str:
+    return f"{base}/{name}" if base else name
+
+
+def top_level_heads(paths: Iterable[str], bases: Iterable[str]) -> set[str]:
+    """The top-level module names ``paths`` may give below each of ``bases`` holding them.
+
+    A path's first segment below a base: a directory's name, or a module's stem when the
+    path is a ``.py`` or ``.pyi`` file directly there -- when that is an identifier. Never
+    a name deeper in the path: ``pkg/foo/bar.py`` gives ``pkg`` below the root, and
+    ``foo`` only below ``pkg``, when that is a base.
+    """
+    found: set[str] = set()
+    ordered = sorted(set(bases))
+    for path in paths:
+        for base in ordered:
+            if base and not path.startswith(f"{base}/"):
+                continue
+            head, slash, _ = (path[len(base) + 1 :] if base else path).partition("/")
+            if not slash:
+                if not head.endswith(_MODULE_SUFFIXES):
+                    continue
+                head = head.rsplit(".", 1)[0]
+            if head.isidentifier():
+                found.add(head)
+    return found
+
+
+def _rebased(path: str, projects: Iterable[str]) -> set[str]:
+    """The bases whose meaning adding or deleting ``path`` may change: the root, for a root
+    ``setup.py`` or ``setup.cfg``; a base and its ``src/``, for a regular package or a
+    module directly in that ``src/``, which decides whether it is the root."""
+    found = {""} if path in _ROOT_METADATA else set()
+    for base in {"", *projects}:
+        src = _join(base, "src")
+        if not path.startswith(f"{src}/"):
+            continue
+        parts = path[len(src) + 1 :].split("/")
+        if (len(parts) == 1 and parts[0].endswith(_MODULE_SUFFIXES)) or (
+            len(parts) == 2 and parts[1] in _PACKAGE_FILES
+        ):
+            found |= {base, src}
+    return found
+
+
+def _layout_names(facts: Iterable[str]) -> set[str]:
+    """The top-level names Python project facts state a project ships: flit's module, and
+    each hatchling package's own name."""
+    found: set[str] = set()
+    for meta_json in facts:
+        meta = json.loads(meta_json) if meta_json else {}
+        if meta.get(MODULE_RESOLUTION) != PYTHON_PROJECT:
+            continue
+        stated = json.loads(meta.get("facts") or "{}")
+        flit = stated.get("flit_module")
+        if isinstance(flit, str):
+            found.add(flit.split(".")[0])
+        packages = stated.get("packages")
+        for entry in packages if isinstance(packages, list) else []:
+            if isinstance(entry, str):
+                found.add(PurePosixPath(entry.strip().rstrip("/")).name)
+    return found
+
+
+@dataclass(slots=True)
+class _Heads:
+    """What one run changed in one repository that may change the top-level modules it
+    holds or ships (see :func:`top_level_heads`)."""
+
+    #: Paths added or deleted, and project files whose facts changed.
+    touched: set[str] = field(default_factory=set)
+    #: Paths no longer indexed: deleted, or of a repository forgotten.
+    gone: set[str] = field(default_factory=set)
+    #: Bases whose every head may have changed meaning.
+    rebased: set[str] = field(default_factory=set)
+    #: Names project facts stated before a change, or state after it.
+    names: set[str] = field(default_factory=set)
+
+
 class UsesChangeLog:
     """What one sync run changed that uses can depend on, gathered as each file is written.
 
@@ -140,6 +245,8 @@ class UsesChangeLog:
         self.packages: set[tuple[str, str]] = set()
         #: Repositories nested inside a repository forgotten in this run, found before it is.
         self.nested: set[int] = set()
+        #: What changed each repository's top-level Python module names may.
+        self.heads: dict[int, _Heads] = defaultdict(_Heads)
 
     def before(self, file_id: int) -> FileState | None:
         """The file's state before its facts are replaced; notes the uses landing in it."""
@@ -155,23 +262,28 @@ class UsesChangeLog:
         self.own.add(file_id)
         self._compare(repo_id, file_id, before or FileState(), self._state(file_id))
 
-    def files_added(self, repo_id: int) -> None:
+    def files_added(self, repo_id: int, paths: Sequence[str] = ()) -> None:
         if self.everything is None:
             self.repositories.add(repo_id)
+            self.heads[repo_id].touched.update(paths)
 
     def files_deleting(self, repo_id: int, file_ids: Sequence[int]) -> None:
         """Before files are deleted: what landed in them, read them and they provided."""
         if self.everything is not None or not file_ids:
             return
         self.repositories.add(repo_id)
+        gone = [path for _, path in self._knowledge.file_locations(list(file_ids)).values()]
+        self.heads[repo_id].touched.update(gone)
+        self.heads[repo_id].gone.update(gone)
         for file_id in file_ids:
             self.landed |= self._knowledge.use_consumers_landing_in(file_id, self._producer)
             self.readers |= self._knowledge.use_readers([file_id])
             self._compare(repo_id, file_id, self._state(file_id), FileState())
 
     def repository_removing(self, repo_id: int) -> None:
-        """Before a repository is forgotten: the packages it provided lose a provider, and
-        the repositories nested inside it any workspace it declared."""
+        """Before a repository is forgotten: the packages it provided lose a provider, the
+        repositories nested inside it any workspace it declared, and the modules it held or
+        shipped their place."""
         if self.everything is not None:
             return
         self.nested |= self._knowledge.nested_repositories([repo_id])
@@ -179,6 +291,12 @@ class UsesChangeLog:
             for ecosystem in LINKED_ECOSYSTEMS:
                 provided = self._dependencies.names_provided_by([repo_id], ecosystem)
                 self.packages |= {(ecosystem, name) for name in provided}
+        change = self.heads[repo_id]
+        for file_id, path in self._knowledge.files_of_repository(repo_id):
+            change.touched.add(path)
+            change.gone.add(path)
+            if PurePosixPath(path).name == "pyproject.toml":
+                change.names |= _layout_names(self._facts(file_id))
 
     def scope(self) -> UsesScope:
         """The files whose uses may have changed (see the module docstring)."""
@@ -197,6 +315,7 @@ class UsesChangeLog:
                 dependents |= self._dependencies.repositories_declaring(sorted(provided), ecosystem)
                 names = sorted(name for kind, name in self.packages if kind == ecosystem)
                 declaring |= self._dependencies.repositories_declaring(names, ecosystem)
+            declaring |= self._requiring()
             package_files = self._knowledge.file_ids_of_repositories(sorted(declaring))
         nested = self.nested | self._knowledge.nested_repositories(sorted(self.repositories))
         repositories = dependents | self.package_repositories | nested
@@ -219,13 +338,7 @@ class UsesChangeLog:
             surface=export_surface(
                 file_id, tables.get(file_id), self._knowledge.list_symbols(file_id=file_id)
             ),
-            facts=tuple(
-                sorted(
-                    claim.meta_json or ""
-                    for claim in self._knowledge.list_module_facts(file_id)
-                    if claim.meta_json and MODULE_RESOLUTION in claim.meta_json
-                )
-            ),
+            facts=self._facts(file_id),
             packages=(
                 tuple(
                     (ecosystem, *row)
@@ -237,11 +350,51 @@ class UsesChangeLog:
             ),
         )
 
+    def _facts(self, file_id: int) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                claim.meta_json or ""
+                for claim in self._knowledge.list_module_facts(file_id)
+                if claim.meta_json and MODULE_RESOLUTION in claim.meta_json
+            )
+        )
+
+    def _requiring(self) -> set[int]:
+        """Repositories whose root requirements require a top-level head this run changed
+        (see the module docstring), by its legacy key."""
+        if self._dependencies is None or not self.heads:
+            return set()
+        keys: set[str] = set()
+        for repo_id, change in sorted(self.heads.items()):
+            rows = self._knowledge.files_of_repository(repo_id)
+            paths = {path for _, path in rows} | change.gone
+            projects = {_directory(p) for p in paths if PurePosixPath(p).name == "pyproject.toml"}
+            bases = {"", "src", *projects, *(_join(d, "src") for d in projects)}
+            rebased = set(change.rebased)
+            for path in change.touched:
+                rebased |= _rebased(path, projects)
+            heads = set(change.names) | top_level_heads(change.touched, bases)
+            if rebased:
+                heads |= top_level_heads(paths, rebased)
+            for file_id, path in rows:
+                if PurePosixPath(path).name == "pyproject.toml":
+                    heads |= _layout_names(self._facts(file_id))
+            keys |= {legacy_key(head) for head in heads}
+        return self._dependencies.repositories_requiring(sorted(keys))
+
     def _compare(self, repo_id: int, file_id: int, before: FileState, after: FileState) -> None:
         if before.surface != after.surface:
             self.surface.add(file_id)
         if before.facts != after.facts:
             self.repositories.add(repo_id)
+            # A project appearing, going or changing its layout may change what every base
+            # of the repository means, and the names its facts state.
+            [(_, path)] = self._knowledge.file_locations([file_id]).values()
+            change = self.heads[repo_id]
+            change.touched.add(path)
+            directory = _directory(path)
+            change.rebased |= {"", "src", directory, _join(directory, "src")}
+            change.names |= _layout_names(before.facts) | _layout_names(after.facts)
         if before.packages != after.packages:
             # Declarations are read only for this repository's own files; provisions for
             # them too (``provided-locally``), and for every file declaring the package.
