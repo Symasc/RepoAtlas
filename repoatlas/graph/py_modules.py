@@ -24,6 +24,10 @@ differ (PEP 503) are ``project-metadata-conflict``, and one computed where a sta
 would be overridden leaves it unnamed (``provider-unnamed``). At most one source may state
 its layout -- two that differ are ``project-metadata-conflict``, one computed
 ``project-layout-unread`` -- and none falls back to another or to the directories on disk.
+Its dependencies are one field, taken whole from one source as setuptools takes them: a
+``[project]`` table's unless ``dynamic`` names them, else ``setup.py``'s ``install_requires``,
+else ``setup.cfg``'s; the one stating them in a shape not read leaves them unread
+(``dependency-unread``), never read from the next (:mod:`repoatlas.graph.py_packages`).
 
 **Roots.** A project's roots are the directories its hatchling ``packages`` name, which
 also limit the top-level names it provides; or, for flit's ``[tool.flit.module] name``,
@@ -121,6 +125,11 @@ class Project:
     layout_source: str | None = None
     #: Why none of its roots is read: its sources disagree, or one computes its layout.
     layout_refused: str | None = None
+    #: The ``setup.py`` or ``setup.cfg`` whose ``install_requires`` are its dependencies,
+    #: when neither a ``[project]`` table nor an unread source decides them.
+    requires_source: str | None = None
+    #: Why its dependencies are not read: the source deciding them states them otherwise.
+    requires_refused: str | None = None
 
     @property
     def setuptools_named(self) -> bool:
@@ -259,6 +268,7 @@ class PythonModules:
             ((path, found) for path, found in layouts if found != "pyproject"), (None, None)
         )
         name_source, name = names[0] if names and name_refused is None else (None, None)
+        requires_source, requires_refused = self._requires(repo_id, directory, existing, ordered)
         if existing is None:
             manifest = next(
                 path
@@ -274,7 +284,33 @@ class PythonModules:
             layout=None if layout_refused else layout,
             layout_source=None if layout_refused else layout_source,
             layout_refused=layout_refused,
+            requires_source=requires_source,
+            requires_refused=requires_refused,
         )
+
+    def _requires(
+        self,
+        repo_id: int,
+        directory: str,
+        existing: Project | None,
+        ordered: list[tuple[str, dict[str, Any]]],
+    ) -> tuple[str | None, str | None]:
+        """Which setuptools source states the project's dependencies, or why none is read:
+        a ``[project]`` table states them unless ``dynamic`` names them (then ``setup.py``,
+        ``setup.cfg`` in ``ordered``'s order, the first stating them deciding), and a source
+        stating them in a shape not read decides them unread."""
+        stated = self.stated.get((repo_id, directory)) if existing is not None else None
+        declared = stated[1].get("dependencies") if stated is not None else None
+        if declared == "static":
+            return None, None
+        if declared == "unread":
+            return None, "dependency-unread"
+        for path, facts in ordered:
+            if any(entry.endswith(".install_requires") for entry in facts.get("unread", ())):
+                return None, "dependency-unread"
+            if facts.get("requires"):
+                return path, None
+        return None, None
 
     def metadata_less(self, repo_id: int) -> bool:
         """Whether a repository states nothing about Python packaging: no project fact of
