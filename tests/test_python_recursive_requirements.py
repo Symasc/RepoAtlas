@@ -136,6 +136,17 @@ def test_a_file_the_root_does_not_reach_declares_nothing(
     assert _facts_on(built, "unreached") == ["requirements.txt"]
 
 
+@pytest.mark.parametrize("consumer", ["tool-config-root", "tool-config-include"])
+def test_a_repository_with_packaging_metadata_declares_nothing_by_requirements(
+    workspace: Workspace, tmp_path: Path, consumer: str
+) -> None:
+    """P3a's R24 (LM15): a root setup.cfg of tool settings alone makes no project, yet the
+    repository is not metadata-less -- neither its root requirements.txt nor a file that
+    includes declares, however the root reaches it."""
+    built = _build(workspace, tmp_path, PROVIDER, consumer)
+    assert _refused(built, consumer, "dependency-absent")
+
+
 def test_only_the_files_the_root_reaches_hold_requirements_facts(
     workspace: Workspace, tmp_path: Path
 ) -> None:
