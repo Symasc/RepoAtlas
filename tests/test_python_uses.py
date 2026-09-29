@@ -140,12 +140,23 @@ def test_p7_a_flat_project_roots_at_itself_and_scripts_are_no_root(pyfix: Worksp
 
 
 def test_p12_a_project_is_a_boundary_inside_one_repository(pyfix: Workspace) -> None:
-    """Each project's own `app`; the other project's module only on evidence (P2)."""
-    assert repo_uses(pyfix, "alpha/") | repo_uses(pyfix, "beta/") == {
+    """Each project's own `app`; the other project's module only on its declaration."""
+    found = repo_uses(pyfix, "alpha/") | repo_uses(pyfix, "beta/") | repo_uses(pyfix, "gamma/")
+    assert found == {
         ("alpha/src/alpha/local.py#mine", "alpha/src/app/__init__.py#App", "type"),
         ("beta/src/beta/service.py#use", "beta/src/app/__init__.py#App", "type"),
+        # P12b: `beta` declares `alpha`, the one project providing it
+        ("beta/src/beta/service.py#use", "alpha/src/alpha/models.py#Thing", "type"),
     }
-    assert refusals(pyfix, "mono", "beta/src/beta/service.py") == {"Thing": "project-boundary"}
+    assert refusals(pyfix, "mono", "gamma/src/gamma/uses.py") == {"Thing": "dependency-absent"}
+    [edge] = [e for e in use_edges(pyfix) if e["target"] == "alpha/src/alpha/models.py#Thing"]
+    assert edge["basis"] == "python-dependency"
+    assert (edge["package"], edge["declared_at"], edge["project"]) == (
+        "pypi:alpha",
+        "beta/pyproject.toml:3",
+        "alpha/pyproject.toml",
+    )
+    assert "crossing" not in edge  # one repository: nothing to cross
 
 
 def test_p12_a_project_nested_in_a_package_is_out_of_the_outer_roots_reach(

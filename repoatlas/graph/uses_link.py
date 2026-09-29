@@ -51,6 +51,7 @@ from repoatlas.dependencies.normalize import NPM
 from repoatlas.graph.modules import ModuleResolver, binding_pairs, declared_constraints
 from repoatlas.graph.packages import CROSSING, PackageLinks
 from repoatlas.graph.py_modules import PythonModules
+from repoatlas.graph.py_packages import PythonPackageLinks
 from repoatlas.graph.py_uses import PythonUseResolver
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.graph.uses import UseResolver, declared_entity, table_from_meta, use_resolution
@@ -63,7 +64,7 @@ from repoatlas.storage.sqlite.stores import SqliteDependencyStore, SqliteKnowled
 
 #: Changed whenever what a use resolves to changes for the same facts, so edges kept
 #: from before the change are never trusted: the next sync resolves every use again.
-USES_RESOLUTION_VERSION = "4"
+USES_RESOLUTION_VERSION = "5"
 COMPLETE = f"complete:{USES_RESOLUTION_VERSION}"
 PENDING = "pending"
 
@@ -317,7 +318,7 @@ def plan_uses(
 
     tables = _Tables(knowledge)
     resolver = use_resolver(knowledge, index, records, tables)
-    python_resolver = python_use_resolver(knowledge, index, tables)
+    python_resolver = python_use_resolver(knowledge, index, records, tables)
     by_id = {row.file_id: row for rows in index.files_by_repo.values() for row in rows.values()}
 
     edges: list[EdgeRecord] = []
@@ -394,11 +395,16 @@ def use_resolver(
 
 
 def python_use_resolver(
-    knowledge: SqliteKnowledgeStore, index: ResolutionIndex, tables: _Tables | None = None
+    knowledge: SqliteKnowledgeStore,
+    index: ResolutionIndex,
+    records: Sequence[DependencyRecord],
+    tables: _Tables | None = None,
 ) -> PythonUseResolver:
     """The resolver a pass resolves Python uses with, built from indexed facts alone."""
     modules = PythonModules(index, knowledge.list_module_facts())
-    return PythonUseResolver(modules, index, tables or _Tables(knowledge))
+    return PythonUseResolver(
+        modules, index, tables or _Tables(knowledge), PythonPackageLinks(modules, index, records)
+    )
 
 
 def apply_uses(knowledge: SqliteKnowledgeStore, plan: UsesPlan, *, producer: str) -> UsesApplied:

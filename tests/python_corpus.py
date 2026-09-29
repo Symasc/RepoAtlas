@@ -12,8 +12,10 @@ binding or layout rule it exists to prove.
   package whose own directory is no root either, and a project nested inside a package.
 * ``flitfix`` is a flit project whose ``[tool.flit.module]`` names a module that is not
   its distribution name, beside a package spelled like the distribution.
-* ``mono`` is one Git repository holding two projects, ``alpha`` and ``beta``, each
-  with its own top-level ``app``: a project is a boundary, whatever repository it is in.
+* ``mono`` is one Git repository holding three projects: ``alpha`` and ``beta``, each
+  with its own top-level ``app``, and ``gamma``. A project is a boundary, whatever
+  repository it is in; ``beta`` crosses it on its declaration of ``alpha``, ``gamma``,
+  declaring nothing, does not.
 """
 
 from __future__ import annotations
@@ -194,6 +196,10 @@ MONO: dict[str, str] = {
         "def use(t: Thing, a: App):\n    return a\n"
     ),
     "beta/src/app/__init__.py": "class App:\n    pass\n",
+    # declares nothing: the other project's module stays out of reach
+    "gamma/pyproject.toml": '[project]\nname = "gamma"\n',
+    "gamma/src/gamma/__init__.py": "",
+    "gamma/src/gamma/uses.py": "from alpha.models import Thing\ndef g(t: Thing):\n    return t\n",
 }
 
 
@@ -201,7 +207,7 @@ def refusals(workspace: Workspace, repository: str, path: str) -> dict[str, str]
     """Why each Python use one file makes resolved to nothing, by its target key."""
     knowledge = workspace.knowledge
     index = ResolutionIndex.build(knowledge.list_file_rows(), knowledge.list_symbols())
-    resolver = python_use_resolver(knowledge, index)
+    resolver = python_use_resolver(knowledge, index, workspace.dependencies.list_for_repos(None))
     [repo_id] = [i for i, slug in index.repo_slugs.items() if slug == repository]
     origin = index.file(repo_id, path)
     assert origin is not None
