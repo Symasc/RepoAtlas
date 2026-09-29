@@ -8,6 +8,7 @@ pristine database indexing the edited tree
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -457,3 +458,203 @@ def test_a_tool_only_project_file_becoming_a_project_withdraws_the_link_and_back
     sync_all(legacy, root)
     assert _linked(legacy)
     _equal(legacy, settings, tmp_path, "configuration")
+
+
+# -- setuptools metadata: a project's name and layout as setup.cfg / setup.py state them (P3b) --
+
+CFG_FLAT = "[metadata]\nname = fixture-auth\n\n[options]\npackages = find:\n"
+CFG_SRC = (
+    "[metadata]\nname = fixture-auth\n\n[options]\npackage_dir =\n    = src\n"
+    "packages = find:\n\n[options.packages.find]\nwhere = src\n"
+)
+SRC_PACKAGE = {f"src/{path}": text for path, text in AUTH_PACKAGE.items()}
+
+
+def _reaches(workspace: Workspace, provider: str, models: str = "fixture_auth/models.py") -> bool:
+    return repository_uses(workspace, "basic") == service_uses("basic", provider, models)
+
+
+def test_s19_a_setup_cfg_name_and_layout_edited_and_back(
+    workspace: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    """The layout edit changes no dependency row: only the project's facts say it moved."""
+    provider = {"setup.cfg": CFG_FLAT, **AUTH_PACKAGE, **SRC_PACKAGE}
+    linked = build(workspace, tmp_path, {**pick(LEGACY, "basic"), "cfg-provider": provider})
+    root = tmp_path / "repos"
+    assert _reaches(linked, "cfg-provider")
+    edit(root, "cfg-provider", "setup.cfg", CFG_SRC)
+    assert sync_all(linked, root).mode == "incremental"
+    assert _reaches(linked, "cfg-provider", "src/fixture_auth/models.py")
+    _equal(linked, settings, tmp_path, "src")
+    edit(root, "cfg-provider", "setup.cfg", CFG_FLAT.replace("fixture-auth", "fixture-renamed"))
+    sync_all(linked, root)
+    assert refusals(linked, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "dependency-absent"
+    )
+    _equal(linked, settings, tmp_path, "renamed")
+    edit(root, "cfg-provider", "setup.cfg", CFG_FLAT)
+    sync_all(linked, root)
+    assert _reaches(linked, "cfg-provider")
+    _equal(linked, settings, tmp_path, "flat")
+
+
+def test_s19_a_setup_py_name_computed_and_back(
+    workspace: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    static = (
+        'from setuptools import setup\n\nsetup(name="fixture-auth", packages=["fixture_auth"])\n'
+    )
+    provider = {"setup.py": static, **AUTH_PACKAGE}
+    linked = build(workspace, tmp_path, {**pick(LEGACY, "basic"), "py-provider": provider})
+    root = tmp_path / "repos"
+    assert _reaches(linked, "py-provider")
+    edit(root, "py-provider", "setup.py", static.replace('"fixture-auth"', "compute()"))
+    sync_all(linked, root)
+    assert refusals(linked, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "provider-unnamed"
+    )
+    _equal(linked, settings, tmp_path, "computed")
+    edit(root, "py-provider", "setup.py", static)
+    sync_all(linked, root)
+    assert _reaches(linked, "py-provider")
+    _equal(linked, settings, tmp_path, "static")
+
+
+def test_s20_a_metadata_less_provider_gains_setup_cfg_and_loses_it(
+    legacy: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    """The legacy link becomes a named one, and back: the requirement is the same row."""
+    root = tmp_path / "repos"
+    [before] = [
+        e
+        for e in edges(legacy)
+        if e["source"] == f"basic:{LEGACY_SERVICE}#load" and e["use"] == "call"
+    ]
+    assert before["basis"] == "python-requirements-legacy"
+    edit(root, "auth-provider", "setup.cfg", CFG_FLAT)
+    sync_all(legacy, root)
+    [after] = [
+        e
+        for e in edges(legacy)
+        if e["source"] == f"basic:{LEGACY_SERVICE}#load" and e["use"] == "call"
+    ]
+    assert (after["basis"], after["crossing"]["provided_at"]) == (
+        "python-dependency",
+        "setup.cfg:2",
+    )
+    _equal(legacy, settings, tmp_path, "explicit")
+    (root / "auth-provider" / "setup.cfg").unlink()
+    sync_all(legacy, root)
+    assert _linked(legacy)
+    _equal(legacy, settings, tmp_path, "metadata-less")
+
+
+def test_s20_a_build_system_pyproject_gains_its_setup_cfg_and_loses_it(
+    workspace: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    build_system = (
+        '[build-system]\nrequires = ["setuptools"]\nbuild-backend = "setuptools.build_meta"\n'
+    )
+    provider = {"pyproject.toml": build_system, **SRC_PACKAGE}
+    linked = build(workspace, tmp_path, {**pick(LEGACY, "basic"), "bs-provider": provider})
+    root = tmp_path / "repos"
+    assert refusals(linked, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "provider-unnamed"
+    )
+    edit(root, "bs-provider", "setup.cfg", CFG_SRC)
+    sync_all(linked, root)
+    assert _reaches(linked, "bs-provider", "src/fixture_auth/models.py")
+    _equal(linked, settings, tmp_path, "completed")
+    (root / "bs-provider" / "setup.cfg").unlink()
+    sync_all(linked, root)
+    assert refusals(linked, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "provider-unnamed"
+    )
+    _equal(linked, settings, tmp_path, "unnamed")
+
+
+def test_s20_a_second_explicit_provider_appears_and_goes(
+    workspace: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    provider = {"setup.cfg": CFG_FLAT, **AUTH_PACKAGE}
+    linked = build(workspace, tmp_path, {**pick(LEGACY, "basic"), "cfg-provider": provider})
+    root = tmp_path / "repos"
+    add_repo(root, "cfg-twin", provider)
+    sync_all(linked, root)
+    assert refusals(linked, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "provider-ambiguous"
+    )
+    _equal(linked, settings, tmp_path, "twins")
+    remove_repo(root, "cfg-twin")
+    sync_all(linked, root)
+    assert _reaches(linked, "cfg-provider")
+    _equal(linked, settings, tmp_path, "single")
+
+
+LIB_CFG = (
+    "[metadata]\nname = auth-core\n\n[options]\npackage_dir =\n    = lib\n"
+    "packages = find:\npy_modules = lib_tool\n\n[options.packages.find]\nwhere = lib\n"
+)
+
+
+def test_a_layout_rooted_elsewhere_gaining_the_module_withdraws_a_legacy_link_and_back(
+    legacy: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    """A project named otherwise starts shipping fixture_auth from its own lib/: every
+    repository requiring it by the legacy key is resolved again (P3a R21, below a root
+    only a setuptools layout states)."""
+    root = tmp_path / "repos"
+    add_repo(
+        root,
+        "lib-core",
+        {"setup.cfg": LIB_CFG, "lib/other_pkg/__init__.py": "", "lib/lib_tool.py": ""},
+    )
+    sync_all(legacy, root)
+    assert _linked(legacy)
+    for path, text in AUTH_PACKAGE.items():
+        edit(root, "lib-core", f"lib/{path}", text)
+    sync_all(legacy, root)
+    assert refusals(legacy, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "dependency-absent"
+    )
+    _equal(legacy, settings, tmp_path, "shipped")
+    shutil.rmtree(root / "lib-core" / "lib" / "fixture_auth")
+    sync_all(legacy, root)
+    assert _linked(legacy)
+    _equal(legacy, settings, tmp_path, "unshipped")
+
+
+def test_a_py_modules_edit_below_a_stated_root_withdraws_a_legacy_link_and_back(
+    workspace: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    """Only the facts change: lib/fixture_auth.py is there all along, and py_modules starts
+    and stops naming it."""
+    corpus = {
+        **pick(LEGACY, "auth-provider", "basic"),
+        "lib-core": {"setup.cfg": LIB_CFG, "lib/lib_tool.py": "", "lib/fixture_auth.py": "x = 1\n"},
+    }
+    linked = build(workspace, tmp_path, corpus)
+    root = tmp_path / "repos"
+    assert _linked(linked)
+    edit(root, "lib-core", "setup.cfg", LIB_CFG.replace("lib_tool", "lib_tool, fixture_auth"))
+    sync_all(linked, root)
+    assert not _linked(linked)
+    _equal(linked, settings, tmp_path, "named")
+    edit(root, "lib-core", "setup.cfg", LIB_CFG)
+    sync_all(linked, root)
+    assert _linked(linked)
+    _equal(linked, settings, tmp_path, "unnamed")
+
+
+def test_a_setuptools_provider_body_edit_resolves_no_other_repository(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    provider = {"setup.cfg": CFG_FLAT, **AUTH_PACKAGE}
+    linked = build(workspace, tmp_path, {**pick(LEGACY, "basic"), "cfg-provider": provider})
+    root = tmp_path / "repos"
+    append(root, "cfg-provider", "fixture_auth/models.py", "\n\ndef extra() -> None:\n    pass\n")
+    work = sync_all(linked, root)
+    assert (work.repository, work.package) == (0, 0)
+    edit(root, "cfg-provider", "setup.cfg", CFG_FLAT + "\n[flake8]\nmax-line-length = 100\n")
+    work = sync_all(linked, root)
+    assert (work.repository, work.package) == (0, 0)
