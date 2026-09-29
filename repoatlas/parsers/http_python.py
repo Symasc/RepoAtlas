@@ -45,12 +45,19 @@ lines that prove it. The claim is generic on purpose: it names the identity's
 source kind and nothing about flasgger, so another source-backed extractor produces
 the same claim.
 
+**A request's URL** for the cross-repository join
+(:data:`~repoatlas.parsers.http_facts.HTTP_CLIENT_CALL`) is read a little further
+than a literal: a module constant that holds a URL, or an f-string whose origin is
+literal or such a constant, with each placeholder filling one whole path segment.
+Only the per-file facts above stay literal-only.
+
 Parsed, never imported: this reads the syntax tree only (V1_SPEC §17).
 """
 
 from __future__ import annotations
 
 import ast
+import json
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -58,6 +65,7 @@ from dataclasses import dataclass, field
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedReference
 from repoatlas.parsers.http_facts import (
+    HTTP_CLIENT_CALL,
     HTTP_EXPOSED_ENDPOINT,
     http_reference,
     pending_reference,
@@ -107,6 +115,8 @@ FLASGGER_SWAGGER2 = "flasgger-swagger2"
 _TEMPLATE_FIELDS = ("host", "basePath", "schemes")
 #: What catching the failed import of an optional dependency looks like.
 _IMPORT_ERRORS = frozenset({"ImportError", "ModuleNotFoundError"})
+#: Display only: a placeholder's source text is shortened past this.
+_MAX_EXPRESSION = 64
 
 #: Deep enough for any literal someone writes by hand; shallow enough that an
 #: adversarial chain of ``+`` cannot recurse the parser into the ground.
@@ -203,6 +213,19 @@ class _Receiver:
     deployments: tuple[_Deployment, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class _ClientUrl:
+    """A request's origin and path shape, as far as the source states them."""
+
+    origin: str
+    #: Each path segment's literal text, or ``None`` where one value fills it.
+    segments: tuple[str | None, ...]
+    #: The URL as written, a placeholder shown as ``{expression}``: display only.
+    display: str
+    #: The line of the module constant the URL or its base came from.
+    base_at: int | None = None
+
+
 def _module_statements(tree: ast.Module) -> Iterator[ast.stmt]:
     """Statements that run at module level: the body, and module-level ``if``/``try`` bodies.
 
@@ -297,6 +320,8 @@ class PythonHttp:
         #: Local name → ``module.attr``, for ``from fastapi import FastAPI``.
         self._names: dict[str, str] = {}
         self._receivers: dict[str, _Receiver] = {}
+        #: Module constant → (its literal value, its line), each bound exactly once.
+        self._constants: dict[str, tuple[str, int]] = {}
         counts = _binding_counts(tree)
         if counts is None:
             return
@@ -305,6 +330,7 @@ class PythonHttp:
         self._constructors(tree, counts)
         self._mounts(tree)
         self._identities(tree, counts)
+        self._read_constants(tree, counts)
 
     # -- what the module proves ---------------------------------------------------
 
@@ -587,6 +613,22 @@ class PythonHttp:
                 )
         return found
 
+    def _read_constants(self, tree: ast.Module, counts: Counter[str]) -> None:
+        for statement in tree.body:
+            if (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+            ):
+                name, value = statement.targets[0].id, statement.value
+            elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+                name, value = statement.target.id, statement.value
+            else:
+                continue
+            text = static_string(value)
+            if text is not None and counts[name] == 1:
+                self._constants[name] = (text, statement.lineno)
+
     # -- routes ---------------------------------------------------------------------
 
     def route_references(
@@ -762,14 +804,23 @@ class PythonHttp:
             method = _CLIENT_VERBS[function]
         else:
             return []
-        url = static_string(url_node)
-        target = http.client_target(url) if url is not None else None
-        # Neither library resolves a relative URL: it names no request at all.
-        if method is None or target is None or target.url is None or url_node is None:
+        if method is None or url_node is None:
             return []
         end = max(
             node.end_lineno or node.lineno for node in (url_node, method_node) if node is not None
         )
+        url = static_string(url_node)
+        if url is None:
+            # Not literal: at most a claim for the join, never a per-file fact.
+            read = self._client_url(url_node)
+            if read is None:
+                return []
+            return [self._client_claim(read, method, call.lineno, end, library, source_symbol)]
+        target = http.client_target(url)
+        # Neither library resolves a relative URL: it names no request at all.
+        if target is None or target.url is None or target.origin is None:
+            return []
+        literal = _ClientUrl(target.origin, tuple(target.path[1:].split("/")), target.url)
         return [
             http_reference(
                 EdgeType.CALLS_HTTP_ENDPOINT,
@@ -791,4 +842,111 @@ class PythonHttp:
                 composed=False,
                 source_symbol=source_symbol,
             ),
+            self._client_claim(literal, method, call.lineno, end, library, source_symbol),
         ]
+
+    @staticmethod
+    def _client_claim(
+        read: _ClientUrl,
+        method: str,
+        start: int,
+        end: int,
+        library: str,
+        source_symbol: str | None,
+    ) -> ParsedReference:
+        meta = {
+            "method": method,
+            "origin": read.origin,
+            "segments": json.dumps(list(read.segments)),
+            "source": library,
+        }
+        if read.base_at is not None:
+            meta["base_at"] = str(read.base_at)
+        return pending_reference(
+            EdgeType.CALLS_HTTP_ENDPOINT,
+            EntityType.HTTP_ENDPOINT,
+            f"{method} {read.display}",
+            start,
+            end,
+            role=HTTP_CLIENT_CALL,
+            source_symbol=source_symbol,
+            **meta,
+        )
+
+    def _client_url(self, node: ast.expr) -> _ClientUrl | None:
+        """A URL named by a module constant, or an f-string on a known origin."""
+        if isinstance(node, ast.Name):
+            constant = self._constants.get(node.id)
+            target = http.client_target(constant[0]) if constant is not None else None
+            if constant is None or target is None or target.url is None or target.origin is None:
+                return None
+            segments = tuple(target.path[1:].split("/"))
+            return _ClientUrl(target.origin, segments, target.url, constant[1])
+        if isinstance(node, ast.JoinedStr):
+            return self._template_url(node)
+        return None
+
+    def _template_url(self, node: ast.JoinedStr) -> _ClientUrl | None:
+        """``f"https://host/users/{uid}"`` or ``f"{BASE}/users/{uid}"``, or ``None``.
+
+        The text is concatenated exactly as the f-string would concatenate it: a base
+        constant is appended to, never resolved against. The origin must be entirely
+        literal; every placeholder after it goes through :func:`http.route_template`,
+        which accepts one only as a whole path segment.
+        """
+        values = list(node.values)
+        head, base_at = "", None
+        first = values[0] if values else None
+        if isinstance(first, ast.FormattedValue):
+            if not (
+                isinstance(first.value, ast.Name)
+                and first.conversion == -1
+                and first.format_spec is None
+            ):
+                return None
+            constant = self._constants.get(first.value.id)
+            if constant is None:
+                return None
+            head, base_at = constant
+            values = values[1:]
+            following = values[0] if values else None
+            if not head.endswith("/") and not (
+                isinstance(following, ast.Constant)
+                and isinstance(following.value, str)
+                and following.value.startswith("/")
+            ):
+                return None
+        while values and isinstance(values[0], ast.Constant):
+            text = values[0].value
+            if not isinstance(text, str):
+                return None
+            head += text
+            values = values[1:]
+        scheme = head.find("://")
+        slash = head.find("/", scheme + 3) if scheme >= 0 else -1
+        if slash < 0:
+            return None
+        origin = http.client_target(head[:slash] + "/")
+        if origin is None or origin.origin is None:
+            return None
+        parts: list[list[str]] = [[http.TEMPLATE_LITERAL, head[slash:]]]
+        for value in values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append([http.TEMPLATE_LITERAL, value.value])
+            elif (
+                isinstance(value, ast.FormattedValue)
+                and value.conversion == -1
+                and value.format_spec is None
+            ):
+                parts.append([http.TEMPLATE_SUBSTITUTION, ast.unparse(value.value)])
+            else:
+                return None
+        template = http.route_template(parts)
+        if isinstance(template, str):
+            return None
+        expressions = iter(template.expressions)
+        display = "/".join(
+            segment if segment is not None else "{" + next(expressions, "")[:_MAX_EXPRESSION] + "}"
+            for segment in template.segments
+        )
+        return _ClientUrl(origin.origin, template.segments, f"{origin.origin}/{display}", base_at)
