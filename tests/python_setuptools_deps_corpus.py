@@ -129,11 +129,20 @@ DEPS: dict[str, dict[str, str]] = {
             )
         }
     ),
-    # D9: extras only, in either source
+    # D9: extras only: setup.py states the field (empty) and an extra; setup.cfg an extra (CM5)
     "extras-only": project(
         {
-            "setup.py": SETUP + 'setup(extras_require={"auth": ["fixture-auth"]})\n',
-            "setup.cfg": cfg("", after="\n[options.extras_require]\nauth =\n    fixture-auth\n"),
+            "setup.py": SETUP
+            + 'setup(install_requires=[], extras_require={"auth": ["fixture-auth"]})\n',
+            "setup.cfg": "[metadata]\nname = fixture-client\n\n[options]\npy_modules = service\n"
+            "\n[options.extras_require]\nauth =\n    fixture-auth\n",
+        }
+    ),
+    # D5 / CM4: one element computed leaves the whole list unread, the literal one too
+    "py-partial": project(
+        {
+            "setup.py": SETUP
+            + 'V = "1"\nsetup(install_requires=["fixture-auth", f"fixture-db>={V}"])\n'
         }
     ),
     # D10: install_requires and an extra both state it: the requirement on line 7

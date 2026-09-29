@@ -102,6 +102,7 @@ def test_d1_the_edge_is_the_one_a_pyproject_declaration_gives(
     ("consumer", "why"),
     [
         ("py-dynamic", "dependency-unread"),  # D5: computed, and no fallback to setup.cfg
+        ("py-partial", "dependency-unread"),  # D5: one element computed (CM4)
         ("pep621-none-cfg", "dependency-absent"),  # D6: [project] states none
         ("py-other-cfg", "dependency-absent"),  # D7: setup.cfg's list is overridden (CM6)
         ("cfg-direct", "dependency-unread"),  # D8: a direct reference, never a version
