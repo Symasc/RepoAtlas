@@ -1,7 +1,8 @@
 """P20: an edit to a Python project, then a sync, equals a fresh index of the same tree.
 
-Each case edits :data:`tests.python_corpus.PYFIX`, syncs it incrementally, and holds the
-result to a pristine database indexing the edited tree
+Each case edits :data:`tests.python_corpus.PYFIX`, or the projects across repositories of
+:mod:`tests.python_packages_corpus`, syncs it incrementally, and holds the result to a
+pristine database indexing the edited tree
 (:func:`~tests.incremental_corpus.assert_equals_fresh`).
 """
 
@@ -13,11 +14,29 @@ import pytest
 from repoatlas.config.settings import Settings
 from repoatlas.services.workspace import Workspace
 from tests.impact_corpus import build, uses
-from tests.incremental_corpus import append, assert_equals_fresh, edit, sync_all
+from tests.incremental_corpus import (
+    add_repo,
+    append,
+    assert_equals_fresh,
+    edit,
+    remove_repo,
+    sync_all,
+)
 from tests.python_corpus import PKG, PYFIX, refusals
+from tests.python_packages_corpus import (
+    SERVICE,
+    TWINS,
+    UVWS,
+    XREPO,
+    consumer_uses,
+    edges,
+)
+from tests.python_packages_corpus import uses as repository_uses
 
 R = PKG
 REPO = "pyfix"
+#: What ``internal-fixture``'s consumers use of it, by target key.
+IMPORTED = ("Widget", "PublicWidget", "make", "models.make")
 
 
 @pytest.fixture
@@ -25,10 +44,17 @@ def indexed(workspace: Workspace, tmp_path: Path) -> Workspace:
     return build(workspace, tmp_path, {REPO: PYFIX})
 
 
-def _replace(root: Path, path: str, old: str, new: str) -> None:
-    text = (root / REPO / path).read_text(encoding="utf-8")
+@pytest.fixture
+def linked(workspace: Workspace, tmp_path: Path) -> Workspace:
+    """A provider, an undeclared shadow of its module, and two repositories declaring it."""
+    names = ("provider", "shadow", "consumer", "pinned")
+    return build(workspace, tmp_path, {name: XREPO[name] for name in names})
+
+
+def _replace(root: Path, path: str, old: str, new: str, repo: str = REPO) -> None:
+    text = (root / repo / path).read_text(encoding="utf-8")
     assert old in text, f"{old!r} not in {path}"
-    edit(root, REPO, path, text.replace(old, new))
+    edit(root, repo, path, text.replace(old, new))
 
 
 def _remove(root: Path, path: str) -> None:
@@ -147,3 +173,88 @@ def test_moving_a_star_import_after_a_binding_refuses_it(
     sync_all(indexed, root)
     assert not [u for u in uses(indexed) if u[0] == f"{R}/star_after.py#p11a"]
     _equal(indexed, settings, tmp_path, "star")
+
+
+def test_a_provider_renamed_and_back_reaches_every_repository_declaring_it(
+    linked: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    named, renamed = 'name = "internal-fixture"', 'name = "internal-fixture-renamed"'
+    _replace(root, "pyproject.toml", named, renamed, repo="provider")
+    work = sync_all(linked, root)
+    assert (work.mode, work.packages_invalidated) == ("incremental", 2)
+    assert refusals(linked, "consumer", SERVICE) == dict.fromkeys(IMPORTED, "dependency-absent")
+    assert not [
+        e
+        for e in edges(linked)
+        if e["target"].startswith("provider:") and not e["source"].startswith("provider:")
+    ]
+    _equal(linked, settings, tmp_path, "renamed")
+
+    _replace(root, "pyproject.toml", renamed, named, repo="provider")
+    sync_all(linked, root)
+    for repository in ("consumer", "pinned"):
+        assert repository_uses(linked, repository) == consumer_uses(repository)
+    _equal(linked, settings, tmp_path, "named")
+
+
+def test_a_second_provider_appears_and_goes(
+    linked: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    add_repo(root, "twin", TWINS["twin"])
+    work = sync_all(linked, root)
+    assert (work.mode, work.packages_invalidated) == ("incremental", 1)
+    assert refusals(linked, "consumer", SERVICE) == dict.fromkeys(IMPORTED, "provider-ambiguous")
+    # a pin names its provider whoever else provides the name
+    assert repository_uses(linked, "pinned") == consumer_uses("pinned")
+    _equal(linked, settings, tmp_path, "twin")
+
+    remove_repo(root, "twin")
+    sync_all(linked, root)
+    assert repository_uses(linked, "consumer") == consumer_uses("consumer")
+    _equal(linked, settings, tmp_path, "untwinned")
+
+
+def test_a_uv_source_retargeted_and_back(
+    linked: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    _replace(root, "pyproject.toml", "../provider", "../shadow", repo="pinned")
+    sync_all(linked, root)
+    assert refusals(linked, "pinned", SERVICE) == dict.fromkeys(IMPORTED, "dependency-elsewhere")
+    _equal(linked, settings, tmp_path, "retargeted")
+
+    _replace(root, "pyproject.toml", "../shadow", "../provider", repo="pinned")
+    sync_all(linked, root)
+    assert repository_uses(linked, "pinned") == consumer_uses("pinned")
+    _equal(linked, settings, tmp_path, "pinned")
+
+
+def test_a_declaration_removed_takes_its_uses_with_it(
+    linked: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    _replace(root, "pyproject.toml", '"internal-fixture>=1.0"', "", repo="consumer")
+    work = sync_all(linked, root)
+    assert work.mode == "incremental"
+    assert refusals(linked, "consumer", SERVICE) == dict.fromkeys(IMPORTED, "dependency-absent")
+    _equal(linked, settings, tmp_path, "undeclared")
+
+
+def test_a_workspace_source_removed_leaves_its_members_to_the_version_rule(
+    workspace: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    uvws = build(workspace, tmp_path, {"uvws": UVWS})
+    root = tmp_path / "repos"
+    source = "[tool.uv.sources]\nlib = { workspace = true }\n"
+    _replace(root, "pyproject.toml", source, "", repo="uvws")
+    sync_all(uvws, root)
+    [edge] = [
+        e
+        for e in edges(uvws)
+        if e["source"] == "uvws:packages/app/src/app/__init__.py#run"
+        and e["basis"] == "python-dependency"
+    ]
+    assert "resolved_by" not in edge
+    _equal(uvws, settings, tmp_path, "unsourced")

@@ -27,6 +27,15 @@ them, and one the workspace excludes.
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
+from repoatlas.services.workspace import Workspace
+from tests.impact_corpus import label
+
+MODELS = "provider:src/internal_fixture/models.py"
+SERVICE = "src/consumer_app/service.py"
+
 PROVIDER: dict[str, str] = {
     "pyproject.toml": (
         '[project]\nname = "internal-fixture"\nversion = "1.2.0"\n'
@@ -153,3 +162,46 @@ UVWS: dict[str, str] = {
         "from lib import helper\ndef old():\n    return helper()\n"
     ),
 }
+
+
+def edges(workspace: Workspace) -> list[dict[str, Any]]:
+    """Every ``USES`` edge, each end labelled ``repository:path#name``."""
+    rows = workspace.database.execute(
+        """
+        SELECT sr.slug AS s_repo, sf.rel_path AS s_path, s.qualified_name AS s_name,
+               s.type AS s_type, dr.slug AS d_repo, df.rel_path AS d_path,
+               d.qualified_name AS d_name, d.type AS d_type, e.resolution AS resolution
+        FROM edges e
+        JOIN entities s ON s.id = e.src_id JOIN entities d ON d.id = e.dst_id
+        JOIN files sf ON sf.id = s.file_id JOIN files df ON df.id = d.file_id
+        JOIN repositories sr ON sr.id = sf.repo_id JOIN repositories dr ON dr.id = df.repo_id
+        WHERE e.type = 'USES'
+        """
+    ).fetchall()
+    return [
+        {
+            "source": f"{row['s_repo']}:{label(row['s_path'], row['s_name'], row['s_type'])}",
+            "target": f"{row['d_repo']}:{label(row['d_path'], row['d_name'], row['d_type'])}",
+            **json.loads(row["resolution"] or "{}"),
+        }
+        for row in rows
+    ]
+
+
+def uses(workspace: Workspace, repository: str) -> set[tuple[str, str, str]]:
+    return {
+        (e["source"], e["target"], e["use"])
+        for e in edges(workspace)
+        if e["source"].startswith(f"{repository}:")
+    }
+
+
+def consumer_uses(repository: str) -> set[tuple[str, str, str]]:
+    """What a consumer of ``internal-fixture`` uses of it, and its own test."""
+    here = f"{repository}:{SERVICE}"
+    return {
+        (f"{here}#build", f"{MODELS}#Widget", "type"),
+        (f"{here}#build", f"{MODELS}#make", "call"),
+        (f"{here}#via_module", f"{MODELS}#make", "call"),
+        (f"{repository}:tests/test_service.py#test_build", f"{here}#build", "call"),
+    }
