@@ -710,6 +710,7 @@ class SearchIndex(Protocol):
         limit: int,
         *,
         path_prefix: str | None = None,
+        module_values: bool = True,
     ) -> list[EntityHit]: ...
     def search_entities(
         self,
@@ -719,4 +720,5 @@ class SearchIndex(Protocol):
         limit: int,
         *,
         path_prefix: str | None = None,
+        module_values: bool = True,
     ) -> list[EntityHit]: ...

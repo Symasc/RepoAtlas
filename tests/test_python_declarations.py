@@ -19,6 +19,7 @@ from repoatlas.indexing.chunking import chunk_content
 from repoatlas.models.capability import CapabilityContext, CapabilityScope, Presentation
 from repoatlas.models.impact import ImpactRequest
 from repoatlas.models.parsing import USES_EXPORT_TABLE, EntityType
+from repoatlas.models.search import SearchRequest
 from repoatlas.parsers.python import PythonParser
 from repoatlas.parsers.ts_uses import USES_EXPORTS
 from repoatlas.services.workspace import Workspace
@@ -402,6 +403,29 @@ def test_a_value_across_repositories_records_what_proved_it(declared: Workspace)
         "constraint": ">=1.0",
         "imported_at": 1,
     }
+
+
+def test_search_names_no_module_value_and_impact_does(declared: Workspace) -> None:
+    """Retrieval answers as before: the value's source line, never its declaration record.
+
+    Impact is the one that names it, as it names a function.
+    """
+    service = CapabilityService(declared)
+    context = CapabilityContext(scope=CapabilityScope.GLOBAL)
+    found = service.search(SearchRequest(context=context, question="DEFAULT_TIMEOUT"))
+    assert any("DEFAULT_TIMEOUT = 30" in item.text for item in found.evidence)
+    assert not [
+        item.entity.key
+        for item in found.evidence
+        if item.entity is not None and item.entity.type is EntityType.SYMBOL
+    ]
+    seed = service.impact(ImpactRequest(context=context, seed="DEFAULT_TIMEOUT")).seed
+    assert (seed.status, seed.type, seed.path, seed.lines) == (
+        "resolved",
+        EntityType.SYMBOL,
+        "src/timeout_config/config.py",
+        (1, 1),
+    )
 
 
 def test_the_call_graph_is_what_it_was(declared: Workspace) -> None:

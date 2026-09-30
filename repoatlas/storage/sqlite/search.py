@@ -42,6 +42,15 @@ from repoatlas.storage.sqlite.database import Database
 #: "did someone remember this script?" rather than "is this a word character?".
 _TOKEN_RE = re.compile(r"[\w.@$/-]+")
 
+#: Leaves Python module values out of an entity lookup (``module_values=False``). They are
+#: declarations a ``USES`` lands on and nothing else (``USES_ONLY_KINDS``), and retrieval
+#: never names one. A Python file's only ``symbol`` entities are its module values; the
+#: suffixes are ``flavor_for``'s, and ``GLOB`` because a suffix is case-sensitive.
+_NO_MODULE_VALUES = (
+    " AND NOT (e.type = 'symbol' AND f.rel_path IS NOT NULL"
+    " AND (f.rel_path GLOB '*.py' OR f.rel_path GLOB '*.pyi'))"
+)
+
 
 def _fts_query(terms: Sequence[str]) -> str:
     """Build a MATCH expression from literal terms.
@@ -790,6 +799,7 @@ class SqliteSearchIndex:
         limit: int = 50,
         *,
         path_prefix: str | None = None,
+        module_values: bool = True,
     ) -> list[EntityHit]:
         """Entities whose name, qualified name or key matches ``names`` exactly.
 
@@ -802,6 +812,8 @@ class SqliteSearchIndex:
         returned. An interned entity — an environment variable, a package, an HTTP
         operation — has no location, so it is not beneath any path; the path
         predicate is false for its ``NULL`` file and excludes it.
+
+        ``module_values=False`` leaves out Python module values (``_NO_MODULE_VALUES``).
         """
         wanted = [name for name in names if name]
         if not wanted:
@@ -820,6 +832,8 @@ class SqliteSearchIndex:
             scope = f" AND (e.repo_id IN ({repo_placeholders}) OR e.repo_id IS NULL)"
             params.extend(repo_ids)
         scope += path_scope("f", path_prefix, params)
+        if not module_values:
+            scope += _NO_MODULE_VALUES
         params.append(limit)
 
         rows = self._db.execute(
@@ -865,6 +879,7 @@ class SqliteSearchIndex:
         limit: int = 50,
         *,
         path_prefix: str | None = None,
+        module_values: bool = True,
     ) -> list[EntityHit]:
         terms = tokenize_query(query)
         if not terms:
@@ -891,6 +906,8 @@ class SqliteSearchIndex:
         # A path scope admits only entities declared beneath it, which excludes the
         # interned ones the repository clause above keeps: they have no location.
         scope += path_scope("f", path_prefix, params)
+        if not module_values:
+            scope += _NO_MODULE_VALUES
         params.append(limit)
 
         rows = self._db.execute(
