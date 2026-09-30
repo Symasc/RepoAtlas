@@ -27,6 +27,7 @@ from tests.incremental_corpus import (
 from tests.python_corpus import PKG, PYFIX, refusals
 from tests.python_legacy_corpus import AUTH_MODELS, AUTH_PACKAGE, LEGACY, pick, service_uses
 from tests.python_legacy_corpus import SERVICE as LEGACY_SERVICE
+from tests.python_namespace_corpus import NAMESPACES
 from tests.python_packages_corpus import (
     SERVICE,
     TWINS,
@@ -788,3 +789,77 @@ def test_n2_a_body_edit_in_a_pyproject_layout_provider_resolves_no_other_reposit
     append(root, "only-provider", "fixture_auth/models.py", "\n\ndef extra() -> None:\n    pass\n")
     work = sync_all(linked, root)
     assert (work.repository, work.package) == (0, 0)
+
+
+# -- P6 N1: namespace portions ------------------------------------------------------------
+
+HA_TEST = "ha:tests/test_const.py#test_domain"
+HA_CONST = "ha:custom_components/fixture_ha/const.py#domain"
+
+
+def _through(workspace: Workspace, source: str) -> list[tuple[str, object]]:
+    """Where ``source``'s uses land, and the namespace each was found through."""
+    return sorted(
+        (e["target"], e.get("namespace_package")) for e in edges(workspace) if e["source"] == source
+    )
+
+
+def test_n1_a_top_level_portion_becoming_a_regular_package_and_back(
+    workspace: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    """The same module, reached with the namespace evidence and without it."""
+    linked = build(workspace, tmp_path, pick(NAMESPACES, "ha"))
+    root = tmp_path / "repos"
+    assert _through(linked, HA_TEST) == [(HA_CONST, "custom_components")]
+    edit(root, "ha", "custom_components/__init__.py", "")
+    sync_all(linked, root)
+    assert _through(linked, HA_TEST) == [(HA_CONST, None)]
+    _equal(linked, settings, tmp_path, "regular")
+    (root / "ha" / "custom_components" / "__init__.py").unlink()
+    sync_all(linked, root)
+    assert _through(linked, HA_TEST) == [(HA_CONST, "custom_components")]
+    _equal(linked, settings, tmp_path, "portion")
+
+
+def test_n1_a_module_below_a_portion_deleted_and_restored(
+    workspace: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    linked = build(workspace, tmp_path, pick(NAMESPACES, "ha"))
+    root = tmp_path / "repos"
+    const = NAMESPACES["ha"]["custom_components/fixture_ha/const.py"]
+    (root / "ha" / "custom_components" / "fixture_ha" / "const.py").unlink()
+    sync_all(linked, root)
+    assert _through(linked, HA_TEST) == []
+    assert refusals(linked, "ha", "tests/test_const.py") == dict.fromkeys(
+        ("domain", "other"), "namespace-package"
+    )
+    _equal(linked, settings, tmp_path, "deleted")
+    edit(root, "ha", "custom_components/fixture_ha/const.py", const)
+    sync_all(linked, root)
+    assert _through(linked, HA_TEST) == [(HA_CONST, "custom_components")]
+    _equal(linked, settings, tmp_path, "restored")
+
+
+def test_n1_a_second_portion_holding_the_module_makes_it_ambiguous_and_back(
+    workspace: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    module = "def a() -> None:\n    pass\n"
+    project = {
+        "pyproject.toml": (
+            '[project]\nname = "p"\n\n'
+            '[tool.hatch.build.targets.wheel]\npackages = ["lib1/ns", "lib2/ns"]\n'
+        ),
+        "lib1/ns/a.py": module,
+        "app.py": "from ns.a import a\n\n\ndef run() -> None:\n    a()\n",
+    }
+    linked = build(workspace, tmp_path, {"two-roots": project})
+    root = tmp_path / "repos"
+    assert _through(linked, "two-roots:app.py#run") == [("two-roots:lib1/ns/a.py#a", "ns")]
+    edit(root, "two-roots", "lib2/ns/a.py", module)
+    sync_all(linked, root)
+    assert refusals(linked, "two-roots", "app.py") == {"a": "module-ambiguous"}
+    _equal(linked, settings, tmp_path, "ambiguous")
+    (root / "two-roots" / "lib1" / "ns" / "a.py").unlink()
+    sync_all(linked, root)
+    assert _through(linked, "two-roots:app.py#run") == [("two-roots:lib2/ns/a.py#a", "ns")]
+    _equal(linked, settings, tmp_path, "moved")

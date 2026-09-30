@@ -48,14 +48,20 @@ boundary: another project's modules -- in this repository or any other -- are re
 only on dependency evidence, never because they sit in the same Git repository, and an
 import that only another project here could satisfy is refused as ``project-boundary``.
 
-**Relative names** resolve within the chain of regular packages holding the importer,
-which never climbs to or above its source root.
+**Relative names** resolve within the chain of packages holding the importer, which never
+climbs to or above its source root; a namespace portion is a level of it only below a
+regular package.
 
 Within one directory CPython's own order holds: a regular package (``x/__init__.py``)
 before a module (``x.py``), and a stub (``.pyi``) only where no source exists. A directory
-without ``__init__`` is a namespace portion, refused (``namespace-package``) rather than
-treated as a package. Module names are matched exactly, case and all, on the index's own
-repository-relative paths.
+without ``__init__`` is a **namespace portion** (PEP 420). A name is walked through one
+below a package -- flask's ``sansio/`` inside ``flask/`` is one directory, the only one
+``flask.sansio`` can be, and so is every portion below it -- and through one at the top
+of the importer's *own* roots, when exactly one of them holds the module named
+(``custom_components.hacs`` in a Home Assistant integration). A portion is never itself a
+module (``namespace-package``), never shipped, and never provided to another project: a
+namespace root may be shared by many, and none of them owns it. Module names are matched
+exactly, case and all, on the index's own repository-relative paths.
 """
 
 from __future__ import annotations
@@ -518,18 +524,30 @@ class PythonModules:
         return self.project_of(a.repo_id, a.rel_path) == self.project_of(b.repo_id, b.rel_path)
 
     def _walk(self, start: FileRow, parts: Sequence[str]) -> FileRow | str:
-        """From a package, down ``parts`` as submodules; each step must be a regular package."""
-        current = start
-        for part in parts:
-            if PurePosixPath(current.rel_path).name not in _PACKAGE_FILES:
-                return "module-not-found"
-            found = self._top_level(current.repo_id, _parent(current.rel_path), part)
+        """From a package, down ``parts`` as submodules (:meth:`_descend`)."""
+        return self._descend(start.repo_id, _package_directory(start), start, parts)
+
+    def _descend(
+        self, repo_id: int, directory: str | None, current: FileRow | None, parts: Sequence[str]
+    ) -> FileRow | str:
+        """Down ``parts`` from ``current``: a package or a namespace portion whose directory is
+        ``directory``, which a module has none of. Each step is a regular package, a module,
+        or a namespace portion walked through -- one directory, the one its parent's own
+        directory holds, so nothing else provides it. A name ending on a portion names no
+        file (``namespace-package``)."""
+        for index, part in enumerate(parts):
+            if directory is None:
+                return "module-not-found"  # a module has no submodules
+            found = self._top_level(repo_id, directory, part)
             if found is None:
                 return "module-not-found"
             if isinstance(found, str):
-                return found
-            current = found
-        return current
+                if index == len(parts) - 1:
+                    return found
+                directory, current = _join(directory, part), None
+                continue
+            current, directory = found, _package_directory(found)
+        return current if current is not None else "namespace-package"
 
     # -- names -------------------------------------------------------------------
 
@@ -570,21 +588,33 @@ class PythonModules:
         chain = self._package_chain(origin, project)
         if level > len(chain):
             return "relative-beyond-package"
-        package = chain[level - 1]
-        found = self._walk(package, parts)
+        directory, package = chain[level - 1]
+        if not parts:
+            return (package, []) if package is not None else "namespace-package"
+        found = self._descend(origin.repo_id, directory, package, parts)
         if isinstance(found, str):
             return found
         return found, []
 
-    def _package_chain(self, origin: FileRow, project: Project | None) -> list[FileRow]:
-        """The ``__init__`` of each regular package holding ``origin``, innermost first."""
+    def _package_chain(
+        self, origin: FileRow, project: Project | None
+    ) -> list[tuple[str, FileRow | None]]:
+        """Each package holding ``origin``, innermost first: its directory, and its
+        ``__init__`` -- ``None`` for a namespace portion.
+
+        The chain never climbs to or above a source root, and a directory without an
+        ``__init__`` is a level only below a regular package: inside ``flask/``,
+        ``sansio/`` is the namespace package ``flask.sansio``, while a script's directory
+        with no regular package above it is no package at all.
+        """
         stops = set()
         roots = self.roots(project) if project is not None else []
         if isinstance(roots, list):
             stops = {root.path for root in roots}
         if project is not None:
             stops.add(project.directory)
-        chain: list[FileRow] = []
+        chain: list[tuple[str, FileRow | None]] = []
+        regular = 0  # the levels up to and including the outermost regular package
         directory = _parent(origin.rel_path)
         while directory and directory not in stops:
             package = next(
@@ -595,11 +625,11 @@ class PythonModules:
                 ),
                 None,
             )
-            if package is None:
-                break
-            chain.append(package)
+            chain.append((directory, package))
+            if package is not None:
+                regular = len(chain)
             directory = _parent(directory)
-        return chain
+        return chain[:regular]
 
     def _absolute(
         self, origin: FileRow, project: Project, parts: list[str]
@@ -609,6 +639,8 @@ class PythonModules:
             return roots
         head = parts[0]
         found = self._head(project.repo_id, roots, head)
+        if found == "namespace-package" and len(parts) > 1:
+            return self._portion(origin, project, roots, parts)
         if isinstance(found, str):
             if found == "module-not-found" and self._elsewhere(origin, project, head):
                 return "project-boundary"
@@ -621,6 +653,36 @@ class PythonModules:
         if isinstance(target, str):
             return target
         return target, root_detail(root, project)
+
+    def _portion(
+        self, origin: FileRow, project: Project, roots: Sequence[Root], parts: list[str]
+    ) -> tuple[FileRow, list[tuple[str, str]]] | str:
+        """A module below a top-level namespace portion of the importer's own roots.
+
+        Only ever the importer's own project: every root holding a portion named ``head``
+        is walked (:meth:`_descend`), and the module must be one file among them all -- two
+        is ``module-ambiguous``. None is ``namespace-package``, which no other project is
+        asked for: a namespace root may be shared, and is never assigned to anyone.
+        """
+        head = parts[0]
+        found: dict[int, tuple[FileRow, Root]] = {}
+        for root in roots:
+            if (root.names is not None and head not in root.names) or root.ships == "modules":
+                continue
+            if self._top_level(project.repo_id, root.path, head) != "namespace-package":
+                continue
+            target = self._descend(project.repo_id, _join(root.path, head), None, parts[1:])
+            if isinstance(target, FileRow):
+                found.setdefault(target.file_id, (target, root))
+        if len(found) > 1:
+            return "module-ambiguous"
+        if not found:
+            return "namespace-package"
+        [(target, root)] = found.values()
+        shadow = self._portion_shadow(origin, root, head)
+        if shadow is not None:
+            return shadow
+        return target, [*root_detail(root, project), ("namespace_package", head)]
 
     def _head(self, repo_id: int, roots: Sequence[Root], head: str) -> tuple[FileRow, Root] | str:
         """The one top-level module ``head`` names in ``roots``, or why none does."""
@@ -827,6 +889,17 @@ class PythonModules:
             return "script-shadow"
         return None
 
+    def _portion_shadow(self, origin: FileRow, root: Root, head: str) -> str | None:
+        """As :meth:`_script_shadow`, for a namespace portion: a package or module named
+        ``head`` beside the script wins outright, and another portion there would merge a
+        directory outside every root into the namespace -- neither is guessed through."""
+        directory = _parent(origin.rel_path)
+        if directory == root.path or any(
+            self._file(origin.repo_id, _join(directory, name)) for name in _PACKAGE_FILES
+        ):
+            return None
+        return "script-shadow" if self._top_level(origin.repo_id, directory, head) else None
+
     def _elsewhere(self, origin: FileRow, project: Project, head: str) -> bool:
         """Whether another project of this repository would provide ``head``."""
         for other in self._repos[origin.repo_id].projects.values():
@@ -841,6 +914,11 @@ class PythonModules:
                 if isinstance(self._top_level(origin.repo_id, root.path, head), FileRow):
                     return True
         return False
+
+
+def _package_directory(row: FileRow) -> str | None:
+    """The directory a package's ``__init__`` stands for; ``None`` for a module."""
+    return _parent(row.rel_path) if PurePosixPath(row.rel_path).name in _PACKAGE_FILES else None
 
 
 def root_detail(root: Root, project: Project) -> list[tuple[str, str]]:
