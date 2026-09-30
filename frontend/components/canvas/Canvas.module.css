@@ -1,0 +1,80 @@
+/* a survey grid: dots every 24px, fixed to the canvas rather than the content */
+.canvas {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  background-color: var(--ra-canvas);
+  background-image: radial-gradient(circle, var(--ra-grid-dot) 1px, transparent 1.2px);
+  background-size: 24px 24px;
+  background-position: 12px 12px;
+}
+
+.center {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--mantine-spacing-xl) var(--mantine-spacing-lg);
+  overflow-y: auto;
+}
+
+.pending {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: var(--mantine-spacing-lg);
+  font-size: var(--mantine-font-size-md);
+  color: var(--ra-text-subtle);
+  text-align: center;
+  pointer-events: none;
+}
+
+/* the map's legend: a scale bar of totals, bottom left */
+.legend {
+  position: absolute;
+  left: var(--mantine-spacing-lg);
+  bottom: var(--mantine-spacing-lg);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  margin: 0;
+  padding: 0;
+  background-color: var(--ra-surface);
+  border: 1px solid var(--ra-border);
+  border-radius: var(--mantine-radius-sm);
+  max-width: calc(100% - 2 * var(--mantine-spacing-lg));
+}
+
+.figure {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 1px;
+  padding: 7px 14px 8px;
+
+  & + & {
+    border-left: 1px solid var(--ra-border);
+  }
+}
+
+.count {
+  margin: 0;
+  font-size: var(--mantine-font-size-lg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+  color: var(--ra-text);
+}
+
+.noun {
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-muted);
+}
+
+@media (max-width: $mantine-breakpoint-sm) {
+  .figure {
+    padding: 6px 10px 7px;
+  }
+}

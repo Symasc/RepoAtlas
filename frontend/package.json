@@ -1,0 +1,47 @@
+{
+  "name": "repoatlas-explorer",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.24.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "next dev --hostname 127.0.0.1 --port 7318",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1 --port 7318",
+    "typecheck": "next typegen && tsc --noEmit",
+    "lint": "eslint --max-warnings 0 .",
+    "test": "vitest run",
+    "e2e": "playwright test",
+    "dto": "node scripts/generate-dto.mjs",
+    "dto:check": "node scripts/generate-dto.mjs --check",
+    "check": "pnpm dto:check && pnpm typecheck && pnpm lint && pnpm test"
+  },
+  "dependencies": {
+    "@mantine/core": "^9.6.3",
+    "@mantine/hooks": "^9.6.3",
+    "@mantine/spotlight": "^9.6.3",
+    "@phosphor-icons/react": "^2.1.10",
+    "@tanstack/react-query": "^5.104.0",
+    "geist": "^1.7.2",
+    "next": "16.3.6",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^22",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "16.3.6",
+    "json-schema-to-typescript": "^16.0.0",
+    "postcss-preset-mantine": "^1.18.0",
+    "postcss-simple-vars": "^7.0.1",
+    "typescript": "~6.0.3",
+    "vitest": "^5.0.2"
+  }
+}

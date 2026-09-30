@@ -1,0 +1,55 @@
+.panel {
+  width: min(440px, 100%);
+  padding: var(--mantine-spacing-xl);
+  background-color: var(--ra-surface);
+  border: 1px solid var(--ra-border);
+  border-radius: var(--mantine-radius-md);
+  box-shadow: var(--ra-shadow);
+}
+
+.icon {
+  color: var(--ra-text-muted);
+}
+
+.title {
+  margin: var(--mantine-spacing-md) 0 0;
+  font-size: var(--mantine-h2-font-size);
+  line-height: var(--mantine-h2-line-height);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.body {
+  margin: var(--mantine-spacing-sm) 0 0;
+  color: var(--ra-text-muted);
+  font-size: var(--mantine-font-size-lg);
+  line-height: 1.55;
+}
+
+.command {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--mantine-spacing-sm);
+  margin-top: var(--mantine-spacing-lg);
+  padding: 6px 6px 6px 12px;
+  background-color: var(--ra-canvas);
+  border: 1px solid var(--ra-border);
+  border-radius: var(--mantine-radius-sm);
+
+  code {
+    font-family: var(--mantine-font-family-monospace);
+    font-size: var(--mantine-font-size-lg);
+    color: var(--ra-text);
+  }
+}
+
+.retry {
+  margin-top: var(--mantine-spacing-lg);
+}
+
+.code {
+  margin: var(--mantine-spacing-md) 0 0;
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-subtle);
+}

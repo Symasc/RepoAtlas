@@ -1,0 +1,42 @@
+/* Mantine components, restyled from the semantic tokens (lib/theme/tokens.ts). */
+
+.actionIcon {
+  color: var(--ra-text-muted);
+  transition:
+    color var(--ra-duration-fast) var(--ra-ease),
+    background-color var(--ra-duration-fast) var(--ra-ease);
+
+  @mixin hover {
+    color: var(--ra-text);
+    background-color: var(--ra-hover);
+  }
+}
+
+.tooltip {
+  background-color: var(--ra-text);
+  color: var(--ra-surface);
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: var(--mantine-radius-xs);
+}
+
+.dropdown {
+  background-color: var(--ra-surface-elevated);
+  border: 1px solid var(--ra-border);
+  box-shadow: var(--ra-shadow);
+  color: var(--ra-text);
+}
+
+.kbd {
+  font-family: var(--mantine-font-family);
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 500;
+  line-height: 1;
+  padding: 3px 5px;
+  color: var(--ra-text-muted);
+  background-color: var(--ra-canvas);
+  border: 1px solid var(--ra-border);
+  border-bottom-width: 1px;
+  border-radius: var(--mantine-radius-xs);
+}

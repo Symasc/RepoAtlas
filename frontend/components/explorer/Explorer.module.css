@@ -1,0 +1,15 @@
+.header {
+  background-color: var(--ra-surface);
+  border-bottom: 1px solid var(--ra-border);
+}
+
+.main {
+  display: flex;
+  height: 100dvh;
+  background-color: var(--ra-canvas);
+}
+
+.aside {
+  background-color: var(--ra-surface);
+  border-left: 1px solid var(--ra-border);
+}
