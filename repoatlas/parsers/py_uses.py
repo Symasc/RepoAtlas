@@ -40,7 +40,9 @@ from (``form``), how the name is bound (``local``, ``import``, ``namespace``), t
 and name an import names, and the attribute chain it reaches through (``member``). A use
 belongs to the innermost ``def`` or ``class`` it sits in, qualified as the parser
 qualifies symbols; decorators, defaults, annotations and bases belong to the declaration
-they decorate or annotate. A call this binding model proves is recorded too, local or
+they decorate or annotate, and a module value's annotation and value to the module value
+(``A = B = …`` declares two, and its uses stay the file's). A change to ``X`` so reaches
+what ``ALIAS = X`` reaches. A call this binding model proves is recorded too, local or
 imported: the call graph matches callees by bare name, and a method of the same name is
 not the function an import binds.
 
@@ -521,6 +523,8 @@ class PythonUseAnalysis:
             self._statement(statement, stack, owner)
 
     def _statement(self, node: ast.stmt, stack: list[_Scope], owner: str | None) -> None:
+        if owner is None and len(stack) == 1:
+            owner = self._declares(node)
         if isinstance(node, _FUNCTIONS):
             self._function(node, stack, owner)
         elif isinstance(node, ast.ClassDef):
@@ -563,6 +567,16 @@ class PythonUseAnalysis:
                     self._expr(child.context_expr, stack, owner, _VALUE)
                     if child.optional_vars is not None:
                         self._expr(child.optional_vars, stack, owner, _VALUE)
+
+    def _declares(self, node: ast.stmt) -> str | None:
+        """The one module value a module-level statement declares, if it declares one."""
+        declared = _declared(node)
+        if len(declared) != 1:
+            return None
+        binding = self.bindings.get(declared[0])
+        if binding is None or binding.kind != "local" or binding.line != node.lineno:
+            return None
+        return declared[0]
 
     def _function(
         self, node: ast.FunctionDef | ast.AsyncFunctionDef, stack: list[_Scope], owner: str | None

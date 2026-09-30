@@ -357,7 +357,8 @@ class PythonParser:
     # 9: and each request whose origin and path shape it states — a literal, a module
     #    constant, an f-string on a known origin — is the join's other claim.
     # 10: a module-level name one declaring statement binds is a declaration, a module
-    #    value, and the uses of it land on it (repoatlas.parsers.py_uses).
+    #    value, and the uses of it land on it (repoatlas.parsers.py_uses); the uses in
+    #    its own statement are its.
     # +pyX.Y: `ast` is the running interpreter's, and what it accepts moves with the
     #    interpreter (repoatlas.parsers.interpreter), so facts parsed by another one
     #    are never kept.

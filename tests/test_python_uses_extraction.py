@@ -241,8 +241,10 @@ def test_type_value_and_call_forms() -> None:
         ("C", "Base", "value", "base"),
         ("C", "User", "type", "annotation"),
         ("d", "User", "value", "argument"),
+        # a module value's own statement is the value's
+        ("Pair", "User", "type", "type-alias"),
+        ("Pair", "Result", "type", "type-alias"),
         (None, "User", "type", "type-alias"),
-        (None, "Result", "type", "type-alias"),
     }
 
 
