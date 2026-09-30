@@ -395,6 +395,89 @@ class TargetOutOfScopeError(RepoAtlasError):
         super().__init__(message, detail=detail)
 
 
+class EdgeRefInvalidError(RepoAtlasError):
+    """The edge reference is not one this server issued.
+
+    Refused rather than repaired. An ``edge_ref`` is opaque and exact: guessing
+    what a damaged one meant would answer about a relationship nobody named.
+    """
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(
+        self,
+        message: str = "that is not an edge reference this server issued",
+        *,
+        detail: str | None = (
+            "Edge references are opaque. Pass back exactly the value a topology answer returned."
+        ),
+    ) -> None:
+        super().__init__(message, detail=detail)
+
+
+class EdgeNotFoundError(RepoAtlasError):
+    """No stored edge in this context is the one the reference names.
+
+    Also what a reference to an edge outside the scope gets, on purpose: telling
+    the two apart would tell a scoped caller that the edge exists elsewhere. A
+    reference also stops resolving when a sync changes the fact it names.
+    """
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(
+        self,
+        message: str = "no edge in this context matches that reference",
+        *,
+        detail: str | None = (
+            "A reference resolves only while the exact fact it names is indexed, "
+            "and only in a scope that holds every repository the edge touches. Ask "
+            "the topology capability again for a current reference."
+        ),
+    ) -> None:
+        super().__init__(message, detail=detail)
+
+
+class PathNotFoundError(RepoAtlasError):
+    """Nothing is indexed at or beneath that path in the repository."""
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(
+        self,
+        message: str = "nothing is indexed at or beneath that path",
+        *,
+        detail: str | None = "Paths are repository-relative and exact, including case.",
+    ) -> None:
+        super().__init__(message, detail=detail)
+
+
+class InvalidTopologyRequestError(RepoAtlasError):
+    """The topology request asks for something that capability does not answer."""
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(self, message: str, *, detail: str | None = None) -> None:
+        super().__init__(message, detail=detail)
+
+
+class InvalidTopologyCursorError(RepoAtlasError):
+    """The continuation token is unreadable, or was made for another path."""
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(
+        self,
+        message: str = "that topology cursor does not belong to this request",
+        *,
+        detail: str | None = (
+            "Cursors are issued by the server and are only valid for the path that "
+            "produced them. Start again without a cursor."
+        ),
+    ) -> None:
+        super().__init__(message, detail=detail)
+
+
 class InvestigationRequiredError(RepoAtlasError):
     """An evidence id was named without the investigation that issued it.
 
@@ -497,6 +580,20 @@ def capability_error(exc: Exception) -> CapabilityError:
         )
     if isinstance(exc, EntityNotFoundError):
         return _from_repoatlas(exc, code="ENTITY_NOT_FOUND", category=ErrorCategory.NOT_FOUND)
+    if isinstance(exc, EdgeRefInvalidError):
+        return _from_repoatlas(exc, code="EDGE_REF_INVALID", category=ErrorCategory.INVALID_REQUEST)
+    if isinstance(exc, EdgeNotFoundError):
+        return _from_repoatlas(exc, code="EDGE_NOT_FOUND", category=ErrorCategory.NOT_FOUND)
+    if isinstance(exc, PathNotFoundError):
+        return _from_repoatlas(exc, code="PATH_NOT_FOUND", category=ErrorCategory.NOT_FOUND)
+    if isinstance(exc, InvalidTopologyRequestError):
+        return _from_repoatlas(
+            exc, code="INVALID_TOPOLOGY_REQUEST", category=ErrorCategory.INVALID_REQUEST
+        )
+    if isinstance(exc, InvalidTopologyCursorError):
+        return _from_repoatlas(
+            exc, code="INVALID_TOPOLOGY_CURSOR", category=ErrorCategory.INVALID_REQUEST
+        )
     if isinstance(exc, InvalidRelationshipRequestError):
         return _from_repoatlas(
             exc,

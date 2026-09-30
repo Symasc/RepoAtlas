@@ -75,6 +75,7 @@ from repoatlas.capabilities.dependencies import (
     validate_dependency_request,
 )
 from repoatlas.capabilities.errors import (
+    EdgeNotFoundError,
     EntityAmbiguousError,
     EntityNotFoundError,
     EntityNotInspectableError,
@@ -82,7 +83,9 @@ from repoatlas.capabilities.errors import (
     FileNotIndexedError,
     IndexChangedError,
     IndexInconsistencyError,
+    InvalidTopologyRequestError,
     InvestigationRequiredError,
+    PathNotFoundError,
     ServiceClosedError,
     SyncFailedError,
     TargetOutOfScopeError,
@@ -94,6 +97,8 @@ from repoatlas.capabilities.impact import (
     Assembled,
     SeedResolver,
     assemble,
+    http_crossing,
+    package_crossing,
     package_dependents,
     seed_nodes,
 )
@@ -133,6 +138,30 @@ from repoatlas.capabilities.sync import (
     revalidation_failed,
     revalidation_summary,
     sync_status,
+)
+from repoatlas.capabilities.topology import (
+    ROW_CEILING,
+    STRUCTURAL,
+    ChildScope,
+    ambiguous_dependencies,
+    bound_child_links,
+    child_groups,
+    child_links,
+    context_view,
+    crossing_groups,
+    decode_children_cursor,
+    decode_edge_ref,
+    decoded_resolution,
+    directory_entries,
+    encode_children_cursor,
+    encode_edge_ref,
+    file_entries,
+    matching_edges,
+    page_limits,
+    page_of,
+    peer_repositories,
+    repository_links,
+    with_declaration_counts,
 )
 from repoatlas.capabilities.verification import (
     CitationOutcome,
@@ -229,6 +258,7 @@ from repoatlas.models.parsing import NeighborOrder
 from repoatlas.models.relationships import (
     MAX_NEIGHBORS_CEILING,
     AppliedGraphLimits,
+    EdgeProvenance,
     EntityRef,
     GraphEdge,
     GraphPath,
@@ -241,6 +271,15 @@ from repoatlas.models.repository import FileState, Repository
 from repoatlas.models.retrieval import RetrievalOutcome
 from repoatlas.models.search import SearchMode, SearchRequest, SearchResponse
 from repoatlas.models.sync import EvidenceRevalidationSummary, SyncRequest, SyncResponse
+from repoatlas.models.topology import (
+    EntryKind,
+    TopologyChildrenRequest,
+    TopologyChildrenResponse,
+    TopologyEdgeRequest,
+    TopologyEdgeResponse,
+    TopologyOverviewRequest,
+    TopologyOverviewResponse,
+)
 from repoatlas.models.verification import (
     AgentAnswer,
     CitationVerdict,
@@ -259,7 +298,7 @@ from repoatlas.services.freshness_service import (
     repository_set_drift,
 )
 from repoatlas.services.workspace import Workspace, open_workspace
-from repoatlas.storage.protocols import EntityIdentity
+from repoatlas.storage.protocols import EntityIdentity, StoredEdge
 from repoatlas.sync.engine import BINARY_SNIFF_BYTES
 from repoatlas.sync.scanner import hash_bytes
 
@@ -1261,6 +1300,317 @@ class CapabilityService:
                 limits=limits,
                 prefix=prefix,
             )
+
+    def topology_overview(self, request: TopologyOverviewRequest) -> TopologyOverviewResponse:
+        """Which repositories in scope are linked to which, and by what kind of fact.
+
+        Reads only, and a fixed number of statements: one scan of the edges whose
+        ends lie in two repositories, one read of the examples it keeps, and the
+        dependency inventory. Nothing is read per repository or per edge, so the
+        cost in statements is the same for two repositories and for twenty.
+
+        Both ends of every link are in scope. A repository-scoped overview is
+        therefore empty of links by construction: reaching another repository is
+        a thing to ask for with ``scope: global``.
+        """
+        with self._operation():
+            registered = self._workspace.repositories.list_all()
+            resolution = resolve_context(request.context, registered)
+            in_scope = {r.id: r.slug for r in resolution.repositories if r.id is not None}
+            store = self._workspace.topology()
+            with self._workspace.database.read_snapshot():
+                rows = store.crossing_edges(exclude=STRUCTURAL, limit=ROW_CEILING + 1)
+                complete = len(rows) <= ROW_CEILING
+                found = crossing_groups(rows if complete else (), in_scope)
+                refs = {
+                    edge.edge_id: encode_edge_ref(edge)
+                    for edge in store.stored_edges(found.example_ids())
+                }
+                packages = self._workspace.dependencies.list_packages(None)
+            links = repository_links(found, refs, packages)
+            listed, ambiguous_total = ambiguous_dependencies(packages, frozenset(in_scope.values()))
+            facts = current_facts_version(self._workspace)
+            return TopologyOverviewResponse(
+                context=context_view(request.context, resolution),
+                repositories=tuple(sorted(in_scope.values())),
+                links=tuple(links),
+                ambiguous=listed,
+                ambiguous_total=ambiguous_total,
+                complete=complete,
+                freshness=index_freshness(
+                    [
+                        repository_freshness_for(
+                            self._workspace, repo, depth=request.depth, facts=facts
+                        )
+                        for repo in resolution.repositories
+                    ],
+                    depth=request.depth,
+                ),
+            )
+
+    def topology_children(self, request: TopologyChildrenRequest) -> TopologyChildrenResponse:
+        """One page of what a directory or file holds, and how all its children link.
+
+        Reads only, and a fixed number of statements whatever the path holds: the
+        listing, one count over the page's files, the edges leaving the path and
+        the edges arriving at it, the examples kept, and — only when crossing was
+        asked for — the dependency inventory. No statement runs per child.
+
+        A link to another repository is reported only with ``cross_repository``,
+        the same explicit step a relationships walk takes to leave its scope.
+        """
+        with self._operation():
+            registered = self._workspace.repositories.list_all()
+            resolution = resolve_context(request.context, registered)
+            repo = resolution.primary
+            if (
+                resolution.scope is not CapabilityScope.REPOSITORY
+                or repo is None
+                or repo.id is None
+            ):
+                raise InvalidTopologyRequestError(
+                    "children are the children of a path in one repository",
+                    detail="Name the repository in a repository-scoped context.",
+                )
+            limits = page_limits(request.limit)
+            after = (
+                decode_children_cursor(request.cursor, repo.slug, request.path)
+                if request.cursor is not None
+                else None
+            )
+            slugs = {r.id: r.slug for r in registered if r.id is not None}
+            store = self._workspace.topology()
+            with self._workspace.database.read_snapshot():
+                file_row = store.file_at(repo.id, request.path) if request.path else None
+                if file_row is not None:
+                    declarations = store.declarations_in(file_row.file_id)
+                    listed = file_entries(request.path, declarations)
+                    declared = {row.entity_id: row.key for row in declarations}
+                else:
+                    files = store.files_under(repo.id, request.path)
+                    if request.path and not files:
+                        raise PathNotFoundError()
+                    listed = directory_entries(repo.slug, request.path, files)
+                    declared = {}
+                page, resume_after = page_of(listed, after, limits.applied)
+                counts = store.declaration_counts(
+                    [item.file_id for item in page if item.file_id is not None]
+                )
+                scope = ChildScope(
+                    repo_id=repo.id,
+                    repository=repo.slug,
+                    path=request.path,
+                    is_file=file_row is not None,
+                    declarations=declared,
+                    cross_repository=request.cross_repository,
+                    slugs=slugs,
+                )
+                where = {
+                    "prefix": None if file_row is not None else request.path,
+                    "file_id": file_row.file_id if file_row is not None else None,
+                }
+                outgoing = store.edges_under(
+                    repo.id, outgoing=True, exclude=STRUCTURAL, limit=ROW_CEILING + 1, **where
+                )
+                incoming = store.edges_under(
+                    repo.id, outgoing=False, exclude=STRUCTURAL, limit=ROW_CEILING + 1, **where
+                )
+                asserted = store.repository_edges_under(
+                    repo.id, exclude=STRUCTURAL, limit=ROW_CEILING + 1, **where
+                )
+                complete = all(len(rows) <= ROW_CEILING for rows in (outgoing, incoming, asserted))
+                groups = child_groups(scope, outgoing, incoming, asserted) if complete else {}
+                bounded = bound_child_links(groups)
+                refs = {
+                    edge.edge_id: encode_edge_ref(edge)
+                    for edge in store.stored_edges(bounded.example_ids())
+                }
+            links = child_links(bounded, refs)
+            facts = current_facts_version(self._workspace)
+            return TopologyChildrenResponse(
+                context=context_view(request.context, resolution),
+                repository=repo.slug,
+                path=request.path,
+                target=EntryKind.FILE if file_row is not None else EntryKind.DIRECTORY,
+                entries=tuple(with_declaration_counts(page, counts)),
+                entries_total=len(listed),
+                next_cursor=(
+                    encode_children_cursor(repo.slug, request.path, resume_after)
+                    if resume_after is not None
+                    else None
+                ),
+                has_more=resume_after is not None,
+                limits=limits,
+                links=tuple(links),
+                links_total=bounded.total,
+                truncated=bounded.truncated,
+                complete=complete,
+                freshness=index_freshness(
+                    [
+                        repository_freshness_for(
+                            self._workspace, covered, depth=request.depth, facts=facts
+                        )
+                        for covered in self._covering_repositories(
+                            resolution, peer_repositories(links)
+                        )
+                    ],
+                    depth=request.depth,
+                ),
+            )
+
+    def topology_edge(self, request: TopologyEdgeRequest) -> TopologyEdgeResponse:
+        """One exact stored relationship, why it is held, and the lines asserting it.
+
+        The reference names the fact exactly, so nothing here searches: the
+        source's key is read by index, the edges of that type leaving it by index,
+        and the one whose every stored field matches is the answer. Rows that match
+        on every field are one fact recorded more than once, and resolve together.
+
+        The investigation follows ``relationships`` exactly. Without an id a new
+        one is started and returned; with one, that one is used, and the asserting
+        lines are recorded in it — so ``inspect`` can read them by evidence id in
+        the same investigation. An edge resolves only in a scope that holds every
+        repository it touches, and one that does not is reported as not found,
+        exactly as an entity outside the scope is.
+        """
+        with self._operation():
+            registered = self._workspace.repositories.list_all()
+            resolution = resolve_context(request.context, registered)
+            # Before any investigation exists, so a malformed reference leaves no
+            # session behind.
+            identity = decode_edge_ref(request.edge_ref)
+
+            existing = request.investigation_id is not None
+            session = (
+                self._sessions.get(request.investigation_id)
+                if request.investigation_id is not None
+                else self._sessions.create()
+            )
+            try:
+                with self._workspace.database.read_snapshot():
+                    sources = self._workspace.knowledge.get_entities_by_key([identity.src_key])
+                    found = matching_edges(
+                        identity,
+                        self._workspace.topology().stored_edges_from(
+                            [source.entity_id for source in sources], identity.type
+                        ),
+                    )
+                    if not found:
+                        raise EdgeNotFoundError()
+                    edge = found[0]
+                    in_scope = {repo.id for repo in resolution.repositories}
+                    touched = {i for i in (edge.src_repo_id, edge.dst_repo_id) if i is not None}
+                    if not touched <= in_scope:
+                        raise EdgeNotFoundError()
+                    ends = self._workspace.knowledge.keys_for_entities([edge.src_id, edge.dst_id])
+                    supply = self._edge_supply(edge)
+                entries = session.ledger.record([supply.proposed] if supply is not None else [])
+            except BaseException:
+                if not existing and len(session.ledger) == 0:
+                    self._sessions.drop(session.id)
+                raise
+
+            items = tuple(
+                EvidenceItem(
+                    id=entry.id,
+                    rank=rank,
+                    ref=supplied.proposed.ref,
+                    repository_name=supplied.proposed.repository_name,
+                    location=supplied.proposed.ref.location,
+                    text=supplied.text,
+                    why=supplied.proposed.reason,
+                    tier=supplied.proposed.tier,
+                    match=supplied.proposed.match,
+                    status=entry.status,
+                )
+                for rank, (supplied, entry) in enumerate(
+                    zip([supply] if supply is not None else [], entries, strict=True), start=1
+                )
+            )
+            resolution_record = decoded_resolution(edge)
+            provenance = (
+                None
+                if edge.parser is None and edge.file_id is None and edge.line_start is None
+                else EdgeProvenance(
+                    repository_slug=edge.repository_slug,
+                    path=edge.path,
+                    line_start=edge.line_start,
+                    line_end=edge.line_end,
+                    parser=edge.parser,
+                    citable=bool(items),
+                )
+            )
+            facts = current_facts_version(self._workspace)
+            touched_slugs = {
+                slug
+                for slug in (
+                    ends[edge.src_id].repository_slug,
+                    ends[edge.dst_id].repository_slug,
+                    edge.repository_slug,
+                )
+                if slug is not None
+            }
+            return TopologyEdgeResponse(
+                investigation_id=session.id,
+                context=context_view(request.context, resolution),
+                edge_ref=request.edge_ref,
+                edge=GraphEdge(
+                    source=entity_ref(ends[edge.src_id]),
+                    target=entity_ref(ends[edge.dst_id]),
+                    type=edge.type,
+                    hop=1,
+                    traversal_direction=RelationshipDirection.OUTGOING,
+                    cross_repository=(
+                        edge.src_repo_id is not None
+                        and edge.dst_repo_id is not None
+                        and edge.src_repo_id != edge.dst_repo_id
+                    ),
+                    confidence=edge.confidence,
+                    provenance=provenance,
+                    evidence_ids=tuple(item.id for item in items),
+                ),
+                multiplicity=len(found),
+                resolution=resolution_record,
+                crossing=(
+                    package_crossing(resolution_record, edge.repository_slug, edge.path)
+                    if resolution_record is not None
+                    else None
+                ),
+                http=(
+                    http_crossing(resolution_record, edge.repository_slug)
+                    if resolution_record is not None
+                    else None
+                ),
+                evidence=items,
+                freshness=index_freshness(
+                    [
+                        repository_freshness_for(
+                            self._workspace, covered, depth=request.depth, facts=facts
+                        )
+                        for covered in self._covering_repositories(resolution, touched_slugs)
+                    ],
+                    depth=request.depth,
+                ),
+                ledger=session.ledger.summary(),
+            )
+
+    def _edge_supply(self, edge: StoredEdge) -> ProvenanceSupply | None:
+        """The asserting lines of one edge, prepared for the ledger, where provable.
+
+        The same rule relationships applies: read from the indexed chunks, never
+        the working tree, and only when they cover the whole asserting span.
+        """
+        if edge.file_id is None or edge.line_start is None or edge.line_end is None:
+            return None
+        chunks = self._workspace.knowledge.chunks_for_file(edge.file_id, 1, WHOLE_FILE_END)
+        if not chunks:
+            return None
+        available = indexed_line_map(chunks)
+        if any(n not in available for n in range(edge.line_start, edge.line_end + 1)):
+            return None
+        return self._provenance_supply(
+            chunks[0].repository_slug, chunks[0].path, edge.line_start, edge.line_end, available
+        )
 
     def verify_grounding(self, request: VerifyGroundingRequest) -> VerifyGroundingResponse:
         """Check an answer's citations against the evidence this investigation supplied.

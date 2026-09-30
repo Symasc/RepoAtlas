@@ -555,7 +555,7 @@ def assemble(
             if row.line_start is not None:
                 lines = (row.line_start, row.line_end or row.line_start)
         crossing = _crossing(resolution, walk.slug_of(row.file_repo_id) if row else None, row)
-        http = _http_crossing(resolution, walk.slug_of(row.file_repo_id) if row else None)
+        http = http_crossing(resolution, walk.slug_of(row.file_repo_id) if row else None)
         via = tuple(str(v) for v in _list(resolution.get("via")))
         if crossing is not None:
             via = tuple(f"{crossing.from_repository}/{v}" for v in via)
@@ -1067,8 +1067,23 @@ def _crossing(
     resolution: Mapping[str, object], consumer: str | None, row: NeighborRow | None
 ) -> PackageCrossing | None:
     """A step's package evidence, each part spelled where it can be read, or ``None``."""
+    if row is None:
+        return None
+    return package_crossing(resolution, consumer, row.file_path)
+
+
+def package_crossing(
+    resolution: Mapping[str, object], consumer: str | None, asserting_path: str | None
+) -> PackageCrossing | None:
+    """An edge's package evidence, each part spelled where it can be read, or ``None``.
+
+    ``consumer`` is the repository of the file asserting the edge and
+    ``asserting_path`` that file, which is where the import it rests on was read.
+    Public because an impact step and a topology edge describe the same stored
+    fact, and two spellings of one fact are how they come to disagree.
+    """
     record = resolution.get(CROSSING)
-    if not isinstance(record, dict) or row is None or consumer is None:
+    if not isinstance(record, dict) or consumer is None:
         return None
     provider = str(record.get("provider") or "")
     mapped = record.get("entry_mapped")
@@ -1086,8 +1101,8 @@ def _crossing(
         else None,
         declared_by=f"{consumer}/{record.get('declared_at')}",
         constraint=_text(record.get("constraint")),
-        imported_at=f"{consumer}/{row.file_path}:{imported_at}"
-        if isinstance(imported_at, int) and row.file_path
+        imported_at=f"{consumer}/{asserting_path}:{imported_at}"
+        if isinstance(imported_at, int) and asserting_path
         else None,
         declared_as=_text(resolution.get("name")),
         imported_as=_text(resolution.get("imported")),
@@ -1095,8 +1110,13 @@ def _crossing(
     )
 
 
-def _http_crossing(resolution: Mapping[str, object], consumer: str | None) -> HttpCrossing | None:
-    """A step's HTTP evidence, each part spelled where it can be read, or ``None``."""
+def http_crossing(resolution: Mapping[str, object], consumer: str | None) -> HttpCrossing | None:
+    """An edge's HTTP evidence, each part spelled where it can be read, or ``None``.
+
+    ``consumer`` is the repository of the file asserting the edge, which for a
+    caller-to-handler edge is the caller's. Public for the reason
+    :func:`package_crossing` is.
+    """
     record = resolution.get(HTTP_CROSSING)
     if not isinstance(record, dict) or consumer is None:
         return None
