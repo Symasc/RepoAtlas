@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
@@ -632,6 +632,122 @@ class DependencyStore(Protocol):
     def providers(self, ecosystem: str, normalized_name: str) -> list[tuple[int, str]]: ...
     def list_for_repos(self, repo_ids: Sequence[int] | None) -> list[DependencyRecord]: ...
     def list_packages(self, repo_ids: Sequence[int] | None) -> list[DependencyPackage]: ...
+
+
+class CrossingEdgeRow(NamedTuple):
+    """A stored edge whose two endpoints belong to two different repositories."""
+
+    edge_id: int
+    type: str
+    src_repo_id: int
+    dst_repo_id: int
+    src_key: str
+    dst_key: str
+    #: The file asserting the edge, and where.
+    path: str | None
+    line_start: int | None
+
+
+class LinkEdgeRow(NamedTuple):
+    """A stored edge incident to an entity under one path, seen from that entity.
+
+    ``near`` is the end under the path; ``far`` is the other end, wherever it is.
+    """
+
+    edge_id: int
+    type: str
+    near_id: int
+    near_path: str
+    line_start: int | None
+    far_repo_id: int | None
+    far_path: str | None
+    far_type: str
+    far_key: str
+
+
+class TopologyFileRow(NamedTuple):
+    file_id: int
+    path: str
+    language: str | None
+
+
+class TopologyDeclarationRow(NamedTuple):
+    """An entity a file declares, other than the file itself."""
+
+    entity_id: int
+    key: str
+    type: str
+    name: str
+    qualified_name: str | None
+    line_start: int | None
+    line_end: int | None
+
+
+class StoredEdge(BaseModel):
+    """One stored edge with every field that identifies it exactly.
+
+    ``resolution`` is the stored text, unparsed: an exact reference to the fact has
+    to be able to tell apart two rows that differ in nothing else.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    edge_id: int
+    type: EdgeType
+    src_id: int
+    dst_id: int
+    src_key: str
+    dst_key: str
+    src_repo_id: int | None = None
+    dst_repo_id: int | None = None
+    #: The repository and file asserting the edge, and where.
+    repository_slug: str | None = None
+    file_id: int | None = None
+    path: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    parser: str | None = None
+    confidence: float = 1.0
+    resolution: str | None = None
+
+
+class TopologyStore(Protocol):
+    """Set-based reads for the topology capabilities: one statement per question.
+
+    None of these runs a query per row it returns, so what a topology answer costs
+    in statements does not grow with the size of the repository it describes.
+    """
+
+    def crossing_edges(
+        self, *, exclude: Sequence[EdgeType], limit: int
+    ) -> list[CrossingEdgeRow]: ...
+    def stored_edges(self, edge_ids: Sequence[int]) -> list[StoredEdge]: ...
+    def stored_edges_from(
+        self, src_ids: Sequence[int], edge_type: EdgeType
+    ) -> list[StoredEdge]: ...
+    def file_at(self, repo_id: int, path: str) -> TopologyFileRow | None: ...
+    def files_under(self, repo_id: int, prefix: str) -> list[TopologyFileRow]: ...
+    def declaration_counts(self, file_ids: Sequence[int]) -> dict[int, int]: ...
+    def declarations_in(self, file_id: int) -> list[TopologyDeclarationRow]: ...
+    def edges_under(
+        self,
+        repo_id: int,
+        *,
+        prefix: str | None,
+        file_id: int | None,
+        outgoing: bool,
+        exclude: Sequence[EdgeType],
+        limit: int,
+    ) -> list[LinkEdgeRow]: ...
+    def repository_edges_under(
+        self,
+        repo_id: int,
+        *,
+        prefix: str | None,
+        file_id: int | None,
+        exclude: Sequence[EdgeType],
+        limit: int,
+    ) -> list[LinkEdgeRow]: ...
 
 
 class VectorIndex(Protocol):

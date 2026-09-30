@@ -28,6 +28,7 @@ from repoatlas.storage.sqlite.stores import (
     SqliteKnowledgeStore,
     SqliteRepositoryStore,
 )
+from repoatlas.storage.sqlite.topology import SqliteTopologyStore
 from repoatlas.storage.sqlite.vectors import SqliteVectorIndex
 from repoatlas.sync.engine import SyncEngine
 from repoatlas.sync.lock import writer_lock
@@ -109,6 +110,10 @@ class Workspace:
             embeddings=self.embeddings(),
             limits=limits or RetrievalLimits.from_settings(self.settings.retrieval),
         )
+
+    def topology(self) -> SqliteTopologyStore:
+        """The set-based reads the topology capabilities make. Stateless and cheap."""
+        return SqliteTopologyStore(self.database)
 
     def close(self) -> None:
         self.database.close()
