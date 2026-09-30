@@ -31,6 +31,7 @@ from tests.skills.conftest import (
     frontmatter,
     prose,
     sections,
+    skill_paths,
 )
 
 #: Exactly the tools the transport exposes.
@@ -67,17 +68,18 @@ def test_no_vendor_directory_holds_a_competing_copy() -> None:
     """§2 and §3: one source of behavioural truth, in no vendor's namespace.
 
     A second copy under a client's directory is how two agents come to follow two
-    different policies while both believing they follow RepoAtlas's.
+    different policies while both believing they follow RepoAtlas's. The five task
+    skills are not copies of each other: each is the only workflow for its task.
     """
     root = SKILL_PATH.parent.parent.parent
     for vendor in (".claude", ".codex", ".cursor", ".windsurf", "anthropic", "openai"):
         assert not (root / vendor).exists(), f"vendor-specific guidance directory: {vendor}"
-    copies = [
+    copies = sorted(
         path
         for path in root.rglob("SKILL.md")
         if ".venv" not in path.parts and "dist" not in path.parts
-    ]
-    assert copies == [SKILL_PATH], copies
+    )
+    assert copies == sorted(skill_paths().values()), copies
 
 
 def test_the_frontmatter_names_the_skill_and_says_when_to_use_it(skill: str) -> None:
