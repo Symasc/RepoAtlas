@@ -1,0 +1,270 @@
+# RepoAtlas skill-trigger corpus.
+#
+# Each case is a request someone might type into a coding session, and the one
+# RepoAtlas skill that should load for it. The skills are routed by their
+# descriptions alone, so the corpus is built around the boundaries between them:
+# a proposed change against an explanation of existing code, a package question
+# against a change to a package, a route question against a change to a route.
+#
+# GROUND TRUTH IS MANUAL. It follows the routing the skills are meant to have:
+#
+#   proposed change / refactor / blast radius      -> repoatlas-change-impact
+#   how / where / why existing code works          -> repoatlas-investigation
+#   packages / providers / dependency metadata     -> repoatlas-dependencies
+#   route / caller / handler / API relationship    -> repoatlas-http
+#   what is indexed / freshness / sync             -> repoatlas-index
+#   not about the repositories at all              -> none
+#
+# Two readers:
+#   tests/evaluation/test_skill_trigger_corpus.py  deterministic; checks the corpus
+#       is well formed and that each skill's description carries the vocabulary
+#       its cases route on. No model.
+#   ~/repoatlas-bench/topology/skill-trigger/       the live harness; runs each
+#       prompt through a real client with the skills installed and records which
+#       skill it loads and which RepoAtlas tool it calls first. Paid.
+#
+# A prompt never names a skill or a tool: a request that says which skill to use
+# measures reading, not routing.
+#
+# Fields
+#   id               stable identifier
+#   prompt           the request, verbatim
+#   expect           the skill that should load, or none
+#   confusable_with  the skills a careless router would pick instead
+#   first_tool       optional: RepoAtlas tools acceptable as the first one called
+#   forbid_tools     optional: RepoAtlas tools that must not be called at all
+
+skills:
+  repoatlas-change-impact:
+    description_terms: [change, refactor, rename, affect, other repositories, blast radius]
+  repoatlas-investigation:
+    description_terms: [understand, where, implemented, how a feature works, debugging]
+  repoatlas-dependencies:
+    description_terms: [package, declares, lockfile, provides]
+  repoatlas-http:
+    description_terms: [http, calls a route, handler, serves]
+  repoatlas-index:
+    description_terms: [indexed, freshness, sync, working tree]
+
+cases:
+  # -- change impact -----------------------------------------------------------
+  - id: impact-rename-client-factory
+    prompt: >-
+      I'm about to rename createAuthoringClient in lvl's packages/contracts to
+      createContentClient. Before I touch anything, what else might this affect,
+      including code outside packages/contracts?
+    expect: repoatlas-change-impact
+    confusable_with: [repoatlas-investigation]
+    first_tool: [repoatlas_impact, repoatlas_search]
+    forbid_tools: [repoatlas_sync]
+
+  - id: impact-signature-change
+    prompt: >-
+      In lvl I want to add a required tenantId argument to the authoring client's
+      listContent method. What do I need to look at before making that change?
+    expect: repoatlas-change-impact
+    confusable_with: [repoatlas-investigation, repoatlas-http]
+    first_tool: [repoatlas_impact, repoatlas_search]
+    forbid_tools: [repoatlas_sync]
+
+  - id: impact-package-export
+    prompt: >-
+      We're planning to drop one of the exports from the @lvl/contracts package.
+      Which code across the workspace could be affected?
+    expect: repoatlas-change-impact
+    confusable_with: [repoatlas-dependencies]
+    first_tool: [repoatlas_impact, repoatlas_search]
+    forbid_tools: [repoatlas_sync]
+
+  - id: impact-route-contract
+    prompt: >-
+      If we change the response shape of GET /v1/courses/:courseId/content, which
+      callers might need updating?
+    expect: repoatlas-change-impact
+    confusable_with: [repoatlas-http]
+    first_tool: [repoatlas_impact, repoatlas_search, repoatlas_http_operations]
+    forbid_tools: [repoatlas_sync]
+
+  - id: impact-env-var-rename
+    prompt: >-
+      I'm renaming an environment variable the lvl identity service reads at
+      startup. What's the blast radius?
+    expect: repoatlas-change-impact
+    confusable_with: [repoatlas-investigation]
+    first_tool: [repoatlas_impact, repoatlas_search]
+    forbid_tools: [repoatlas_sync]
+
+  - id: impact-refactor-decorator
+    prompt: >-
+      I want to move the user-claims decorator in pitch's API gateway into the
+      shared package. What depends on it that I'd have to update?
+    expect: repoatlas-change-impact
+    confusable_with: [repoatlas-investigation, repoatlas-dependencies]
+    first_tool: [repoatlas_impact, repoatlas_search]
+    forbid_tools: [repoatlas_sync]
+
+  # -- investigation -----------------------------------------------------------
+  - id: investigation-where-implemented
+    prompt: >-
+      Where is JWT authentication implemented in pitch's API gateway, and how do a
+      request's user claims get populated?
+    expect: repoatlas-investigation
+    confusable_with: [repoatlas-change-impact]
+    first_tool: [repoatlas_search]
+    forbid_tools: [repoatlas_sync]
+
+  - id: investigation-feature-walkthrough
+    prompt: >-
+      How does lvl's web app upload course content? Walk me through the code path.
+    expect: repoatlas-investigation
+    confusable_with: [repoatlas-http]
+    first_tool: [repoatlas_search]
+    forbid_tools: [repoatlas_sync]
+
+  - id: investigation-debug-upload
+    prompt: >-
+      A user reports that finishing an upload in lvl does nothing. Help me find
+      where upload completion is handled so I can debug it.
+    expect: repoatlas-investigation
+    confusable_with: [repoatlas-http, repoatlas-change-impact]
+    first_tool: [repoatlas_search]
+    forbid_tools: [repoatlas_sync]
+
+  - id: investigation-architecture
+    prompt: >-
+      Give me an overview of how the lvl services are organised and which parts of
+      the code own what.
+    expect: repoatlas-investigation
+    confusable_with: [repoatlas-dependencies, repoatlas-http]
+    forbid_tools: [repoatlas_sync]
+
+  - id: investigation-who-reads-config
+    prompt: >-
+      Which code in lvl reads the identity service's base URL setting, and where
+      does its value come from?
+    expect: repoatlas-investigation
+    confusable_with: [repoatlas-change-impact]
+    first_tool: [repoatlas_search]
+    forbid_tools: [repoatlas_sync]
+
+  # -- dependencies ------------------------------------------------------------
+  - id: dependencies-who-provides
+    prompt: >-
+      Which part of the workspace provides the @lvl/contracts package, and which
+      other packages declare a dependency on it?
+    expect: repoatlas-dependencies
+    confusable_with: [repoatlas-change-impact]
+    first_tool: [repoatlas_dependencies]
+    forbid_tools: [repoatlas_sync]
+
+  - id: dependencies-version-pinned
+    prompt: >-
+      What version of typescript does pitch use? Is it pinned in the lockfile or
+      only constrained in package.json?
+    expect: repoatlas-dependencies
+    confusable_with: [repoatlas-investigation]
+    first_tool: [repoatlas_dependencies]
+    forbid_tools: [repoatlas_sync]
+
+  - id: dependencies-cross-repository
+    prompt: >-
+      Do any of my repositories depend on each other through internal packages? I
+      want to know which package links cross repository boundaries and why.
+    expect: repoatlas-dependencies
+    confusable_with: [repoatlas-investigation, repoatlas-change-impact]
+    first_tool: [repoatlas_dependencies, repoatlas_repositories]
+    forbid_tools: [repoatlas_sync]
+
+  - id: dependencies-ambiguous-provider
+    prompt: >-
+      Two repositories seem to publish a package under the same name. Which one
+      does lvl's web app actually get?
+    expect: repoatlas-dependencies
+    confusable_with: [repoatlas-investigation]
+    first_tool: [repoatlas_dependencies]
+    forbid_tools: [repoatlas_sync]
+
+  # -- http --------------------------------------------------------------------
+  - id: http-who-calls-route
+    prompt: >-
+      Which code calls PATCH /v1/content/:contentItemId, and is there a handler for
+      it anywhere in the workspace?
+    expect: repoatlas-http
+    confusable_with: [repoatlas-investigation]
+    first_tool: [repoatlas_http_operations, repoatlas_search]
+    forbid_tools: [repoatlas_sync]
+
+  - id: http-unmatched-calls
+    prompt: >-
+      List the API requests lvl's contracts package makes that don't have a
+      matching handler in the repo.
+    expect: repoatlas-http
+    confusable_with: [repoatlas-investigation]
+    first_tool: [repoatlas_http_operations]
+    forbid_tools: [repoatlas_sync]
+
+  - id: http-cross-service
+    prompt: >-
+      Does pitch's web app call endpoints served by the API's userManagement
+      microservice? Show me the caller-to-handler links.
+    expect: repoatlas-http
+    confusable_with: [repoatlas-investigation, repoatlas-change-impact]
+    first_tool: [repoatlas_http_operations, repoatlas_search]
+    forbid_tools: [repoatlas_sync]
+
+  - id: http-uncalled-handlers
+    prompt: >-
+      Which routes does pitch's API serve that nothing in the workspace appears to
+      call?
+    expect: repoatlas-http
+    confusable_with: [repoatlas-investigation]
+    first_tool: [repoatlas_http_operations]
+    forbid_tools: [repoatlas_sync]
+
+  # -- index -------------------------------------------------------------------
+  - id: index-what-is-indexed
+    prompt: >-
+      What repositories does RepoAtlas have indexed right now?
+    expect: repoatlas-index
+    confusable_with: [repoatlas-investigation]
+    first_tool: [repoatlas_repositories, repoatlas_status]
+    forbid_tools: [repoatlas_sync]
+
+  - id: index-is-it-current
+    prompt: >-
+      I've made a bunch of local edits in lvl. Is RepoAtlas's index still in step
+      with my working tree?
+    expect: repoatlas-index
+    confusable_with: [repoatlas-investigation]
+    first_tool: [repoatlas_status, repoatlas_repositories]
+    forbid_tools: [repoatlas_sync]
+
+  - id: index-sync-requested
+    prompt: >-
+      Please update the RepoAtlas index for lvl so it picks up my latest changes.
+    expect: repoatlas-index
+    confusable_with: [repoatlas-investigation]
+    first_tool: [repoatlas_sync, repoatlas_status, repoatlas_repositories]
+
+  - id: index-stale-line-numbers
+    prompt: >-
+      RepoAtlas keeps pointing me at line numbers that don't match the files any
+      more. Is the index out of date?
+    expect: repoatlas-index
+    confusable_with: [repoatlas-investigation]
+    first_tool: [repoatlas_status, repoatlas_repositories]
+    forbid_tools: [repoatlas_sync]
+
+  # -- none --------------------------------------------------------------------
+  - id: none-git-question
+    prompt: >-
+      What's the difference between git rebase and git merge?
+    expect: none
+    forbid_tools: [repoatlas_sync]
+
+  - id: none-standalone-code
+    prompt: >-
+      Write a Python function that parses an ISO 8601 date string and returns a
+      timezone-aware datetime.
+    expect: none
+    forbid_tools: [repoatlas_sync]
