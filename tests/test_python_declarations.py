@@ -298,6 +298,9 @@ def test_every_use_of_a_module_value_and_no_other(declared: Workspace) -> None:
         # V5: the alias is its own declaration, and uses what it aliases
         (f"{V}#ALIAS", f"{V}#X", "value"),
         (f"{C}#v5", f"{V}#ALIAS", "value"),
+        # a declaration over several lines, at its first, owning its statement
+        (f"{V}#SPREAD", f"{V}#X", "value"),
+        (f"{C}#v_spread", f"{V}#SPREAD", "value"),
         # module values called: USES lands on them; CALLS is untouched (below). The
         # statement declaring `get` is `get`'s.
         (f"{PKG}/calls.py#get", f"{PKG}/calls.py#C", "call"),
@@ -333,6 +336,9 @@ def test_a_use_lands_on_the_declaration_line_through_its_hops(declared: Workspac
         ).fetchall()
     )
     assert lines["X"] == 3 and lines["obj"] == 23 and lines["CHECKED"] == 12
+    assert lines["SPREAD"] == 28
+    spread = edges[(f"{V}#SPREAD", f"{V}#X")]
+    assert (spread["line"], edges[(f"{C}#v_spread", f"{V}#SPREAD")]["line"]) == (29, 31)
     v1, v7 = edges[(f"{C}#v1", f"{V}#X")], edges[(f"{C}#v7", f"{V}#X")]
     assert (v1["via"], v1["via_names"], v1["name"], v1["line"]) == (
         [f"{PKG}/__init__.py"],
