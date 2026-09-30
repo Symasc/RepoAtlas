@@ -52,6 +52,9 @@ DECL: dict[str, str] = {
         "def local_user():\n"  # 25
         "    return X, ANNOTATED, BARE, LOW, TWICE, LATE, CHECKED, SEP, loads, GUARDED\n"
         "ALIAS = X\n"  # 27 V5: a value of its own, which uses X
+        "SPREAD: dict[str, int] = dict(\n"  # 28 a declaration over three lines,
+        "    x=X,\n"  # 29 declared at its first
+        ")\n"  # 30
     ),
     # V8: imported, then rebound -- no longer the import, and no single declaration
     f"{PKG}/rebound.py": (
@@ -76,6 +79,8 @@ DECL: dict[str, str] = {
         "def v10(x: 'CHECKED') -> None:\n    return None\n"  # 23 V10
         "def v13():\n    return obj.attr\n"  # 25 V13: an object's attribute
         "def v5():\n    return ALIAS\n"  # 27 V5: the alias, not what it aliases
+        "from decl_pkg.values import SPREAD\n"  # 29
+        "def v_spread():\n    return SPREAD\n"  # 30
     ),
     # The call graph matches callees by name; a module value is none of them.
     f"{PKG}/calls.py": (
