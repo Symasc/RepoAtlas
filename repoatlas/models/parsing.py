@@ -90,6 +90,12 @@ class EdgeType(enum.StrEnum):
 #: (repoatlas.parsers.ts_uses). No identifier spells it, so no use can collide with it.
 USES_EXPORT_TABLE = "export-table"
 
+#: The ``kind`` of a symbol that is a Python module value (repoatlas.parsers.py_uses): a
+#: declaration a ``USES`` lands on and a use can belong to, and nothing else. It is no
+#: chunk boundary, and no callee a ``CALLS`` or ``REFERENCES`` matches by name -- those
+#: read the symbols they read before module values were declarations.
+USES_ONLY_KINDS = frozenset({"variable"})
+
 
 class EdgeDirection(enum.StrEnum):
     """Which end of an edge the queried entity is required to sit on.
@@ -238,6 +244,11 @@ class ParsedSymbol(BaseModel):
     signature: str | None = None
     parent: str | None = None
     meta: dict[str, str] = Field(default_factory=dict)
+
+    @property
+    def uses_only(self) -> bool:
+        """A module value: a ``USES`` declaration and nothing else (``USES_ONLY_KINDS``)."""
+        return self.meta.get("kind") in USES_ONLY_KINDS
 
 
 class ParsedReference(BaseModel):

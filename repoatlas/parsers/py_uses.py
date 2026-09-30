@@ -7,20 +7,28 @@ it resolves by name. This module records the uses it can prove, and only those, 
 syntax tree alone -- the source is parsed, never run (V1_SPEC §17):
 
 * the name resolves, by Python's own scoping, to a binding of the **module** -- one
-  ``def`` or ``class`` of this file, one import -- or to the one import of an enclosing
-  function that binds it nothing else. The scopes are CPython's: a name bound anywhere in
-  a function is local to all of it, class bodies are invisible to the functions inside
-  them, comprehensions bind their own targets, and a generic ``def``, ``class`` or
-  ``type`` statement (PEP 695) binds its type parameters in a scope of their own, which
-  its annotations, bases, bounds, defaults and body see and its decorators and default
-  values do not. A doubt costs a fact: every name a class body binds hides the module's
-  from the whole body, whatever the order;
-* the module binds the name **exactly once**. A second binding, an assignment, a
-  ``global`` rebinding it from a function, or a ``del`` leaves no declaration to name;
+  ``def`` or ``class`` of this file, one declaring statement, one import -- or to the one
+  import of an enclosing function that binds it nothing else. The scopes are CPython's: a
+  name bound anywhere in a function is local to all of it, class bodies are invisible to
+  the functions inside them, comprehensions bind their own targets, and a generic
+  ``def``, ``class`` or ``type`` statement (PEP 695) binds its type parameters in a scope
+  of their own, which its annotations, bases, bounds, defaults and body see and its
+  decorators and default values do not. A doubt costs a fact: every name a class body
+  binds hides the module's from the whole body, whatever the order;
+* the module binds the name **exactly once**. A second binding of any kind, a ``global``
+  rebinding it from a function, or a ``del`` leaves no declaration to name -- whichever
+  branch or order the bindings are in, since telling them apart is flow analysis;
 * no star import could have rebound it. ``from x import *`` rebinds whatever names ``x``
   has, which is not knowable from this file, so a binding a star import follows -- or a
   conditional one a star import precedes -- is refused. Every other binding stands; a
   star import never costs the file its other facts.
+
+A **declaring statement** is an assignment whose every target is a name (``X = …``,
+``A = B = …``) or an annotated name (``X: T = …``, and ``X: T`` alone, which is how a
+stub declares one). Bound once -- under a guard or not, as a lone import is -- the name it
+declares is a declaration of this module: a *value*, whatever it holds and however it is
+spelled. Nothing here says what it evaluates to, or that it never changes. Unpacking, a
+loop, ``with`` or ``except`` target, a walrus and ``del`` declare nothing.
 
 ``if TYPE_CHECKING:`` imports are ordinary module bindings: a type checker binds them, and
 the use is marked ``type_only``. A string in an annotation is the annotation it spells
@@ -107,17 +115,32 @@ class UseSite:
         return f"{self.name}.{self.member}" if self.member else self.name
 
 
+@dataclass(frozen=True, slots=True)
+class Declaration:
+    """A module value: a name one declaring statement binds, and nothing else does."""
+
+    name: str
+    #: The declaring statement's lines.
+    line: int
+    end_line: int
+    #: ``variable``; the statement's target and annotation, never its value.
+    kind: str
+    signature: str
+
+
 @dataclass(slots=True)
 class _Site:
     """One place a module binds a name."""
 
-    kind: str  # local, import, namespace, or other
+    kind: str  # local, import, namespace, value, or other
     line: int
     conditional: bool
     type_only: bool = False
     module: str | None = None
     imported: str | None = None
     loaded: str | None = None
+    #: ``value``: the declaring statement.
+    statement: ast.stmt | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,6 +343,8 @@ class PythonUseAnalysis:
         #: (line, column, name, decision) for every name read, when asked: what a test
         #: holds against CPython's own symbol table.
         self.decisions: list[tuple[int, int, str, str]] | None = [] if record else None
+        #: The module values this file declares, in line order: the parser's symbols.
+        self.declarations: list[Declaration] = []
         self._guards, rebinds = _survey(tree)
         self._module_bindings(tree, rebinds=rebinds)
         self.exports = self._export_table()
@@ -338,6 +363,10 @@ class PythonUseAnalysis:
             if binding.kind != "none" and stars and _star_affected(found, stars):
                 binding = Binding("none", reason="star-import")
             self.bindings[name] = binding
+            [site, *_] = found
+            if binding.kind == "local" and site.statement is not None:
+                self.declarations.append(_declaration(name, site.statement))
+        self.declarations.sort(key=lambda d: (d.line, d.name))
 
     def _sites(
         self,
@@ -439,6 +468,17 @@ class PythonUseAnalysis:
                 continue
             if isinstance(statement, ast.TypeAlias) and isinstance(statement.name, ast.Name):
                 other(statement.name.id, statement.lineno)
+                continue
+            declared = _declared(statement)
+            if declared:
+                for name in declared:
+                    sites.setdefault(name, []).append(
+                        _Site("value", statement.lineno, conditional, statement=statement)
+                    )
+                # a walrus in the value binds at module scope too
+                for part in _declaring_parts(statement):
+                    for name, line in _stored(part):
+                        other(name, line)
                 continue
             for name, line in _stored(statement):
                 other(name, line)
@@ -776,7 +816,7 @@ def _binding_of(name: str, sites: list[_Site]) -> Binding:
     if len(sites) > 1:
         return Binding("none", reason="duplicate")
     site = sites[0]
-    if site.kind == "local":
+    if site.kind in {"local", "value"}:
         return Binding("local", line=site.line)
     if site.kind == "import":
         return Binding(
@@ -795,6 +835,40 @@ def _binding_of(name: str, sites: list[_Site]) -> Binding:
             bound_at=site.line,
         )
     return Binding("none", reason="not-a-declaration")
+
+
+def _declared(statement: ast.stmt) -> list[str]:
+    """The names a declaring statement declares (see the module docstring), else none."""
+    if isinstance(statement, ast.Assign):
+        if all(isinstance(target, ast.Name) for target in statement.targets):
+            return [target.id for target in statement.targets if isinstance(target, ast.Name)]
+        return []
+    if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+        return [statement.target.id]
+    return []
+
+
+def _declaring_parts(statement: ast.stmt) -> list[ast.expr]:
+    """What a declaring statement holds besides its targets: its value and annotation."""
+    if isinstance(statement, ast.Assign):
+        return [statement.value]
+    if isinstance(statement, ast.AnnAssign):
+        return [statement.annotation, *([statement.value] if statement.value else [])]
+    return []
+
+
+def _declaration(name: str, statement: ast.stmt) -> Declaration:
+    """The declaration ``statement`` makes of ``name``: its lines and signature."""
+    signature = name
+    if isinstance(statement, ast.AnnAssign):
+        signature = f"{name}: {ast.unparse(statement.annotation)}"
+    return Declaration(
+        name=name,
+        line=statement.lineno,
+        end_line=statement.end_lineno or statement.lineno,
+        kind="variable",
+        signature=signature,
+    )
 
 
 def _star_affected(sites: list[_Site], stars: list[int]) -> bool:

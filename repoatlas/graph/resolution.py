@@ -284,9 +284,16 @@ class ResolutionIndex:
     # -- symbols -------------------------------------------------------------
 
     def resolve_symbol(self, file_row: FileRow, name: str) -> SymbolRow | None:
-        """A definition of ``name`` in ``file_row``, when there is exactly one."""
+        """A definition of ``name`` in ``file_row``, when there is exactly one.
+
+        A Python file's ``symbol`` entities are its module values, which a use lands on
+        (``USES_ONLY_KINDS``) and a callee matched by name never is.
+        """
         matches = self.symbols_by_file.get(file_row.file_id, {}).get(name, [])
-        exact = [s for s in matches if s.name == name]
+        python = flavor_for(file_row.rel_path) == "python"
+        exact = [
+            s for s in matches if s.name == name and not (python and s.type is EntityType.SYMBOL)
+        ]
         return exact[0] if len(exact) == 1 else None
 
     def resolve_salt_state(self, repo_id: int, name: str) -> SymbolRow | None:
