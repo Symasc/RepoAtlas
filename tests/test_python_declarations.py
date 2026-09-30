@@ -8,7 +8,9 @@ same evidence. The fixtures are in :mod:`tests.python_declarations_corpus`.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from repoatlas.capabilities.service import CapabilityService
@@ -16,8 +18,9 @@ from repoatlas.config.settings import Settings
 from repoatlas.indexing.chunking import chunk_content
 from repoatlas.models.capability import CapabilityContext, CapabilityScope, Presentation
 from repoatlas.models.impact import ImpactRequest
-from repoatlas.models.parsing import EntityType
+from repoatlas.models.parsing import USES_EXPORT_TABLE, EntityType
 from repoatlas.parsers.python import PythonParser
+from repoatlas.parsers.ts_uses import USES_EXPORTS
 from repoatlas.services.workspace import Workspace
 from tests.impact_corpus import build, use_edges, uses, verify_steps
 from tests.incremental_corpus import assert_equals_fresh, edit, sync_all
@@ -26,6 +29,7 @@ from tests.python_declarations_corpus import PKG, WORKSPACE
 
 V = f"{PKG}/values.py"
 C = f"{PKG}/consumer.py"
+OVER = f"{PKG}/overloads.py"
 
 
 @pytest.fixture
@@ -164,6 +168,108 @@ def test_a_value_is_no_chunk_boundary() -> None:
     assert chunk_content(source, parsed.symbols) == chunk_content(source, others)
 
 
+def bound(source: str) -> dict[str, Any]:
+    """What the module binds each name to, as its export table records it."""
+    parsed = PythonParser().parse(Path("m.py"), source)
+    [table] = [r for r in parsed.references if r.target_key == USES_EXPORT_TABLE]
+    return json.loads(table.meta[USES_EXPORTS])["names"]
+
+
+#: Two stubs, then the implementation, each decorator spelled ``{}``.
+GROUP = (
+    "@{0}\ndef f(x: int) -> int: ...\n@{0}\ndef f(x: str) -> str: ...\ndef f(x):\n    return x\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("header", "decorator"),
+    [
+        ("from typing import overload", "overload"),
+        ("from typing import overload as ov", "ov"),
+        ("import typing as t", "t.overload"),
+        ("from typing_extensions import overload", "overload"),
+        ("import typing_extensions", "typing_extensions.overload"),
+    ],
+)
+def test_an_overload_group_is_its_implementation(header: str, decorator: str) -> None:
+    """VC4a: stubs whose ``overload`` this module proves is typing's, then one ``def``."""
+    assert bound(f"{header}\n{GROUP.format(decorator)}")["f"] == ["local", "f", "6"]
+
+
+@pytest.mark.parametrize(
+    ("header", "decorator"),
+    [
+        ("from mylib import overload", "overload"),
+        ("import mylib as typing", "typing.overload"),
+        ("from typing import overload as ov", "overload"),
+        ("", "overload"),
+        ("from typing import overload\noverload = print", "overload"),
+        ("import typing\ntyping = None", "typing.overload"),
+    ],
+    ids=[
+        "another-module",
+        "another-module-aliased",
+        "unbound",
+        "unimported",
+        "rebound",
+        "rebound-module",
+    ],
+)
+def test_an_overload_is_typings_by_its_import_never_by_its_spelling(
+    header: str, decorator: str
+) -> None:
+    """VC4b: a decorator named ``overload`` that no import proves is typing's proves nothing."""
+    assert bound(f"{header}\n{GROUP.format(decorator)}")["f"] == ["none", "duplicate"]
+
+
+STUB = "@overload\ndef f(x: int) -> int: ...\n"
+IMPLEMENTATION = "def f(x):\n    return x\n"
+
+
+@pytest.mark.parametrize(
+    ("group", "binding"),
+    [
+        (f"{IMPLEMENTATION}{STUB}", ["none", "duplicate"]),
+        (f"{STUB}{IMPLEMENTATION}{IMPLEMENTATION}", ["none", "duplicate"]),
+        (f"{STUB}{STUB}", ["none", "duplicate"]),
+        (
+            f"{STUB}if sys.version_info >= (3, 12):\n    def f(x):\n        return x\n",
+            ["none", "duplicate"],
+        ),
+        (f"{STUB}{IMPLEMENTATION}f = staticmethod(f)\n", ["none", "duplicate"]),
+        (
+            "if sys.version_info >= (3, 12):\n    @overload\n    def f(x: int) -> int: ...\n"
+            f"{IMPLEMENTATION}",
+            ["local", "f", "6"],
+        ),
+    ],
+    ids=[
+        "implementation-first",
+        "two-implementations",
+        "no-implementation",
+        "conditional-implementation",
+        "rebound-after",
+        "conditional-stub",
+    ],
+)
+def test_an_overload_group_has_one_last_unconditional_implementation(
+    group: str, binding: list[str]
+) -> None:
+    """VC4c: whichever ``def`` is not last, not alone or not unconditional is no implementation."""
+    assert bound(f"import sys\nfrom typing import overload\n{group}")["f"] == binding
+
+
+def test_a_star_import_could_rebind_an_overload_group_or_its_overload() -> None:
+    """P1 R4 still applies, to the group and to the ``overload`` that proves it."""
+    stub = "if sys.version_info >= (3, 12):\n    @overload\n    def f(x: int) -> int: ...\n"
+    group = f"{stub}{IMPLEMENTATION}"
+    before = f"from other import *\nimport sys\nfrom typing import overload\n{group}"
+    assert bound(before)["f"] == ["none", "star-import"]
+    after = f"import sys\nfrom typing import overload\n{group}from other import *\n"
+    assert bound(after)["overload"] == ["none", "star-import"]
+    assert bound(after)["f"] == ["none", "duplicate"]
+
+
 # -- where a use lands -----------------------------------------------------------------------
 
 
@@ -210,6 +316,9 @@ def test_every_use_of_a_module_value_and_no_other(declared: Workspace) -> None:
         ("src/client_app/http.py#slow_request", "src/client_app/http.py#SLOW", "value"),
         ("tests/test_http.py#test_fetch", "src/client_app/http.py#fetch", "call"),
         ("tests/test_http.py#test_slow", "src/client_app/http.py#slow_request", "call"),
+        # VC4: an overloaded function, in its module and from another (lines below)
+        (f"{OVER}#local", f"{OVER}#parse", "call"),
+        (f"{PKG}/overload_user.py#remote", f"{OVER}#parse", "call"),
     }
 
 
@@ -239,6 +348,19 @@ def test_a_use_lands_on_the_declaration_line_through_its_hops(declared: Workspac
     v13 = edges[(f"{C}#v13", f"{V}#obj")]
     assert (v13["member"], v13["form"], v13["defined_at"]) == ("attr", "receiver", V)
     assert (f"{C}#v13", f"{V}#attr") not in edges
+
+
+def test_an_overloaded_function_is_used_at_its_implementation(declared: Workspace) -> None:
+    """VC4: in its own module and from another, the use lands on the last ``def``."""
+    rows = declared.database.execute(
+        """
+        SELECT s.qualified_name, d.line_start, e.line_start FROM edges e
+        JOIN entities s ON s.id = e.src_id JOIN entities d ON d.id = e.dst_id
+        JOIN files df ON df.id = d.file_id WHERE e.type = 'USES' AND df.rel_path = ?
+        """,
+        (OVER,),
+    ).fetchall()
+    assert sorted(tuple(r) for r in rows) == [("local", 6, 9), ("remote", 6, 3)]
 
 
 def test_what_stays_refused(declared: Workspace) -> None:
@@ -369,6 +491,32 @@ def test_a_declaration_edit_equals_a_fresh_index(
     sync_all(declared, root)
     assert any(u[:2] == (source, target) for u in uses(declared)) is lands
     assert_equals_fresh(declared, settings, root, tmp_path, tag)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "line"),
+    [
+        # a third stub: the implementation moves, and its readers follow it
+        ("def parse(x):\n", "@overload\ndef parse(x: bytes) -> bytes: ...\ndef parse(x):\n", 8),
+        # typing's no longer: no group, no implementation
+        ("from typing import overload\n", "from mylib import overload\n", None),
+    ],
+    ids=["stub-added", "unproven"],
+)
+def test_an_overload_edit_equals_a_fresh_index(
+    declared: Workspace, settings: Settings, tmp_path: Path, old: str, new: str, line: int | None
+) -> None:
+    root = tmp_path / "repos"
+    _replace(root, OVER, old, new)
+    work = sync_all(declared, root)
+    assert work.landed + work.readers > 0, work
+    [landed] = declared.database.execute(
+        "SELECT max(d.line_start) FROM edges e JOIN entities s ON s.id = e.src_id "
+        "JOIN entities d ON d.id = e.dst_id WHERE e.type = 'USES' AND s.qualified_name = 'remote' "
+        "AND d.qualified_name = 'parse'"
+    ).fetchone()
+    assert landed == line
+    assert_equals_fresh(declared, settings, root, tmp_path, "overload")
 
 
 @pytest.mark.parametrize(

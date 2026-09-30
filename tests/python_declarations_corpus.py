@@ -8,7 +8,8 @@ declaring statement, rebinding or boundary it exists to prove.
   by unpacking and by an optional import; ``__init__`` re-exports ``X`` under its own
   name and another; ``rebound.py`` imports ``X`` and rebinds it; ``consumer.py`` reaches
   each of them every way a module attribute is reached; ``calls.py`` and ``caller.py``
-  name a module value and a method alike, which the call graph must not notice.
+  name a module value and a method alike, which the call graph must not notice;
+  ``overloads.py`` declares an ``@overload`` group, which ``overload_user.py`` calls.
 * ``timeouts`` ships ``timeout_config`` (distribution ``timeout-config``); ``client``
   declares it and uses its ``DEFAULT_TIMEOUT``; ``stray`` imports it without declaring it.
 """
@@ -89,6 +90,21 @@ DECL: dict[str, str] = {
     ),
     f"{PKG}/caller.py": (
         "from decl_pkg.calls import get, handler\ndef remote():\n    handler()\n    return get()\n"
+    ),
+    # VC4: two stubs typing's `overload` decorates, then the implementation
+    f"{PKG}/overloads.py": (
+        "from typing import overload\n"  # 1
+        "@overload\n"  # 2
+        "def parse(x: int) -> int: ...\n"  # 3
+        "@overload\n"  # 4
+        "def parse(x: str) -> str: ...\n"  # 5
+        "def parse(x):\n"  # 6 the implementation
+        "    return x\n"  # 7
+        "def local():\n"  # 8
+        "    return parse(1)\n"  # 9
+    ),
+    f"{PKG}/overload_user.py": (
+        "from decl_pkg.overloads import parse\ndef remote():\n    return parse('x')\n"
     ),
 }
 
