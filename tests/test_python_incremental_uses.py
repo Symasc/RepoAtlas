@@ -658,3 +658,133 @@ def test_a_setuptools_provider_body_edit_resolves_no_other_repository(
     edit(root, "cfg-provider", "setup.cfg", CFG_FLAT + "\n[flake8]\nmax-line-length = 100\n")
     work = sync_all(linked, root)
     assert (work.repository, work.package) == (0, 0)
+
+
+# -- P6 C1: the layouts a pyproject states for itself ------------------------------------
+
+FIND = (
+    '[project]\nname = "fixture-auth"\nversion = "1.0"\n\n'
+    '[build-system]\nbuild-backend = "setuptools.build_meta"\n\n'
+    '[tool.setuptools.packages.find]\nwhere = ["."]\ninclude = ["fixture_auth*"]\n'
+)
+ONLY_INCLUDE = (
+    '[project]\nname = "fixture-auth"\nversion = "1.0"\n\n'
+    '[build-system]\nbuild-backend = "hatchling.build"\n\n'
+    '[tool.hatch.build]\nonly-include = ["fixture_auth"]\n'
+)
+
+
+def test_n2_a_find_include_and_where_edited_and_back(
+    workspace: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    """Only the project's facts change: the module it ships goes, moves to src/, and back."""
+    provider = {"pyproject.toml": FIND, **AUTH_PACKAGE, **SRC_PACKAGE}
+    linked = build(workspace, tmp_path, {**pick(LEGACY, "basic"), "find-provider": provider})
+    root = tmp_path / "repos"
+    assert _reaches(linked, "find-provider")
+    edit(root, "find-provider", "pyproject.toml", FIND.replace("fixture_auth*", "other*"))
+    assert sync_all(linked, root).mode == "incremental"
+    assert refusals(linked, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "module-not-found"
+    )
+    _equal(linked, settings, tmp_path, "excluded")
+    edit(root, "find-provider", "pyproject.toml", FIND.replace('where = ["."]', 'where = ["src"]'))
+    sync_all(linked, root)
+    assert _reaches(linked, "find-provider", "src/fixture_auth/models.py")
+    _equal(linked, settings, tmp_path, "src")
+    edit(root, "find-provider", "pyproject.toml", FIND)
+    sync_all(linked, root)
+    assert _reaches(linked, "find-provider")
+    _equal(linked, settings, tmp_path, "flat")
+
+
+def test_n2_an_only_include_becoming_readable_and_its_package_removed_and_back(
+    workspace: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    unread = ONLY_INCLUDE + 'exclude = ["fixture_auth/cache.py"]\n'
+    provider = {"pyproject.toml": unread, **AUTH_PACKAGE}
+    linked = build(workspace, tmp_path, {**pick(LEGACY, "basic"), "only-provider": provider})
+    root = tmp_path / "repos"
+    assert refusals(linked, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "module-not-found"
+    )
+    edit(root, "only-provider", "pyproject.toml", ONLY_INCLUDE)
+    sync_all(linked, root)
+    assert _reaches(linked, "only-provider")
+    _equal(linked, settings, tmp_path, "read")
+    shutil.rmtree(root / "only-provider" / "fixture_auth")
+    sync_all(linked, root)
+    assert refusals(linked, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "module-not-found"
+    )
+    _equal(linked, settings, tmp_path, "gone")
+    for path, text in AUTH_PACKAGE.items():
+        edit(root, "only-provider", path, text)
+    sync_all(linked, root)
+    assert _reaches(linked, "only-provider")
+    _equal(linked, settings, tmp_path, "back")
+
+
+def test_n2_an_only_include_starting_to_ship_the_module_withdraws_a_legacy_link_and_back(
+    legacy: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    """A project named otherwise starts naming fixture_auth in only-include: only its facts
+    change, and every repository requiring it by the legacy key is resolved again."""
+    root = tmp_path / "repos"
+    core = ONLY_INCLUDE.replace("fixture-auth", "auth-core").replace('"fixture_auth"', '"other"')
+    add_repo(root, "hatch-core", {"pyproject.toml": core, "other/__init__.py": "", **AUTH_PACKAGE})
+    sync_all(legacy, root)
+    assert _linked(legacy)
+    edit(
+        root, "hatch-core", "pyproject.toml", core.replace('["other"]', '["other", "fixture_auth"]')
+    )
+    sync_all(legacy, root)
+    assert refusals(legacy, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "dependency-absent"
+    )
+    _equal(legacy, settings, tmp_path, "named")
+    edit(root, "hatch-core", "pyproject.toml", core)
+    sync_all(legacy, root)
+    assert _linked(legacy)
+    _equal(legacy, settings, tmp_path, "unnamed")
+
+
+def test_n2_a_pyproject_find_rooted_elsewhere_starting_to_ship_withdraws_a_legacy_link_and_back(
+    legacy: Workspace, settings: Settings, tmp_path: Path
+) -> None:
+    """The same below a root only the pyproject's own [tool.setuptools] states: lib/."""
+    root = tmp_path / "repos"
+    core = FIND.replace("fixture-auth", "auth-core").replace('["."]', '["lib"]')
+    closed = core.replace("fixture_auth*", "other*")
+    add_repo(
+        root,
+        "find-core",
+        {
+            "pyproject.toml": closed,
+            "lib/other/__init__.py": "",
+            **{f"lib/{path}": text for path, text in AUTH_PACKAGE.items()},
+        },
+    )
+    sync_all(legacy, root)
+    assert _linked(legacy)
+    edit(root, "find-core", "pyproject.toml", core)
+    sync_all(legacy, root)
+    assert refusals(legacy, "basic", LEGACY_SERVICE) == dict.fromkeys(
+        AUTH_NAMES, "dependency-absent"
+    )
+    _equal(legacy, settings, tmp_path, "found")
+    edit(root, "find-core", "pyproject.toml", closed)
+    sync_all(legacy, root)
+    assert _linked(legacy)
+    _equal(legacy, settings, tmp_path, "excluded")
+
+
+def test_n2_a_body_edit_in_a_pyproject_layout_provider_resolves_no_other_repository(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    provider = {"pyproject.toml": ONLY_INCLUDE, **AUTH_PACKAGE}
+    linked = build(workspace, tmp_path, {**pick(LEGACY, "basic"), "only-provider": provider})
+    root = tmp_path / "repos"
+    append(root, "only-provider", "fixture_auth/models.py", "\n\ndef extra() -> None:\n    pass\n")
+    work = sync_all(linked, root)
+    assert (work.repository, work.package) == (0, 0)

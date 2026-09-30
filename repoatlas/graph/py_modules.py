@@ -18,7 +18,8 @@ A file outside every project of a repository that has projects belongs to none.
 
 **One project, several files.** A project's ``pyproject.toml``, ``setup.cfg`` and
 ``setup.py`` are sources of one project, never three -- the setuptools ones only while the
-pyproject names no other build backend. Its distribution name is the one they state:
+pyproject names no other build backend, and the pyproject's own ``[tool.setuptools]``
+layout counting as one more source of its layout. Its distribution name is the one they state:
 ``[project]`` before ``setup.py`` before ``setup.cfg``, as setuptools reads them; two that
 differ (PEP 503) are ``project-metadata-conflict``, and one computed where a static one
 would be overridden leaves it unnamed (``provider-unnamed``). At most one source may state
@@ -30,14 +31,17 @@ else ``setup.cfg``'s; the one stating them in a shape not read leaves them unrea
 (``dependency-unread``), never read from the next (:mod:`repoatlas.graph.py_packages`).
 
 **Roots.** A project's roots are the directories its hatchling ``packages`` name, which
-also limit the top-level names it provides; or, for flit's ``[tool.flit.module] name``,
+also limit the top-level names it provides; or its own directory, limited to the names a
+hatchling wheel's ``only-include`` lists; or, for flit's ``[tool.flit.module] name``,
 the one directory holding that module -- the project's own or its ``src/``, as flit
 itself looks, and never both; or the one directory a setuptools layout roots
-(``package_dir``'s, which ``find``'s ``where`` must be); else ``src/`` when that holds a
-regular package or module; else the project's own directory. A project stating any other
-layout is refused (``project-layout-unread``): a layout this does not read is not guessed
-from its directories, and an explicit layout that names nothing indexed is refused as
-well, never replaced by discovery.
+(``package_dir``'s, which ``find``'s ``where`` must be), whether a ``setup.cfg``, a
+``setup.py`` or the pyproject's own ``[tool.setuptools.packages.find]`` states it; else
+``src/`` when that holds a regular package or module; else the project's own directory. A
+project stating any other layout is refused (``project-layout-unread``): a layout this
+does not read is not guessed from its directories, and an explicit layout that names
+nothing indexed is refused as well, never replaced by discovery. A local ``tests``
+package an explicit layout does not name is no top-level module of the project.
 
 **Absolute names** resolve only in the importer's own project roots. A project is a
 boundary: another project's modules -- in this repository or any other -- are reached
@@ -74,17 +78,17 @@ from repoatlas.parsers.module_facts import (
     PYTHON_REQUIREMENTS,
     PYTHON_SETUPTOOLS,
 )
+from repoatlas.parsers.setuptools_project import SETUPTOOLS_BACKENDS as SETUPTOOLS_BACKENDS
 from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
 
 PYTHON_RELATIVE = "python-relative"
 PYTHON_ROOT = "python-root"
 #: The implicit project of a repository with no Python project at all.
 REPOSITORY_ROOT = "repository-root"
+#: The root a hatchling wheel's ``only-include`` names its top-level packages in.
+ONLY_INCLUDE = "tool.hatch.build.only-include"
 
 _PACKAGE_FILES = ("__init__.py", "__init__.pyi")
-#: The build backends that read a ``setup.cfg`` and ``setup.py`` beside a ``pyproject.toml``
-#: (and none named at all: pip then builds with setuptools).
-SETUPTOOLS_BACKENDS = frozenset({"setuptools.build_meta", "setuptools.build_meta:__legacy__"})
 #: Top-level directories a discovered layout never ships: a project's own tooling.
 _NOT_SHIPPED = frozenset(
     {"tests", "test", "docs", "doc", "examples", "example", "scripts", "benchmarks", "tools"}
@@ -135,6 +139,8 @@ class Project:
     requires_source: str | None = None
     #: Why its dependencies are not read: the source deciding them states them otherwise.
     requires_refused: str | None = None
+    #: A hatchling wheel's ``only-include``: the only top-level packages it ships.
+    only_include: tuple[str, ...] | None = None
 
     @property
     def setuptools_named(self) -> bool:
@@ -208,6 +214,7 @@ class PythonModules:
                 continue  # a workspace root with no project of its own owns no modules
             packages = stated.get("packages")
             name, flit = stated.get("name"), stated.get("flit_module")
+            layout, only = stated.get("setuptools_layout"), stated.get("only_include")
             directory = _parent(row.rel_path)
             self._repos[row.repo_id].projects[directory] = Project(
                 row.repo_id,
@@ -217,6 +224,9 @@ class PythonModules:
                 bool(stated.get("unread")),
                 name if isinstance(name, str) else None,
                 flit if isinstance(flit, str) else None,
+                layout=json.dumps(layout, sort_keys=True) if isinstance(layout, dict) else None,
+                layout_source=row.rel_path if isinstance(layout, dict) else None,
+                only_include=tuple(only) if isinstance(only, list) else None,
             )
         for (repo_id, directory), sources in sorted(setuptools.items()):
             completed = self._completed(repo_id, directory, sources)
@@ -269,7 +279,12 @@ class PythonModules:
             for path, stated in ordered
             if "layout" in stated
         ]
-        if existing is not None and (existing.unread or existing.packages or existing.flit):
+        if existing is not None and existing.layout is not None:
+            # the pyproject's own [tool.setuptools] find: one more source of the one layout
+            layouts.insert(0, (existing.manifest, existing.layout))
+        elif existing is not None and (
+            existing.unread or existing.packages or existing.flit or existing.only_include
+        ):
             layouts.append((existing.manifest, "pyproject"))
         layout_refused = None
         if any(entry.endswith(".layout") for entry in unread):
@@ -372,6 +387,8 @@ class PythonModules:
             return self._setuptools_roots(project, json.loads(project.layout))
         if project.unread or (project.packages is not None and project.flit is not None):
             return "project-layout-unread"
+        if project.only_include is not None:
+            return [Root(project.directory, ONLY_INCLUDE, frozenset(project.only_include))]
         if project.flit is not None:
             return self._flit_root(project, project.flit)
         if project.packages is not None:
@@ -399,8 +416,8 @@ class PythonModules:
         ``find``'s regular packages, a list's, and ``py_modules``' modules. A ``package_dir``
         alone roots the project and ships nothing."""
         root = _join(project.directory, layout["root"]) if layout["root"] else project.directory
-        cfg = PurePosixPath(project.layout_source or "").name == "setup.cfg"
-        key = "options" if cfg else "setup"
+        source = PurePosixPath(project.layout_source or "").name
+        key = {"setup.cfg": "options", "pyproject.toml": "tool.setuptools"}.get(source, "setup")
         roots: list[Root] = []
         packages = layout.get("packages")
         if packages in ("find", "find_namespace"):

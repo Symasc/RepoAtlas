@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from repoatlas.config.settings import Settings
 from repoatlas.models.parsing import EntityType
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION, PYTHON_PROJECT
@@ -47,7 +48,12 @@ def test_hatch_wheel_packages_are_the_layout_read() -> None:
     }
 
 
-def test_a_layout_this_does_not_read_is_named_not_guessed() -> None:
+SETUPTOOLS_BACKEND = '[build-system]\nbuild-backend = "setuptools.build_meta"\n'
+HATCH_BACKEND = '[build-system]\nbuild-backend = "hatchling.build"\n'
+
+
+def test_setuptools_find_is_read_normalised_as_a_setup_cfg_find() -> None:
+    """P6 C1: no backend named is setuptools; package-dir must root where `where` does."""
     content = (
         '[project]\nname = "demo"\n'
         '[tool.setuptools]\npackage-dir = {"" = "lib"}\n'
@@ -56,7 +62,126 @@ def test_a_layout_this_does_not_read_is_named_not_guessed() -> None:
     assert facts(content) == {
         "name": "demo",
         "dependencies": "static",
-        "unread": ["tool.setuptools.package-dir", "tool.setuptools.packages"],
+        "setuptools_layout": {
+            "root": "lib",
+            "packages": "find_namespace",
+            "include": [],
+            "exclude": [],
+        },
+    }
+
+
+def test_setuptools_find_patterns_and_namespaces_as_written() -> None:
+    content = (
+        SETUPTOOLS_BACKEND + '[tool.setuptools.packages.find]\nwhere = ["."]\n'
+        'include = ["demo*"]\nexclude = ["demo.tests*"]\nnamespaces = false\n'
+    )
+    assert facts(content) == {
+        "backend": "setuptools.build_meta",
+        "setuptools_layout": {
+            "root": "",
+            "packages": "find",
+            "include": ["demo*"],
+            "exclude": ["demo.tests*"],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("layout", "unread"),
+    [
+        # two where, a packages list, py-modules beside find, a package-dir rooting elsewhere
+        ('[tool.setuptools.packages.find]\nwhere = ["src", "lib"]\n', ["tool.setuptools.packages"]),
+        ('[tool.setuptools]\npackages = ["demo"]\n', ["tool.setuptools.packages"]),
+        (
+            '[tool.setuptools]\npy-modules = ["tool"]\n[tool.setuptools.packages.find]\n',
+            ["tool.setuptools.packages", "tool.setuptools.py-modules"],
+        ),
+        (
+            '[tool.setuptools]\npackage-dir = {"" = "lib"}\n[tool.setuptools.packages.find]\n'
+            'where = ["src"]\n',
+            ["tool.setuptools.package-dir", "tool.setuptools.packages"],
+        ),
+        (
+            '[tool.setuptools.packages.find]\nwhere = ["../elsewhere"]\n',
+            ["tool.setuptools.packages"],
+        ),
+        ('[tool.setuptools.packages.find]\nnamespaces = "yes"\n', ["tool.setuptools.packages"]),
+    ],
+)
+def test_a_setuptools_layout_in_another_shape_is_named_not_guessed(
+    layout: str, unread: list[str]
+) -> None:
+    assert facts(SETUPTOOLS_BACKEND + layout) == {
+        "backend": "setuptools.build_meta",
+        "unread": unread,
+    }
+
+
+def test_setuptools_keys_under_another_backend_are_not_its_layout() -> None:
+    content = HATCH_BACKEND + '[tool.setuptools.packages.find]\nwhere = ["src"]\n'
+    assert facts(content) == {"backend": "hatchling.build", "unread": ["tool.setuptools.packages"]}
+
+
+def test_hatch_only_include_names_the_top_level_packages_shipped() -> None:
+    """requests-cache's form: the build's only-include, a README force-included."""
+    content = (
+        HATCH_BACKEND + '[tool.hatch.build]\nonly-include = ["demo", "./other/"]\n'
+        'force-include = {"README.md" = "demo/README.md"}\n'
+        '[tool.hatch.build.targets.sdist]\nonly-include = ["demo", "tests"]\n'
+    )
+    assert facts(content) == {"backend": "hatchling.build", "only_include": ["demo", "other"]}
+
+
+def test_the_wheel_target_s_only_include_overrides_the_build_s() -> None:
+    content = (
+        HATCH_BACKEND + '[tool.hatch.build]\nonly-include = ["build_level"]\n'
+        '[tool.hatch.build.targets.wheel]\nonly-include = ["wheel_level"]\n'
+    )
+    assert facts(content) == {"backend": "hatchling.build", "only_include": ["wheel_level"]}
+
+
+@pytest.mark.parametrize(
+    ("build", "unread"),
+    [
+        ('only-include = ["src/demo"]\n', ["tool.hatch.build.only-include"]),  # a nested path
+        ('only-include = ["demo.py"]\n', ["tool.hatch.build.only-include"]),  # a file
+        ('only-include = ["demo"]\nexclude = ["demo/x.py"]\n', ["tool.hatch.build.only-include"]),
+        (
+            'only-include = ["demo"]\nforce-include = {"x.py" = "demo/x.py"}\n',
+            ["tool.hatch.build.only-include"],
+        ),
+        (
+            'only-include = ["demo"]\nforce-include = {"shared" = "demo/shared"}\n',
+            ["tool.hatch.build.only-include"],
+        ),
+        (
+            'only-include = ["demo"]\nsources = ["src"]\n',
+            ["tool.hatch.build.sources", "tool.hatch.build.only-include"],
+        ),
+    ],
+)
+def test_an_only_include_in_another_shape_is_named_not_guessed(
+    build: str, unread: list[str]
+) -> None:
+    content = HATCH_BACKEND + "[tool.hatch.build]\n" + build
+    assert facts(content) == {"backend": "hatchling.build", "unread": unread}
+
+
+def test_only_include_under_another_backend_or_beside_packages_is_not_read() -> None:
+    setuptools = SETUPTOOLS_BACKEND + '[tool.hatch.build]\nonly-include = ["demo"]\n'
+    assert facts(setuptools) == {
+        "backend": "setuptools.build_meta",
+        "unread": ["tool.hatch.build.only-include"],
+    }
+    packages = (
+        HATCH_BACKEND + '[tool.hatch.build.targets.wheel]\npackages = ["src/demo"]\n'
+        'only-include = ["demo"]\n'
+    )
+    assert facts(packages) == {
+        "backend": "hatchling.build",
+        "packages": ["src/demo"],
+        "unread": ["tool.hatch.build.targets.wheel.only-include"],
     }
 
 
