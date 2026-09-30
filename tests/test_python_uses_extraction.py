@@ -244,7 +244,7 @@ def test_type_value_and_call_forms() -> None:
         # a module value's own statement is the value's
         ("Pair", "User", "type", "type-alias"),
         ("Pair", "Result", "type", "type-alias"),
-        (None, "User", "type", "type-alias"),
+        ("Alias", "User", "type", "type-alias"),
     }
 
 
@@ -282,9 +282,11 @@ def test_tp_c_bounds_and_defaults_resolve_while_the_parameter_stays_local() -> N
 
 
 def test_tp_d_a_generic_alias_parameter_is_not_the_import() -> None:
-    # Apart: both are the file's, so together one use would hide the other.
+    # Apart, as they were when both were the file's; each alias now owns its own statement.
     assert uses("from provider import T\ntype Alias[T] = list[T]\n") == set()
-    assert uses("from provider import T\ntype Other = T\n") == {(None, "T", "type", "type-alias")}
+    assert uses("from provider import T\ntype Other = T\n") == {
+        ("Other", "T", "type", "type-alias")
+    }
 
 
 def test_tp_e_decorators_and_defaults_are_outside_the_scope() -> None:

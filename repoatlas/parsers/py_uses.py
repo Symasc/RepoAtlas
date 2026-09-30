@@ -24,11 +24,14 @@ syntax tree alone -- the source is parsed, never run (V1_SPEC §17):
   star import never costs the file its other facts.
 
 A **declaring statement** is an assignment whose every target is a name (``X = …``,
-``A = B = …``) or an annotated name (``X: T = …``, and ``X: T`` alone, which is how a
-stub declares one). Bound once -- under a guard or not, as a lone import is -- the name it
-declares is a declaration of this module: a *value*, whatever it holds and however it is
-spelled. Nothing here says what it evaluates to, or that it never changes. Unpacking, a
-loop, ``with`` or ``except`` target, a walrus and ``del`` declare nothing.
+``A = B = …``), an annotated name (``X: T = …``, and ``X: T`` alone, which is how a
+stub declares one) or a ``type`` statement (PEP 695). Bound once -- under a guard or not,
+as a lone import is -- the name it declares is a declaration of this module: a *value*,
+whatever it holds and however it is spelled. Nothing here says what it evaluates to, or
+that it never changes. Unpacking, a loop, ``with`` or ``except`` target, a walrus and
+``del`` declare nothing. A value is a **type alias** only where the syntax says so: a
+``type`` statement, or ``X: TypeAlias = …`` whose ``TypeAlias`` this module's own import
+of ``typing`` or ``typing_extensions`` binds -- ``UserId = int`` is a value like any.
 
 ``if TYPE_CHECKING:`` imports are ordinary module bindings: a type checker binds them, and
 the use is marked ``type_only``. A string in an annotation is the annotation it spells
@@ -125,7 +128,8 @@ class Declaration:
     #: The declaring statement's lines.
     line: int
     end_line: int
-    #: ``variable``; the statement's target and annotation, never its value.
+    #: ``variable`` or ``type-alias``; the signature is the statement's target and
+    #: annotation (``type X[T]`` for an alias), never its value.
     kind: str
     signature: str
 
@@ -356,6 +360,7 @@ class PythonUseAnalysis:
 
     def _module_bindings(self, tree: ast.Module, *, rebinds: bool) -> None:
         sites: dict[str, list[_Site]] = {}
+        declared: list[tuple[str, ast.stmt]] = []
         self._sites(tree.body, sites, conditional=False, type_only=False)
         for line, name in _global_rebinds(tree) if rebinds else ():
             sites.setdefault(name, []).append(_Site("other", line, conditional=True))
@@ -366,9 +371,55 @@ class PythonUseAnalysis:
                 binding = Binding("none", reason="star-import")
             self.bindings[name] = binding
             [site, *_] = found
-            if binding.kind == "local" and site.statement is not None:
-                self.declarations.append(_declaration(name, site.statement))
-        self.declarations.sort(key=lambda d: (d.line, d.name))
+            if binding.kind == "local" and site.kind == "value" and site.statement is not None:
+                declared.append((name, site.statement))
+        # What a value is spelled with is read once every binding is known.
+        self.declarations = sorted(
+            (self._declaration(name, statement) for name, statement in declared),
+            key=lambda d: (d.line, d.name),
+        )
+
+    def _declaration(self, name: str, statement: ast.stmt) -> Declaration:
+        """The declaration ``statement`` makes of ``name``: its lines, kind and signature."""
+        kind, signature = "variable", name
+        if isinstance(statement, ast.TypeAlias):
+            kind, signature = "type-alias", f"type {name}{_type_params_text(statement)}"
+        elif isinstance(statement, ast.AnnAssign):
+            if statement.value is not None and self._typing(statement.annotation, "TypeAlias"):
+                kind, signature = "type-alias", f"type {name}"
+            else:
+                signature = f"{name}: {ast.unparse(statement.annotation)}"
+        return Declaration(
+            name=name,
+            line=statement.lineno,
+            end_line=statement.end_lineno or statement.lineno,
+            kind=kind,
+            signature=signature,
+        )
+
+    def _typing(self, node: ast.expr, name: str) -> bool:
+        """Whether ``node`` is ``typing``'s or ``typing_extensions``' own ``name``.
+
+        Proven by this module's binding of what spells it: ``from typing import name`` (under
+        any alias), or ``import typing`` (under any alias) and the attribute. A name bound
+        twice, by a star import's reach or by anything else, proves nothing.
+        """
+        if isinstance(node, ast.Name):
+            found = self.bindings.get(node.id)
+            return (
+                found is not None
+                and found.kind == "import"
+                and found.module in _TYPING
+                and found.imported == name
+            )
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == name
+            and isinstance(node.value, ast.Name)
+        ):
+            found = self.bindings.get(node.value.id)
+            return found is not None and found.kind == "namespace" and found.module in _TYPING
+        return False
 
     def _sites(
         self,
@@ -467,9 +518,6 @@ class PythonUseAnalysis:
                         for name, line in _stored(case.guard):
                             other(name, line)
                     self._sites(case.body, sites, conditional=True, type_only=type_only)
-                continue
-            if isinstance(statement, ast.TypeAlias) and isinstance(statement.name, ast.Name):
-                other(statement.name.id, statement.lineno)
                 continue
             declared = _declared(statement)
             if declared:
@@ -859,7 +907,16 @@ def _declared(statement: ast.stmt) -> list[str]:
         return []
     if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
         return [statement.target.id]
+    if isinstance(statement, ast.TypeAlias) and isinstance(statement.name, ast.Name):
+        return [statement.name.id]
     return []
+
+
+def _type_params_text(statement: ast.TypeAlias) -> str:
+    """``[T, U: int]`` as a ``type`` statement spells its parameters, else nothing."""
+    if not statement.type_params:
+        return ""
+    return "[" + ", ".join(ast.unparse(param) for param in statement.type_params) + "]"
 
 
 def _declaring_parts(statement: ast.stmt) -> list[ast.expr]:
@@ -869,20 +926,6 @@ def _declaring_parts(statement: ast.stmt) -> list[ast.expr]:
     if isinstance(statement, ast.AnnAssign):
         return [statement.annotation, *([statement.value] if statement.value else [])]
     return []
-
-
-def _declaration(name: str, statement: ast.stmt) -> Declaration:
-    """The declaration ``statement`` makes of ``name``: its lines and signature."""
-    signature = name
-    if isinstance(statement, ast.AnnAssign):
-        signature = f"{name}: {ast.unparse(statement.annotation)}"
-    return Declaration(
-        name=name,
-        line=statement.lineno,
-        end_line=statement.end_lineno or statement.lineno,
-        kind="variable",
-        signature=signature,
-    )
 
 
 def _star_affected(sites: list[_Site], stars: list[int]) -> bool:

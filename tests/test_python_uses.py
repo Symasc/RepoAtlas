@@ -63,7 +63,7 @@ def test_every_python_use_and_no_other(pyfix: Workspace) -> None:
         # P10-TP: only the base, the bound and the non-generic alias
         (f"{R}/generic.py#C", f"{R}/models.py#Base", "value"),
         (f"{R}/generic.py#g", f"{R}/models.py#Bound", "type"),
-        (f"{R}/generic.py", f"{R}/models.py#T", "type"),
+        (f"{R}/generic.py#Other", f"{R}/models.py#T", "type"),
         # P11: the explicit re-export beside two stars, and the binding after a star
         (f"{R}/star_user.py#p11d", f"{R}/starpkg/things.py#Thing", "type"),
         (f"{R}/star_after.py#p11a", f"{R}/models.py#User", "type"),

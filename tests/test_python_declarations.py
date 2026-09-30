@@ -113,6 +113,45 @@ def test_a_star_import_after_a_value_leaves_it_undeclared() -> None:
     assert values("X = 1\nfrom other import *\nY = 2\n") == {"Y": (3, 3, "Y")}
 
 
+def test_a_type_alias_is_one_only_where_the_syntax_says_so() -> None:
+    """V11, V12: a ``type`` statement, or a ``TypeAlias`` this module proves is typing's."""
+    source = (
+        "import typing as t\n"
+        "from typing_extensions import TypeAlias as _TypeAlias\n"
+        "from mylib import TypeAlias\n"
+        "Proven: t.TypeAlias = int\n"  # 4
+        "Aliased: _TypeAlias = str\n"  # 5
+        "Unproven: TypeAlias = float\n"  # 6: not typing's TypeAlias
+        "Implicit = int\n"  # 7: an assignment, whatever it holds
+        "type Result[T, E: Exception] = T | E\n"  # 8
+        "type Plain = Result[int, ValueError]\n"  # 9
+    )
+    parsed = PythonParser().parse(Path("m.py"), source)
+    kinds = {s.name: (s.meta["kind"], s.signature) for s in parsed.symbols if s.uses_only}
+    assert kinds == {
+        "Proven": ("type-alias", "type Proven"),
+        "Aliased": ("type-alias", "type Aliased"),
+        "Unproven": ("variable", "Unproven: TypeAlias"),
+        "Implicit": ("variable", "Implicit"),
+        "Result": ("type-alias", "type Result[T, E: Exception]"),
+        "Plain": ("type-alias", "type Plain"),
+    }
+
+
+def test_a_type_alias_is_used_and_uses_what_it_names() -> None:
+    """V12: the parameters stay the statement's own; the alias owns the rest of it."""
+    source = (
+        "from pkg import Base\ntype Result[T: Base] = list[T]\ndef f(x: Result[int]) -> None: ...\n"
+    )
+    parsed = PythonParser().parse(Path("m.py"), source)
+    found = {
+        (r.source_symbol, r.target_key, r.meta["use"])
+        for r in parsed.references
+        if r.meta.get("use") and r.target_key != "export-table"
+    }
+    assert found == {("Result", "Base", "type"), ("f", "Result", "type")}
+
+
 def test_a_value_is_no_chunk_boundary() -> None:
     """Chunks are cut where they were before module values were declarations."""
     source = (
