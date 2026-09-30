@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from repoatlas.graph.modules import ModuleTarget
-from repoatlas.graph.py_modules import PythonModules
+from repoatlas.graph.py_modules import PYTHON_ROOT, REPOSITORY_ROOT, PythonModules
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION, PYTHON_PROJECT
@@ -75,7 +75,10 @@ def test_p7_flat_layout_roots_at_the_project_and_scripts_are_not_top_level() -> 
     )
     assert tree.resolve("app.py", "fixture_pkg.models") == "fixture_pkg/models.py"
     assert tree.resolve("app.py", "bar") == "<module-not-found>"
-    assert tree.resolve("app.py", "scripts.bar") == "<namespace-package>"
+    # P6: scripts/ is a namespace portion of the project's own root; bar.py below it is the
+    # one file that name can mean, and scripts itself stays no module
+    assert tree.resolve("app.py", "scripts.bar") == "scripts/bar.py"
+    assert tree.resolve("app.py", "scripts") == "<namespace-package>"
 
 
 def test_hatch_packages_name_the_root_and_the_only_top_level_names() -> None:
@@ -107,9 +110,13 @@ def test_a_stub_answers_only_where_no_source_does() -> None:
     assert tree.resolve("main.py", "both") == "both.py"
 
 
-def test_a_namespace_directory_is_refused_not_treated_as_a_package() -> None:
+def test_a_module_below_a_namespace_portion_of_the_project_s_own_root_resolves() -> None:
+    """P6 N1b: the portion is walked through, never itself a module."""
     tree = Tree(["ns/inner/__init__.py", "ns/inner/mod.py", "main.py"])
-    assert tree.resolve("main.py", "ns.inner.mod") == "<namespace-package>"
+    assert tree.resolve("main.py", "ns.inner.mod") == "ns/inner/mod.py"
+    assert tree.resolve("main.py", "ns.inner") == "ns/inner/__init__.py"
+    assert tree.resolve("main.py", "ns") == "<namespace-package>"
+    assert tree.resolve("main.py", "ns.missing") == "<namespace-package>"
 
 
 def test_a_repository_without_a_project_is_one_rooted_at_its_root() -> None:
@@ -163,7 +170,8 @@ def test_a_nested_project_is_unreachable_from_the_flat_project_around_it() -> No
         ["outer/__init__.py", "outer/use.py", "plugins/inner/inner/__init__.py"],
         {"pyproject.toml": {"name": "outer"}, "plugins/inner/pyproject.toml": {"name": "inner"}},
     )
-    assert tree.resolve("outer/use.py", "plugins.inner.inner") == "<namespace-package>"
+    # P6: the portion plugins/ is walked, and what it leads to is another project's
+    assert tree.resolve("outer/use.py", "plugins.inner.inner") == "<project-boundary>"
     assert tree.resolve("outer/use.py", "inner") == "<project-boundary>"
 
 
@@ -278,3 +286,132 @@ def test_a_virtual_workspace_root_owns_no_modules() -> None:
     )
     assert tree.resolve("packages/a/src/a/core.py", "a") == "packages/a/src/a/__init__.py"
     assert tree.resolve("scripts/run.py", "a") == "<no-project>"
+
+
+# -- P6 N1: namespace portions (PEP 420) inside the importer's own project ----------------
+
+FLASK = [
+    "src/flask/__init__.py",
+    "src/flask/app.py",
+    "src/flask/config.py",
+    "src/flask/sansio/app.py",
+    "src/flask/sansio/scaffold.py",
+]
+
+
+def test_n1a_a_portion_below_a_regular_package_is_walked_through() -> None:
+    """flask's shape: ``sansio/`` has no ``__init__``, and is the one ``flask.sansio``."""
+    tree = Tree(FLASK, {"pyproject.toml": {"name": "flask"}})
+    here = "src/flask/app.py"
+    assert tree.resolve(here, ".sansio.app") == "src/flask/sansio/app.py"
+    assert tree.resolve(here, "flask.sansio.scaffold") == "src/flask/sansio/scaffold.py"
+    assert tree.resolve(here, "flask.sansio") == "<namespace-package>"
+    assert tree.resolve(here, ".sansio.missing") == "<module-not-found>"
+
+
+def test_n1a_a_portion_below_a_regular_package_is_a_level_of_the_relative_chain() -> None:
+    tree = Tree(FLASK, {"pyproject.toml": {"name": "flask"}})
+    here = "src/flask/sansio/app.py"
+    assert tree.resolve(here, "..") == "src/flask/__init__.py"
+    assert tree.resolve(here, "..config") == "src/flask/config.py"
+    assert tree.resolve(here, ".scaffold") == "src/flask/sansio/scaffold.py"
+    assert tree.resolve(here, ".") == "<namespace-package>"
+    assert tree.resolve(here, "...config") == "<relative-beyond-package>"
+
+
+def test_n1a_portions_two_deep_below_a_package() -> None:
+    tree = Tree(
+        ["pkg/__init__.py", "pkg/core.py", "pkg/a/b/mod.py", "pkg/a/b/other.py"],
+        {"pyproject.toml": {"name": "p"}},
+    )
+    here = "pkg/a/b/mod.py"
+    assert tree.resolve(here, ".other") == "pkg/a/b/other.py"
+    assert tree.resolve(here, "...core") == "pkg/core.py"
+    assert tree.resolve(here, "....core") == "<relative-beyond-package>"
+    assert tree.resolve(here, "pkg.a.b.other") == "pkg/a/b/other.py"
+    assert tree.resolve(here, "pkg.a") == "<namespace-package>"
+    assert tree.resolve(here, "pkg.a.b") == "<namespace-package>"
+
+
+def test_n1a_a_portion_with_no_regular_package_above_it_is_no_relative_level() -> None:
+    """A top-level portion holds no package, and a script's directory is none either."""
+    tree = Tree(
+        ["ns/pkg/__init__.py", "ns/pkg/mod.py", "ns/other.py", "tools/sub/run.py", "tools/lib.py"],
+        {"pyproject.toml": {"name": "p"}},
+    )
+    assert tree.resolve("ns/pkg/mod.py", ".") == "ns/pkg/__init__.py"
+    assert tree.resolve("ns/pkg/mod.py", "..other") == "<relative-beyond-package>"
+    assert tree.resolve("tools/sub/run.py", "..lib") == "<relative-beyond-package>"
+
+
+def test_n1b_a_module_below_a_top_level_portion_of_the_importer_s_own_project() -> None:
+    """hacs's shape: ``custom_components/`` in a repository with no packaging metadata."""
+    tree = Tree(
+        [
+            "custom_components/hacs/__init__.py",
+            "custom_components/hacs/const.py",
+            "action/action.py",
+            "tests/__init__.py",
+            "tests/test_const.py",
+        ]
+    )
+    here = "tests/test_const.py"
+    assert tree.resolve(here, "custom_components.hacs.const") == "custom_components/hacs/const.py"
+    assert tree.resolve(here, "custom_components.hacs") == "custom_components/hacs/__init__.py"
+    assert tree.resolve(here, "action.action") == "action/action.py"
+    assert tree.resolve(here, "custom_components") == "<namespace-package>"
+    assert tree.resolve(here, "custom_components.other") == "<namespace-package>"
+    found = tree.modules.resolve(tree.rows[here], "custom_components.hacs.const")
+    assert isinstance(found, ModuleTarget)
+    assert (found.basis, dict(found.detail)) == (
+        PYTHON_ROOT,
+        {
+            "root": ".",
+            "root_basis": REPOSITORY_ROOT,
+            "project": REPOSITORY_ROOT,
+            "namespace_package": "custom_components",
+        },
+    )
+
+
+def test_n1b_a_namespace_in_two_roots_of_one_project_names_one_file_or_is_ambiguous() -> None:
+    tree = Tree(
+        ["lib1/ns/a.py", "lib1/ns/same.py", "lib2/ns/b.py", "lib2/ns/same.py", "app.py"],
+        {"pyproject.toml": {"name": "p", "packages": ["lib1/ns", "lib2/ns"]}},
+    )
+    assert tree.resolve("app.py", "ns.a") == "lib1/ns/a.py"
+    assert tree.resolve("app.py", "ns.b") == "lib2/ns/b.py"
+    assert tree.resolve("app.py", "ns.same") == "<module-ambiguous>"
+    assert tree.resolve("app.py", "ns") == "<namespace-package>"
+
+
+def test_n1b_a_script_beside_what_names_the_portion_is_refused() -> None:
+    """The script's own directory is searched first: a package there wins, and a portion
+    there would merge a directory outside every root into the namespace."""
+    tree = Tree(
+        [
+            "ns/pkg/mod.py",
+            "main.py",
+            "scripts/run.py",
+            "tools/run.py",
+            "tools/ns/__init__.py",
+            "bin/run.py",
+            "bin/ns/pkg/mod.py",
+        ],
+        {"pyproject.toml": {"name": "p"}},
+    )
+    assert tree.resolve("main.py", "ns.pkg.mod") == "ns/pkg/mod.py"
+    assert tree.resolve("scripts/run.py", "ns.pkg.mod") == "ns/pkg/mod.py"
+    assert tree.resolve("tools/run.py", "ns.pkg.mod") == "<script-shadow>"
+    assert tree.resolve("bin/run.py", "ns.pkg.mod") == "<script-shadow>"
+
+
+def test_n1b_a_portion_is_walked_only_in_the_importer_s_own_project() -> None:
+    """Another project here holding the same namespace is no evidence: what only it
+    holds names nothing, and never crosses the boundary."""
+    tree = Tree(
+        ["alpha/ns/mine.py", "alpha/app.py", "beta/ns/theirs.py"],
+        {"alpha/pyproject.toml": {"name": "alpha"}, "beta/pyproject.toml": {"name": "beta"}},
+    )
+    assert tree.resolve("alpha/app.py", "ns.mine") == "alpha/ns/mine.py"
+    assert tree.resolve("alpha/app.py", "ns.theirs") == "<namespace-package>"
