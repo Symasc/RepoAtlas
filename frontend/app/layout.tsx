@@ -8,11 +8,14 @@ import { GeistSans } from "geist/font/sans";
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 
+import mark from "@/assets/brand/repoatlas-mark-256.png";
+
 import { Providers } from "./providers";
 
 export const metadata: Metadata = {
   title: "RepoAtlas",
   description: "A map of the repositories RepoAtlas has indexed on this machine.",
+  icons: { icon: mark.src },
 };
 
 export const viewport: Viewport = {

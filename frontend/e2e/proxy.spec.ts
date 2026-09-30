@@ -3,6 +3,8 @@ import path from "node:path";
 
 import { expect, test } from "@playwright/test";
 
+import { STATE } from "../playwright.config";
+
 /**
  * The explorer's route adds the API token, so it must refuse everything a page
  * on another site, or a rebound DNS name, could send it. Asked over real HTTP.
@@ -66,7 +68,7 @@ test("refuses endpoints the contract does not serve, and other methods", async (
 
 test("never hands the token to the browser", async ({ page }) => {
   // the suite's own server wrote this file (playwright.config.ts)
-  const record = readFileSync(path.join(import.meta.dirname, ".state/api.json"), "utf8");
+  const record = readFileSync(path.join(STATE, "live-api.json"), "utf8");
   const { token } = JSON.parse(record) as { token: string };
   const bodies: Promise<string>[] = [];
   page.on("response", (response) => bodies.push(response.text().catch(() => "")));

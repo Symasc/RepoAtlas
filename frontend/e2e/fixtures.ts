@@ -13,9 +13,12 @@ export const test = base.extend<{ problems: string[] }>({
       if (message.type() === "error") problems.push(`console: ${message.text()}`);
     });
     page.on("pageerror", (error) => problems.push(`exception: ${error.message}`));
-    page.on("requestfailed", (request) =>
-      problems.push(`request failed: ${request.url()} ${request.failure()?.errorText ?? ""}`),
-    );
+    page.on("requestfailed", (request) => {
+      const reason = request.failure()?.errorText ?? "";
+      // the page cancelling what it no longer needs (leaving a level mid-read) is not a failure
+      if (reason === "net::ERR_ABORTED") return;
+      problems.push(`request failed: ${request.url()} ${reason}`);
+    });
     await use(problems);
   },
 });

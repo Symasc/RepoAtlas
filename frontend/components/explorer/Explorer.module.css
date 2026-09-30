@@ -9,7 +9,19 @@
   background-color: var(--ra-canvas);
 }
 
-.aside {
-  background-color: var(--ra-surface);
-  border-left: 1px solid var(--ra-border);
+.center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--mantine-spacing-md);
+  padding: var(--mantine-spacing-xl) var(--mantine-spacing-lg);
+  overflow-y: auto;
+}
+
+.missing {
+  margin: 0;
+  font-size: var(--mantine-font-size-lg);
+  color: var(--ra-text);
 }

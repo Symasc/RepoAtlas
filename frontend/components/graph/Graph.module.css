@@ -1,0 +1,555 @@
+/* -- the canvas ------------------------------------------------------------- */
+
+.flow {
+  --xy-background-color: var(--ra-canvas);
+  --xy-background-pattern-color: var(--ra-grid-dot);
+  flex: 1;
+  min-width: 0;
+
+  :global(.react-flow__attribution) {
+    background: transparent;
+    opacity: 0.45;
+    font-size: 10px;
+
+    a {
+      color: var(--ra-text-subtle);
+    }
+  }
+}
+
+.anchor {
+  width: 1px;
+  height: 1px;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* a whole-card button: the card is the click target, and a real focusable one */
+.cover {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: 2px solid var(--ra-focus);
+    outline-offset: 2px;
+  }
+}
+
+/* -- repository nodes --------------------------------------------------------- */
+
+.repository,
+.peer,
+.path {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  height: 100%;
+  padding: 0 14px;
+  background-color: var(--ra-surface);
+  border: 1px solid var(--ra-border);
+  border-radius: var(--mantine-radius-md);
+  color: var(--ra-text);
+  transition:
+    border-color var(--ra-duration-fast) var(--ra-ease),
+    box-shadow var(--ra-duration-fast) var(--ra-ease);
+
+  &:hover {
+    border-color: var(--ra-border-strong);
+  }
+
+  &[data-current] {
+    border-color: color-mix(in oklch, var(--ra-accent) 70%, transparent);
+    box-shadow: 0 0 0 3px var(--ra-selected);
+  }
+}
+
+.badge {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--mantine-radius-md);
+  font-weight: 600;
+  font-size: var(--mantine-font-size-lg);
+  color: var(--hue, var(--ra-text-muted));
+  background-color: color-mix(in oklch, var(--hue, var(--ra-text-muted)) 14%, transparent);
+  border: 1px solid color-mix(in oklch, var(--hue, var(--ra-text-muted)) 45%, transparent);
+
+  &[data-small] {
+    width: 28px;
+    height: 28px;
+    font-size: var(--mantine-font-size-md);
+  }
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.titleLine {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.name {
+  font-size: var(--mantine-font-size-lg);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta,
+.stats {
+  display: flex;
+  gap: 10px;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.stats {
+  color: var(--ra-text-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+.sha {
+  font-family: var(--mantine-font-family-monospace);
+  color: var(--ra-text-subtle);
+}
+
+.state {
+  color: var(--ra-text-subtle);
+}
+
+.freshness {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--tone);
+
+  &[data-tone="current"] {
+    --tone: var(--ra-success);
+  }
+  &[data-tone="unverified"] {
+    --tone: var(--ra-text-subtle);
+  }
+  &[data-tone="unknown"] {
+    --tone: var(--ra-border-strong);
+  }
+  &[data-tone="attention"] {
+    --tone: var(--ra-warning);
+  }
+  &[data-tone="problem"] {
+    --tone: var(--ra-danger);
+  }
+}
+
+.peer {
+  opacity: 0.62;
+
+  &:hover {
+    opacity: 1;
+  }
+}
+
+/* -- directories and files -------------------------------------------------- */
+
+.path {
+  gap: 10px;
+}
+
+.folder {
+  flex-shrink: 0;
+  color: var(--ra-file);
+}
+
+.path .folder,
+.cardHeader .folder {
+  color: var(--ra-accent);
+}
+
+.fileIcon {
+  flex-shrink: 0;
+  color: var(--ra-text-subtle);
+}
+
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  background-color: var(--ra-surface);
+  border: 1px solid var(--ra-border);
+  border-radius: var(--mantine-radius-md);
+  overflow: hidden;
+  transition: border-color var(--ra-duration-fast) var(--ra-ease);
+
+  &:hover {
+    border-color: var(--ra-border-strong);
+  }
+}
+
+.cardHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  height: 54px;
+  padding: 0 14px;
+  border: 0;
+  border-bottom: 1px solid var(--ra-border);
+  background: transparent;
+  color: var(--ra-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  &[data-static] {
+    cursor: default;
+  }
+
+  &:not([data-static]):hover {
+    background-color: var(--ra-hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--ra-focus);
+    outline-offset: -2px;
+  }
+}
+
+.cardTitle {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--mantine-font-size-lg);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cardCount {
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+.rows {
+  margin: 0;
+  padding: 4px 6px 6px;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--mantine-radius-xs);
+  background: transparent;
+  color: var(--ra-text-muted);
+  font: inherit;
+  font-size: var(--mantine-font-size-md);
+  text-align: left;
+
+  &:not([data-static]) {
+    cursor: pointer;
+
+    &:hover {
+      background-color: var(--ra-hover);
+      color: var(--ra-text);
+    }
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--ra-focus);
+    outline-offset: -2px;
+  }
+}
+
+.rowName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.caret {
+  flex-shrink: 0;
+  color: var(--ra-text-subtle);
+}
+
+.placeholder {
+  height: 14px;
+  margin: 6px 8px;
+  border-radius: 3px;
+  background-color: var(--ra-hover);
+}
+
+.more {
+  height: 26px;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-subtle);
+}
+
+/* -- things many repositories share: packages, modules, endpoints ------------ */
+
+.shared {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 100%;
+  padding: 0 12px 0 14px;
+  background-color: var(--ra-surface);
+  border: 1px solid var(--ra-border);
+  border-radius: 22px;
+  color: var(--ra-text);
+
+  &[data-family="package"] {
+    --family: var(--ra-package);
+  }
+  &[data-family="endpoint"] {
+    --family: var(--ra-endpoint);
+  }
+  &[data-family="external"] {
+    --family: var(--ra-external);
+  }
+}
+
+.sharedIcon {
+  flex-shrink: 0;
+  color: var(--family);
+}
+
+.sharedLabel {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--mantine-font-size-md);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sharedCount {
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+/* -- edges ------------------------------------------------------------------ */
+
+.link {
+  --stroke: var(--ra-edge-cross);
+  transition: opacity var(--ra-duration) var(--ra-ease);
+
+  &[data-kind="http"] {
+    --stroke: var(--ra-endpoint);
+  }
+  &[data-kind="dependency"] {
+    --stroke: var(--ra-package);
+  }
+
+  &[data-emphasis="rest"] {
+    opacity: 0.45;
+  }
+  &[data-emphasis="lit"] {
+    opacity: 1;
+  }
+  &[data-emphasis="dim"] {
+    opacity: 0.1;
+  }
+}
+
+.linkStroke {
+  stroke: var(--stroke);
+  fill: none;
+  stroke-linecap: round;
+}
+
+.link[data-kind="http"] .linkStroke {
+  stroke-dasharray: 7 5;
+  stroke-linecap: butt;
+}
+
+/* a double line: the colour, hollowed out by the canvas */
+.linkOuter {
+  stroke: var(--stroke);
+  fill: none;
+}
+
+.linkInner {
+  stroke: var(--ra-canvas);
+  fill: none;
+}
+
+.edgeLabel {
+  position: absolute;
+  padding: 1px 6px;
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+  color: var(--ra-text);
+  background-color: var(--ra-surface-elevated);
+  border: 1px solid var(--ra-border-strong);
+  border-radius: 9px;
+  pointer-events: none;
+}
+
+.tree {
+  transition: opacity var(--ra-duration) var(--ra-ease);
+
+  &[data-emphasis="dim"] {
+    opacity: 0.35;
+  }
+}
+
+.treeStroke {
+  stroke: var(--ra-border-strong);
+  stroke-width: 1.25;
+  fill: none;
+}
+
+.treeDot {
+  fill: var(--ra-border-strong);
+}
+
+/* -- controls ---------------------------------------------------------------- */
+
+.zoom,
+.legend {
+  display: flex;
+  align-items: center;
+  background-color: var(--ra-surface);
+  border: 1px solid var(--ra-border);
+  border-radius: var(--mantine-radius-md);
+  box-shadow: var(--ra-shadow);
+}
+
+.zoom {
+  gap: 2px;
+  padding: 3px;
+}
+
+.zoomValue {
+  min-width: 44px;
+  text-align: center;
+  font-size: var(--mantine-font-size-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--ra-text-muted);
+}
+
+.zoomDivider {
+  width: 1px;
+  height: 18px;
+  margin: 0 3px;
+  background-color: var(--ra-border);
+}
+
+.legend {
+  gap: 18px;
+  margin: 0;
+  padding: 7px 14px;
+  list-style: none;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-muted);
+
+  @media (max-width: $mantine-breakpoint-sm) {
+    display: none;
+  }
+}
+
+.legendItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.legendLine {
+  --stroke: var(--ra-edge-cross);
+
+  &[data-kind="http"] {
+    --stroke: var(--ra-endpoint);
+  }
+  &[data-kind="dependency"] {
+    --stroke: var(--ra-package);
+  }
+  &[data-kind="tree"] {
+    --stroke: var(--ra-border-strong);
+  }
+}
+
+.legendStroke {
+  stroke: var(--stroke);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.legendLine[data-kind="http"] .legendStroke {
+  stroke-dasharray: 5 3;
+  stroke-linecap: butt;
+}
+
+.legendLine[data-kind="tree"] .legendStroke {
+  stroke-width: 1.25;
+}
+
+.legendOuter {
+  stroke: var(--stroke);
+  stroke-width: 5;
+}
+
+.legendInner {
+  stroke: var(--ra-surface);
+  stroke-width: 1.5;
+}
+
+/* on a light canvas a resting line needs more ink to read at all */
+:global([data-mantine-color-scheme="light"]) .link[data-emphasis="rest"] {
+  opacity: 0.7;
+}

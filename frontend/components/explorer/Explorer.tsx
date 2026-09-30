@@ -1,14 +1,14 @@
 "use client";
 
-import { AppShell } from "@mantine/core";
-import { useDisclosure } from "@mantine/hooks";
+import { AppShell, Button, Loader } from "@mantine/core";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useMemo } from "react";
 
-import { Canvas } from "@/components/canvas/Canvas";
-import { Inspector } from "@/components/inspector/Inspector";
 import { AppHeader } from "@/components/shell/AppHeader";
 import { RepositorySpotlight } from "@/components/shell/SearchTrigger";
+import { ApiState } from "@/components/states/ApiState";
+import { OverviewLevel } from "@/components/views/OverviewLevel";
+import { RepositoryLevel } from "@/components/views/RepositoryLevel";
 import { ApiError } from "@/lib/api/client";
 import { useLiveFreshness, useRepositories } from "@/lib/api/queries";
 import type { RepositoryModel } from "@/lib/model/repositories";
@@ -16,15 +16,14 @@ import type { RepositoryModel } from "@/lib/model/repositories";
 import classes from "./Explorer.module.css";
 
 /**
- * The one explorer screen. Navigation lives in the URL (`?repo=<slug>`), so a
- * view can be shared and Back undoes a selection; P2 onwards add the graph to
- * the canvas and deeper levels to the same parameters.
+ * The one explorer screen. Where you are lives in the URL, `?repo=<slug>&path=<dir>`,
+ * so a view can be shared and Back climbs out: no repository is the overview,
+ * a repository is its root, a path is a directory inside it.
  */
 export function Explorer() {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
-  const [inspectorOpened, inspector] = useDisclosure(false);
 
   const repositories = useRepositories();
   const live = useLiveFreshness();
@@ -40,38 +39,56 @@ export function Explorer() {
   );
 
   const slug = params.get("repo");
-  const selected = merged?.find((r) => r.slug === slug) ?? null;
+  const path = params.get("path") ?? "";
+  const selected = slug === null ? null : (merged?.find((r) => r.slug === slug) ?? null);
 
-  const select = useCallback(
-    (next: string | null) => {
-      const search = new URLSearchParams(params.toString());
-      if (next === null) search.delete("repo");
-      else search.set("repo", next);
+  const navigate = useCallback(
+    (next: string | null, nextPath = "") => {
+      const search = new URLSearchParams();
+      if (next !== null) search.set("repo", next);
+      if (next !== null && nextPath) search.set("path", nextPath);
       const query = search.toString();
       router.push(query ? `${pathname}?${query}` : pathname, { scroll: false });
-      if (next !== null) inspector.open();
     },
-    [params, pathname, router, inspector],
+    [pathname, router],
   );
+  const open = useCallback((next: string) => navigate(next), [navigate]);
 
   const error = repositories.error instanceof ApiError ? repositories.error : null;
 
+  let body;
+  if (error !== null) {
+    body = (
+      <div className={classes.center}>
+        <ApiState error={error} retrying={repositories.isFetching} onRetry={() => void repositories.refetch()} />
+      </div>
+    );
+  } else if (merged === undefined) {
+    body = (
+      <div className={classes.center} aria-busy="true">
+        <Loader size="sm" type="dots" />
+      </div>
+    );
+  } else if (slug !== null && selected === null) {
+    body = (
+      <div className={classes.center} role="alert">
+        <p className={classes.missing}>No indexed repository is called “{slug}”.</p>
+        <Button variant="default" onClick={() => navigate(null)}>
+          Show all repositories
+        </Button>
+      </div>
+    );
+  } else if (selected !== null) {
+    body = <RepositoryLevel repository={selected} path={path} repositories={merged} onNavigate={navigate} />;
+  } else {
+    body = <OverviewLevel repositories={merged} onOpen={open} />;
+  }
+
   return (
-    <AppShell
-      header={{ height: 52 }}
-      aside={{
-        width: { md: 360, lg: 400 },
-        breakpoint: "md",
-        collapsed: { mobile: !inspectorOpened, desktop: false },
-      }}
-      padding={0}
-      classNames={{ header: classes.header, main: classes.main, aside: classes.aside }}
-    >
+    <AppShell header={{ height: 52 }} padding={0} classNames={{ header: classes.header, main: classes.main }}>
       <AppShell.Header>
         <AppHeader
           repositories={merged}
-          selected={selected}
-          onSelect={select}
           freshness={{
             live: live.isSuccess,
             checking: live.isFetching,
@@ -80,32 +97,10 @@ export function Explorer() {
             recheck: () => void live.refetch(),
           }}
           offline={error?.unavailable ?? false}
-          inspectorOpened={inspectorOpened}
-          onToggleInspector={inspector.toggle}
         />
       </AppShell.Header>
-
-      <AppShell.Main>
-        <Canvas
-          repositories={merged}
-          loading={repositories.isPending}
-          error={error}
-          retrying={repositories.isFetching}
-          onRetry={() => void repositories.refetch()}
-        />
-      </AppShell.Main>
-
-      <AppShell.Aside aria-label="Inspector">
-        <Inspector
-          repositories={merged}
-          loading={repositories.isPending}
-          failed={error !== null}
-          selected={selected}
-          onSelect={select}
-        />
-      </AppShell.Aside>
-
-      <RepositorySpotlight repositories={merged ?? []} onSelect={select} />
+      <AppShell.Main>{body}</AppShell.Main>
+      <RepositorySpotlight repositories={merged ?? []} onSelect={open} />
     </AppShell>
   );
 }

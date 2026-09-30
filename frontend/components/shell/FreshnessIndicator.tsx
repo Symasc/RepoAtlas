@@ -65,7 +65,7 @@ export function FreshnessIndicator({ repositories, check, offline }: Props) {
           aria-label={`Index freshness: ${headline}`}
           data-tone={pending ? "unverified" : summary.tone}
         >
-          <span className={classes.strip} aria-hidden>
+          <span className={classes.strip} data-dense={repositories.length > 12 || undefined} aria-hidden>
             {repositories.map((r) => (
               <span
                 key={r.slug}

@@ -94,3 +94,27 @@ def statements(workspace: Workspace) -> Iterator[list[str]]:
         yield seen
     finally:
         connection.set_trace_callback(None)
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Build the linked corpus for the graph explorer's end-to-end run.
+
+    ``python -m tests.topology_corpus <dir>`` indexes it into ``<dir>``, which
+    must be absent or empty, leaving ``config.yaml`` and ``state/atlas.db`` there
+    for ``repoatlas serve`` (via REPOATLAS_CONFIG and REPOATLAS_DB). It is the
+    one index whose repositories link to each other, which a live index may not.
+    """
+    import sys
+
+    args = sys.argv[1:] if argv is None else argv
+    if len(args) != 1:
+        raise SystemExit("usage: python -m tests.topology_corpus <empty directory>")
+    root = Path(args[0])
+    if root.exists() and any(root.iterdir()):
+        raise SystemExit(f"{root} is not empty")
+    root.mkdir(parents=True, exist_ok=True)
+    open_corpus(root, LINKED).close()
+
+
+if __name__ == "__main__":
+    main()
