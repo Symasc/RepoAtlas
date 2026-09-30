@@ -19,9 +19,28 @@ from typing import Any
 import pytest
 import yaml
 
-#: The one canonical artifact. Vendor-neutral, at the repository root, and the
-#: only place investigation behaviour is defined.
-SKILL_PATH = Path(__file__).parent.parent.parent / "skills" / "repoatlas-investigation" / "SKILL.md"
+#: Where the canonical skills live. Vendor-neutral, at the repository root, and the
+#: only place agent behaviour is defined.
+SKILLS_ROOT = Path(__file__).parent.parent.parent / "skills"
+
+#: The five task skills, one directory each. Each is the workflow for one kind of
+#: task; none is a copy of another, and the contract they share lives once, under
+#: ``repoatlas-investigation/references``.
+SKILL_NAMES = (
+    "repoatlas-change-impact",
+    "repoatlas-investigation",
+    "repoatlas-dependencies",
+    "repoatlas-http",
+    "repoatlas-index",
+)
+
+#: The investigation skill, which also carries the shared contract reference.
+SKILL_PATH = SKILLS_ROOT / "repoatlas-investigation" / "SKILL.md"
+
+
+def skill_paths() -> dict[str, Path]:
+    """Each task skill's ``SKILL.md``, by skill name."""
+    return {name: SKILLS_ROOT / name / "SKILL.md" for name in SKILL_NAMES}
 
 
 def skill_text() -> str:

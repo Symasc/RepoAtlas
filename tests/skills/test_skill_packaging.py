@@ -1,13 +1,13 @@
-"""§29: the skill ships with the thing people install, from one maintained copy.
+"""§29: the skills ship with the thing people install, from one maintained copy.
 
 A skill that exists only in a git checkout is guidance that a user who ran
 ``pip install repoatlas`` does not have, and its absence is silent: the agent
 simply behaves like an agent with no guidance, which looks like a weak model
 rather than a missing file.
 
-The canonical artifact is at the repository root, where it is vendor-neutral and
-where a reader looks for it. The wheel maps that same file into the installed
-package instead of keeping a second one, because two hand-maintained copies of
+The canonical skills are at the repository root, where they are vendor-neutral
+and where a reader looks for them. The wheel maps those same files into the
+installed package instead of keeping second ones, because two hand-maintained copies of
 behavioural guidance is precisely how the two come to disagree. These tests build
 the real artifacts with the project's own packaging command and read what is
 inside them.
@@ -23,15 +23,19 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from tests.skills.conftest import SKILL_PATH
+from tests.skills.conftest import SKILL_NAMES, SKILL_PATH, skill_paths
 
 ROOT = SKILL_PATH.parent.parent.parent
 
-#: Where the artifact keeps the skill once installed.
-INSTALLED_PATH = "repoatlas/skills/repoatlas-investigation/SKILL.md"
+#: Where the artifact keeps each skill once installed.
+INSTALLED_PATHS = {name: f"repoatlas/skills/{name}/SKILL.md" for name in SKILL_NAMES}
 
-#: Where it lives in a source distribution, which mirrors the repository.
-SOURCE_PATH = "skills/repoatlas-investigation/SKILL.md"
+#: Where each lives in a source distribution, which mirrors the repository.
+SOURCE_PATHS = {name: f"skills/{name}/SKILL.md" for name in SKILL_NAMES}
+
+#: A task skill stays small enough to be read whole whenever it loads. The shared
+#: contract is the place for detail.
+MAX_SKILL_BYTES = 6_500
 
 requires_uv = pytest.mark.skipif(
     shutil.which("uv") is None, reason="uv is the project's packaging command and is not installed"
@@ -70,46 +74,63 @@ def test_the_packaging_configuration_maps_the_canonical_skill_in() -> None:
 
 
 @requires_uv
-def test_the_wheel_carries_the_canonical_skill(built: Path) -> None:
+def test_the_wheel_carries_every_canonical_skill(built: Path) -> None:
     wheels = list(built.glob("*.whl"))
     assert len(wheels) == 1, wheels
     with zipfile.ZipFile(wheels[0]) as archive:
         names = archive.namelist()
-        assert INSTALLED_PATH in names, [n for n in names if "skill" in n.lower()]
-        shipped = archive.read(INSTALLED_PATH).decode("utf-8")
-    assert shipped == SKILL_PATH.read_text(encoding="utf-8"), (
-        "the installed skill is not the canonical one"
-    )
+        for name, installed in INSTALLED_PATHS.items():
+            assert installed in names, [n for n in names if "skill" in n.lower()]
+            shipped = archive.read(installed).decode("utf-8")
+            assert shipped == skill_paths()[name].read_text(encoding="utf-8"), (
+                f"the installed {name} is not the canonical one"
+            )
 
 
 @requires_uv
-def test_the_source_distribution_carries_the_canonical_skill(built: Path) -> None:
+def test_the_source_distribution_carries_every_canonical_skill(built: Path) -> None:
     archives = list(built.glob("*.tar.gz"))
     assert len(archives) == 1, archives
     with tarfile.open(archives[0]) as archive:
-        matches = [name for name in archive.getnames() if name.endswith(SOURCE_PATH)]
-        assert len(matches) == 1, archive.getnames()[:20]
-        handle = archive.extractfile(matches[0])
-        assert handle is not None
-        shipped = handle.read().decode("utf-8")
-    assert shipped == SKILL_PATH.read_text(encoding="utf-8")
+        for name, source in SOURCE_PATHS.items():
+            matches = [member for member in archive.getnames() if member.endswith(source)]
+            assert len(matches) == 1, archive.getnames()[:20]
+            handle = archive.extractfile(matches[0])
+            assert handle is not None
+            shipped = handle.read().decode("utf-8")
+            assert shipped == skill_paths()[name].read_text(encoding="utf-8"), name
 
 
 @requires_uv
-def test_the_artifact_holds_exactly_one_skill_document(built: Path) -> None:
-    """One copy in the wheel, so there is nothing for a second one to drift from."""
+def test_the_artifact_holds_exactly_the_five_skill_documents(built: Path) -> None:
+    """One copy of each in the wheel, so there is nothing for a second one to drift from."""
     with zipfile.ZipFile(next(built.glob("*.whl"))) as archive:
-        found = [name for name in archive.namelist() if name.endswith("SKILL.md")]
-    assert found == [INSTALLED_PATH], found
+        found = sorted(name for name in archive.namelist() if name.endswith("SKILL.md"))
+    assert found == sorted(INSTALLED_PATHS.values()), found
 
 
-def test_the_repository_holds_exactly_one_skill_document() -> None:
+def test_the_repository_holds_exactly_the_five_skill_documents() -> None:
     found = sorted(
         path.relative_to(ROOT).as_posix()
         for path in ROOT.rglob("SKILL.md")
         if ".venv" not in path.parts and "dist" not in path.parts
     )
-    assert found == [SOURCE_PATH], found
+    assert found == sorted(SOURCE_PATHS.values()), found
+
+
+def test_every_task_skill_is_small() -> None:
+    for name, path in skill_paths().items():
+        size = len(path.read_bytes())
+        assert size <= MAX_SKILL_BYTES, f"{name} is {size} bytes"
+
+
+def test_every_skill_links_the_shared_contract_where_it_is_installed() -> None:
+    """The sibling link resolves in the repository, and therefore in the wheel and in
+    any install that keeps the five skills side by side, as the wheel does."""
+    link = "../repoatlas-investigation/references/contracts.md"
+    for name, path in skill_paths().items():
+        assert link in path.read_text(encoding="utf-8"), name
+        assert (path.parent / link).resolve().is_file(), name
 
 
 def test_core_guidance_is_small_and_its_optional_reference_exists() -> None:

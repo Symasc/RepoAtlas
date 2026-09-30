@@ -163,9 +163,10 @@ Ten tools, all deterministic and local: `repositories`, `status`, `search`, `ins
 repository source is reachable only through the evidence path that records what it supplies. The agent is the
 reasoner; RepoAtlas supplies evidence and checks citations against it.
 
-How an agent should use that surface is one document,
-[`skills/repoatlas-investigation/SKILL.md`](skills/repoatlas-investigation/SKILL.md), which is vendor-neutral and
-ships with the installed package. Setup is in [`docs/agent-integration.md`](docs/agent-integration.md).
+How an agent should use that surface is five task skills under [`skills/`](skills/): change impact, investigation
+([`skills/repoatlas-investigation/SKILL.md`](skills/repoatlas-investigation/SKILL.md), which also carries the shared
+contract), dependencies, HTTP and index. They are vendor-neutral and ship with the installed package. Setup is in
+[`docs/agent-integration.md`](docs/agent-integration.md).
 
 ## Docker
 
