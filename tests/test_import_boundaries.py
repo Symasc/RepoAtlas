@@ -126,6 +126,7 @@ def _loaded(statement: str) -> Imported:
 DETERMINISTIC_IMPORTS = [
     pytest.param("import repoatlas.capabilities.service", id="capability-service"),
     pytest.param("import repoatlas.mcp.server", id="mcp-server"),
+    pytest.param("import repoatlas.api.server", id="api-server"),
     pytest.param("import repoatlas.services", id="services-package"),
     pytest.param("import repoatlas.services.sync_service", id="sync-service"),
     pytest.param("from repoatlas.services import sync_service", id="sync-service-from-package"),
@@ -311,6 +312,8 @@ def test_resolving_a_name_twice_returns_one_object() -> None:
         "repoatlas.services.retrieval_service",
         "repoatlas.capabilities.service",
         "repoatlas.mcp.server",
+        "repoatlas.api.server",
+        "repoatlas.api.schema",
         "repoatlas.cli.main",
     ],
 )

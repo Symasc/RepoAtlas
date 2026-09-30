@@ -38,6 +38,7 @@ Dependencies flow in one direction only:
                  cli/
                   │
                   ├──────────────► mcp/           (stdio transport adapter; cli/ is its only caller)
+                  ├──────────────► api/           (loopback HTTP transport for a local app; likewise)
                   │                 │
                   │                 ▼
                   │           capabilities/       (what an external agent talks to)
@@ -64,8 +65,8 @@ Dependencies flow in one direction only:
 
 1. **Parsers never touch storage.** A parser is a pure function of `(path, content)`.
 2. **The capability layer returns models, never text, and reaches no terminal and no transport.** It sits above
-   `services/` and may use everything below it, but it imports neither `cli/` nor `rendering/` nor `mcp/`, and
-   `services/` never imports it back. It talks to protocols and services and never acquires a storage driver.
+   `services/` and may use everything below it, but it imports neither `cli/` nor `rendering/` nor a transport
+   (`mcp/`, `api/`), and `services/` never imports it back. It talks to protocols and services and never acquires a storage driver.
 3. **The CLI contains no indexing logic.** Each command: resolve context → call one service → render.
 4. **No god object.** There is no `RepoAtlasAgent`. Orchestration lives in small per-command services.
 5. **`models/` imports nothing from other RepoAtlas packages**, so it can be imported anywhere without cycles.
