@@ -17,7 +17,10 @@ syntax tree alone -- the source is parsed, never run (V1_SPEC §17):
   binds hides the module's from the whole body, whatever the order;
 * the module binds the name **exactly once**. A second binding of any kind, a ``global``
   rebinding it from a function, or a ``del`` leaves no declaration to name -- whichever
-  branch or order the bindings are in, since telling them apart is flow analysis;
+  branch or order the bindings are in, since telling them apart is flow analysis. The one
+  exception is an ``@overload`` group: ``def`` statements whose ``overload`` this module's
+  own import of ``typing`` or ``typing_extensions`` binds, then one plain, unconditional
+  ``def``, last -- the implementation, which is the group's one binding;
 * no star import could have rebound it. ``from x import *`` rebinds whatever names ``x``
   has, which is not knowable from this file, so a binding a star import follows -- or a
   conditional one a star import precedes -- is refused. Every other binding stands; a
@@ -373,6 +376,16 @@ class PythonUseAnalysis:
             [site, *_] = found
             if binding.kind == "local" and site.kind == "value" and site.statement is not None:
                 declared.append((name, site.statement))
+        # Whether a decorator is typing's `overload` is read once every binding is known.
+        for name, found in sites.items():
+            if self.bindings[name].reason != "duplicate":
+                continue
+            implementation = self._implementation(found)
+            if implementation is not None:
+                binding = Binding("local", line=implementation)
+                if stars and _star_affected(found, stars):
+                    binding = Binding("none", reason="star-import")
+                self.bindings[name] = binding
         # What a value is spelled with is read once every binding is known.
         self.declarations = sorted(
             (self._declaration(name, statement) for name, statement in declared),
@@ -396,6 +409,28 @@ class PythonUseAnalysis:
             kind=kind,
             signature=signature,
         )
+
+    def _implementation(self, sites: list[_Site]) -> int | None:
+        """The line of an ``@overload`` group's implementation, which is its one binding.
+
+        Every site is a ``def``; all but one carry a decorator proven to be ``typing``'s or
+        ``typing_extensions``' ``overload``; and that one, the implementation, is the last
+        binding and unconditional -- so it is what the module binds when its body is done.
+        """
+        stubs: list[_Site] = []
+        rest: list[_Site] = []
+        for site in sites:
+            statement = site.statement
+            if site.kind != "local" or not isinstance(statement, _FUNCTIONS):
+                return None
+            proven = any(self._typing(d, "overload") for d in statement.decorator_list)
+            (stubs if proven else rest).append(site)
+        if not stubs or len(rest) != 1:
+            return None
+        [implementation] = rest
+        if implementation.conditional or implementation.line != max(s.line for s in sites):
+            return None
+        return implementation.line
 
     def _typing(self, node: ast.expr, name: str) -> bool:
         """Whether ``node`` is ``typing``'s or ``typing_extensions``' own ``name``.
@@ -435,7 +470,7 @@ class PythonUseAnalysis:
         for statement in statements:
             if isinstance(statement, (*_FUNCTIONS, ast.ClassDef)):
                 sites.setdefault(statement.name, []).append(
-                    _Site("local", statement.lineno, conditional)
+                    _Site("local", statement.lineno, conditional, statement=statement)
                 )
                 if isinstance(statement, _FUNCTIONS) and statement.name == "__getattr__":
                     self.getattr = True
