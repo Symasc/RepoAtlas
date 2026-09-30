@@ -110,6 +110,7 @@ def test_the_skill_is_the_only_document_carrying_the_decision_table() -> None:
             or path == SKILL_PATH.parent / "references/contracts.md"
             or ".venv" in path.parts
             or "dist" in path.parts
+            or "node_modules" in path.parts
         ):
             continue
         if ".pytest_cache" in path.parts:

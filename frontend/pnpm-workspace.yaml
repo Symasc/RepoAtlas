@@ -1,0 +1,5 @@
+packages:
+  - .
+allowBuilds:
+  # its prebuilt binary arrives as an optional dependency; the script only repairs a missing one
+  unrs-resolver: false

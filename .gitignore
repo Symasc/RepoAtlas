@@ -21,3 +21,20 @@ htmlcov/
 *.db
 *.db-wal
 *.db-shm
+
+# Graph explorer (frontend/): installed packages, builds, local settings and test
+# output. Listed here, not in frontend/.gitignore, because hatchling builds the
+# sdist from this file alone.
+frontend/node_modules/
+frontend/.next/
+frontend/.next-e2e/
+frontend/out/
+frontend/next-env.d.ts
+frontend/*.tsbuildinfo
+frontend/.env*.local
+frontend/test-results/
+frontend/playwright-report/
+frontend/e2e/.state/
+
+# Playwright MCP output
+.playwright-mcp/

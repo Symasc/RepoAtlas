@@ -1,0 +1,88 @@
+.trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--mantine-spacing-sm);
+  width: 100%;
+  height: 34px;
+  padding: 0 6px 0 10px;
+  color: var(--ra-text-subtle);
+  background-color: var(--ra-canvas);
+  border: 1px solid var(--ra-border);
+  border-radius: var(--mantine-radius-sm);
+  transition:
+    border-color var(--ra-duration-fast) var(--ra-ease),
+    color var(--ra-duration-fast) var(--ra-ease);
+
+  @mixin hover {
+    border-color: var(--ra-border-strong);
+    color: var(--ra-text-muted);
+  }
+
+  @media (max-width: $mantine-breakpoint-sm) {
+    display: none;
+  }
+}
+
+.icon {
+  flex-shrink: 0;
+}
+
+.placeholder {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  font-size: var(--mantine-font-size-md);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.keys {
+  display: flex;
+  gap: 3px;
+}
+
+.compact {
+  @media (min-width: $mantine-breakpoint-sm) {
+    display: none;
+  }
+}
+
+.content {
+  background-color: var(--ra-surface-elevated);
+  border: 1px solid var(--ra-border);
+  box-shadow: var(--ra-shadow);
+}
+
+.search {
+  font-size: var(--mantine-font-size-lg);
+  border: 0;
+  border-bottom: 1px solid var(--ra-border);
+  background: transparent;
+}
+
+.action {
+  border-radius: var(--mantine-radius-sm);
+  color: var(--ra-text);
+
+  &[data-selected] {
+    color: var(--ra-text);
+    background-color: var(--ra-selected);
+  }
+
+  /* the matched part of a name: set in the accent, not boxed in stock yellow */
+  :global(.mantine-Mark-root) {
+    color: var(--ra-accent-strong);
+    background-color: transparent;
+    font-weight: 600;
+  }
+}
+
+.actionDescription {
+  color: var(--ra-text-muted);
+}
+
+.empty {
+  color: var(--ra-text-muted);
+  font-size: var(--mantine-font-size-md);
+}

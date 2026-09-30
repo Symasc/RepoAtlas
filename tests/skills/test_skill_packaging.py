@@ -107,7 +107,8 @@ def test_the_repository_holds_exactly_one_skill_document() -> None:
     found = sorted(
         path.relative_to(ROOT).as_posix()
         for path in ROOT.rglob("SKILL.md")
-        if ".venv" not in path.parts and "dist" not in path.parts
+        # installed packages are not this repository's guidance (Playwright ships skills)
+        if not {".venv", "dist", "node_modules"} & set(path.parts)
     )
     assert found == [SOURCE_PATH], found
 

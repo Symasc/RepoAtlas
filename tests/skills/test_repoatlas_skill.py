@@ -72,10 +72,11 @@ def test_no_vendor_directory_holds_a_competing_copy() -> None:
     root = SKILL_PATH.parent.parent.parent
     for vendor in (".claude", ".codex", ".cursor", ".windsurf", "anthropic", "openai"):
         assert not (root / vendor).exists(), f"vendor-specific guidance directory: {vendor}"
+    # installed packages are not this repository's guidance (Playwright ships skills)
     copies = [
         path
         for path in root.rglob("SKILL.md")
-        if ".venv" not in path.parts and "dist" not in path.parts
+        if not {".venv", "dist", "node_modules"} & set(path.parts)
     ]
     assert copies == [SKILL_PATH], copies
 
