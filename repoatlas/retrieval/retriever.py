@@ -547,8 +547,14 @@ class Retriever:
         proven: set[str] = set()
         if named:
             for scope in scopes:
+                # Retrieval names no Python module value: those are declarations for
+                # USES alone, which search and locate answer as they did without them.
                 found = self._search.find_entities_by_name(
-                    named, scope, self._limits.per_source, path_prefix=path_prefix
+                    named,
+                    scope,
+                    self._limits.per_source,
+                    path_prefix=path_prefix,
+                    module_values=False,
                 )
                 if proofs is not None:
                     proofs.names(named, found, self._limits.per_source)
@@ -575,7 +581,7 @@ class Retriever:
         hits: list[EntityHit] = []
         for scope in scopes:
             found = self._search.find_entities_by_name(
-                names, scope, self._limits.per_source, path_prefix=path_prefix
+                names, scope, self._limits.per_source, path_prefix=path_prefix, module_values=False
             )
             if proofs is not None:
                 proofs.names(names, found, self._limits.per_source)
@@ -756,7 +762,12 @@ class Retriever:
                 )
             for scope in scopes if suppressed is None else []:
                 for hit in self._search.search_entities(
-                    question, scope, None, self._limits.per_source, path_prefix=path_prefix
+                    question,
+                    scope,
+                    None,
+                    self._limits.per_source,
+                    path_prefix=path_prefix,
+                    module_values=False,
                 ):
                     if hit.entity_id in seen_entities:
                         continue
@@ -925,7 +936,9 @@ class Retriever:
         for term in sorted((proofs.names_crowded & reported) - proofs.names_found):
             proofs.names_crowded.discard(term)
             if any(
-                self._search.find_entities_by_name([term], scope, 1, path_prefix=path_prefix)
+                self._search.find_entities_by_name(
+                    [term], scope, 1, path_prefix=path_prefix, module_values=False
+                )
                 for scope in scopes
             ):
                 proofs.names_found.add(term)
