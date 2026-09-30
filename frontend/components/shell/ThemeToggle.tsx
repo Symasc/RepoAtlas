@@ -10,11 +10,14 @@ import {
 import { useMounted } from "@mantine/hooks";
 import { MoonIcon, SunIcon } from "@phosphor-icons/react";
 
+import classes from "./ThemeToggle.module.css";
+
 /**
  * The server cannot know a scheme chosen in this browser, so nothing it renders
  * may depend on one: both icons are rendered and CSS shows the right one (the
  * scheme attribute is set before first paint), and the label names the target
- * scheme only once mounted.
+ * scheme only once mounted. The icons take no inline `display`, which would
+ * override the class that hides them.
  */
 export function ThemeToggle() {
   const { setColorScheme } = useMantineColorScheme();
@@ -25,10 +28,10 @@ export function ThemeToggle() {
   return (
     <Tooltip label={label}>
       <ActionIcon onClick={() => setColorScheme(next)} aria-label={label}>
-        <Box component="span" display="flex" lightHidden>
+        <Box component="span" lightHidden className={classes.glyph}>
           <SunIcon size={18} />
         </Box>
-        <Box component="span" display="flex" darkHidden>
+        <Box component="span" darkHidden className={classes.glyph}>
           <MoonIcon size={18} />
         </Box>
       </ActionIcon>

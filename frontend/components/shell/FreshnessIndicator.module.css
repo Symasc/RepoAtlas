@@ -39,6 +39,17 @@
   width: 72px;
   height: 8px;
   flex-shrink: 0;
+  overflow: hidden;
+
+  /* many repositories: hairline gaps, so every one still gets a segment */
+  &[data-dense] {
+    gap: 1px;
+
+    .segment {
+      min-width: 1px;
+      border-radius: 1px;
+    }
+  }
 
   &[data-loading] {
     border-radius: 2px;

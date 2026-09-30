@@ -38,7 +38,7 @@ export interface ColorTokens {
 
 export const DARK: ColorTokens = {
   canvas: "#070d16",
-  gridDot: "rgba(154, 168, 188, 0.13)",
+  gridDot: "rgba(154, 168, 188, 0.22)",
   surface: "#0c1420",
   surfaceElevated: "#111b29",
   border: "#1c2838",
@@ -68,7 +68,7 @@ export const DARK: ColorTokens = {
 
 export const LIGHT: ColorTokens = {
   canvas: "#f5f7fa",
-  gridDot: "rgba(15, 24, 38, 0.1)",
+  gridDot: "rgba(15, 24, 38, 0.16)",
   surface: "#ffffff",
   surfaceElevated: "#ffffff",
   border: "#e2e7ee",

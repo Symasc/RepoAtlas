@@ -33,6 +33,22 @@ The connection file is read on every request, so restarting `repoatlas serve`
 needs no restart here. If the API is not running, the explorer says so and
 shows the command to start it.
 
+## What it shows
+
+- **All repositories.** Every indexed repository, and the links the index
+  records between them, one line per kind: code (solid), HTTP (dashed) and
+  package dependency (double). Kinds are never merged into one line.
+  Repositories with no links sit in a row of their own.
+- **A repository, opened.** Click one: its directories become cards listing
+  what is in them, its files share a card, and what they link to is drawn
+  around them (other repositories and elsewhere in this one on the left;
+  modules, packages, environment variables, commands and endpoints shared
+  across the index on the right). At rest the level's total per kind is drawn;
+  point at or focus a card to see its own lines. Click a card to go into it.
+
+Where you are is in the URL (`?repo=<slug>&path=<dir>`), so Back climbs out
+and a view can be shared.
+
 ## The `/api/ra` route
 
 The browser only ever talks to its own origin. The route adds the API's bearer
@@ -57,8 +73,15 @@ connection file. The token and the file's path never reach the browser.
 `pnpm dto` regenerates the types after the contract changes. It runs the
 repository's `.venv/bin/python`, or `REPOATLAS_PYTHON`.
 
-`pnpm e2e` starts its own API (port 7337) and explorer (port 7338) on the
-index your environment configures. To run it on the fixtures instead, index
-`tests/fixtures/repos` into a scratch workspace and set `REPOATLAS_CONFIG`
-and `REPOATLAS_DB` to it first. It needs Playwright's Chromium
-(`pnpm exec playwright install chromium`).
+`pnpm e2e` runs two pipelines from one production build, each with its own
+`repoatlas serve`:
+
+- `live` (ports 7337/7338): the index your environment configures. In CI, set
+  `REPOATLAS_CONFIG` and `REPOATLAS_DB` to a scratch workspace first.
+- `linked` (ports 7347/7348): the linked test corpus, built fresh by
+  `python -m tests.topology_corpus` into the system temp directory, never into
+  the checkout (RepoAtlas would discover its repositories on the next sync).
+  Its repositories link to each other, so the lines between repositories are
+  tested even when a live index has none.
+
+It needs Playwright's Chromium (`pnpm exec playwright install chromium`).
