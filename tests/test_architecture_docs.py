@@ -107,7 +107,7 @@ def test_the_layering_diagram_shows_the_layers_an_agent_talks_to(document: str) 
     block = re.search(r"```\n(.*?)```", _sections(document)["1"], re.DOTALL)
     assert block
     diagram = block.group(1)
-    for package in ("capabilities/", "mcp/", "services/", "storage/", "models/"):
+    for package in ("capabilities/", "mcp/", "api/", "services/", "storage/", "models/"):
         assert package in diagram, f"§1 diagram omits {package}"
 
 
@@ -147,7 +147,7 @@ def test_the_document_describes_the_commands_the_cli_registers(document: str) ->
         callback = command.callback
         assert callback is not None, "every registered command has a callback"
         registered.add(command.name or callback.__name__)
-    assert registered == {"init", "sync", "status", "repos", "locate", "mcp"}
+    assert registered == {"init", "sync", "status", "repos", "locate", "mcp", "serve"}
 
     # And the reverse direction: nothing removed is offered as a command.
     for retired in ("ask", "debug"):

@@ -237,6 +237,37 @@ def mcp() -> None:
         _fail(exc)
 
 
+@app.command()
+def serve(
+    host: Annotated[
+        str, typer.Option("--host", help="Loopback address: 127.0.0.1, ::1 or localhost.")
+    ] = "127.0.0.1",
+    port: Annotated[
+        int, typer.Option("--port", min=0, max=65535, help="Port; 0 picks a free one.")
+    ] = 7317,
+) -> None:
+    """Serve the RepoAtlas capabilities to a local app over HTTP on loopback.
+
+    Runs until interrupted or terminated. Every request needs the bearer token,
+    which is ``REPOATLAS_API_TOKEN`` when set and a fresh random one otherwise; it
+    is written, with the URL, to the connection file
+    (``REPOATLAS_API_CONNECTION_FILE``, or ``api.json`` beside the index), readable
+    by its owner only, and is never printed. See docs/local-api.md.
+
+    The import is local for the same reason as ``mcp``'s.
+    """
+    from repoatlas.api import server as api
+
+    def announce(serving: api.Serving) -> None:
+        typer.echo(f"RepoAtlas local API at {serving.url}", err=True)
+        typer.echo(f"connection file: {serving.connection_file}", err=True)
+
+    try:
+        api.serve(host=host, port=port, ready=announce)
+    except RepoAtlasError as exc:
+        _fail(exc)
+
+
 def _report_sync_telemetry(report: SyncReport) -> None:
     """Stage costs of the global link and embedding passes (V1_SPEC §20)."""
     if report.link_trace is not None:

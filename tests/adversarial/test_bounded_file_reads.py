@@ -1191,6 +1191,10 @@ READERS = {
     # listed because the sweep below cannot tell a descriptor from a path, and
     # because `CapabilityService.open` reads as `.open` to a name-based check.
     "repoatlas/mcp/server.py": "wraps the process's own stdout descriptor; writes only",
+    # Writes its connection file through the descriptor `mkstemp` returns, and reads
+    # it back under `CONNECTION_FILE_CEILING` before removing it on exit. Its
+    # `CapabilityService.open` reads as `.open`, as in the MCP server.
+    "repoatlas/api/server.py": "its own connection file, read back under a small ceiling",
 }
 
 

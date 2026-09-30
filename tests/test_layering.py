@@ -71,11 +71,11 @@ _FORBIDDEN: dict[str, set[str]] = {
     # terminal (cli), it returns models rather than formatted text (rendering),
     # and it is deterministic — a capability that could reach a model could
     # manufacture evidence (llm).
-    "capabilities": {"cli", "rendering", "llm", "mcp"},
+    "capabilities": {"cli", "rendering", "llm", "mcp", "api"},
     # ...and the arrow only runs one way. A service reaching up into
     # capabilities/ for one typed value would reverse the layering for a single
     # import, which is exactly how it would happen.
-    "services": {"capabilities", "mcp"},
+    "services": {"capabilities", "mcp", "api"},
     # The transport adapter is the top of the stack and the narrowest layer in
     # it. It may name the capability service, the V2 models it passes through and
     # the public error envelope; everything else on this list is a piece of
@@ -98,8 +98,13 @@ _FORBIDDEN: dict[str, set[str]] = {
         "llm",
         "rendering",
         "cli",
+        "api",
     },
 }
+#: The local HTTP transport is held to the same line, and neither transport
+#: reaches the other: each is an adapter over the capability layer, not over one
+#: another.
+_FORBIDDEN["api"] = (_FORBIDDEN["mcp"] - {"api"}) | {"mcp"}
 
 
 def _modules() -> list[tuple[str, Path]]:
@@ -367,7 +372,7 @@ def test_the_capability_layer_names_no_protocol_message_type() -> None:
 #: survives is the rule that actually mattered — *V1* has acquired no dependency
 #: on V2 — and it is asserted by naming the single exception rather than by
 #: loosening the walk.
-_TRANSPORTS = {"mcp"}
+_TRANSPORTS = {"mcp", "api"}
 
 
 def test_nothing_outside_the_capability_layer_imports_it() -> None:
@@ -398,9 +403,9 @@ def test_only_the_cli_reaches_the_transport_adapter() -> None:
     for package, path in _modules():
         if package in _TRANSPORTS or package == "cli":
             continue
-        if "mcp" in _imported_packages(path):
+        if _imported_packages(path) & _TRANSPORTS:
             offenders.append(str(path.relative_to(PACKAGE_ROOT.parent)))
-    assert not offenders, f"repoatlas.mcp is a transport, imported by: {offenders}"
+    assert not offenders, f"a transport is imported by: {offenders}"
 
 
 def test_the_transport_adapter_holds_no_repository_intelligence() -> None:
@@ -433,13 +438,18 @@ def test_the_transport_adapter_holds_no_repository_intelligence() -> None:
         "open_workspace",
         "Workspace",
     )
+    assert not _transport_sources_containing(banned)
+
+
+def _transport_sources_containing(banned: tuple[str, ...]) -> list[str]:
     offenders: list[str] = []
-    for path in sorted((PACKAGE_ROOT / "mcp").rglob("*.py")):
-        source = path.read_text(encoding="utf-8")
-        for marker in banned:
-            if marker in source:
-                offenders.append(f"mcp/{path.name} contains {marker!r}")
-    assert not offenders, offenders
+    for transport in sorted(_TRANSPORTS):
+        for path in sorted((PACKAGE_ROOT / transport).rglob("*.py")):
+            source = path.read_text(encoding="utf-8")
+            for marker in banned:
+                if marker in source:
+                    offenders.append(f"{transport}/{path.name} contains {marker!r}")
+    return offenders
 
 
 def test_the_transport_adapter_infers_no_working_directory() -> None:
@@ -451,10 +461,4 @@ def test_the_transport_adapter_infers_no_working_directory() -> None:
     scope would then depend on which transport the caller used.
     """
     banned = ("Path.cwd(", "os.getcwd(", "os.curdir", "list_roots", "ListRoots")
-    offenders: list[str] = []
-    for path in sorted((PACKAGE_ROOT / "mcp").rglob("*.py")):
-        source = path.read_text(encoding="utf-8")
-        for marker in banned:
-            if marker in source:
-                offenders.append(f"mcp/{path.name} contains {marker!r}")
-    assert not offenders, offenders
+    assert not _transport_sources_containing(banned)
