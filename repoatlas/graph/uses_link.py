@@ -51,7 +51,8 @@ use can depend on, and :meth:`UsesChangeLog.scope` turns it into the files to re
   are the plausible **top-level heads** of the change (:func:`top_level_heads`), never
   every name along its path: its first segment below each base a module can start from
   -- the repository root, ``src/``, each Python project's directory and its ``src/``, and
-  every directory a setuptools layout roots -- and the names a project's facts state.
+  every directory a setuptools layout roots, a pyproject's own ``[tool.setuptools]`` one
+  included -- and the names a project's facts state.
   Every head below a base is taken only when what the base means may have changed: a
   root ``setup.py`` or ``setup.cfg`` added or deleted, a project's facts changed (a
   ``setup.cfg`` or ``setup.py`` stating another name or layout included), or a regular
@@ -205,7 +206,8 @@ def _stated(facts: Iterable[str]) -> list[tuple[str, dict[str, Any]]]:
 
 def _layout_names(facts: Iterable[str]) -> set[str]:
     """The top-level names Python project facts state a project ships: flit's module, each
-    hatchling package's own name, and the packages and modules a setuptools layout lists."""
+    hatchling package's own name and each name its wheel's ``only-include`` lists, and the
+    packages and modules a setuptools layout lists."""
     found: set[str] = set()
     for kind, stated in _stated(facts):
         if kind == PYTHON_SETUPTOOLS:
@@ -221,15 +223,26 @@ def _layout_names(facts: Iterable[str]) -> set[str]:
         for entry in packages if isinstance(packages, list) else []:
             if isinstance(entry, str):
                 found.add(PurePosixPath(entry.strip().rstrip("/")).name)
+        only = stated.get("only_include")
+        found |= {
+            name for name in (only if isinstance(only, list) else []) if isinstance(name, str)
+        }
     return found
+
+
+def _setuptools_layout(kind: str, stated: dict[str, Any]) -> dict[str, Any] | None:
+    """The setuptools layout a fact states: a ``setup.cfg``'s or ``setup.py``'s, or a
+    ``pyproject.toml``'s own ``[tool.setuptools.packages.find]``."""
+    found = stated.get("layout" if kind == PYTHON_SETUPTOOLS else "setuptools_layout")
+    return found if isinstance(found, dict) else None
 
 
 def _layout_roots(facts: Iterable[str], directory: str) -> set[str]:
     """The directory a setuptools layout stated in ``directory`` roots its modules at."""
     return {
-        _join(directory, stated["layout"]["root"]) if stated["layout"].get("root") else directory
+        _join(directory, layout["root"]) if layout.get("root") else directory
         for kind, stated in _stated(facts)
-        if kind == PYTHON_SETUPTOOLS and isinstance(stated.get("layout"), dict)
+        if (layout := _setuptools_layout(kind, stated)) is not None
     }
 
 

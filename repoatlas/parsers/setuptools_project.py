@@ -63,6 +63,9 @@ from repoatlas.parsers.requirements import python_requirement
 #: Larger than any hand-written project file; beyond it the file records nothing.
 _MAX_BYTES = 256 * 1024
 _MAX_ENTRIES = 512
+#: The build backends that read setuptools metadata beside a ``pyproject.toml`` (and none
+#: named at all: pip then builds with setuptools).
+SETUPTOOLS_BACKENDS = frozenset({"setuptools.build_meta", "setuptools.build_meta:__legacy__"})
 #: The keys that state where a project's modules live, in ``[options]`` and in ``setup()``.
 LAYOUT_KEYS = ("package_dir", "packages", "py_modules")
 _FIND_KEYS = ("where", "include", "exclude")
