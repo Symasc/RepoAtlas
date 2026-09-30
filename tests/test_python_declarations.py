@@ -150,8 +150,12 @@ def test_every_use_of_a_module_value_and_no_other(declared: Workspace) -> None:
         (f"{C}#v13", f"{V}#obj", "value"),
         # V8: `rebound.py` rebinds X, so only its own call remains
         (f"{PKG}/rebound.py", f"{PKG}/rebound.py#wrap", "call"),
-        # module values called: USES lands on them; CALLS is untouched (below)
-        (f"{PKG}/calls.py", f"{PKG}/calls.py#C", "call"),
+        # V5: the alias is its own declaration, and uses what it aliases
+        (f"{V}#ALIAS", f"{V}#X", "value"),
+        (f"{C}#v5", f"{V}#ALIAS", "value"),
+        # module values called: USES lands on them; CALLS is untouched (below). The
+        # statement declaring `get` is `get`'s.
+        (f"{PKG}/calls.py#get", f"{PKG}/calls.py#C", "call"),
         (f"{PKG}/calls.py#run", f"{PKG}/calls.py#handler", "call"),
         (f"{PKG}/calls.py#run", f"{PKG}/calls.py#get", "call"),
         (f"{PKG}/caller.py#remote", f"{PKG}/calls.py#handler", "call"),
@@ -163,7 +167,10 @@ def test_every_use_of_a_module_value_and_no_other(declared: Workspace) -> None:
             "value",
         ),
         ("src/client_app/http.py#fetch", "src/client_app/http.py#make_request", "call"),
+        ("src/client_app/http.py#SLOW", "src/timeout_config/config.py#DEFAULT_TIMEOUT", "value"),
+        ("src/client_app/http.py#slow_request", "src/client_app/http.py#SLOW", "value"),
         ("tests/test_http.py#test_fetch", "src/client_app/http.py#fetch", "call"),
+        ("tests/test_http.py#test_slow", "src/client_app/http.py#slow_request", "call"),
     }
 
 
@@ -211,7 +218,11 @@ def test_what_stays_refused(declared: Workspace) -> None:
 
 def test_a_value_across_repositories_records_what_proved_it(declared: Workspace) -> None:
     """V14: exactly the crossing a class across repositories records."""
-    [edge] = [e for e in use_edges(declared) if e["target"].endswith("#DEFAULT_TIMEOUT")]
+    [edge] = [
+        e
+        for e in use_edges(declared)
+        if e["target"].endswith("#DEFAULT_TIMEOUT") and e["source"].endswith("#make_request")
+    ]
     assert edge["basis"] == "python-dependency"
     assert edge["crossing"] == {
         "package": "pypi:timeout-config",
@@ -261,7 +272,10 @@ def test_a_changed_value_reaches_its_users_and_their_tests(declared: Workspace) 
     crossed = "DEFAULT_TIMEOUT -> make_request (uses, timeouts -> client via pypi:timeout-config)"
     assert chains["make_request"] == crossed
     assert chains["fetch"] == f"{crossed} -> fetch (calls)"
-    assert [t.name for t in response.tests] == ["test_fetch"]
+    # through a value derived from it, which owns its own statement's use
+    slow = "DEFAULT_TIMEOUT -> SLOW (uses, timeouts -> client via pypi:timeout-config)"
+    assert chains["slow_request"] == f"{slow} -> slow_request (uses)"
+    assert sorted(t.name for t in response.tests) == ["test_fetch", "test_slow"]
 
 
 # -- incremental == fresh ----------------------------------------------------------------------

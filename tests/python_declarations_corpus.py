@@ -50,6 +50,7 @@ DECL: dict[str, str] = {
         "attr = 3\n"  # 24 V13
         "def local_user():\n"  # 25
         "    return X, ANNOTATED, BARE, LOW, TWICE, LATE, CHECKED, SEP, loads, GUARDED\n"
+        "ALIAS = X\n"  # 27 V5: a value of its own, which uses X
     ),
     # V8: imported, then rebound -- no longer the import, and no single declaration
     f"{PKG}/rebound.py": (
@@ -60,7 +61,7 @@ DECL: dict[str, str] = {
         "from typing import TYPE_CHECKING\n"  # 2
         "from decl_pkg import X, PublicX\n"  # 3
         "from decl_pkg import values as vals\n"  # 4
-        "from decl_pkg.values import ANNOTATED, BARE, TWICE, LOW, SEP, obj\n"  # 5
+        "from decl_pkg.values import ANNOTATED, BARE, TWICE, LOW, SEP, obj, ALIAS\n"  # 5
         "from decl_pkg.rebound import X as ReboundX\n"  # 6
         "if TYPE_CHECKING:\n"  # 7
         "    from decl_pkg.values import CHECKED\n"  # 8
@@ -73,6 +74,7 @@ DECL: dict[str, str] = {
         "def v9():\n    return TWICE, LOW, SEP\n"  # 21 V9, unpacking, V10
         "def v10(x: 'CHECKED') -> None:\n    return None\n"  # 23 V10
         "def v13():\n    return obj.attr\n"  # 25 V13: an object's attribute
+        "def v5():\n    return ALIAS\n"  # 27 V5: the alias, not what it aliases
     ),
     # The call graph matches callees by name; a module value is none of them.
     f"{PKG}/calls.py": (
@@ -106,8 +108,14 @@ CLIENT: dict[str, str] = {
         "from timeout_config.config import DEFAULT_TIMEOUT\n"  # 1
         "def make_request():\n    return DEFAULT_TIMEOUT\n"  # 2
         "def fetch():\n    return make_request()\n"  # 4
+        "SLOW = DEFAULT_TIMEOUT * 2\n"  # 6 V16: a value derived from the value
+        "def slow_request():\n    return SLOW\n"  # 7
     ),
-    "tests/test_http.py": "from client_app.http import fetch\ndef test_fetch():\n    fetch()\n",
+    "tests/test_http.py": (
+        "from client_app.http import fetch, slow_request\n"
+        "def test_fetch():\n    fetch()\n"
+        "def test_slow():\n    slow_request()\n"
+    ),
 }
 
 STRAY: dict[str, str] = {
