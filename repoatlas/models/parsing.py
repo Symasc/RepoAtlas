@@ -94,7 +94,7 @@ USES_EXPORT_TABLE = "export-table"
 #: declaration a ``USES`` lands on and a use can belong to, and nothing else. It is no
 #: chunk boundary, and no callee a ``CALLS`` or ``REFERENCES`` matches by name -- those
 #: read the symbols they read before module values were declarations.
-USES_ONLY_KINDS = frozenset({"variable"})
+USES_ONLY_KINDS = frozenset({"variable", "type-alias"})
 
 
 class EdgeDirection(enum.StrEnum):
