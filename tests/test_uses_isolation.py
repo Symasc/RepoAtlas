@@ -216,26 +216,43 @@ REVIEWED_EDGE_READS = {
 }
 
 
-def _functions_reading_edges(path: Path) -> set[str]:
+#: The topology store's reads. Its aggregates take every non-structural type on
+#: purpose, ``USES`` included, and report each under its own type: counted, never
+#: summed into another type, never expanded. None of them answers a search.
+REVIEWED_TOPOLOGY_EDGE_READS = {
+    "crossing_edges": "per-type counts: edges between two repositories",
+    "edges_under": "per-type counts: edges at the entities under one path",
+    "repository_edges_under": "per-type counts: a repository entity's edges, by asserting file",
+    "stored_edges": "exact: the stored edges an edge_ref's lookup matched, by id",
+    "stored_edges_from": "typed: one edge type leaving the entities an edge_ref names",
+}
+
+_EDGE_READ_MARKERS = ("FROM edges", "JOIN edges", "{table}")
+
+
+def _functions_reading_edges(path: Path, markers: tuple[str, ...] = _EDGE_READ_MARKERS) -> set[str]:
     tree = ast.parse(path.read_text())
     found = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             text = ast.get_source_segment(path.read_text(), node) or ""
-            if any(s in text for s in ("FROM edges", "JOIN edges", "{table}")) and (
-                "edges" in text
-            ):
+            if any(s in text for s in markers) and ("edges" in text):
                 found.add(node.name)
     return found
 
 
 def test_every_query_reading_edges_is_reviewed() -> None:
     stores = REPOATLAS / "storage/sqlite/stores.py"
+    topology = REPOATLAS / "storage/sqlite/topology.py"
     assert _functions_reading_edges(stores) <= set(REVIEWED_EDGE_READS)
+    # its shared SELECT reads edges too, so a function using it is a reader
+    shared = (*_EDGE_READ_MARKERS, "_STORED_EDGE_SELECT")
+    assert _functions_reading_edges(topology, shared) == set(REVIEWED_TOPOLOGY_EDGE_READS)
     others = [
         path
         for path in REPOATLAS.rglob("*.py")
-        if path != stores and ("FROM edges" in path.read_text() or "JOIN edges" in path.read_text())
+        if path not in {stores, topology}
+        and ("FROM edges" in path.read_text() or "JOIN edges" in path.read_text())
     ]
     assert others == []
 
