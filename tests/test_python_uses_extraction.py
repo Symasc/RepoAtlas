@@ -111,10 +111,16 @@ def test_a_name_bound_twice_names_nothing() -> None:
     assert exports(source)["names"]["parse"] == ["none", "duplicate"]
 
 
-def test_an_assignment_is_no_declaration() -> None:
+def test_an_assignment_bound_once_is_a_declaration() -> None:
     source = "LIMIT = 3\ndef f():\n    return LIMIT\n"
+    assert uses(source) == {("f", "LIMIT", "value", "read")}
+    assert exports(source)["names"]["LIMIT"] == ["local", "LIMIT", "1"]
+
+
+def test_an_unpacking_assignment_is_no_declaration() -> None:
+    source = "LOW, HIGH = 1, 2\ndef f():\n    return LOW\n"
     assert targets(source) == set()
-    assert exports(source)["names"]["LIMIT"] == ["none", "not-a-declaration"]
+    assert exports(source)["names"]["LOW"] == ["none", "not-a-declaration"]
 
 
 def test_a_global_rebinding_from_a_function_is_a_second_binding() -> None:
@@ -386,7 +392,7 @@ def test_the_export_table_holds_every_module_binding() -> None:
     )
     table = exports(source)
     assert table["names"] == {
-        "LIMIT": ["none", "not-a-declaration"],
+        "LIMIT": ["local", "LIMIT", "5"],
         "Public": ["import", ".models", "User"],
         "Thing": ["local", "Thing", "6"],
         "__getattr__": ["local", "__getattr__", "7"],

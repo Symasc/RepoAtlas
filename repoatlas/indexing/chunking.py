@@ -135,10 +135,15 @@ def _symbol_spans(
     # Only spans are needed below, so they are extracted once. A symbol with no
     # span is the whole-file symbol of an empty file, which this function is never
     # reached for; dropping it here keeps the arithmetic free of absent lines.
+    # A module value is a declaration for USES alone (USES_ONLY_KINDS): chunks stay
+    # where they were before it was one.
     top_level = [
         (s.line_start, s.line_end)
         for s in symbols
-        if s.parent is None and s.line_start is not None and s.line_end is not None
+        if s.parent is None
+        and s.line_start is not None
+        and s.line_end is not None
+        and not s.uses_only
     ]
     # A module symbol spans the whole file; using it would defeat chunking.
     top_level = [

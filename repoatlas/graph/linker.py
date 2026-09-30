@@ -204,7 +204,13 @@ class ReferenceLinker:
             return LinkResult(edges=0, unresolved=0)
 
         qualified: dict[str, int] = {}
-        symbol_ids = self._symbol_ids(file_id, repo_slug, rel_path, parsed.symbols, qualified)
+        values: dict[str, int] = {}
+        symbol_ids = self._symbol_ids(
+            file_id, repo_slug, rel_path, parsed.symbols, qualified, values
+        )
+        # A module value owns the uses in its own statement, and is named by its name
+        # before anything else is; it is no callee a CALLS or REFERENCES matches.
+        sources = {**symbol_ids, **values}
         imported = _imported_names(parsed)
 
         edges: list[EdgeRecord] = [
@@ -216,12 +222,12 @@ class ReferenceLinker:
                 file_id=file_id,
                 parser=parsed.parser,
             )
-            for entity_id in symbol_ids.values()
+            for entity_id in (*symbol_ids.values(), *values.values())
         ]
 
         claims: list[UnresolvedRefRecord] = []
         for reference in parsed.references:
-            source_id = symbol_ids.get(reference.source_symbol or "", file_entity_id)
+            source_id = sources.get(reference.source_symbol or "", file_entity_id)
 
             if reference.edge_type is EdgeType.USES:
                 # A declaration's use of a module-scope name (repoatlas.parsers.ts_uses).
@@ -389,20 +395,26 @@ class ReferenceLinker:
         rel_path: str,
         symbols: tuple[ParsedSymbol, ...],
         qualified: dict[str, int] | None = None,
+        values: dict[str, int] | None = None,
     ) -> dict[str, int]:
         """Map qualified symbol name to its persisted entity id.
 
         ``qualified``, when given, receives the qualified names alone, without the
-        bare-name fallback below.
+        bare-name fallback below. A module value (``ParsedSymbol.uses_only``) is never
+        in the mapping: it goes to ``qualified`` and to ``values``, when given.
         """
         mapping: dict[str, int] = {}
         for symbol in symbols:
             key = symbol_key(repo_slug, rel_path, symbol.qualified_name, symbol.line_start)
             entity_id = self._knowledge.find_file_entity(file_id, key)
             if entity_id is not None:
-                mapping[symbol.qualified_name] = entity_id
                 if qualified is not None:
                     qualified[symbol.qualified_name] = entity_id
+                if symbol.uses_only:
+                    if values is not None:
+                        values[symbol.qualified_name] = entity_id
+                    continue
+                mapping[symbol.qualified_name] = entity_id
                 # A returned object's property is reachable only through the object,
                 # never by its bare name: `createCourse()` beside a `createCourse:`
                 # property names whatever `createCourse` is bound to, not the property.

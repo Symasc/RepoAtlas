@@ -356,10 +356,12 @@ class PythonParser:
     #    (repoatlas.parsers.http_python).
     # 9: and each request whose origin and path shape it states — a literal, a module
     #    constant, an f-string on a known origin — is the join's other claim.
+    # 10: a module-level name one declaring statement binds is a declaration, a module
+    #    value, and the uses of it land on it (repoatlas.parsers.py_uses).
     # +pyX.Y: `ast` is the running interpreter's, and what it accepts moves with the
     #    interpreter (repoatlas.parsers.interpreter), so facts parsed by another one
     #    are never kept.
-    version = f"9+{interpreter_tag()}"
+    version = f"10+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
@@ -399,15 +401,28 @@ class PythonParser:
         visitor = _Visitor(module_name, http)
         visitor.visit(tree)
         try:
+            analysis = PythonUseAnalysis(tree)
             uses = python_use_references(
-                PythonUseAnalysis(tree),
+                analysis,
                 visitor.symbols,
                 package=path.name in {"__init__.py", "__init__.pyi"},
             )
+            values = [
+                ParsedSymbol(
+                    kind=EntityType.SYMBOL,
+                    name=value.name,
+                    qualified_name=value.name,
+                    line_start=value.line,
+                    line_end=value.end_line,
+                    signature=value.signature,
+                    meta={"kind": value.kind},
+                )
+                for value in analysis.declarations
+            ]
         except RecursionError:
-            # Nesting deeper than the analysis can walk costs the file its uses, never
-            # its other facts.
-            uses = []
+            # Nesting deeper than the analysis can walk costs the file its uses and its
+            # module values, never its other facts.
+            uses, values = [], []
 
         whole_file_start, whole_file_last = whole_file_span(content)
         module_symbol = ParsedSymbol(
@@ -423,7 +438,8 @@ class PythonParser:
             language=self.language,
             parser=self.name,
             parser_version=self.version,
-            symbols=(module_symbol, *visitor.symbols),
+            # Module values last: a name one shares with the module itself names the value.
+            symbols=(module_symbol, *visitor.symbols, *values),
             references=(
                 *visitor.references,
                 *http.deployment_references(),
