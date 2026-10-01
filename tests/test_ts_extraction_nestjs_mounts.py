@@ -22,7 +22,14 @@ from repoatlas.models.search import SearchRequest
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace
 from tests.conftest import fact_snapshot, git, init_git_repository, reindex_from_scratch
-from tests.http_corpus import GLOBAL, corpus_settings, entity_key, http_nodes, relationships
+from tests.http_corpus import (
+    GLOBAL,
+    corpus_settings,
+    entity_key,
+    http_nodes,
+    relationships,
+    stored_http_edges,
+)
 
 MAIN = """\
 import {{ NestFactory }} from "@nestjs/core";
@@ -310,6 +317,155 @@ def test_two_applications_in_one_repository_each_serve_their_own(index: Index) -
     assert _served(workspace) == PROVEN | {("AuditController.list", "http-route:GET:/admin/audit")}
 
 
+# -- URI versioning -----------------------------------------------------------------------
+
+VERSIONED_MAIN = """\
+import {{ NestFactory }} from "@nestjs/core";
+import {{ VersioningType }} from "@nestjs/common";
+import {{ AppModule }} from "./app.module";
+
+async function bootstrap() {{
+  const app = await NestFactory.create(AppModule);
+  app.setGlobalPrefix("api");
+  {versioning}
+  await app.listen(3000);
+}}
+
+void bootstrap();
+"""
+
+VERSIONED = {
+    "src/versioned/versioned.module.ts": (
+        'import { Module } from "@nestjs/common";\n'
+        'import { UsersV2Controller, CalendarController } from "./versioned.controller";\n'
+        "@Module({ controllers: [UsersV2Controller, CalendarController] })\n"
+        "export class VersionedModule {}\n"
+    ),
+    "src/versioned/versioned.controller.ts": """\
+import { Controller, Delete, Get, Version, VERSION_NEUTRAL } from "@nestjs/common";
+
+@Controller({ path: "users", version: "2" })
+export class UsersV2Controller {
+  @Get()
+  list() {}
+
+  @Delete(":id")
+  remove() {}
+
+  @Version(["3", VERSION_NEUTRAL])
+  @Get("me")
+  me() {}
+}
+
+@Controller({ path: "calendar", version: VERSION_NEUTRAL })
+export class CalendarController {
+  @Get("callback")
+  callback() {}
+}
+""",
+}
+
+
+def _versioned(index: Index, versioning: str, **extra: str) -> Workspace:
+    workspace, _ = index(
+        extra_imports='import { VersionedModule } from "./versioned/versioned.module";\n',
+        imports="UsersModule, VersionedModule",
+        extra={
+            "src/main.ts": VERSIONED_MAIN.format(versioning=versioning),
+            **VERSIONED,
+            **extra,
+        },
+    )
+    return workspace
+
+
+def test_uri_versioning_serves_each_route_at_its_own_version(index: Index) -> None:
+    workspace = _versioned(
+        index, 'app.enableVersioning({ type: VersioningType.URI, defaultVersion: "1" });'
+    )
+    assert _served(workspace) == {
+        # no version of their own: the application's default
+        ("HealthController.check", "http-route:GET:/api/v1/health"),
+        ("UsersController.me", "http-route:GET:/api/v1/v1/me"),
+        ("UsersController.session", "http-route:POST:/api/v1/v1/me/session"),
+        # the controller's version
+        ("UsersV2Controller.list", "http-route:GET:/api/v2/users"),
+        ("UsersV2Controller.remove", "http-route:DELETE:/api/v2/users/:id"),
+        # the handler's versions replace the controller's; neutral adds no segment
+        ("UsersV2Controller.me", "http-route:GET:/api/v3/users/me"),
+        ("UsersV2Controller.me", "http-route:GET:/api/users/me"),
+        ("CalendarController.callback", "http-route:GET:/api/calendar/callback"),
+    }
+
+
+def test_without_versioning_a_stated_version_changes_nothing(index: Index) -> None:
+    workspace = _versioned(index, "")
+    assert {route for _, route in _served(workspace)} == {
+        "http-route:GET:/api/health",
+        "http-route:GET:/api/v1/me",
+        "http-route:POST:/api/v1/me/session",
+        "http-route:GET:/api/users",
+        "http-route:DELETE:/api/users/:id",
+        "http-route:GET:/api/users/me",
+        "http-route:GET:/api/calendar/callback",
+    }
+
+
+def test_a_route_with_no_version_under_uri_versioning_is_withheld(index: Index) -> None:
+    workspace = _versioned(
+        index, "app.enableVersioning({ type: VersioningType.URI, prefix: false });"
+    )
+    assert {route for _, route in _served(workspace)} == {
+        "http-route:GET:/api/2/users",
+        "http-route:DELETE:/api/2/users/:id",
+        "http-route:GET:/api/3/users/me",
+        "http-route:GET:/api/users/me",
+        "http-route:GET:/api/calendar/callback",
+    }
+    assert _outcomes(workspace)["UsersController.me"] == "URI versioning names no version for it"
+
+
+# A Next.js client in the same repository, its base a deployment setting with a default.
+WEB_CLIENT = """\
+export const API_CONFIG = {
+  baseURL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v2",
+};
+
+async function apiRequest(endpoint: string, options: RequestInit = {}) {
+  const url = `${API_CONFIG.baseURL}${endpoint}`;
+  const attempt = () => fetch(url, { ...options });
+  try {
+    return await attempt();
+  } catch {
+    return await attempt();
+  }
+}
+
+export const users = {
+  list: () => apiRequest("/users"),
+  remove: (id: string) => apiRequest(`/users/${id}`, { method: "DELETE" }),
+};
+"""
+
+
+def test_a_client_on_a_default_base_meets_the_versioned_routes_it_calls(index: Index) -> None:
+    workspace = _versioned(
+        index,
+        'app.enableVersioning({ type: VersioningType.URI, defaultVersion: "1" });',
+        **{"web/src/lib/client.ts": WEB_CLIENT},
+    )
+    edges = stored_http_edges(workspace)
+    called = {route for _, kind, route in edges if kind == "CALLS_HTTP_ROUTE"}
+    served = {route for _, kind, route in edges if kind == "SERVES_HTTP_ROUTE"}
+    assert called & served == {
+        "http-route:GET:/api/v2/users",
+        "http-route:DELETE:/api/v2/users/:id",
+    }
+    assert {route for _, kind, route in edges if kind == "CALLS_HTTP_ENDPOINT"} == {
+        "http-endpoint:GET:http://localhost:8000/api/v2/users"
+    }
+
+
 # -- withheld: what an unknown can reach ------------------------------------------------
 
 
@@ -317,7 +473,7 @@ def test_two_applications_in_one_repository_each_serve_their_own(index: Index) -
     ("configure", "reason"),
     [
         ("app.setGlobalPrefix(process.env.PREFIX);", "prefix not proven: global prefix"),
-        ("app.enableVersioning();", "prefix not proven: versioning"),
+        ("app.enableVersioning({ type: 2 });", "prefix not proven: versioning"),
         ("configure(app);", "prefix not proven: application escapes"),
     ],
 )

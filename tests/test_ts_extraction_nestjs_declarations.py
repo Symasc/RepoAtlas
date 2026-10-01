@@ -252,20 +252,64 @@ def test_http_decorators_outside_a_controller_declare_nothing() -> None:
     [
         ("@Controller(prefix)", '@Get("x")'),
         ('@Controller(["a", "b"])', '@Get("x")'),
-        ('@Controller({ path: "v1", version: "2" })', '@Get("x")'),
+        ('@Controller({ path: "v1", version: V2 })', '@Get("x")'),
+        ('@Controller({ path: "v1", version: [] })', '@Get("x")'),
+        ('@Controller({ path: "v1", version: ["1", ["2"]] })', '@Get("x")'),
+        ('@Controller({ path: "v1", version: "" })', '@Get("x")'),
         ('@Controller({ path: "v1", host: "admin.example.com" })', '@Get("x")'),
+        ('@Controller("v1")', '@Get("x")\n  @Version(v)'),
+        ('@Controller("v1")', '@Get("x")\n  @Version("1", "2")'),
+        ('@Controller("v1")', '@Get("x")\n  @Version("1")\n  @Version("2")'),
         ('@Controller("v1", "extra")', '@Get("x")'),
         ('@Controller("v1")', "@Get(path)"),
         ('@Controller("v1")', '@Get(["a", "b"])'),
         ('@Controller("v1")', "@Get(`x/${id}`)"),
         ('@Controller("v1")', '@Get("files/*")'),
         ('@Controller("v1")', '@Get("a/(.*)")'),
-        ('@Controller("v1")', '@Get("x")\n  @Version("2")'),
         ('@Controller("v1")\n@Version("2")', '@Get("x")'),
     ],
 )
 def test_a_path_that_cannot_be_read_declares_nothing(controller: str, method: str) -> None:
     source = COMMON + f"{controller}\nclass C {{\n  {method}\n  h() {{}}\n}}\n"
+    assert _routes(source) == {}
+
+
+NEUTRAL = 'import { VERSION_NEUTRAL } from "@nestjs/common";\n'
+
+
+@pytest.mark.parametrize(
+    ("controller", "method", "version"),
+    [
+        ('@Controller("v1")', '@Get("x")', None),
+        ('@Controller({ path: "v1", version: "2" })', '@Get("x")', ["2"]),
+        ('@Controller({ path: "v1", version: ["1", "2", "1"] })', '@Get("x")', ["1", "2"]),
+        ('@Controller({ path: "v1", version: VERSION_NEUTRAL })', '@Get("x")', [None]),
+        # a handler's own version replaces its controller's
+        ('@Controller({ path: "v1", version: "2" })', '@Get("x")\n  @Version("3")', ["3"]),
+        (
+            '@Controller("v1")',
+            '@Get("x")\n  @Version([VERSION_NEUTRAL, "4"])',
+            [None, "4"],
+        ),
+    ],
+)
+def test_a_stated_version_is_recorded_on_the_route(
+    controller: str, method: str, version: list[str | None] | None
+) -> None:
+    source = COMMON + NEUTRAL + f"{controller}\nclass C {{\n  {method}\n  h() {{}}\n}}\n"
+    [claim] = _claims(source, "nestjs-route")
+    assert claim.target_key == "GET /v1/x"
+    recorded = claim.meta.get("version")
+    assert (json.loads(recorded) if recorded is not None else None) == version
+
+
+def test_a_neutral_version_must_be_the_nestjs_one() -> None:
+    source = (
+        COMMON
+        + 'import { VERSION_NEUTRAL } from "./versions";\n'
+        + '@Controller({ path: "v1", version: VERSION_NEUTRAL })\n'
+        + 'class C {\n  @Get("x")\n  h() {}\n}\n'
+    )
     assert _routes(source) == {}
 
 
@@ -505,6 +549,21 @@ def test_an_application_without_a_prefix_has_an_empty_proven_prefix(create: str)
             "versioning",
         ),
         (
+            CREATE + "app.enableVersioning({ type: VersioningType.HEADER, header: 'v' });",
+            "versioning",
+        ),
+        # only the type differs from URI versioning: a header names no path
+        (CREATE + "app.enableVersioning({ type: VersioningType.MEDIA_TYPE });", "versioning"),
+        (CREATE + "app.enableVersioning({ type: VersioningType.URI, extractor });", "versioning"),
+        (CREATE + 'app.enableVersioning({ defaultVersion: "1" });', "versioning"),
+        (CREATE + "app.enableVersioning({ type: VersioningType.URI, prefix: P });", "versioning"),
+        (
+            CREATE + "app.enableVersioning({ type: VersioningType.URI, defaultVersion: V });",
+            "versioning",
+        ),
+        (CREATE + "app.enableVersioning(options);", "versioning"),
+        (CREATE + "app.enableVersioning();\napp.enableVersioning();", "versioning"),
+        (
             CREATE + "configure(app);",
             "application escapes",
         ),
@@ -525,8 +584,83 @@ def test_an_application_without_a_prefix_has_an_empty_proven_prefix(create: str)
 def test_anything_that_could_change_a_route_makes_the_prefix_unknown(
     body: str, reason: str
 ) -> None:
-    claim = _root(f"async function main() {{\n{body}\n}}\n")
+    claim = _root(f"async function main() {{\n{body}\n}}\n", COMMON + CORE + VERSIONING)
     assert (claim.meta["prefix_status"], claim.meta["reason"]) == ("unknown", reason)
+    assert "versioning" not in claim.meta
+
+
+VERSIONING = 'import { VersioningType, VERSION_NEUTRAL } from "@nestjs/common";\n'
+
+
+@pytest.mark.parametrize(
+    ("call", "versioning"),
+    [
+        ("app.enableVersioning();", {"prefix": "v", "default": None}),
+        (
+            'app.enableVersioning({ type: VersioningType.URI, defaultVersion: "1" });',
+            {"prefix": "v", "default": ["1"]},
+        ),
+        (
+            "app.enableVersioning({ type: VersioningType.URI, prefix: false, "
+            'defaultVersion: [VERSION_NEUTRAL, "2"] });',
+            {"prefix": "", "default": [None, "2"]},
+        ),
+        (
+            'app.enableVersioning({ type: VersioningType.URI, prefix: "version-" });',
+            {"prefix": "version-", "default": None},
+        ),
+    ],
+)
+def test_uri_versioning_is_recorded_with_the_prefix(call: str, versioning: object) -> None:
+    claim = _root(
+        f'async function main() {{\n{CREATE}app.setGlobalPrefix("api");\n{call}\n}}\n',
+        COMMON + CORE + VERSIONING,
+    )
+    assert (claim.meta["prefix_status"], claim.meta["prefix"]) == ("proven", "api")
+    assert json.loads(claim.meta["versioning"]) == versioning
+
+
+SWAGGER = 'import { SwaggerModule } from "@nestjs/swagger";\n'
+DOCUMENTED = (
+    "const document = SwaggerModule.createDocument(app, config);\n"
+    'SwaggerModule.setup("docs", app, document, { swaggerOptions: {} });\n'
+)
+
+
+def test_documenting_the_application_with_swagger_changes_no_route() -> None:
+    claim = _root(
+        f'async function main() {{\n{CREATE}app.setGlobalPrefix("api");\n{DOCUMENTED}}}\n',
+        COMMON + CORE + SWAGGER,
+    )
+    assert (claim.meta["prefix_status"], claim.meta["prefix"]) == ("proven", "api")
+
+
+@pytest.mark.parametrize(
+    ("header", "body"),
+    [
+        # not the NestJS one
+        ('import { SwaggerModule } from "./swagger";\n', DOCUMENTED),
+        ('import * as swagger from "@nestjs/swagger";\n', "swagger.SwaggerModule.setup('d', app);"),
+        # the NestJS one, doing something other than documenting
+        (SWAGGER, "SwaggerModule.patch(app);"),
+        (SWAGGER, "configure(SwaggerModule.createDocument, app);"),
+    ],
+)
+def test_handing_the_application_to_anything_else_still_escapes(header: str, body: str) -> None:
+    claim = _root(f"async function main() {{\n{CREATE}{body}\n}}\n", COMMON + CORE + header)
+    assert (claim.meta["prefix_status"], claim.meta["reason"]) == (
+        "unknown",
+        "application escapes",
+    )
+
+
+def test_a_versioning_type_that_is_not_nestjs_proves_nothing() -> None:
+    claim = _root(
+        f"async function main() {{\n{CREATE}"
+        "app.enableVersioning({ type: VersioningType.URI });\n}\n",
+        COMMON + CORE + 'import { VersioningType } from "./versioning";\n',
+    )
+    assert (claim.meta["prefix_status"], claim.meta["reason"]) == ("unknown", "versioning")
 
 
 def test_a_dynamic_root_is_recorded_as_dynamic() -> None:
@@ -570,6 +704,15 @@ def test_a_factory_that_is_not_nestjs_is_not_a_root() -> None:
         ('export { RouterModule } from "@nestjs/core";\n', ["router"]),
         ('const core = require("@nestjs/core");\n', ["global"]),
         ('const core = await import("@nestjs/core");\n', ["global"]),
+        # destructured by name, a require takes what a named import takes
+        ('const { NestFactory } = require("@nestjs/core");\n', []),
+        ('const { NestFactory: Factory } = await import("@nestjs/core");\n', []),
+        ('const { RouterModule } = require("@nestjs/core");\n', ["router"]),
+        ('const { NestFactory, ApplicationConfig } = require("@nestjs/core");\n', ["global"]),
+        ('const { NestFactory, ...rest } = require("@nestjs/core");\n', ["global"]),
+        ('const { ["Application" + "Config"]: c } = require("@nestjs/core");\n', ["global"]),
+        ('const NestFactory = require("@nestjs/core").NestFactory;\n', ["global"]),
+        ('configure(require("@nestjs/core"));\n', ["global"]),
         (
             'import { RouterModule, ApplicationConfig } from "@nestjs/core";\n',
             ["global", "router"],
