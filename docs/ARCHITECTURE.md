@@ -1796,6 +1796,16 @@ Until the pass proves one, it stays a pending claim that records the declaration
     substitution must fill one whole segment.
   - A URL with no scheme names no origin, except under superagent, whose Node client requests it over `http`. Such
     a claim is marked `scheme_from: superagent`.
+  - **A transport and a base injected in options objects** (`repoatlas/parsers/http_ts_injection.py`,
+    `repoatlas/graph/ts_injection.py`). A request `fetcher.<verb>(`${base}/…`)` on names a module-level function
+    destructures from its first parameter (bound once in its own scope) is a claim with no origin yet. A call to a
+    function declared in the file, or imported from a relative module, records its first argument as far as the file
+    proves it: superagent itself, a stated string, a key of the caller's own options, or an object literal of those
+    (a spread or method leaves nothing known). The global pass follows each **root** call (one that passes on none of
+    its caller's options) through at most 3 functions, each resolved to exactly one, never around a cycle. A request
+    a root reaches with superagent as the transport and a stated, non-empty base becomes the request's own
+    `http-client-call` claim, recording where the options were injected (`injected_at`) and where the base is written
+    (`base_in`). A transport that a nested closure reassigns is not seen.
 
 Values are literal or nothing. A string literal, a concatenation of literals, and an f-string or template with no
 placeholder are read; anything else is not. **A known suffix of a dynamic URL proves no route**:

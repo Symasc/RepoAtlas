@@ -52,7 +52,12 @@ from repoatlas.parsers.http_facts import (
     http_reference,
     pending_reference,
 )
-from repoatlas.parsers.http_typescript import bindings, plain_object, static_string
+from repoatlas.parsers.http_typescript import (
+    FUNCTION_NODES,
+    plain_object,
+    scope_bindings,
+    static_string,
+)
 from repoatlas.parsers.treesitter import line_range, node_text, string_literal, walk
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -75,17 +80,7 @@ _METHODS = frozenset(_VERBS.values())
 APP = "app"
 PLUGIN = "plugin"
 
-_FUNCTIONS = frozenset(
-    {
-        "function_declaration",
-        "generator_function_declaration",
-        "function_expression",
-        "function",
-        "generator_function",
-        "arrow_function",
-        "method_definition",
-    }
-)
+_FUNCTIONS = FUNCTION_NODES
 _DECLARATIONS = frozenset({"function_declaration", "generator_function_declaration"})
 _FUNCTION_VALUES = frozenset({"arrow_function", "function_expression", "function"})
 _TRANSPARENT = frozenset({"parenthesized_expression", "await_expression", "as_expression"})
@@ -383,21 +378,10 @@ class FastifyDeclarations:
         """Names bound in ``function``'s own scope, never inside a nested function."""
         key = _key(function)
         found = self._own.get(key)
-        if found is not None:
-            return found
-        counts: Counter[str] = Counter()
-        stack = [function]
-        while stack:
-            node = stack.pop()
-            if _key(node) != key and node.type in _FUNCTIONS:
-                name = node.child_by_field_name("name")
-                if node.type in _DECLARATIONS and name is not None:
-                    counts[node_text(self._source, name)] += 1
-                continue
-            counts.update(bindings(self._source, node))
-            stack.extend(node.children)
-        self._own[key] = counts
-        return counts
+        if found is None:
+            found = scope_bindings(self._source, function)
+            self._own[key] = found
+        return found
 
     def _enclosing_binding(self, at: Node, name: str) -> Node | str:
         """The function that binds ``name`` where ``at`` uses it.

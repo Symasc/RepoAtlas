@@ -377,6 +377,40 @@ def bindings(source: bytes, node: Node) -> Iterator[str]:
             yield node_text(source, child)
 
 
+#: Nodes that open a function scope of their own.
+FUNCTION_NODES = frozenset(
+    {
+        "function_declaration",
+        "generator_function_declaration",
+        "function_expression",
+        "function",
+        "generator_function",
+        "arrow_function",
+        "method_definition",
+    }
+)
+_DECLARED_FUNCTIONS = frozenset({"function_declaration", "generator_function_declaration"})
+
+
+def scope_bindings(source: bytes, function: Node) -> Counter[str]:
+    """Names bound in ``function``'s own scope: its parameters and the declarations
+    in its body, never anything bound inside a nested function -- whose name alone, if
+    it is declared, binds here."""
+    key = (function.start_byte, function.end_byte)
+    counts: Counter[str] = Counter()
+    stack = [function]
+    while stack:
+        node = stack.pop()
+        if (node.start_byte, node.end_byte) != key and node.type in FUNCTION_NODES:
+            name = node.child_by_field_name("name")
+            if node.type in _DECLARED_FUNCTIONS and name is not None:
+                counts[node_text(source, name)] += 1
+            continue
+        counts.update(bindings(source, node))
+        stack.extend(node.children)
+    return counts
+
+
 def plain_object(source: bytes, node: Node) -> dict[str, Node] | None:
     """An object literal's keys, or ``None`` when any key is not provably literal."""
     if node.type != "object":

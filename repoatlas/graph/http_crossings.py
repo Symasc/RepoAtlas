@@ -233,6 +233,10 @@ def _edge(
         "served_at": f"{provider.rel_path}:{exposure.claim.line_start}",
         "identity_source": exposure.meta.get("identity_source", ""),
     }
+    # A request on an injected transport: where the options were written, and its base.
+    for key in ("injected_at", "base_in"):
+        if key in request.meta:
+            record[key] = request.meta[key]
     for key, line in (
         ("base_at", _line(request.meta.get("base_at"))),
         ("identity_at", _line(exposure.meta.get("identity_at"))),

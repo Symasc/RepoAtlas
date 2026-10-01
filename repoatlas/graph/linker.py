@@ -524,7 +524,9 @@ class ReferenceLinker:
             edges.extend(decided.edges)
             # The one HTTP decision that joins two repositories: exposure and request
             # claims, both per file, never this pass's previous output.
-            crossings = plan_http_crossings(pending, file_rows, producer=GLOBAL_PARSER)
+            crossings = plan_http_crossings(
+                [*pending, *decided.injected], file_rows, producer=GLOBAL_PARSER
+            )
             edges.extend(crossings.edges)
             resolved += decided.resolved
             unresolved += decided.unresolved
