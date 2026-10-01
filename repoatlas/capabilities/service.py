@@ -159,6 +159,7 @@ from repoatlas.capabilities.topology import (
     file_matches,
     line_references,
     matching_edges,
+    name_matches,
     page_limits,
     page_of,
     peer_repositories,
@@ -276,6 +277,7 @@ from repoatlas.models.retrieval import RetrievalOutcome
 from repoatlas.models.search import SearchMode, SearchRequest, SearchResponse
 from repoatlas.models.sync import EvidenceRevalidationSummary, SyncRequest, SyncResponse
 from repoatlas.models.topology import (
+    NAME_TYPES,
     EntryKind,
     TopologyChildrenRequest,
     TopologyChildrenResponse,
@@ -283,6 +285,8 @@ from repoatlas.models.topology import (
     TopologyEdgeResponse,
     TopologyFilesRequest,
     TopologyFilesResponse,
+    TopologyNamesRequest,
+    TopologyNamesResponse,
     TopologyOverviewRequest,
     TopologyOverviewResponse,
     TopologyReferencesRequest,
@@ -1488,6 +1492,44 @@ class CapabilityService:
                 context=context_view(request.context, resolution),
                 query=request.query,
                 files=tuple(file_matches(rows, in_scope)),
+                total=total,
+                truncated=total > len(rows),
+                freshness=index_freshness(
+                    [
+                        repository_freshness_for(
+                            self._workspace, repo, depth=request.depth, facts=facts
+                        )
+                        for repo in resolution.repositories
+                    ],
+                    depth=request.depth,
+                ),
+            )
+
+    def topology_names(self, request: TopologyNamesRequest) -> TopologyNamesResponse:
+        """Declared names in scope whose qualified names hold every term, best first.
+
+        One statement, ranked and counted in the database, like files. Evidence-
+        free: it names entities, it quotes nothing, and it opens no investigation.
+        A name found here is traced or inspected by its key, which records its own.
+        """
+        with self._operation():
+            registered = self._workspace.repositories.list_all()
+            resolution = resolve_context(request.context, registered)
+            in_scope = {r.id: r.slug for r in resolution.repositories if r.id is not None}
+            store = self._workspace.topology()
+            with self._workspace.database.read_snapshot():
+                rows = store.names_matching(
+                    sorted(in_scope),
+                    query_terms(request.query),
+                    types=NAME_TYPES,
+                    limit=request.limit,
+                )
+            total = rows[0].total if rows else 0
+            facts = current_facts_version(self._workspace)
+            return TopologyNamesResponse(
+                context=context_view(request.context, resolution),
+                query=request.query,
+                names=tuple(name_matches(rows, in_scope)),
                 total=total,
                 truncated=total > len(rows),
                 freshness=index_freshness(

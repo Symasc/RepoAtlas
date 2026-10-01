@@ -9,6 +9,8 @@ answers without one call per entity:
   repositories;
 * **edge** — one exact stored relationship, with the evidence that asserts it;
 * **files** — which indexed files a name points at, for a map's search box;
+* **names** — which declared names (a variable, a function, a class, a method,
+  an environment variable) a name points at, for the same box;
 * **references** — what each line of one file declares and refers to, so a
   reader can follow a name in the source to the entity the index resolved it to.
 
@@ -61,8 +63,21 @@ MAX_CHILDREN_PAGE = 500
 #: Files one search answer lists, by default and at most.
 DEFAULT_FILE_MATCHES = 20
 MAX_FILE_MATCHES = 50
-#: The most whitespace-separated terms a file search matches on.
+#: The most whitespace-separated terms a file or name search matches on.
 MAX_QUERY_TERMS = 8
+#: Names one search answer lists, by default and at most.
+DEFAULT_NAME_MATCHES = 20
+MAX_NAME_MATCHES = 50
+#: What a name search looks among: what code declares, and the environment
+#: variables it reads. Configuration keys are left out: they are the keys of data
+#: files, and they outnumber everything else.
+NAME_TYPES: tuple[EntityType, ...] = (
+    EntityType.SYMBOL,
+    EntityType.FUNCTION,
+    EntityType.CLASS,
+    EntityType.METHOD,
+    EntityType.ENV_VAR,
+)
 #: The most references one file's answer lists, in source order.
 MAX_REFERENCES = 2000
 
@@ -384,6 +399,59 @@ class TopologyFilesResponse(BaseModel):
     query: str
     files: tuple[FileMatch, ...] = ()
     #: Every file in scope that matches, listed or not.
+    total: int = 0
+    truncated: bool = False
+    freshness: IndexFreshness
+    policy: str = POLICY
+
+
+class TopologyNamesRequest(BaseModel):
+    """Ask which declared names a name points at.
+
+    Every whitespace-separated term must occur in an entity's qualified name
+    (``Class.method`` for a member, the name itself otherwise), ignoring ASCII
+    case. Entities whose own name holds the last term rank first: one named
+    exactly that, then one starting with it, then one containing it; then the
+    shortest names. Only :data:`NAME_TYPES` are searched. An environment variable
+    belongs to no repository, so it is in every scope.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    context: CapabilityContext
+    query: str = Field(min_length=1, max_length=200)
+    limit: int = Field(default=DEFAULT_NAME_MATCHES, ge=1, le=MAX_NAME_MATCHES)
+    depth: FreshnessDepth = FreshnessDepth.STORED
+
+    @field_validator("query")
+    @classmethod
+    def _has_a_term(cls, value: str) -> str:
+        if not value.split():
+            raise ValueError("query must name at least one term")
+        if len(value.split()) > MAX_QUERY_TERMS:
+            raise ValueError(f"query may name at most {MAX_QUERY_TERMS} terms")
+        return value
+
+
+class NameMatch(BaseModel):
+    """One declared name a search found: the entity, to trace or inspect, and where."""
+
+    model_config = ConfigDict(frozen=True)
+
+    entity: EntityRef
+    #: ``Class.method`` for a member; the name itself otherwise.
+    qualified_name: str
+
+
+class TopologyNamesResponse(BaseModel):
+    """The best-ranked names in scope that match, and how many match in all."""
+
+    model_config = ConfigDict(frozen=True)
+
+    context: ContextView
+    query: str
+    names: tuple[NameMatch, ...] = ()
+    #: Every name in scope that matches, listed or not.
     total: int = 0
     truncated: bool = False
     freshness: IndexFreshness

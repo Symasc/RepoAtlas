@@ -694,6 +694,22 @@ class FileMatchRow(NamedTuple):
     total: int
 
 
+class NameMatchRow(NamedTuple):
+    """A declared name a search matched, and how many matched in all."""
+
+    key: str
+    type: str
+    name: str
+    qualified_name: str | None
+    #: ``None`` for an entity no repository owns, such as an environment variable.
+    repo_id: int | None
+    path: str | None
+    line_start: int | None
+    line_end: int | None
+    #: Every matching name in scope, the same on each row.
+    total: int
+
+
 class ReferenceRow(NamedTuple):
     """A located edge leaving an entity in one file, with its far end."""
 
@@ -778,6 +794,14 @@ class TopologyStore(Protocol):
     def files_matching(
         self, repo_ids: Sequence[int], terms: Sequence[str], *, limit: int
     ) -> list[FileMatchRow]: ...
+    def names_matching(
+        self,
+        repo_ids: Sequence[int],
+        terms: Sequence[str],
+        *,
+        types: Sequence[EntityType],
+        limit: int,
+    ) -> list[NameMatchRow]: ...
     def references_in(
         self, file_id: int, *, exclude: Sequence[EdgeType], limit: int
     ) -> list[ReferenceRow]: ...

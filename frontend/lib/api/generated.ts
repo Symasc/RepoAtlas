@@ -1571,6 +1571,16 @@ export interface LineReference {
   type: EdgeType;
 }
 /**
+ * One declared name a search found: the entity, to trace or inspect, and where.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "NameMatch".
+ */
+export interface NameMatch {
+  entity: EntityRef;
+  qualified_name: string;
+}
+/**
  * One package a dependency link rests on, with where each side says so.
  *
  * This interface was referenced by `ApiIndex`'s JSON-Schema
@@ -1965,6 +1975,40 @@ export interface TopologyFilesResponse {
   truncated?: boolean;
 }
 /**
+ * Ask which declared names a name points at.
+ *
+ * Every whitespace-separated term must occur in an entity's qualified name
+ * (``Class.method`` for a member, the name itself otherwise), ignoring ASCII
+ * case. Entities whose own name holds the last term rank first: one named
+ * exactly that, then one starting with it, then one containing it; then the
+ * shortest names. Only :data:`NAME_TYPES` are searched. An environment variable
+ * belongs to no repository, so it is in every scope.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "TopologyNamesRequest".
+ */
+export interface TopologyNamesRequest {
+  context: CapabilityContext;
+  depth?: FreshnessDepth;
+  limit?: number;
+  query: string;
+}
+/**
+ * The best-ranked names in scope that match, and how many match in all.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "TopologyNamesResponse".
+ */
+export interface TopologyNamesResponse {
+  context: ContextView;
+  freshness: IndexFreshness;
+  names?: NameMatch[];
+  policy?: string;
+  query: string;
+  total?: number;
+  truncated?: boolean;
+}
+/**
  * Ask which repositories in scope are linked to which.
  *
  * This interface was referenced by `ApiIndex`'s JSON-Schema
@@ -2025,7 +2069,7 @@ export interface TopologyReferencesResponse {
 export const CONTRACT = "repoatlas-local-api/1" as const;
 
 /** Every endpoint the local API serves, in the server's registry order. */
-export const ENDPOINT_NAMES = ["repositories","status","search","inspect","relationships","impact","dependencies","http_operations","topology/overview","topology/children","topology/edge","topology/files","topology/references"] as const;
+export const ENDPOINT_NAMES = ["repositories","status","search","inspect","relationships","impact","dependencies","http_operations","topology/overview","topology/children","topology/edge","topology/files","topology/names","topology/references"] as const;
 
 export type EndpointName = (typeof ENDPOINT_NAMES)[number];
 
@@ -2043,5 +2087,6 @@ export interface Endpoints {
   "topology/children": { request: TopologyChildrenRequest; response: TopologyChildrenResponse };
   "topology/edge": { request: TopologyEdgeRequest; response: TopologyEdgeResponse };
   "topology/files": { request: TopologyFilesRequest; response: TopologyFilesResponse };
+  "topology/names": { request: TopologyNamesRequest; response: TopologyNamesResponse };
   "topology/references": { request: TopologyReferencesRequest; response: TopologyReferencesResponse };
 }

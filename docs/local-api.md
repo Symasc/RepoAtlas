@@ -73,6 +73,7 @@ Content-Length: <n>
 | `topology/children` | one page of a directory's or file's children, and how every child links |
 | `topology/edge` | one exact stored edge: its evidence, crossing, and multiplicity |
 | `topology/files` | indexed files whose paths hold every term of a query, best-named first |
+| `topology/names` | declared names (variables, functions, classes, methods, environment variables) that hold every term of a query, best-named first |
 | `topology/references` | what each line of one file declares and refers to, in source order |
 
 **Not served:** `sync`, the only write, and `verify_grounding`, which checks an agent's answer. Both remain
@@ -134,9 +135,9 @@ investigation exactly, and an unknown id is refused (409).
 
 So an edge reference taken from `topology/overview` or `topology/children` reaches source directly:
 `topology/edge {edge_ref}`, then `inspect {target: {evidence_id}, investigation_id}`, with no search
-beforehand. `topology/overview`, `topology/children`, `topology/files` and `topology/references` record
-no evidence and start no investigation, so a client may ask them as often as it likes, a search box on
-every keystroke included.
+beforehand. `topology/overview`, `topology/children`, `topology/files`, `topology/names` and
+`topology/references` record no evidence and start no investigation, so a client may ask them as often as
+it likes, a search box on every keystroke included.
 
 Investigations live in the server process: at most 32, each expiring after an hour idle, and none survives
 a restart.
@@ -158,6 +159,13 @@ unchanged and never parses it.
 path, ignoring ASCII case; `%` and `_` are literal. Files whose own name holds the last term come first
 (named exactly that, then starting with it, then containing it), then the shortest paths. `total` counts
 every match in scope, and `limit` (at most 50) caps how many are listed.
+
+`topology/names {query}` searches the names code declares (`symbol`, `function`, `class`, `method`) and
+the environment variables it reads, by the same rule against each entity's qualified name (`Class.method`
+for a member): entities whose own name holds the last term come first, then the shortest names.
+Configuration keys are not searched. Each match is an `entity` handle, the key `impact` and `inspect`
+take, with where it is written; an environment variable belongs to no repository, has no path, and is
+in every scope.
 
 `topology/references {path}` reads one file: its declarations, and every located edge the file asserts,
 containment left out, in source order. A reference's lines are lines of that file, and its `target` is the

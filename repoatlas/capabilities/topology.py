@@ -68,6 +68,7 @@ from repoatlas.models.topology import (
     FileMatch,
     LineReference,
     LinkKind,
+    NameMatch,
     PackageLink,
     PeerKind,
     RepositoryLink,
@@ -77,6 +78,7 @@ from repoatlas.storage.protocols import (
     CrossingEdgeRow,
     FileMatchRow,
     LinkEdgeRow,
+    NameMatchRow,
     ReferenceRow,
     StoredEdge,
     TopologyDeclarationRow,
@@ -837,6 +839,31 @@ def file_matches(rows: Sequence[FileMatchRow], slugs: Mapping[int, str]) -> list
         )
         for row in rows
         if row.repo_id in slugs
+    ]
+
+
+def name_matches(rows: Sequence[NameMatchRow], slugs: Mapping[int, str]) -> list[NameMatch]:
+    """Each matched entity as a handle to trace, with where it is written.
+
+    An entity no repository owns keeps ``repository_slug`` empty, as everywhere
+    else: an environment variable has no provenance of its own to report.
+    """
+    return [
+        NameMatch(
+            entity=EntityRef(
+                key=row.key,
+                type=EntityType(row.type),
+                name=row.name,
+                repository_slug=slugs[row.repo_id] if row.repo_id is not None else None,
+                path=row.path,
+                line_start=row.line_start,
+                line_end=row.line_end,
+                positional=is_positional(row.key),
+            ),
+            qualified_name=row.qualified_name or row.name,
+        )
+        for row in rows
+        if row.repo_id is None or row.repo_id in slugs
     ]
 
 

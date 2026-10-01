@@ -23,6 +23,7 @@ from repoatlas.storage.protocols import (
     CrossingEdgeRow,
     FileMatchRow,
     LinkEdgeRow,
+    NameMatchRow,
     ReferenceRow,
     StoredEdge,
     TopologyDeclarationRow,
@@ -285,6 +286,55 @@ class SqliteTopologyStore:
             (*repo_ids, *terms, last, last, last, limit),
         ).fetchall()
         return [FileMatchRow(*row) for row in rows]
+
+    def names_matching(
+        self,
+        repo_ids: Sequence[int],
+        terms: Sequence[str],
+        *,
+        types: Sequence[EntityType],
+        limit: int,
+    ) -> list[NameMatchRow]:
+        """Entities of ``types`` whose qualified name holds every term, best first.
+
+        In these repositories, or in none: an entity no repository owns (an
+        environment variable) is in every scope. Case is folded by ``lower()`` on
+        both sides, never by ``LIKE``. Ranked by how the entity's own name holds the
+        last term (exactly, as a prefix, anywhere, not at all), then by the shortest
+        name, then by where it is written. ``total`` counts every match.
+        """
+        if not repo_ids or not terms or not types:
+            return []
+        last = terms[-1]
+        named = "lower(COALESCE(e.qualified_name, e.name))"
+        contains = " AND ".join(f"instr({named}, lower(?)) > 0" for _ in terms)
+        rows = self._db.execute(
+            f"""
+            SELECT e.key, e.type, e.name, e.qualified_name, e.repo_id, f.rel_path,
+                   e.line_start, e.line_end, COUNT(*) OVER () AS total
+            FROM entities e
+            LEFT JOIN files f ON f.id = e.file_id
+            LEFT JOIN repositories r ON r.id = e.repo_id
+            WHERE e.type IN ({_placeholders(types)})
+              AND (e.repo_id IN ({_placeholders(repo_ids)}) OR e.repo_id IS NULL)
+              AND {contains}
+            ORDER BY
+                CASE
+                    WHEN lower(e.name) = lower(?) THEN 0
+                    WHEN instr(lower(e.name), lower(?)) = 1 THEN 1
+                    WHEN instr(lower(e.name), lower(?)) > 0 THEN 2
+                    ELSE 3
+                END,
+                length(e.name),
+                COALESCE(r.slug, r.name, ''),
+                COALESCE(f.rel_path, ''),
+                COALESCE(e.line_start, 0),
+                e.key
+            LIMIT ?
+            """,  # noqa: S608 - placeholders and a fixed clause per term only
+            (*[str(t) for t in types], *repo_ids, *terms, last, last, last, limit),
+        ).fetchall()
+        return [NameMatchRow(*row) for row in rows]
 
     def references_in(
         self, file_id: int, *, exclude: Sequence[EdgeType], limit: int

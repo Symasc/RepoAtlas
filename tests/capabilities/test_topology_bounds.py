@@ -18,6 +18,7 @@ from repoatlas.models.topology import (
     TopologyChildrenRequest,
     TopologyEdgeRequest,
     TopologyFilesRequest,
+    TopologyNamesRequest,
     TopologyOverviewRequest,
     TopologyReferencesRequest,
 )
@@ -62,6 +63,13 @@ def files_named(query: str) -> Callable[[CapabilityService], object]:
     return call
 
 
+def names_named(query: str) -> Callable[[CapabilityService], object]:
+    def call(service: CapabilityService) -> object:
+        return service.topology_names(TopologyNamesRequest(context=GLOBAL, query=query))
+
+    return call
+
+
 def references_of(slug: str, path: str) -> Callable[[CapabilityService], object]:
     def call(service: CapabilityService) -> object:
         return service.topology_references(
@@ -99,6 +107,8 @@ def test_the_corpora_differ_in_size(sizes: tuple[Workspace, Workspace]) -> None:
         first_edge,
         files_named("f0"),
         files_named("src f"),
+        names_named("role"),
+        names_named("format role"),
         references_of("hub-a", "packages/u0/src/f0.ts"),
     ],
     ids=[
@@ -110,6 +120,8 @@ def test_the_corpora_differ_in_size(sizes: tuple[Workspace, Workspace]) -> None:
         "edge",
         "files",
         "files-two-terms",
+        "names",
+        "names-two-terms",
         "references",
     ],
 )

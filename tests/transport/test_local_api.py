@@ -414,6 +414,18 @@ def test_a_found_file_reads_its_references_into_another_repository(api: Serving)
     assert crossing and all(r["source"] == CAN_EDIT for r in crossing)
 
 
+def test_a_found_name_is_a_seed_impact_traces(api: Serving) -> None:
+    found = post(api, "topology/names", {"context": GLOBAL, "query": "canEdit"}).result
+    assert "investigation_id" not in found
+    first = found["names"][0]
+    assert first["entity"]["key"] == CAN_EDIT
+    assert (first["entity"]["repository_slug"], first["entity"]["path"]) == ("app", "src/policy.ts")
+    traced = post(
+        api, "impact", {"context": GLOBAL, "seed": first["entity"]["key"], "presentation": "full"}
+    ).result
+    assert (traced["seed"]["status"], traced["seed"]["entity"]) == ("resolved", CAN_EDIT)
+
+
 # ---------------------------------------------------------------------------
 # Starting, finding and stopping it
 # ---------------------------------------------------------------------------
