@@ -77,8 +77,8 @@ SOURCE_FIXTURES = (
     "tests/fixtures/repos/python-service/.env",
 )
 
-INSTALLED_SKILL = "repoatlas/skills/repoatlas-investigation/SKILL.md"
-SOURCE_SKILL = "skills/repoatlas-investigation/SKILL.md"
+INSTALLED_SKILL = "repoatlas/skills/repoatlas-code-trace/SKILL.md"
+SOURCE_SKILL = "skills/repoatlas-code-trace/SKILL.md"
 
 requires_uv = pytest.mark.skipif(
     shutil.which("uv") is None, reason="uv is the project's packaging command and is not installed"

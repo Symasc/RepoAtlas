@@ -4,9 +4,10 @@
 workflow an agent is told to use when the question is what a change affects. Every
 surface an agent reads before or while choosing a tool is read here, sentence by
 sentence: the server instructions, each tool's description and advertised input
-schema, the entry skill and its contract reference, the integration document and the
-README. A sentence about change impact must not recommend a relationships walk for it,
-and the places an agent reads first must each name the impact tool.
+schema, all five task skills and their shared contract reference, the integration
+document and the README. A sentence about change impact must not recommend a
+relationships walk for it, and the places an agent reads first must each name the impact
+tool.
 """
 
 from __future__ import annotations
@@ -17,8 +18,15 @@ from pathlib import Path
 from repoatlas.mcp.server import INSTRUCTIONS, tool_definitions
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "repoatlas-investigation" / "SKILL.md"
-CONTRACTS = SKILL.parent / "references" / "contracts.md"
+SKILLS = ROOT / "skills"
+SKILL_NAMES = (
+    "repoatlas-change-impact",
+    "repoatlas-code-trace",
+    "repoatlas-dependencies",
+    "repoatlas-http",
+    "repoatlas-index",
+)
+CONTRACTS = SKILLS / "repoatlas-code-trace" / "references" / "contracts.md"
 
 #: A sentence about what a change affects.
 ABOUT_IMPACT = re.compile(r"change[- ]impact|what a change\b[^.|]*\baffects?|what depends on", re.I)
@@ -31,7 +39,7 @@ NAMES_IMPACT = re.compile(r"repoatlas_impact", re.I)
 def surfaces() -> dict[str, str]:
     texts = {
         "instructions": INSTRUCTIONS,
-        "skill": SKILL.read_text(encoding="utf-8"),
+        **{name: (SKILLS / name / "SKILL.md").read_text(encoding="utf-8") for name in SKILL_NAMES},
         "contracts": CONTRACTS.read_text(encoding="utf-8"),
         "integration": (ROOT / "docs" / "agent-integration.md").read_text(encoding="utf-8"),
         "readme": (ROOT / "README.md").read_text(encoding="utf-8"),
@@ -79,7 +87,12 @@ def test_no_sentence_about_change_impact_recommends_another_workflow() -> None:
 
 def test_where_an_agent_reads_first_the_impact_tool_is_named() -> None:
     found = about_impact()
-    for surface in ("instructions", "skill", "contracts"):
+    for surface in (
+        "instructions",
+        "repoatlas-change-impact",
+        "repoatlas-code-trace",
+        "contracts",
+    ):
         assert any(name == surface and NAMES_IMPACT.search(sentence) for name, sentence in found), (
             surface
         )
