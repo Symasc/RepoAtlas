@@ -5,6 +5,7 @@ import { FlowArrowIcon } from "@phosphor-icons/react";
 
 import { EntityBadge } from "@/components/graph/glyphs";
 import { typeNoun } from "@/components/graph/traceNodes";
+import { sharedLabel } from "@/lib/model/graph";
 import type { SymbolIndex, SymbolTarget } from "@/lib/model/symbols";
 
 import { Quiet } from "./Inspector";
@@ -28,9 +29,13 @@ function where(target: SymbolTarget, repository: string): string {
   return target.type === "module" || target.type === "package" ? "named import" : "shared";
 }
 
+/** HTTP's kinds, each its own section after what the file refers to: routes, endpoints, deployments. */
+const HTTP_SECTIONS: readonly string[] = ["http_route", "http_endpoint", "http_deployment"];
+
 /**
  * Every name in the file the index resolved: what it declares, then what it
- * refers to elsewhere. The list is the keyboard's way to everything the source
+ * refers to elsewhere, then the HTTP routes, endpoints and deployments it names,
+ * each in a section of its own. The list is the keyboard's way to everything the source
  * makes a link, and each row can follow its chain directly.
  */
 export function SymbolList({
@@ -49,8 +54,12 @@ export function SymbolList({
   const targets = [...index.targets.values()];
   const declared = targets.filter((t) => t.here).sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
   const elsewhere = targets
-    .filter((t) => !t.here)
+    .filter((t) => !t.here && !HTTP_SECTIONS.includes(t.type))
     .sort((a, b) => Number(a.repository === repository) - Number(b.repository === repository) || a.name.localeCompare(b.name));
+  const http = HTTP_SECTIONS.map((type) => ({
+    type,
+    rows: targets.filter((t) => !t.here && t.type === type).sort((a, b) => a.name.localeCompare(b.name)),
+  })).filter((section) => section.rows.length > 0);
   if (targets.length === 0) return <Quiet>The index resolved no names in this file.</Quiet>;
   const row = (target: SymbolTarget) => (
     <li key={target.key} className={classes.rowItem}>
@@ -95,6 +104,14 @@ export function SymbolList({
           <ul className={classes.rows}>{elsewhere.map(row)}</ul>
         </section>
       )}
+      {http.map((section) => (
+        <section key={section.type} className={classes.section}>
+          <h3 className={classes.sectionTitle}>
+            {sharedLabel(section.type)} <span className={classes.sectionCount}>{section.rows.length}</span>
+          </h3>
+          <ul className={classes.rows}>{section.rows.map(row)}</ul>
+        </section>
+      ))}
     </div>
   );
 }

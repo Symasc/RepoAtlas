@@ -314,7 +314,7 @@ const SHARED_LABELS: Record<string, string> = {
   config: "Configuration",
   http_endpoint: "HTTP endpoints",
   http_route: "HTTP routes",
-  http_deployment: "HTTP deployments",
+  http_deployment: "Deployments",
   service: "Services",
   template: "Templates",
   symbol: "Symbols",

@@ -116,6 +116,14 @@ Every line has an arrowhead for its direction. Its width grows with its count.
 Node families differ by shape, icon and border as well as colour. The legend's
 shapes button names them.
 
+HTTP has three kinds of shared node, each in its own group: **HTTP routes**
+(a method and path some code serves or calls), **HTTP endpoints** (a route at a
+known address) and **Deployments**, drawn with a cloud: the addresses an API is
+published at, such as an OpenAPI document's `servers`. In a file's code, the URL
+that declares a deployment is marked, so it can be selected and traced like a
+name, and the inspector's **Symbols** tab lists routes, endpoints and
+deployments in sections of their own.
+
 ### Pointing, selecting, opening
 
 | Action | Result |

@@ -65,6 +65,7 @@ const TYPE_NOUN: Record<string, string> = {
   config: "Configuration key",
   http_route: "HTTP route",
   http_endpoint: "HTTP endpoint",
+  http_deployment: "Deployment",
 };
 
 export function typeNoun(type: string | null | undefined): string {

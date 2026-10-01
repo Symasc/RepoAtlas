@@ -109,6 +109,20 @@ describe("names in the source", () => {
     expect(linked(index, 2).some((l) => l.startsWith("role→"))).toBe(false);
   });
 
+  it("links a deployment's URL where the line declares it, quoted or not, and never a piece of it", () => {
+    const api = { key: "http-deployment:https://api.example.com", name: "https://api.example.com", type: "http_deployment" };
+    const index = symbolIndex([], [ref(1, api), ref(2, api), ref(3, api), ref(4, contracts)], HERE);
+    // the whole line a string to the highlighter, as a YAML scalar or a JSON value is
+    const string = { quiet: () => true, quoted: () => true };
+    const spans = (line: number, text: string, where?: Parameters<typeof spansFor>[3]) =>
+      spansFor(line, text, index, where).map((s) => `${text.slice(s.start, s.end)}→${s.key}`);
+    expect(spans(1, "  - url: https://api.example.com", string)).toEqual([`https://api.example.com→${api.key}`]);
+    expect(spans(2, '    { "url": "https://API.example.com/v2" },', string)).toEqual([`https://API.example.com→${api.key}`]);
+    // its pieces are no names of it, on its own line or on an import's
+    expect(spans(3, "com = example")).toEqual([]);
+    expect(spans(4, 'import com from "@fixture/contracts";').map((l) => l.split("→")[0])).toEqual(["@fixture/contracts"]);
+  });
+
   it("never links a name inside a comment or a string", () => {
     const text = SOURCE[2]!;
     const comment = text.indexOf("//");
