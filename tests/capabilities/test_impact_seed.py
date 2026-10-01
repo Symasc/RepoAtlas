@@ -155,6 +155,15 @@ def test_a_directory_resolves_to_everything_beneath_it(indexed: Workspace) -> No
     both = seed(indexed, "src")
     assert both.status is SeedStatus.AMBIGUOUS
     assert [c.repository for c in both.candidates] == ["elsewhere", "seeds"]
+    # each is listed as it can be asked for again, and only within scope
+    chosen = seed(indexed, both.candidates[1].entity)
+    assert (chosen.status, chosen.basis, chosen.entity, chosen.members) == (
+        SeedStatus.RESOLVED,
+        SeedBasis.DIRECTORY,
+        "seeds:src/",
+        seed(indexed, "src", SEEDS_ONLY).members,
+    )
+    assert seed(indexed, "elsewhere:src/", SEEDS_ONLY).status is SeedStatus.UNRESOLVED
 
 
 def test_a_configuration_key_resolves_by_its_qualified_name(indexed: Workspace) -> None:
