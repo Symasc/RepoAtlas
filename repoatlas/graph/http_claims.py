@@ -92,6 +92,8 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
 from repoatlas.graph.keys import global_key
+from repoatlas.graph.py_modules import PythonModules
+from repoatlas.graph.py_routes import plan_python_routes
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType, EntityType
@@ -356,6 +358,7 @@ def plan_http_claims(
     *,
     producer: str,
     served_routes: Mapping[int, Iterable[str]] | None = None,
+    module_facts: Sequence[UnresolvedRefRecord] = (),
 ) -> HttpClaimPlan:
     """Decide every pending HTTP fact at once. Writes nothing.
 
@@ -363,7 +366,9 @@ def plan_http_claims(
     exactly its own output and rebuild it. ``served_routes`` is, per repository,
     the route bodies its files serve on their own — per-file facts, never this
     pass's previous output — which template calls are matched against together
-    with the routes this plan proves.
+    with the routes this plan proves. ``module_facts`` are the module-resolution
+    facts Python routes mounted from another module are resolved with
+    (:mod:`repoatlas.graph.py_routes`).
     """
     by_id = {row.file_id: row for row in files}
     resolver = _Resolver(index, by_id)
@@ -510,6 +515,28 @@ def plan_http_claims(
                 route_outcomes[claim.id] = withheld.get(
                     controller, "not registered by a proven application"
                 )
+
+    # -- Python routes mounted from another module ----------------------------------
+    python = plan_python_routes(grouped, lambda: PythonModules(index, module_facts), index, by_id)
+    for route in python.routes:
+        _keep(
+            pending,
+            (route.src_id, route.body),
+            PendingHttpEdge(
+                src_id=route.src_id,
+                target=route.target,
+                type=EdgeType.SERVES_HTTP_ROUTE,
+                repo_id=route.repo_id,
+                file_id=route.file_id,
+                line_start=route.line_start,
+                line_end=route.line_end,
+            ),
+        )
+    route_outcomes.update(python.outcomes)
+    promoted_routes.update(python.promoted)
+    declared_routes.update(python.declared)
+    resolved += python.resolved
+    unresolved += python.unresolved
 
     # -- what each repository serves ----------------------------------------------------
     # Per-file routes and the routes proven above, and nothing else: template calls

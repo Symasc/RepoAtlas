@@ -23,12 +23,14 @@ accepted — not even its suffix: whatever ``base`` holds decides the final path
 so a known tail proves no route at all.
 
 **Routers are relative to their mount.** An ``APIRouter`` or ``Blueprint`` route
-is recorded only for mounts this file proves — the router constructed and
+is served here only for mounts this file proves — the router constructed and
 included into an application here, with literal prefixes — and is composed from
-more than one line, so it is recorded as composed. A router included from
-another file, or nested in another router, yields nothing: its served path is
-decided somewhere this parser cannot see. An application passed to
-``.mount()`` here is itself a sub-application and yields nothing either.
+more than one line, so it is recorded as composed. A router mounted from another
+file, nested in another router, or included inside an application factory is
+decided by the global pass (:mod:`repoatlas.graph.py_routes`) from claims this
+module records: its receivers, its routes, its mounts of imported routers and its
+path constants. An application passed to ``.mount()`` here is itself a
+sub-application and yields nothing.
 Application-level routes are taken as served at the root, which is what the file
 states; an application mounted under a prefix from *another* file is a known
 limitation.
