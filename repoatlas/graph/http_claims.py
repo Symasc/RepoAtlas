@@ -95,6 +95,7 @@ from repoatlas.graph.keys import global_key
 from repoatlas.graph.py_modules import PythonModules
 from repoatlas.graph.py_routes import plan_python_routes
 from repoatlas.graph.resolution import ResolutionIndex
+from repoatlas.graph.ts_routes import plan_fastify_routes
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.parsers.http_facts import (
@@ -537,6 +538,28 @@ def plan_http_claims(
     declared_routes.update(python.declared)
     resolved += python.resolved
     unresolved += python.unresolved
+
+    # -- Fastify routes registered from another module -------------------------------
+    fastify = plan_fastify_routes(grouped, index, by_id)
+    for route in fastify.routes:
+        _keep(
+            pending,
+            (route.src_id, route.body),
+            PendingHttpEdge(
+                src_id=route.src_id,
+                target=route.target,
+                type=EdgeType.SERVES_HTTP_ROUTE,
+                repo_id=route.repo_id,
+                file_id=route.file_id,
+                line_start=route.line_start,
+                line_end=route.line_end,
+            ),
+        )
+    route_outcomes.update(fastify.outcomes)
+    promoted_routes.update(fastify.promoted)
+    declared_routes.update(fastify.declared)
+    resolved += fastify.resolved
+    unresolved += fastify.unresolved
 
     # -- what each repository serves ----------------------------------------------------
     # Per-file routes and the routes proven above, and nothing else: template calls

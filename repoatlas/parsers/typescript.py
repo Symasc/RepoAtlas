@@ -24,6 +24,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
     Severity,
 )
+from repoatlas.parsers.http_fastify import FastifyDeclarations
 from repoatlas.parsers.http_nestjs import NestDeclarations
 from repoatlas.parsers.http_ts_wrappers import FetchWrappers
 from repoatlas.parsers.http_typescript import TypeScriptHttp
@@ -95,12 +96,14 @@ class _Walker:
         nest: NestDeclarations | None = None,
         wrappers: FetchWrappers | None = None,
         uses: UseAnalysis | None = None,
+        fastify: FastifyDeclarations | None = None,
     ) -> None:
         self._source = source
         self._language = language
         self._http = http
         self._nest = nest
         self._wrappers = wrappers
+        self._fastify = fastify
         self.symbols: list[ParsedSymbol] = []
         self.references: list[ParsedReference] = []
         self._scope: list[str] = []
@@ -593,6 +596,8 @@ class _Walker:
             self.references.extend(self._nest.call_references(node, self._current))
         if self._wrappers is not None:
             self.references.extend(self._wrappers.call_references(node, self._current))
+        if self._fastify is not None:
+            self.references.extend(self._fastify.call_references(node, self._current))
         self.references.append(
             ParsedReference(
                 edge_type=EdgeType.CALLS,
@@ -716,7 +721,9 @@ class TypeScriptParser:
     #    named import through re-exporting barrels to the file that defines it.
     # 10: declarations' uses of module-scope names (USES), and the file's export
     #    table for following them through barrels (repoatlas.parsers.ts_uses).
-    version = "10"
+    # 11: Fastify applications, plugins, routes and registrations, and the file's
+    #    exported string constants (repoatlas.parsers.http_fastify).
+    version = "11"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
@@ -747,10 +754,11 @@ class TypeScriptParser:
         http = TypeScriptHttp(source, tree.root_node)
         nest = NestDeclarations(source, tree.root_node, http.counts)
         wrappers = FetchWrappers(source, tree.root_node, http.counts)
+        fastify = FastifyDeclarations(source, tree.root_node, http.counts)
         # Uses are proven by scoping, and a tree the grammar had to recover may have
         # lost a declaration: such a file states no uses at all.
         uses = None if has_error(tree) else UseAnalysis(source, tree.root_node)
-        walker = _Walker(source, grammar, http, nest, wrappers, uses)
+        walker = _Walker(source, grammar, http, nest, wrappers, uses, fastify)
         walker.run(tree.root_node)
 
         whole_file_start, whole_file_last = whole_file_span(content)
@@ -781,6 +789,7 @@ class TypeScriptParser:
             references=(
                 *walker.references,
                 *nest.references(),
+                *fastify.references(),
                 *wrappers.declarations(),
                 *(
                     use_references(walker.uses, walker.symbols, uses.exports)
