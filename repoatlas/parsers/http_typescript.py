@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -353,15 +353,16 @@ def binding_counts(source: bytes, root: Node) -> Counter[str]:
     """How many times each name is bound anywhere beneath ``root`` (a file, or a scope)."""
     counts: Counter[str] = Counter()
     for node in walk(root):
-        counts.update(bindings(source, node))
+        _count_bindings(source, node, counts)
     return counts
 
 
-def bindings(source: bytes, node: Node) -> Iterator[str]:
-    """Each name ``node``'s own children bind: a declared name, a parameter, an import."""
+def _count_bindings(source: bytes, node: Node, counts: Counter[str]) -> None:
+    """Count each name ``node``'s own children bind: a declared name, a parameter, an
+    import. Inline rather than a generator: it runs for every node of every file."""
     for index, child in enumerate(node.children):
         if child.type == "shorthand_property_identifier_pattern":
-            yield node_text(source, child)
+            counts[node_text(source, child)] += 1
             continue
         if child.type != "identifier":
             continue
@@ -374,7 +375,7 @@ def bindings(source: bytes, node: Node) -> Iterator[str]:
                 name is None and node.type in _BINDING_PARENTS
             )
         if binds:
-            yield node_text(source, child)
+            counts[node_text(source, child)] += 1
 
 
 #: Nodes that open a function scope of their own.
@@ -406,7 +407,7 @@ def scope_bindings(source: bytes, function: Node) -> Counter[str]:
             if node.type in _DECLARED_FUNCTIONS and name is not None:
                 counts[node_text(source, name)] += 1
             continue
-        counts.update(bindings(source, node))
+        _count_bindings(source, node, counts)
         stack.extend(node.children)
     return counts
 

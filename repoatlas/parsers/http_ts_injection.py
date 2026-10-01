@@ -110,6 +110,10 @@ class Injections:
         self._own: dict[_Key, Counter[str]] = {}
         self._owners: set[str] = set()
         self._top_level(root)
+        #: Every name a registered function destructures: no other name is an option.
+        self._destructured = {
+            name for function in self._functions.values() for name in function.pattern or {}
+        }
 
     # -- the module ------------------------------------------------------------------
 
@@ -271,6 +275,8 @@ class Injections:
     def _option(self, node: Node) -> tuple[_Function, str] | None:
         """The enclosing function and options key a name is destructured from, if it is."""
         name = node_text(self._source, node)
+        if name not in self._destructured:
+            return None
         scope = node.parent
         while scope is not None and scope.type != "program":
             if scope.type in FUNCTION_NODES:
@@ -333,6 +339,9 @@ class Injections:
     # -- calls ---------------------------------------------------------------------------
 
     def call_references(self, node: Node, source_symbol: str | None) -> list[ParsedReference]:
+        # Every claim holds superagent itself or a key of a destructured first parameter.
+        if not self._destructured and not self._wrappers.imports_superagent:
+            return []
         callee = node.child_by_field_name("function")
         if callee is None:
             return []
