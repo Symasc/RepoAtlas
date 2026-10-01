@@ -394,8 +394,8 @@ class FetchWrappers:
                         and node_text(self._source, prop) == "agent"
                     ):
                         self._agents.add(name)
-        for node in walk(root):
-            if node.type != "member_expression" or not self._agents:
+        for node in walk(root) if self._agents else ():
+            if node.type != "member_expression":
                 continue
             owner = node.child_by_field_name("object")
             prop = node.child_by_field_name("property")
@@ -406,6 +406,11 @@ class FetchWrappers:
                 and node_text(self._source, prop) == "use"
             ):
                 self._agents.discard(node_text(self._source, owner))
+
+    @property
+    def imports_superagent(self) -> bool:
+        """Whether the file binds superagent itself at module level at all."""
+        return bool(self._superagent)
 
     def is_superagent(self, name: str, at: Node) -> bool:
         """Whether ``name`` at ``at`` is superagent itself, imported at module level."""
