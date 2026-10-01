@@ -57,7 +57,7 @@ export async function readConnection(env: Environment = process.env): Promise<Co
     throw new ConnectionError(
       "API_NOT_CONFIGURED",
       `${CONNECTION_FILE_ENV} is not set.`,
-      `Set ${CONNECTION_FILE_ENV} for the explorer to the connection file \`repoatlas serve\` reports, then restart the explorer.`,
+      `Start the explorer with \`repoatlas ui\`, or set ${CONNECTION_FILE_ENV} for it to the connection file \`repoatlas serve\` reports, then restart it.`,
     );
   }
   let raw: Buffer;

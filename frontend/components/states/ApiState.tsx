@@ -20,8 +20,8 @@ function guidance(error: ApiError): Guidance {
     case "API_NOT_CONFIGURED":
       return {
         title: "Connect the explorer to RepoAtlas",
-        body: "Start the local API, then restart the explorer with `REPOATLAS_API_CONNECTION_FILE` set to the connection file the API reports.",
-        command: "repoatlas serve",
+        body: "This explorer was started without a connection to RepoAtlas. Stop it and start both together, or start `repoatlas serve` and restart the explorer with `REPOATLAS_API_CONNECTION_FILE` set to the file it reports.",
+        command: "repoatlas ui",
       };
     case "API_NOT_RUNNING":
       return {
