@@ -38,7 +38,7 @@ that gap published a knowledge base with no cross-repository graph at all while
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
@@ -432,7 +432,12 @@ class ReferenceLinker:
         """
         return self.commit_global(self.prepare_global())
 
-    def prepare_global(self, uses: UsesChangeLog | None = None) -> GlobalPlan:
+    def prepare_global(
+        self,
+        uses: UsesChangeLog | None = None,
+        *,
+        on_stage: Callable[[str], None] | None = None,
+    ) -> GlobalPlan:
         """Compute the complete replacement graph. **Writes nothing.**
 
         Everything expensive happens here: reading every file row and symbol,
@@ -448,10 +453,14 @@ class ReferenceLinker:
         edges are not known complete, every use is resolved.
 
         Instrumented per stage so the traversal's cost is measurable without
-        anyone restructuring it to find out (V1_SPEC §20).
+        anyone restructuring it to find out (V1_SPEC §20). ``on_stage`` hears each
+        stage's name as it starts, so a progress bar can follow the pass; it is
+        told, never asked, and nothing it does reaches the plan.
         """
         stages: list[StageTiming] = []
+        entered = on_stage or _unobserved
 
+        entered("index")
         with Stopwatch("index") as watch:
             file_rows = self._knowledge.list_file_rows()
             symbols = self._knowledge.list_symbols()
@@ -462,6 +471,7 @@ class ReferenceLinker:
 
         by_id = {row.file_id: row for row in file_rows}
 
+        entered("resolve")
         with Stopwatch("resolve") as watch:
             # Declaration uses resolve in a stage of their own, below; module-resolution
             # configuration is read by that stage, never resolved itself.
@@ -517,6 +527,7 @@ class ReferenceLinker:
             watch.detail = f"{unresolved} still unresolved; {decided.detail}; {crossings.detail}"
         stages.append(_timing(watch))
 
+        entered("uses")
         with Stopwatch("uses") as watch:
             scope = (
                 uses.scope()
@@ -531,6 +542,7 @@ class ReferenceLinker:
             watch.detail = _uses_detail(uses_plan)
         stages.append(_timing(watch))
 
+        entered("dependencies")
         with Stopwatch("dependencies") as watch:
             dependencies, cross = self._plan_dependencies(index, records)
             watch.candidates_in = len(dependencies)
@@ -979,6 +991,10 @@ def _uses_detail(plan: UsesPlan) -> str:
 def _timing(watch: Stopwatch) -> StageTiming:
     assert watch.recorded is not None
     return watch.recorded
+
+
+def _unobserved(stage: str) -> None:
+    """The stage listener of a pass nobody is following."""
 
 
 def _flavor(origin: FileRow, meta: dict[str, str]) -> str | None:

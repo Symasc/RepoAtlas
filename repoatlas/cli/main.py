@@ -7,6 +7,8 @@ logic (ARCHITECTURE.md §1 rule 3).
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated
 
@@ -22,6 +24,7 @@ from repoatlas.rendering import (
     render_status,
     render_sync,
 )
+from repoatlas.rendering.progress import TerminalProgress
 from repoatlas.services.workspace import Workspace, open_workspace
 
 app = typer.Typer(
@@ -88,12 +91,11 @@ def init(
         _fail(exc)
         return
     try:
-        report, count = services.initialize(workspace, directory)
+        with _progress() as progress:
+            report, count = services.initialize(workspace, directory, progress=progress)
     except RepoAtlasError as exc:
         _fail(exc)
         return
-    finally:
-        pass
 
     if json_output:
         typer.echo(_to_json(report))
@@ -138,7 +140,8 @@ def sync(
         )
     try:
         context = _resolve(workspace, repo or repository, "sync", verbose)
-        report = services.sync(workspace, context, full=full)
+        with _progress() as progress:
+            report = services.sync(workspace, context, full=full, progress=progress)
     except RepoAtlasError as exc:
         _fail(exc)
         return
@@ -266,6 +269,21 @@ def serve(
         api.serve(host=host, port=port, ready=announce)
     except RepoAtlasError as exc:
         _fail(exc)
+
+
+@contextmanager
+def _progress() -> Iterator[TerminalProgress | None]:
+    """A progress line on stderr while a run lasts, when stderr is a terminal.
+
+    Erased on the way out, before anything else is printed: the report, an
+    error, or ``--json`` on stdout reads exactly as it did without one.
+    """
+    progress = TerminalProgress.for_stream(sys.stderr)
+    try:
+        yield progress
+    finally:
+        if progress is not None:
+            progress.close()
 
 
 def _report_sync_telemetry(report: SyncReport) -> None:
