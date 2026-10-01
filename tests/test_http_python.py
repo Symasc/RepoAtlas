@@ -29,7 +29,10 @@ def _http(source: str) -> list[ParsedReference]:
 
 
 def _targets(source: str, edge: EdgeType) -> set[str]:
-    return {r.target_key for r in _http(source) if r.edge_type is edge}
+    """What this file decides alone: claims for the global pass are not facts."""
+    return {
+        r.target_key for r in _http(source) if r.edge_type is edge and PENDING_FACT not in r.meta
+    }
 
 
 def _served(source: str) -> set[str]:
@@ -124,7 +127,7 @@ def test_a_router_route_is_composed_from_its_mounts() -> None:
     app.include_router(router, prefix="/api")
     app.include_router(router)
     """
-    references = _http(source)
+    references = [r for r in _http(source) if PENDING_FACT not in r.meta]
     assert {r.target_key for r in references} == {
         "GET /api/users/me",
         "GET /users/me",
