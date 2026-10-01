@@ -79,6 +79,7 @@ from repoatlas.storage.sqlite.stores import (
 )
 from repoatlas.storage.sqlite.vectors import SqliteVectorIndex
 from repoatlas.sync.planner import decide_rehash, facts_version, plan_sync
+from repoatlas.sync.progress import LINK_STAGES, SILENT, SyncProgress
 from repoatlas.sync.scanner import (
     EnumerationUnavailable,
     ScannedFile,
@@ -170,6 +171,8 @@ class SyncEngine:
         self._linker = ReferenceLinker(knowledge, dependencies)
         #: What the run in progress changed that USES edges depend on; ``None`` outside one.
         self._uses: UsesChangeLog | None = None
+        #: Who is watching the run in progress (:mod:`repoatlas.sync.progress`).
+        self._progress: SyncProgress = SILENT
 
     @property
     def facts_version(self) -> str:
@@ -216,7 +219,7 @@ class SyncEngine:
         return repo.model_copy(update={"slug": slug})
 
     def sync_repository(
-        self, repo: Repository, *, full: bool = False
+        self, repo: Repository, *, full: bool = False, position: int = 1, total: int = 1
     ) -> tuple[RepositorySyncReport, SyncCompletion]:
         """Bring one repository's index in line with its current working tree.
 
@@ -225,11 +228,16 @@ class SyncEngine:
         then, deliberately: parsing having succeeded is not the sync having
         succeeded, and a run that dies here must be redone rather than trusted
         (ARCHITECTURE.md §9).
+
+        ``position`` and ``total`` say where this repository falls in the run, for
+        its progress listener only.
         """
         if repo.id is None:
             raise ValueError("repository must be persisted before sync")
 
         repo_id = repo.id
+        progress = self._progress
+        progress.scanning(position, total, repo.name, 0)
         # Identity is resolved before anything builds a key from it.
         repo = self.ensure_repository_identity(repo)
         repo_path = repo.path
@@ -264,12 +272,20 @@ class SyncEngine:
 
         self._repositories.mark_sync_started(repo_id)
 
+        hashed = 0
+
+        def hash_of(rel: str) -> str | None:
+            nonlocal hashed
+            hashed += 1
+            progress.scanning(position, total, repo.name, hashed)
+            return hash_within(boundary, rel)
+
         plan = plan_sync(
             scanned,
             known,
             rehash=rehash,
             parser_version=self.facts_version,
-            hash_of=lambda rel: hash_within(boundary, rel),
+            hash_of=hash_of,
         )
 
         # Deletion first: a file's facts must never outlive the file.
@@ -296,7 +312,9 @@ class SyncEngine:
                 languages.add(language)
             self._note_manifest(scanned_file.rel_path, manifests, lockfiles)
 
-        for scanned_file in [*plan.new, *plan.changed]:
+        pending = [*plan.new, *plan.changed]
+        progress.indexing(position, total, repo.name, 0, len(pending))
+        for scanned_file in pending:
             outcome = self._index_file(repo, scanned_file.rel_path, scanned_file, boundary)
             # Stamped here, from the path this sync admitted, because this is the
             # only place that knows it: a parser is handed content and a name it
@@ -312,6 +330,7 @@ class SyncEngine:
             edges_total += outcome.edges
             dependencies_total += outcome.dependencies
             indexed += 1
+            progress.indexing(position, total, repo.name, indexed, len(pending))
             if outcome.language:
                 languages.add(outcome.language)
 
@@ -834,6 +853,7 @@ class SyncEngine:
         full: bool = False,
         scope: str = "global",
         embed_repo_ids: Sequence[int] | None = None,
+        progress: SyncProgress | None = None,
     ) -> SyncReport:
         """One synchronization run, from working tree to complete knowledge state.
 
@@ -853,7 +873,8 @@ class SyncEngine:
         run redo the work instead of trusting it (ARCHITECTURE.md §9).
 
         The caller must already hold the writer lock; see
-        :func:`repoatlas.sync.lock.writer_lock`.
+        :func:`repoatlas.sync.lock.writer_lock`. ``progress`` hears how far the run
+        has got (:mod:`repoatlas.sync.progress`); it observes and changes nothing.
         """
         # USES edges are kept between syncs (repoatlas.graph.uses_link). Which of them
         # this run must replace is gathered as files are written, unless the state they
@@ -868,10 +889,12 @@ class SyncEngine:
             everything=stored.reason if stored is not None else None,
         )
         self._knowledge.set_uses_links_state(PENDING)
+        self._progress = progress if progress is not None else SILENT
         try:
             return self._run(repositories, full=full, scope=scope, embed_repo_ids=embed_repo_ids)
         finally:
             self._uses = None
+            self._progress = SILENT
 
     def _run(
         self,
@@ -884,7 +907,7 @@ class SyncEngine:
         reports: list[RepositorySyncReport] = []
         completions: list[SyncCompletion] = []
 
-        for repo in repositories:
+        for position, repo in enumerate(repositories, start=1):
             # Scope decides which repositories a run may forget, exactly as it
             # decides which it may index: a repository-scoped run never touches
             # another row.
@@ -892,7 +915,9 @@ class SyncEngine:
                 continue
             self.ensure_repository_entity(repo)
             try:
-                report, completion = self.sync_repository(repo, full=full)
+                report, completion = self.sync_repository(
+                    repo, full=full, position=position, total=len(repositories)
+                )
             except EnumerationUnavailable:
                 # One repository RepoAtlas cannot establish the file set for does
                 # not invalidate the others: healthy repositories in the same run
@@ -906,10 +931,16 @@ class SyncEngine:
             reports.append(report)
             completions.append(completion)
 
+        def stage(name: str) -> None:
+            self._progress.linking(name, LINK_STAGES.index(name) + 1, len(LINK_STAGES))
+
         # Computed outside the transaction: this is the expensive half, and none
         # of it touches the graph it is going to replace.
-        plan = self._linker.prepare_global(self._uses)
+        plan = self._linker.prepare_global(self._uses, on_stage=stage)
 
+        # The swap is reported here rather than by the linker, so `commit_global` keeps
+        # the one-argument signature the failure-injection tests replace it with.
+        stage("swap")
         with self._knowledge.transaction():
             link = self._linker.commit_global(plan)
             self._repositories.mark_many_synced(completions)
@@ -971,6 +1002,7 @@ class SyncEngine:
 
         embedded = 0
         batch = max(1, self._settings.embeddings.batch_size)
+        self._progress.embedding(0, len(pending))
         for start in range(0, len(pending), batch):
             window = pending[start : start + batch]
             pairs = self._vectors.texts_for_hashes(window)
@@ -993,6 +1025,7 @@ class SyncEngine:
                     for (content_hash, _), vector in zip(pairs, vectors, strict=True)
                 ],
             )
+            self._progress.embedding(min(embedded, len(pending)), len(pending))
 
         return EmbeddingResult(
             embedded=embedded,

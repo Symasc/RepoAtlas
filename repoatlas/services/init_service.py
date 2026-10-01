@@ -13,10 +13,15 @@ from repoatlas.discovery.reconcile import (
 from repoatlas.errors import RepoAtlasError, RepositoryRootConflictError
 from repoatlas.models.reports import SyncReport
 from repoatlas.services.workspace import Workspace
+from repoatlas.sync.progress import SILENT, SyncProgress
 
 
 def initialize(
-    workspace: Workspace, root: Path, *, config_path: Path | None = None
+    workspace: Workspace,
+    root: Path,
+    *,
+    config_path: Path | None = None,
+    progress: SyncProgress | None = None,
 ) -> tuple[SyncReport, int]:
     """Establish the managed root, then discover and index everything beneath it.
 
@@ -35,12 +40,16 @@ def initialize(
     mutating operation on the shared knowledge base — it rewrites the repository
     set and rebuilds the global graph — so protecting only ``sync`` would leave the
     more destructive of the two unserialized (ARCHITECTURE.md §9).
+
+    ``progress`` hears how far discovery and the run have got, and nothing else.
     """
+    listener = progress if progress is not None else SILENT
     resolved = root.expanduser().resolve()
     if not resolved.is_dir():
         raise RepoAtlasError(f"Not a directory: {root}")
 
     with workspace.writer_lock():
+        listener.discovering()
         plan = plan_repository_set(
             resolved, workspace.settings.discovery, workspace.repositories.list_all()
         )
@@ -95,7 +104,7 @@ def initialize(
         # aftermath — configuration moved, rows not.
         save_settings(settings, config_path)
 
-        report = engine.run(managed, scope="global", embed_repo_ids=None)
+        report = engine.run(managed, scope="global", embed_repo_ids=None, progress=listener)
 
     return (
         report.model_copy(

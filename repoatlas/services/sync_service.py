@@ -9,9 +9,16 @@ from repoatlas.models.context import ContextScope, RepositoryContext
 from repoatlas.models.reports import SyncReport
 from repoatlas.models.repository import Repository
 from repoatlas.services.workspace import Workspace
+from repoatlas.sync.progress import SILENT, SyncProgress
 
 
-def sync(workspace: Workspace, context: RepositoryContext, *, full: bool = False) -> SyncReport:
+def sync(
+    workspace: Workspace,
+    context: RepositoryContext,
+    *,
+    full: bool = False,
+    progress: SyncProgress | None = None,
+) -> SyncReport:
     """Reconcile the repository *set*, then the contents of every repository in it.
 
     Scope is decided by the shared resolver, never re-derived here. The link pass
@@ -46,7 +53,10 @@ def sync(workspace: Workspace, context: RepositoryContext, *, full: bool = False
     no ordinary sync ever reconciles again, and the defect this fixes would come
     straight back for anyone who ran ``git init`` on their workspace directory.
     Syncing the repository that *is* the managed root is syncing the managed root.
+
+    ``progress`` hears how far rediscovery and the run have got, and nothing else.
     """
+    listener = progress if progress is not None else SILENT
     root = workspace.root
     with workspace.writer_lock():
         repositories: tuple[Repository, ...] = context.repositories
@@ -54,6 +64,7 @@ def sync(workspace: Workspace, context: RepositoryContext, *, full: bool = False
         unreadable = ()
 
         if root is not None and _covers_root(context, root):
+            listener.discovering()
             plan = plan_repository_set(
                 root, workspace.settings.discovery, workspace.repositories.list_all()
             )
@@ -94,6 +105,7 @@ def sync(workspace: Workspace, context: RepositoryContext, *, full: bool = False
             full=full,
             scope=str(context.scope),
             embed_repo_ids=[r.id for r in repositories if r.id is not None],
+            progress=listener,
         )
 
     return report.model_copy(update={"repositories_added": added, "unreadable_paths": unreadable})
