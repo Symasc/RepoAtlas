@@ -65,8 +65,15 @@ from dataclasses import dataclass, field
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedReference
 from repoatlas.parsers.http_facts import (
+    COMPOSED,
+    EXACT,
     HTTP_CLIENT_CALL,
     HTTP_EXPOSED_ENDPOINT,
+    PYTHON_CONSTANTS,
+    PYTHON_MOUNT,
+    PYTHON_RECEIVER,
+    PYTHON_ROUTE,
+    PYTHON_SCRIPT,
     http_reference,
     pending_reference,
 )
@@ -122,6 +129,20 @@ _MAX_EXPRESSION = 64
 #: adversarial chain of ``+`` cannot recurse the parser into the ground.
 _MAX_STRING_DEPTH = 32
 
+#: Mounting calls: the parameter naming what is mounted, the one naming its prefix, and
+#: the kind it must be.
+_MOUNT_CALLS = {
+    "include_router": ("router", "prefix", _FASTAPI_ROUTER),
+    "register_blueprint": ("blueprint", "url_prefix", _FLASK_BLUEPRINT),
+}
+#: Applications, which serve their routes at the root of their paths.
+_APPLICATIONS = frozenset({_FASTAPI_APP, _FLASK_APP})
+#: A constant other modules may read only when it could be a piece of a path or a URL:
+#: short, and without whitespace -- prose, messages and format strings are left out.
+_MAX_CONSTANT = 256
+#: Constants one module offers, in line order; past this, the rest are not offered.
+_MAX_CONSTANTS = 64
+
 
 def static_string(node: ast.expr | None, depth: int = 0) -> str | None:
     """The value of a literal string expression, or ``None``.
@@ -149,8 +170,8 @@ def static_string(node: ast.expr | None, depth: int = 0) -> str | None:
     return None
 
 
-def _binding_counts(tree: ast.Module) -> Counter[str] | None:
-    """How many times each name is bound anywhere in the module.
+def _binding_counts(tree: ast.AST) -> Counter[str] | None:
+    """How many times each name is bound anywhere in the module (or function).
 
     ``None`` when a star import makes the answer unknowable for every name.
     """
@@ -211,6 +232,27 @@ class _Receiver:
     usable: bool = True
     #: Where an application is published, when its own module states it.
     deployments: tuple[_Deployment, ...] = ()
+    #: The line that constructs it.
+    line: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _Imported:
+    """Where a name this module imports comes from, as its import statement says."""
+
+    #: The module, relative dots included: ``.views``, ``service_prefix``.
+    module: str
+    #: The name taken from it; ``None`` for ``import module``, which binds the module.
+    attribute: str | None
+
+
+def _submodule(module: str, name: str) -> str:
+    """``module.name`` as an import specifier: ``.`` + ``views`` is ``.views``."""
+    return f"{module}{name}" if module.endswith(".") else f"{module}.{name}"
+
+
+def _path_like(value: str) -> bool:
+    return len(value) <= _MAX_CONSTANT and not any(char.isspace() for char in value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,7 +320,7 @@ def _fastapi_prefix(prefix: str) -> bool:
     )
 
 
-def _flask_join(prefix: str | None, rule: str) -> str | None:
+def flask_join(prefix: str | None, rule: str) -> str | None:
     """A blueprint route under a URL prefix, where the result is unambiguous.
 
     Flask joins the prefix and the rule on one ``/``. That is the same as plain
@@ -311,6 +353,198 @@ def _static_methods(node: ast.expr) -> tuple[str, ...] | None:
     return tuple(methods)
 
 
+def _import_table(statements: list[ast.stmt], counts: Counter[str]) -> dict[str, _Imported]:
+    """Where each name the statements import comes from, for names bound exactly once."""
+    table: dict[str, _Imported] = {}
+    for statement in statements:
+        if isinstance(statement, ast.ImportFrom):
+            module = "." * statement.level + (statement.module or "")
+            for alias in statement.names:
+                local = alias.asname or alias.name
+                if alias.name != "*" and counts[local] == 1:
+                    table[local] = _Imported(module, alias.name)
+        elif isinstance(statement, ast.Import):
+            for alias in statement.names:
+                # `import a.b` binds `a`; `import a.b as c` binds the module `a.b`.
+                local = alias.asname or alias.name.split(".")[0]
+                if counts[local] == 1:
+                    table[local] = _Imported(alias.name if alias.asname else local, None)
+    return table
+
+
+def _module_ref(node: ast.expr | None, imported: dict[str, _Imported]) -> tuple[str, str] | None:
+    """``(module, name)`` for an imported name, or ``module.name`` on an imported module."""
+    if isinstance(node, ast.Name):
+        found = imported.get(node.id)
+        if found is None or found.attribute is None:
+            return None
+        return found.module, found.attribute
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+        found = imported.get(node.value.id)
+        if found is None:
+            return None
+        module = found.module
+        if found.attribute is not None:
+            module = _submodule(found.module, found.attribute)
+        return module, node.attr
+    return None
+
+
+def _expression_call(statement: ast.stmt) -> ast.Call | None:
+    """``name.method(...)`` as a statement of its own."""
+    if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)):
+        return None
+    func = statement.value.func
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        return statement.value
+    return None
+
+
+def _main_guard(statement: ast.stmt) -> bool:
+    """``if __name__ == "__main__":``, either way round."""
+    test = statement.test if isinstance(statement, ast.If) else None
+    if not (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Eq)
+        and len(test.comparators) == 1
+    ):
+        return False
+    sides = (test.left, test.comparators[0])
+    return any(isinstance(side, ast.Name) and side.id == "__name__" for side in sides) and any(
+        isinstance(side, ast.Constant) and side.value == "__main__" for side in sides
+    )
+
+
+def _literal_lists(statements: list[ast.stmt], counts: Counter[str]) -> dict[str, list[ast.expr]]:
+    """Names the statements bind, once, to a list or tuple display: ``routers = [a, b]``."""
+    found: dict[str, list[ast.expr]] = {}
+    for statement in statements:
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and isinstance(statement.value, (ast.List, ast.Tuple))
+            and counts[statement.targets[0].id] == 1
+        ):
+            found[statement.targets[0].id] = list(statement.value.elts)
+    return found
+
+
+def _statement_calls(
+    statements: list[ast.stmt], counts: Counter[str], lists: dict[str, list[ast.expr]]
+) -> Iterator[ast.Call]:
+    """``name.method(...)`` statements, with a loop over a literal list unrolled.
+
+    ``for router in routers: app.include_router(router)`` is read as one call per
+    element, each element in the loop variable's place, when the list is a display or
+    a name bound once to one, the loop variable is bound by nothing else, and it is the
+    call's first argument and appears nowhere else in it.
+    """
+    for statement in statements:
+        call = _expression_call(statement)
+        if call is not None:
+            yield call
+            continue
+        if not (
+            isinstance(statement, ast.For)
+            and not statement.orelse
+            and isinstance(statement.target, ast.Name)
+            and counts[statement.target.id] == 1
+        ):
+            continue
+        variable = statement.target.id
+        iterated = statement.iter
+        if isinstance(iterated, (ast.List, ast.Tuple)):
+            elements: list[ast.expr] | None = list(iterated.elts)
+        elif isinstance(iterated, ast.Name):
+            elements = lists.get(iterated.id)
+        else:
+            elements = None
+        if elements is None or any(isinstance(element, ast.Starred) for element in elements):
+            continue
+        for inner in statement.body:
+            call = _expression_call(inner)
+            first = call.args[0] if call is not None and call.args else None
+            if (
+                call is None
+                or not isinstance(first, ast.Name)
+                or first.id != variable
+                or sum(
+                    isinstance(node, ast.Name) and node.id == variable for node in ast.walk(call)
+                )
+                != 1
+            ):
+                continue
+            for element in elements:
+                unrolled = ast.Call(
+                    func=call.func, args=[element, *call.args[1:]], keywords=call.keywords
+                )
+                yield ast.copy_location(unrolled, call)
+
+
+def _mount_target(kind: str, call: ast.Call) -> ast.expr | None:
+    """What an application's or router's mounting call mounts, or ``None``."""
+    attribute = call.func.attr if isinstance(call.func, ast.Attribute) else ""
+    if attribute == "include_router" and kind in {_FASTAPI_APP, _FASTAPI_ROUTER}:
+        return _argument(call, 0, "router")
+    if attribute == "register_blueprint" and kind in {_FLASK_APP, _FLASK_BLUEPRINT}:
+        return _argument(call, 0, "blueprint")
+    if attribute == "mount" and kind == _FASTAPI_APP:
+        return _argument(call, 1, "app")
+    return None
+
+
+def _family(attribute: str, decorator: ast.Call) -> tuple[str, tuple[str, ...]] | None:
+    """Which framework a decorator on an imported receiver can belong to, and its methods.
+
+    The receiver's kind is decided where it is constructed, so the decorator is read
+    under whatever both frameworks agree on, and the global pass checks the kind.
+    """
+    keywords = _keywords(decorator)
+    if attribute == "route":
+        methods = _static_methods(keywords["methods"]) if "methods" in keywords else ("GET",)
+        return ("flask", methods) if methods is not None else None
+    if attribute == "api_route" and "methods" in keywords:
+        methods = _static_methods(keywords["methods"])
+        return ("fastapi", methods) if methods is not None else None
+    if "methods" in keywords:
+        return None
+    if attribute in _FLASK_VERBS:
+        return "either", (_FLASK_VERBS[attribute],)
+    if attribute in _FASTAPI_VERBS:
+        return "fastapi", (_FASTAPI_VERBS[attribute],)
+    return None
+
+
+def _route_claim(
+    receiver: dict[str, str],
+    methods: tuple[str, ...],
+    parts: list[list[str]],
+    span: tuple[int, int],
+    qualified: str,
+) -> list[ParsedReference]:
+    """One :data:`PYTHON_ROUTE` claim per method; ``receiver`` names who declares it."""
+    literal = all(part[0] == "t" for part in parts)
+    shown = "".join(part[1] if part[0] == "t" else "{" + ".".join(part[1:]) + "}" for part in parts)
+    return [
+        pending_reference(
+            EdgeType.SERVES_HTTP_ROUTE,
+            EntityType.HTTP_ROUTE,
+            f"{method} {shown}",
+            span[0],
+            span[1],
+            role=PYTHON_ROUTE,
+            source_symbol=qualified,
+            method=method,
+            path=json.dumps(parts),
+            provenance=EXACT if literal else COMPOSED,
+            **receiver,
+        )
+        for method in methods
+    ]
+
+
 class PythonHttp:
     """What one module proves about HTTP, and the facts that follow from it."""
 
@@ -322,15 +556,26 @@ class PythonHttp:
         self._receivers: dict[str, _Receiver] = {}
         #: Module constant → (its literal value, its line), each bound exactly once.
         self._constants: dict[str, tuple[str, int]] = {}
+        #: Local name → where it is imported from, for every import bound exactly once.
+        self._imported: dict[str, _Imported] = {}
+        #: Mounts only the global pass can decide: an imported router, or a factory's.
+        self._mount_claims: list[ParsedReference] = []
+        #: Module-level names bound once to a list or tuple display.
+        self._lists: dict[str, list[ast.expr]] = {}
+        #: The line of a module-level ``if __name__ == "__main__":``, when there is one.
+        self._script = next(
+            (statement.lineno for statement in tree.body if _main_guard(statement)), None
+        )
         counts = _binding_counts(tree)
         if counts is None:
             return
         self._imports(tree, counts)
         self._optional_imports(tree, counts)
-        self._constructors(tree, counts)
-        self._mounts(tree)
-        self._identities(tree, counts)
         self._read_constants(tree, counts)
+        self._constructors(tree, counts)
+        self._mounts(tree, counts)
+        self._factories(tree)
+        self._identities(tree, counts)
 
     # -- what the module proves ---------------------------------------------------
 
@@ -348,6 +593,8 @@ class PythonHttp:
                     local = alias.asname or alias.name
                     if counts[local] == 1:
                         self._names[local] = f"{statement.module}.{alias.name}"
+        self._imported = _import_table(tree.body, counts)
+        self._lists = _literal_lists(tree.body, counts)
 
     def _optional_imports(self, tree: ast.Module, counts: Counter[str]) -> None:
         """``try: from flasgger import Swagger`` / ``except ImportError: Swagger = None``.
@@ -417,6 +664,7 @@ class PythonHttp:
                 continue
             receiver = self._receiver(kind, value)
             if receiver is not None:
+                receiver.line = statement.lineno
                 self._receivers[name] = receiver
 
     @staticmethod
@@ -441,11 +689,8 @@ class PythonHttp:
             return _Receiver(kind, prefix) if prefix is not None else None
         return _Receiver(kind)
 
-    def _mounts(self, tree: ast.Module) -> None:
-        for statement in tree.body:
-            if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)):
-                continue
-            call = statement.value
+    def _mounts(self, tree: ast.Module, counts: Counter[str]) -> None:
+        for call in _statement_calls(tree.body, counts, _literal_lists(tree.body, counts)):
             func = call.func
             if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)):
                 continue
@@ -463,6 +708,10 @@ class PythonHttp:
                 for argument in (*call.args, *(keyword.value for keyword in call.keywords)):
                     if isinstance(argument, ast.Name) and argument.id in self._receivers:
                         self._receivers[argument.id].usable = False
+                ref = _module_ref(_mount_target(owner.kind, call), self._imported)
+                if ref is not None:
+                    child = {"module": ref[0], "name": ref[1]}
+                    self._claim_mount(func.value.id, owner, call, child)
 
     def _mount(
         self,
@@ -475,7 +724,12 @@ class PythonHttp:
     ) -> None:
         argument = _argument(call, 0, parameter)
         child = self._receivers.get(argument.id) if isinstance(argument, ast.Name) else None
-        if child is None or child.kind != child_kind:
+        if child is None:
+            ref = _module_ref(argument, self._imported)
+            if ref is not None:
+                self._claim_mount(owner_name, owner, call, {"module": ref[0], "name": ref[1]})
+            return
+        if child.kind != child_kind:
             return
         if owner.kind == child_kind or _dynamic(call):
             # Nested in another router, or mounted with arguments this cannot
@@ -491,6 +745,101 @@ class PythonHttp:
             child.usable = False
             return
         child.mounts.append((prefix, owner_name))
+
+    def _claim_mount(
+        self, owner_name: str, owner: _Receiver, call: ast.Call, child: dict[str, str]
+    ) -> None:
+        """A mount only the global pass can decide: of an imported router, or a factory's.
+
+        Recorded unreadable -- which keeps the router from being served at all, as a
+        mount this module cannot read does to one of its own -- when its arguments may
+        carry a prefix this cannot read, when it is a sub-application ``mount``, or when
+        a blueprint is nested in a blueprint, whose composition Flask decides.
+        """
+        attribute = call.func.attr if isinstance(call.func, ast.Attribute) else ""
+        readable = attribute in _MOUNT_CALLS and not _dynamic(call)
+        prefix: str | None = None
+        if readable:
+            _, prefix_name, child_kind = _MOUNT_CALLS[attribute]
+            keywords = _keywords(call)
+            if prefix_name in keywords:
+                prefix = static_string(keywords[prefix_name])
+                readable = prefix is not None and (
+                    child_kind != _FASTAPI_ROUTER or _fastapi_prefix(prefix)
+                )
+            elif child_kind == _FASTAPI_ROUTER:
+                prefix = ""
+        if owner.kind == _FLASK_BLUEPRINT:
+            readable = False
+        self._mount_claims.append(
+            pending_reference(
+                EdgeType.REFERENCES,
+                EntityType.SYMBOL,
+                child["name"],
+                call.lineno,
+                call.end_lineno or call.lineno,
+                role=PYTHON_MOUNT,
+                owner=owner_name,
+                owner_kind=owner.kind,
+                call=attribute,
+                readable="true" if readable else "false",
+                prefix=json.dumps(prefix),
+                **child,
+            )
+        )
+
+    def _factories(self, tree: ast.Module) -> None:
+        """Mounts in an application factory: a module-level function that constructs one.
+
+        The application is the function's local, constructed once at the function's top
+        level and bound nowhere else in it; the mounts are its own top-level statements,
+        so a conditional or looped registration is not read. A mounted name is read as
+        the function binds it: imported there or at module level, or this module's own
+        router -- never one a parameter or a local shadows.
+        """
+        for function in tree.body:
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            counts = _binding_counts(function)
+            if counts is None:
+                continue
+            imported = {name: found for name, found in self._imported.items() if not counts[name]}
+            imported.update(_import_table(function.body, counts))
+            applications: dict[str, str] = {}
+            for statement in function.body:
+                if (
+                    isinstance(statement, ast.Assign)
+                    and len(statement.targets) == 1
+                    and isinstance(statement.targets[0], ast.Name)
+                    and isinstance(statement.value, ast.Call)
+                    and not _dynamic(statement.value)
+                    and counts[statement.targets[0].id] == 1
+                ):
+                    kind = _CONSTRUCTORS.get(self._resolve(statement.value.func) or "")
+                    if kind in _APPLICATIONS:
+                        applications[statement.targets[0].id] = kind
+            lists = {name: found for name, found in self._lists.items() if not counts[name]}
+            lists.update(_literal_lists(function.body, counts))
+            for call in _statement_calls(function.body, counts, lists):
+                if not isinstance(call.func, ast.Attribute):
+                    continue
+                name = call.func.value.id if isinstance(call.func.value, ast.Name) else ""
+                kind = applications.get(name)
+                if kind is None:
+                    continue
+                argument = _mount_target(kind, call)
+                if (
+                    isinstance(argument, ast.Name)
+                    and argument.id in self._receivers
+                    and not counts[argument.id]
+                ):
+                    child = {"name": argument.id}
+                else:
+                    ref = _module_ref(argument, imported)
+                    if ref is None:
+                        continue
+                    child = {"module": ref[0], "name": ref[1]}
+                self._claim_mount(f"{function.name}.{name}", _Receiver(kind), call, child)
 
     # -- where an application is published -------------------------------------------
 
@@ -634,7 +983,13 @@ class PythonHttp:
     def route_references(
         self, function: ast.FunctionDef | ast.AsyncFunctionDef, qualified: str
     ) -> list[ParsedReference]:
-        """Routes a module-level function's decorators prove it serves."""
+        """Routes a module-level function's decorators prove it serves.
+
+        A route on an application with a literal path is served here. One on a router or
+        blueprint, on a receiver this module imports, or with a path naming an imported
+        constant, is also recorded as a :data:`PYTHON_ROUTE` claim, which the global pass
+        serves wherever it proves a mount and the values.
+        """
         found: list[ParsedReference] = []
         for decorator in function.decorator_list:
             if not isinstance(decorator, ast.Call) or _dynamic(decorator):
@@ -642,15 +997,33 @@ class PythonHttp:
             func = decorator.func
             if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)):
                 continue
+            start, end = decorator.lineno, decorator.end_lineno or decorator.lineno
             receiver = self._receivers.get(func.value.id)
-            if receiver is None or not receiver.usable:
+            if receiver is None:
+                found.extend(self._imported_route(func.value, func.attr, decorator, qualified))
+                continue
+            if not receiver.usable:
                 continue
             declared = self._declared(receiver, func.attr, decorator)
             if declared is None:
                 continue
-            methods, path = declared
+            methods, path_node = declared
             source = "fastapi" if receiver.kind in {_FASTAPI_APP, _FASTAPI_ROUTER} else "flask"
-            start, end = decorator.lineno, decorator.end_lineno or decorator.lineno
+            path = static_string(path_node)
+            if path is None or receiver.kind not in _APPLICATIONS:
+                parts = [["t", path]] if path is not None else self._path_parts(path_node)
+                if parts is not None:
+                    found.extend(
+                        _route_claim(
+                            {"router": func.value.id, "family": source},
+                            methods,
+                            parts,
+                            (start, end),
+                            qualified,
+                        )
+                    )
+            if path is None:
+                continue
             for served, composed, owners in self._served(func.value.id, receiver, path):
                 for method in methods:
                     found.append(
@@ -725,10 +1098,122 @@ class PythonHttp:
                 )
         return found
 
+    def _imported_route(
+        self, receiver: ast.Name, attribute: str, decorator: ast.Call, qualified: str
+    ) -> list[ParsedReference]:
+        """A route on a receiver this module imports: ``from . import main``, ``@main.route``."""
+        ref = _module_ref(receiver, self._imported)
+        family = _family(attribute, decorator)
+        if ref is None or family is None:
+            return []
+        named = "path" if family[0] == "fastapi" else "rule"
+        parts = self._path_parts(_argument(decorator, 0, named))
+        if parts is None and family[0] == "either":
+            # A verb shortcut names its path `path` in FastAPI and `rule` in Flask.
+            parts = self._path_parts(_argument(decorator, 0, "path"))
+        if parts is None:
+            return []
+        span = (decorator.lineno, decorator.end_lineno or decorator.lineno)
+        meta = {"module": ref[0], "router": ref[1], "family": family[0]}
+        return _route_claim(meta, family[1], parts, span, qualified)
+
+    def _path_parts(self, node: ast.expr | None, depth: int = 0) -> list[list[str]] | None:
+        """A path as literal text and imported names: ``f"/{PREFIX}/{API_VERSION}" + "/x"``.
+
+        Each part is ``["t", text]`` or ``["r", module, name]`` for a name some module this
+        one imports must bind to a string constant. This module's own constants are read
+        here; anything else -- a call, an attribute of an object, ``%``, ``.format``, a
+        conversion or format spec -- is not a path this can read.
+        """
+        if node is None or depth > _MAX_STRING_DEPTH:
+            return None
+        if isinstance(node, ast.Constant):
+            return [["t", node.value]] if isinstance(node.value, str) else None
+        if isinstance(node, ast.JoinedStr):
+            parts: list[list[str]] = []
+            for value in node.values:
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    parts.append(["t", value.value])
+                elif (
+                    isinstance(value, ast.FormattedValue)
+                    and value.conversion == -1
+                    and value.format_spec is None
+                ):
+                    named = self._named_part(value.value)
+                    if named is None:
+                        return None
+                    parts.append(named)
+                else:
+                    return None
+            return parts
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = self._path_parts(node.left, depth + 1)
+            right = self._path_parts(node.right, depth + 1) if left is not None else None
+            return None if left is None or right is None else left + right
+        named = self._named_part(node)
+        return [named] if named is not None else None
+
+    def _named_part(self, node: ast.expr) -> list[str] | None:
+        if isinstance(node, ast.Name) and node.id in self._constants:
+            return ["t", self._constants[node.id][0]]
+        ref = _module_ref(node, self._imported)
+        return ["r", ref[0], ref[1]] if ref is not None else None
+
+    def claim_references(self) -> list[ParsedReference]:
+        """What only the global pass can decide: receivers, mounts, offered constants."""
+        found: list[ParsedReference] = []
+        for name, receiver in self._receivers.items():
+            found.append(
+                pending_reference(
+                    EdgeType.REFERENCES,
+                    EntityType.SYMBOL,
+                    name,
+                    receiver.line,
+                    receiver.line,
+                    role=PYTHON_RECEIVER,
+                    kind=receiver.kind,
+                    prefix=json.dumps(receiver.prefix),
+                    usable="true" if receiver.usable else "false",
+                    mounts=json.dumps([mount for mount, _ in receiver.mounts]),
+                )
+            )
+        found.extend(self._mount_claims)
+        if self._script is not None:
+            found.append(
+                pending_reference(
+                    EdgeType.REFERENCES,
+                    EntityType.CONFIG,
+                    PYTHON_SCRIPT,
+                    self._script,
+                    self._script,
+                    role=PYTHON_SCRIPT,
+                )
+            )
+        offered = sorted(
+            (line, name, value)
+            for name, (value, line) in self._constants.items()
+            if _path_like(value)
+        )[:_MAX_CONSTANTS]
+        if offered:
+            found.append(
+                pending_reference(
+                    EdgeType.REFERENCES,
+                    EntityType.CONFIG,
+                    PYTHON_CONSTANTS,
+                    offered[0][0],
+                    offered[-1][0],
+                    role=PYTHON_CONSTANTS,
+                    constants=json.dumps(
+                        {name: [value, line] for line, name, value in offered}, sort_keys=True
+                    ),
+                )
+            )
+        return found
+
     @staticmethod
     def _declared(
         receiver: _Receiver, attribute: str, decorator: ast.Call
-    ) -> tuple[tuple[str, ...], str] | None:
+    ) -> tuple[tuple[str, ...], ast.expr | None] | None:
         keywords = _keywords(decorator)
         if receiver.kind in {_FASTAPI_APP, _FASTAPI_ROUTER}:
             path_node = _argument(decorator, 0, "path")
@@ -752,10 +1237,9 @@ class PythonHttp:
                 methods = (_FLASK_VERBS[attribute],)
             else:
                 return None
-        path = static_string(path_node)
-        if methods is None or path is None:
+        if methods is None or path_node is None:
             return None
-        return methods, path
+        return methods, path_node
 
     @staticmethod
     def _served(
@@ -772,7 +1256,7 @@ class PythonHttp:
                     continue
                 full: str | None = f"{mount or ''}{receiver.prefix or ''}{path}"
             else:
-                full = _flask_join(mount if mount is not None else receiver.prefix, path)
+                full = flask_join(mount if mount is not None else receiver.prefix, path)
             served = http.route_path(full) if full else None
             if served is not None:
                 owners = found.setdefault(served, [])
