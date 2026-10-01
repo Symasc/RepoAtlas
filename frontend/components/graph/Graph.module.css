@@ -680,17 +680,27 @@
 
 /* -- lines ----------------------------------------------------------------------------- */
 
+/* a line's colour is its relationship; its pattern, below, is its family */
 .link {
   --stroke: var(--ra-edge-cross);
   transition: opacity var(--ra-duration) var(--ra-ease);
 
-  &[data-family="http"] {
+  &[data-relation="imports"] {
+    --stroke: var(--ra-rel-imports);
+  }
+  &[data-relation="calls"] {
+    --stroke: var(--ra-rel-calls);
+  }
+  &[data-relation="uses"] {
+    --stroke: var(--ra-rel-uses);
+  }
+  &[data-relation="http"] {
     --stroke: var(--ra-endpoint);
   }
-  &[data-family="dependency"] {
+  &[data-relation="dependency"] {
     --stroke: var(--ra-package);
   }
-  &[data-family="config"] {
+  &[data-relation="config"] {
     --stroke: var(--ra-config);
   }
 
@@ -833,6 +843,27 @@
   align-items: center;
   gap: 6px;
   white-space: nowrap;
+}
+
+/* code's relationships, under its name */
+.legendGroup {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+
+  ul {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+}
+
+.legendGroupName {
+  font-weight: 600;
+  color: var(--ra-text);
 }
 
 .marks {

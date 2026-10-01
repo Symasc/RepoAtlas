@@ -25,8 +25,10 @@ import {
   chainOf,
   nameFromKey,
   reachOf,
+  relationOfRow,
   SEED_ID,
   splitAt,
+  traceEdgeId,
   unitLabel,
   type TraceGraph,
   type TraceRow,
@@ -189,7 +191,8 @@ export function TraceLevel({
     if (!graph || !row) return null;
     const before = row.candidate.from === 0 ? null : graph.rows.get(`c:${row.candidate.from}`);
     const from = before ? graph.cardOf.get(before.id) : SEED_ID;
-    return graph.edges.find((e) => e.source === from && e.target === graph.cardOf.get(row.id))?.id ?? null;
+    const id = from ? traceEdgeId(from, graph.cardOf.get(row.id)!, relationOfRow(row)) : null;
+    return graph.edges.some((e) => e.id === id) ? id : null;
   }, [graph, row]);
 
   const [tab, setTab] = useState<string>("");

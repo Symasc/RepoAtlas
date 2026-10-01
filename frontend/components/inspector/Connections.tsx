@@ -7,7 +7,7 @@ import { useState } from "react";
 import { RepoSwatch } from "@/components/common/RepoSwatch";
 import { EntityBadge, LineGlyph, PathBadge } from "@/components/graph/glyphs";
 import { compactCount, formatCount } from "@/lib/model/format";
-import { FAMILIES, type Connection, type Family, type Partner } from "@/lib/model/graph";
+import { FAMILIES, relationOf, type Connection, type Family, type Partner } from "@/lib/model/graph";
 
 import { Quiet } from "./Inspector";
 import classes from "./Inspector.module.css";
@@ -43,11 +43,19 @@ export function PartnerIcon({ partner, hue = null }: { partner: Partner; hue?: n
   }
 }
 
-function types(connection: Connection): string {
-  return connection.link.types
-    .slice(0, 3)
-    .map((t) => t.type.toLowerCase().replace(/_/g, " "))
-    .join(" · ");
+/** The relationships a connection carries, strongest first, each beside its line's colour. */
+function Kinds({ connection }: { connection: Connection }) {
+  const { family, types } = connection.link;
+  return (
+    <>
+      {types.slice(0, 3).map((t) => (
+        <span key={t.type} className={classes.kind}>
+          <LineGlyph family={family} relation={relationOf(family, t.type)} width={10} />
+          {t.type.toLowerCase().replace(/_/g, " ")}
+        </span>
+      ))}
+    </>
+  );
 }
 
 /**
@@ -144,7 +152,9 @@ function FamilyGroup({
                 <span className={classes.rowText}>
                   <span className={classes.rowLabel}>{c.partner.label}</span>
                   <span className={classes.rowDetail}>
-                    {[c.partner.detail, c.via && `via ${c.via}`, types(c)].filter(Boolean).join(" · ")}
+                    {[c.partner.detail, c.via && `via ${c.via}`].filter(Boolean).join(" · ")}
+                    {(c.partner.detail || c.via) && c.link.types.length > 0 && " · "}
+                    <Kinds connection={c} />
                   </span>
                 </span>
                 <span className={classes.rowCount} title={formatCount(c.link.count)}>

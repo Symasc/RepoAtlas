@@ -24,12 +24,12 @@ import {
   type ReactNode,
 } from "react";
 
-import type { Box, Family } from "@/lib/model/graph";
+import { CODE_RELATIONS, RELATIONS, type Box, type Family, type Relation } from "@/lib/model/graph";
 import { useAnimationsOff } from "@/lib/useMotion";
 
 import { RepoSwatch } from "@/components/common/RepoSwatch";
 
-import { edgeTypes, FAMILY_NOUN, type Emphasis, type GraphEdge } from "./edges";
+import { edgeTypes, RELATION_LABEL, type Emphasis, type GraphEdge } from "./edges";
 import { EntityBadge, LineGlyph, PathBadge } from "./glyphs";
 import classes from "./Graph.module.css";
 import { BACKDROP, type GraphNode } from "./nodes";
@@ -179,7 +179,8 @@ function Canvas({
         else if (touching) emphasis = "lit";
         else if (scope === "detail") hidden = true;
         else emphasis = "dim";
-        if (selectedEdge !== null && edge.id === selectedEdge) {
+        // every line of the connection being explained, one per relationship it carries
+        if (selectedEdge !== null && edge.data?.base === selectedEdge) {
           emphasis = "selected";
           hidden = false;
         }
@@ -338,7 +339,7 @@ function Canvas({
       </div>
       <div className={classes.statusBar}>
         <ZoomControls extent={extent} reduced={reduced} />
-        <Legend families={families} />
+        <Legend families={families} edges={edges} />
       </div>
     </div>
   );
@@ -396,26 +397,57 @@ function ZoomControls({ extent, reduced }: { extent: Box | null; reduced: boolea
   );
 }
 
-const LEGEND_LABEL: Record<Family, string> = {
-  code: "Code",
-  http: "HTTP",
-  dependency: "Package dependency",
-  config: "Config & env",
+/** Under the legend's "Code", its relationships go by their own short names. */
+const CODE_LEGEND: Record<(typeof CODE_RELATIONS)[number], string> = {
+  imports: "Imports",
+  calls: "Calls",
+  uses: "Uses",
+  other: "Other",
 };
 
-/** What each stroke means. Colour is never the only difference: each has its own pattern. */
-function Legend({ families }: { families: readonly Family[] }) {
+function isCode(relation: Relation): relation is (typeof CODE_RELATIONS)[number] {
+  return (CODE_RELATIONS as readonly Relation[]).includes(relation);
+}
+
+/**
+ * What each line means. Its pattern is its family (code solid, HTTP dashed, a
+ * package dependency double, configuration dotted); its colour is its
+ * relationship, so colour is never the only difference between families. The
+ * key lists what the level draws; a level with nothing drawn yet lists what its
+ * families usually carry.
+ */
+function Legend({ families, edges }: { families: readonly Family[]; edges: readonly GraphEdge[] }) {
+  const drawn = new Set(edges.map((e) => e.data?.relation));
+  let relations = RELATIONS.filter((r) => drawn.has(r));
+  if (relations.length === 0) {
+    relations = families.flatMap((f): Relation[] => (f === "code" ? ["imports", "calls", "uses"] : [f]));
+  }
+  const code = relations.filter(isCode);
+  const rest = relations.filter((r) => !isCode(r));
   return (
     <div className={classes.legendBar}>
       <ul className={classes.legend} aria-label="Legend">
-        {families.map((family) => (
-          <li key={family} className={classes.legendItem} title={`${FAMILY_NOUN[family]} relationships`}>
-            <LineGlyph family={family} width={24} />
-            {LEGEND_LABEL[family]}
+        {code.length > 0 && (
+          <li className={classes.legendGroup}>
+            <span className={classes.legendGroupName}>Code</span>
+            <ul aria-label="Code relationships">
+              {code.map((relation) => (
+                <li key={relation} className={classes.legendItem}>
+                  <LineGlyph family="code" relation={relation} width={22} />
+                  {CODE_LEGEND[relation]}
+                </li>
+              ))}
+            </ul>
+          </li>
+        )}
+        {rest.map((relation) => (
+          <li key={relation} className={classes.legendItem}>
+            <LineGlyph family={relation as Family} width={22} />
+            {RELATION_LABEL[relation]}
           </li>
         ))}
         <li className={classes.legendItem}>
-          <LineGlyph family="selected" width={24} />
+          <LineGlyph family="selected" width={22} />
           Selected
         </li>
       </ul>

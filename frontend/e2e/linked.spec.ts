@@ -1,8 +1,9 @@
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
 
-import type { ImpactCandidate, ImpactResponse } from "@/lib/api/generated";
+import type { ImpactCandidate, ImpactResponse, RepositoryLink } from "@/lib/api/generated";
 import { ASPECT } from "@/lib/graph/layout";
+import { familyOf, relationOf } from "@/lib/model/graph";
 
 import { ask, expect, ready, test } from "./fixtures";
 
@@ -16,6 +17,18 @@ const WORKSPACE = { scope: "global" } as const;
 /** Drawn link lines of one kind; the legend's samples carry no emphasis. */
 function lines(page: Page, kind: string) {
   return page.locator(`.react-flow__edges g[data-kind="${kind}"][data-emphasis]`);
+}
+
+/** How many lines draw one link: a code link one per relationship it carries, anything else one. */
+function linesOf(link: RepositoryLink): number {
+  const family = familyOf(link.kind, null, link.types ?? []);
+  if (family !== "code") return 1;
+  return Math.max(1, new Set((link.types ?? []).map((t) => relationOf(family, t.type))).size);
+}
+
+/** The links drawn by the lines a locator finds, each counted once however many lines it has. */
+async function linksIn(locator: ReturnType<Page["locator"]>): Promise<number> {
+  return new Set(await locator.evaluateAll((gs) => gs.map((g) => g.getAttribute("data-link")))).size;
 }
 
 function busiest(links: readonly { source: string; target: string }[]): [string, number] {
@@ -35,8 +48,10 @@ test("the overview draws one line per link and kind, each in its own stroke", as
   await page.goto("/");
   await ready(page);
   for (const kind of ["observed", "http", "dependency"] as const) {
-    const expected = links.filter((l) => l.kind === kind && l.source !== l.target).length;
-    await expect(lines(page, kind)).toHaveCount(expected);
+    const drawn = links.filter((l) => l.kind === kind && l.source !== l.target);
+    // one line per relationship of each link, and every line belongs to exactly one link
+    await expect(lines(page, kind)).toHaveCount(drawn.reduce((sum, l) => sum + linesOf(l), 0));
+    expect(await linksIn(lines(page, kind))).toBe(drawn.length);
   }
 
   // a dependency is a double line; HTTP is dashed; code is solid
@@ -132,20 +147,24 @@ test("pointing at a repository lights its links and fades the rest; selecting ho
   const overview = await ask(request, "topology/overview", { context: WORKSPACE });
   const links = overview.links ?? [];
   const [name, touching] = busiest(links);
+  const near = links.filter((l) => l.source === name || l.target === name);
+  const litLines = near.reduce((sum, l) => sum + linesOf(l), 0);
+  const allLines = links.reduce((sum, l) => sum + linesOf(l), 0);
 
   await page.goto("/");
   await ready(page);
   await page.getByRole("button", { name: `Select ${name}`, exact: true }).hover();
-  await expect(page.locator('.react-flow__edges g[data-emphasis="lit"]')).toHaveCount(touching);
-  await expect(page.locator('.react-flow__edges g[data-kind][data-emphasis="dim"]')).toHaveCount(links.length - touching);
-  // count badges on the lit lines
+  await expect(page.locator('.react-flow__edges g[data-emphasis="lit"]')).toHaveCount(litLines);
+  expect(await linksIn(page.locator('.react-flow__edges g[data-emphasis="lit"]'))).toBe(touching);
+  await expect(page.locator('.react-flow__edges g[data-kind][data-emphasis="dim"]')).toHaveCount(allLines - litLines);
+  // one count badge per lit link, however many lines draw it
   await expect(page.locator(".react-flow__edgelabel-renderer span")).toHaveCount(touching);
 
   await page.getByRole("button", { name: `Select ${name}`, exact: true }).click();
   await expect(page.getByRole("complementary", { name: `${name}, inspected` })).toBeVisible();
   // the pointer leaving does not undo a selection
   await page.mouse.move(2, 400);
-  await expect(page.locator('.react-flow__edges g[data-emphasis="lit"]')).toHaveCount(touching);
+  await expect(page.locator('.react-flow__edges g[data-emphasis="lit"]')).toHaveCount(litLines);
   expect(problems).toEqual([]);
 });
 
@@ -198,7 +217,9 @@ test("evidence for a link between repositories reads the lines that assert it", 
   await expect(panel.getByRole("tab", { name: "Evidence", selected: true })).toBeVisible();
   await expect(panel.locator("article").first()).toBeVisible();
   await expect(panel.locator("article pre").first()).toBeVisible();
-  await expect(page.locator('.react-flow__edges g[data-emphasis="selected"]')).toHaveCount(1);
+  // the chosen connection, every line of it
+  await expect(page.locator('.react-flow__edges g[data-emphasis="selected"]').first()).toBeVisible();
+  expect(await linksIn(page.locator('.react-flow__edges g[data-emphasis="selected"]'))).toBe(1);
   expect(problems).toEqual([]);
 });
 

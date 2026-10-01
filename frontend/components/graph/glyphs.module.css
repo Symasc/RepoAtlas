@@ -1,27 +1,46 @@
 /* -- line samples: the same stroke as the canvas draws -------------------------- */
 
-.line {
+/* a relationship's colour, shared by the samples and the segments of a bare code mark */
+:is(.line, .segment) {
   --stroke: var(--ra-edge-cross);
+
+  &[data-relation="imports"] {
+    --stroke: var(--ra-rel-imports);
+  }
+  &[data-relation="calls"] {
+    --stroke: var(--ra-rel-calls);
+  }
+  &[data-relation="uses"] {
+    --stroke: var(--ra-rel-uses);
+  }
+  &[data-relation="http"] {
+    --stroke: var(--ra-endpoint);
+  }
+  &[data-relation="dependency"] {
+    --stroke: var(--ra-package);
+  }
+  &[data-relation="config"] {
+    --stroke: var(--ra-config);
+  }
+}
+
+.line {
   flex-shrink: 0;
   overflow: visible;
 
-  &[data-family="http"] {
-    --stroke: var(--ra-endpoint);
-  }
-  &[data-family="dependency"] {
-    --stroke: var(--ra-package);
-  }
-  &[data-family="config"] {
-    --stroke: var(--ra-config);
-  }
   &[data-family="selected"] {
     --stroke: var(--ra-accent);
   }
 }
 
-.stroke {
+.stroke,
+.segment {
   stroke: var(--stroke);
   stroke-width: 2;
+  stroke-linecap: butt;
+}
+
+.stroke {
   stroke-linecap: round;
 }
 
