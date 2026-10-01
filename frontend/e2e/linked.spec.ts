@@ -308,6 +308,75 @@ test("a directory traces into the repositories that use what it holds", async ({
   expect(problems).toEqual([]);
 });
 
+test("the path a level states goes straight to any step of it", async ({ page, problems }) => {
+  const frame = page.locator(".react-flow__node-frame");
+  const step = (where: typeof frame, name: string) => where.getByRole("button", { name, exact: true });
+
+  // a directory's frame: every step but the one the reader is in
+  await page.goto("/?repo=auth-kit&path=src%2Fauth");
+  await ready(page);
+  await expect(frame).toContainText("auth-kit / src/auth");
+  await expect(step(frame, "auth")).toHaveCount(0);
+  await step(frame, "src").click();
+  await expect(page).toHaveURL(new RegExp(`\\?repo=auth-kit&path=src&sel=dir${literal("%3A")}${literal(encodeURIComponent("src/auth"))}$`));
+  await step(frame, "auth-kit").click();
+  await expect(page).toHaveURL(new RegExp(`\\?repo=auth-kit&sel=dir${literal("%3A")}src$`));
+
+  // a file's own node, in Links: every step of the folder it is in
+  await page.goto(`/?repo=${POLICY.repository}&path=${encodeURIComponent(POLICY.path)}`);
+  await ready(page);
+  await page.getByRole("radiogroup", { name: "Show" }).getByText("Links", { exact: true }).click();
+  const anchor = page.locator(".react-flow__node-anchor");
+  await expect(anchor.getByRole("button", { name: "policy.ts, this file" })).toBeVisible();
+  await step(anchor, "src").click();
+  await expect(page).toHaveURL(new RegExp(`\\?repo=${POLICY.repository}&path=src&sel=files$`));
+  expect(problems).toEqual([]);
+});
+
+test("with variables included, search finds a name and opens on its trace", async ({ page, request, problems }) => {
+  const { names = [] } = await ask(request, "topology/names", { context: WORKSPACE, query: "canEdit" });
+  const found = names[0]!;
+  expect(found.entity).toMatchObject({ repository_slug: POLICY.repository, path: POLICY.path });
+
+  await page.goto("/");
+  await ready(page);
+  // off until it is chosen, and the choice outlasts a reload
+  const beside = page.getByRole("banner").getByRole("switch", { name: "Include variables" });
+  await expect(beside).not.toBeChecked();
+  await beside.check();
+  await expect(page.getByRole("banner").getByRole("button", { name: /^Search repositories, files and variables/ })).toBeVisible();
+  // the switch keeps focus, and the shortcut still opens search
+  await page.keyboard.press("ControlOrMeta+K");
+  await expect(page.getByRole("dialog").getByRole("textbox", { name: "Search repositories, files and variables" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await page.reload();
+  await ready(page);
+  await expect(beside).toBeChecked();
+
+  await page.keyboard.press("ControlOrMeta+K");
+  const search = page.getByRole("dialog");
+  await expect(search.getByRole("switch", { name: "Include variables" })).toBeChecked();
+  await search.getByRole("textbox", { name: "Search repositories, files and variables" }).fill("canEdit");
+  const action = search.getByRole("button", { name: new RegExp(`^${literal(found.qualified_name)}`) });
+  await expect(action).toBeVisible();
+  await action.click();
+  await expect(page).toHaveURL(
+    new RegExp(`\\?repo=${POLICY.repository}&path=${literal(encodeURIComponent(POLICY.path))}&trace=${literal(encodeURIComponent(found.entity.key))}$`),
+  );
+  await expect(page.getByRole("button", { name: `${found.entity.name}, what changes` })).toBeVisible();
+  await expect(search).toHaveCount(0);
+
+  // turned off inside the search itself, names leave it at once and the query stays
+  await page.keyboard.press("ControlOrMeta+K");
+  await search.getByRole("textbox", { name: "Search repositories, files and variables" }).fill("canEdit");
+  await expect(action).toBeVisible();
+  await search.getByRole("switch", { name: "Include variables" }).uncheck();
+  await expect(action).toHaveCount(0);
+  await expect(search.getByRole("textbox", { name: "Search repositories and files" })).toHaveValue("canEdit");
+  await expect(beside).not.toBeChecked();
+  expect(problems).toEqual([]);
+});
+
 for (const scheme of ["dark", "light"] as const) {
   test.describe(`${scheme} theme`, () => {
     test.use({ colorScheme: scheme });

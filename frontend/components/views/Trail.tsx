@@ -1,6 +1,7 @@
 "use client";
 
 import { UnstyledButton } from "@mantine/core";
+import { useCallback } from "react";
 
 import { childOf, directoryId, FILES_ID, repositoryId } from "@/lib/model/graph";
 import type { RepositoryModel } from "@/lib/model/repositories";
@@ -9,22 +10,33 @@ import type { Navigation } from "./navigation";
 import classes from "./Views.module.css";
 
 /**
- * Where you are, every step a way back out. Climbing out lands on the step you
- * came from, selected, so the view you return to says where you were.
+ * Out to one step of where the reader is: `null` for every repository, `""` for
+ * this one's root, else a directory on the way here. It lands on the step the
+ * reader came from, selected, so the view returned to says where they were. A
+ * path names a file when `file` is set: its own step is then the files card.
  */
+export function useClimb(repository: RepositoryModel, nav: Navigation, file: boolean): (at: string | null) => void {
+  return useCallback(
+    (at: string | null) => {
+      if (at === null) {
+        nav.go({ repository: null, path: "" }, { select: repositoryId(repository.slug) });
+        return;
+      }
+      const path = nav.place.path;
+      const child = childOf(at, path);
+      // the child is a card there: a directory's own, or the files card for a file
+      const last = child === path && file;
+      nav.go({ repository: repository.slug, path: at }, { select: child === null ? null : last ? FILES_ID : directoryId(child) });
+    },
+    [repository.slug, nav, file],
+  );
+}
+
+/** Where you are, every step a way back out (see useClimb). */
 export function Trail({ repository, nav, file }: { repository: RepositoryModel; nav: Navigation; file: boolean }) {
   const path = nav.place.path;
   const segments = path ? path.split("/") : [];
-  const out = (at: string | null) => {
-    if (at === null) {
-      nav.go({ repository: null, path: "" }, { select: repositoryId(repository.slug) });
-      return;
-    }
-    const child = childOf(at, path);
-    // the child is a card there: a directory's own, or the files card for a file
-    const last = child === path && file;
-    nav.go({ repository: repository.slug, path: at }, { select: child === null ? null : last ? FILES_ID : directoryId(child) });
-  };
+  const out = useClimb(repository, nav, file);
   return (
     <nav className={classes.trail} aria-label="Location">
       <UnstyledButton className={classes.crumb} onClick={() => out(null)}>

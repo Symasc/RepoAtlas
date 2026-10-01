@@ -352,6 +352,43 @@
   white-space: nowrap;
 }
 
+/* a path a node states, each step a way straight there: above a node's cover,
+   and live inside a frame that otherwise lets every press through */
+.crumbs {
+  position: relative;
+  z-index: 2;
+}
+
+.crumb {
+  padding: 0 1px;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+  text-decoration: underline transparent;
+  text-underline-offset: 3px;
+  transition:
+    color var(--ra-duration-fast) var(--ra-ease),
+    text-decoration-color var(--ra-duration-fast) var(--ra-ease);
+
+  @mixin hover {
+    color: var(--ra-accent-strong);
+    text-decoration-color: currentColor;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--ra-focus);
+    outline-offset: 1px;
+  }
+}
+
+.crumbHere {
+  color: var(--ra-text-muted);
+}
+
 .frameCount {
   display: flex;
   flex-direction: column;

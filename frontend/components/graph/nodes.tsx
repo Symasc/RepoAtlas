@@ -3,7 +3,7 @@
 import { ArrowRightIcon, CaretRightIcon, FileIcon, FolderSimpleIcon, PuzzlePieceIcon } from "@phosphor-icons/react";
 import { Handle, Position, type Node, type NodeProps, type NodeTypes } from "@xyflow/react";
 import Image from "next/image";
-import { memo, type CSSProperties, type MouseEvent, type ReactNode } from "react";
+import { Fragment, memo, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 
 import mark from "@/assets/brand/repoatlas-mark-256.png";
 import type { ChildEntry } from "@/lib/api/generated";
@@ -43,7 +43,10 @@ export type RepositoryNodeData = Common & { repository: RepositoryModel; partner
 export type HubNodeData = { repositories: number; files: number; note: string | null };
 export type OrbitNodeData = Record<string, never>;
 export type GroupNodeData = { count: number };
-export type FrameNodeData = { frame: FrameModel; repository: RepositoryModel };
+/** Out to a directory on the way here, `""` for the repository's root (see useClimb). */
+export type Climb = (at: string) => void;
+
+export type FrameNodeData = { frame: FrameModel; repository: RepositoryModel; climb: Climb };
 export type DirectoryNodeData = Common & { card: DirectoryCard; repository: string };
 export type FilesNodeData = Common & { card: FilesCard; repository: string };
 export type SharedNodeData = Common & { node: SharedModel };
@@ -57,6 +60,7 @@ export type AnchorNodeData = Common & {
   language: string | null;
   declarations: number;
   lines: number | null;
+  climb: Climb;
 };
 export type NeighbourNodeData = Common & { node: Neighbour };
 
@@ -219,9 +223,44 @@ function GroupNode({ data }: NodeProps<Node<GroupNodeData, "group">>) {
 
 // -- an opened repository ---------------------------------------------------------------
 
+/**
+ * `repository / a/b/c` where a node says where it is, each step a way straight
+ * there: no trip to the trail in the corner. `here` is the last step when the
+ * reader is in it, so it is not a link.
+ */
+function PathCrumbs({ repository, path, here, climb }: { repository: string; path: string; here: boolean; climb: Climb }) {
+  const segments = path ? path.split("/") : [];
+  const step = (label: string, at: string) => (
+    <button type="button" className={`${classes.crumb} nodrag nopan`} onClick={stop(() => climb(at))} title={`Go to ${at || repository}`}>
+      {label}
+    </button>
+  );
+  return (
+    <span className={classes.crumbs}>
+      {step(repository, "")}
+      {segments.length > 0 && <span aria-hidden> / </span>}
+      {segments.map((segment, i) => {
+        const at = segments.slice(0, i + 1).join("/");
+        return (
+          <Fragment key={at}>
+            {i > 0 && <span aria-hidden>/</span>}
+            {here && i === segments.length - 1 ? (
+              <span className={classes.crumbHere} aria-current="location">
+                {segment}
+              </span>
+            ) : (
+              step(segment, at)
+            )}
+          </Fragment>
+        );
+      })}
+    </span>
+  );
+}
+
 /** The level itself: what it encloses is what is in it. */
 function FrameNode({ data }: NodeProps<Node<FrameNodeData, "frame">>) {
-  const { frame, repository } = data;
+  const { frame, repository, climb } = data;
   const parts: string[] = [];
   if (frame.directories) parts.push(plural(frame.directories, "directory", "directories"));
   if (frame.leaves) parts.push(plural(frame.leaves, "file"));
@@ -237,7 +276,11 @@ function FrameNode({ data }: NodeProps<Node<FrameNodeData, "frame">>) {
         <span className={classes.frameTitle}>
           <span className={classes.frameName}>{frame.name}</span>
           <span className={classes.frameMeta}>
-            {frame.path ? `${repository.name} / ${frame.path}` : `${repository.branch ?? "detached"} ${shortSha(repository.headSha) ?? ""}`}
+            {frame.path ? (
+              <PathCrumbs repository={repository.name} path={frame.path} here climb={climb} />
+            ) : (
+              `${repository.branch ?? "detached"} ${shortSha(repository.headSha) ?? ""}`
+            )}
           </span>
         </span>
         <span className={classes.frameCount}>
@@ -457,7 +500,7 @@ function MoreNodeView({ id, data }: NodeProps<Node<MoreNodeData, "more">>) {
 // -- a file and its neighbourhood -----------------------------------------------------
 
 function AnchorNode({ id, data }: NodeProps<Node<AnchorNodeData, "anchor">>) {
-  const { name, path, repository, language, declarations, lines, actions } = data;
+  const { name, path, repository, language, declarations, lines, actions, climb } = data;
   const cut = path.lastIndexOf("/");
   return (
     <div className={classes.fileAnchor}>
@@ -473,7 +516,9 @@ function AnchorNode({ id, data }: NodeProps<Node<AnchorNodeData, "anchor">>) {
       </span>
       <span className={classes.body}>
         <span className={classes.anchorName}>{name}</span>
-        <span className={classes.meta}>{cut > 0 ? `${repository.name} / ${path.slice(0, cut)}` : repository.name}</span>
+        <span className={classes.meta}>
+          <PathCrumbs repository={repository.name} path={cut > 0 ? path.slice(0, cut) : ""} here={false} climb={climb} />
+        </span>
         <span className={classes.stats}>
           {language && <span>{language}</span>}
           <span>{plural(declarations, "declaration")}</span>

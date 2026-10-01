@@ -81,6 +81,13 @@ for (const scheme of ["dark", "light"] as const) {
         await expect(
           url.includes("&path=") ? page.getByRole("region", { name: /^Source of / }).locator("pre") : page.locator(".react-flow__node").first(),
         ).toBeVisible();
+        // contrast is read at rest: a level fades in as it arrives, and mid-fade
+        // its colours are the canvas showing through
+        await page.waitForFunction(() =>
+          [...document.querySelectorAll("[data-phase]")].every(
+            (stage) => stage.getAttribute("data-phase") === "shown" && stage.getAnimations().length === 0,
+          ),
+        );
         const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze();
         const serious = results.violations
           .filter((v) => v.impact === "serious" || v.impact === "critical")

@@ -33,7 +33,7 @@ import type { RepositoryModel } from "@/lib/model/repositories";
 import { symbolIndex, type SymbolIndex, type SymbolTarget } from "@/lib/model/symbols";
 
 import type { Navigation } from "./navigation";
-import { Trail } from "./Trail";
+import { Trail, useClimb } from "./Trail";
 import classes from "./Views.module.css";
 
 function dirname(path: string): string {
@@ -178,6 +178,7 @@ export function FileLevel({
     [activate, nav],
   );
   const hues = useMemo(() => new Map(repositories.map((r) => [r.slug, r.hue])), [repositories]);
+  const climb = useClimb(repository, nav, true);
 
   const nodes = useMemo<GraphNode[]>(() => {
     const at = (id: string) => layout.get(id)!;
@@ -194,6 +195,7 @@ export function FileLevel({
             declarations: graph.anchor.declarations,
             lines,
             actions,
+            climb,
           },
         },
         at(FILE_ID),
@@ -219,7 +221,7 @@ export function FileLevel({
       out.push(place({ id: m.id, type: "more", data: { node: m, actions, noun: "neighbours" } }, at(m.id)));
     }
     return out;
-  }, [graph, layout, path, repository, entry, lines, actions, hues]);
+  }, [graph, layout, path, repository, entry, lines, actions, hues, climb]);
 
   const edges = useMemo(() => flowEdges(graph.edges, { route: () => "side", labelled: true }), [graph]);
   const families = useMemo<Family[]>(() => {

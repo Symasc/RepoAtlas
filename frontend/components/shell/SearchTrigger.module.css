@@ -1,4 +1,6 @@
 .trigger {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: var(--mantine-spacing-sm);
@@ -25,6 +27,19 @@
 
 .icon {
   flex-shrink: 0;
+}
+
+.toggleLabel {
+  padding-inline-start: 8px;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* the same switch, inside the search: flipped without leaving it */
+.inlineToggle {
+  margin-inline-end: var(--mantine-spacing-sm);
 }
 
 .placeholder {
