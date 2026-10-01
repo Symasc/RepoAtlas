@@ -2,6 +2,7 @@
 
 import {
   BracketsCurlyIcon,
+  CloudIcon,
   CubeIcon,
   CubeTransparentIcon,
   CurrencyDollarSimpleIcon,
@@ -51,7 +52,8 @@ const ENTITIES: Record<string, { icon: Icon; shape: Shape }> = {
   command: { icon: TerminalWindowIcon, shape: "terminal" },
   http_endpoint: { icon: GlobeSimpleIcon, shape: "circle" },
   http_route: { icon: GlobeSimpleIcon, shape: "circle" },
-  http_deployment: { icon: GlobeSimpleIcon, shape: "circle" },
+  // where an API is published: HTTP's circle, with a cloud of its own
+  http_deployment: { icon: CloudIcon, shape: "circle" },
   // what a file declares: the code a trace walks through
   function: { icon: FunctionIcon, shape: "square" },
   method: { icon: FunctionIcon, shape: "square" },

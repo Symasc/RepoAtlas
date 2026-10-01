@@ -415,6 +415,7 @@ function Shapes() {
     { mark: <PathBadge path="index.ts" size={22} />, label: "File" },
     { mark: <EntityBadge entityType="package" size={22} />, label: "Package" },
     { mark: <EntityBadge entityType="http_route" size={22} />, label: "HTTP route or endpoint" },
+    { mark: <EntityBadge entityType="http_deployment" size={22} />, label: "Deployment" },
     { mark: <EntityBadge entityType="env_var" size={22} />, label: "Environment variable or config" },
     { mark: <EntityBadge entityType="module" size={22} />, label: "External module" },
     { mark: <EntityBadge entityType="command" size={22} />, label: "Command" },

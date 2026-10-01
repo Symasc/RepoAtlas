@@ -44,6 +44,12 @@ export interface SymbolIndex {
 
 /** What never stands for a name in the source: the file itself, its imports' files. */
 const NOT_NAMES: ReadonlySet<string> = new Set(["file", "repository"]);
+/**
+ * What a line writes out whole rather than names: a deployment is its URL. Found
+ * by that text, quoted or not, and never by a piece of it, so `com` is no
+ * deployment however the line spells it.
+ */
+const LITERALS: ReadonlySet<string> = new Set(["http_deployment"]);
 /** Where a name is ambiguous on one line, the thing it names before the place it comes from. */
 const PREFERENCE: Record<string, number> = { function: 0, method: 0, class: 0, symbol: 1, variable: 1, module: 3, package: 3 };
 
@@ -100,7 +106,7 @@ export function symbolIndex(
   for (const [name, keys] of counts) if (keys.length === 1) unique.set(name, keys[0]!);
   const elsewhere = new Map<string, Set<string>>();
   for (const t of targets.values()) {
-    if (t.here || t.type === "module" || t.type === "package") continue;
+    if (t.here || t.type === "module" || t.type === "package" || LITERALS.has(t.type)) continue;
     const short = shortName(t.name);
     elsewhere.set(short, (elsewhere.get(short) ?? new Set()).add(t.key));
   }
@@ -146,6 +152,15 @@ export function spansFor(
     }
   }
 
+  // a deployment's URL where the line declares it: a string by nature, so never quiet
+  for (const r of refs) {
+    if (!LITERALS.has(r.target.type)) continue;
+    const url = r.target.name ?? "";
+    const at = url ? text.toLowerCase().indexOf(url.toLowerCase()) : -1;
+    if (at < 0 || spans.some((s) => at < s.end && s.start < at + url.length)) continue;
+    spans.push({ start: at, end: at + url.length, key: r.target.key });
+  }
+
   for (const match of text.matchAll(IDENTIFIER)) {
     const start = match.index;
     const end = start + match[0].length;
@@ -153,7 +168,13 @@ export function spansFor(
     if (spans.some((s) => start < s.end && s.start < end)) continue;
     const name = match[0];
     const said = refs
-      .filter((r) => r.target.type !== "module" && r.target.type !== "package" && shortName(r.target.name ?? "") === name)
+      .filter(
+        (r) =>
+          r.target.type !== "module" &&
+          r.target.type !== "package" &&
+          !LITERALS.has(r.target.type) &&
+          shortName(r.target.name ?? "") === name,
+      )
       .sort((a, b) => rank(a.target.type) - rank(b.target.type) || a.target.key.localeCompare(b.target.key))[0];
     const declared = (index.declaredAt.get(line) ?? []).find((d) => shortName(d.name) === name);
     const key = said?.target.key ?? declared?.key ?? index.unique.get(name) ?? (importing ? index.imported.get(name) : undefined) ?? null;
