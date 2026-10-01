@@ -362,7 +362,7 @@ def test_the_skill_prefers_slugs_and_says_host_paths_are_opt_in() -> None:
     Checked as content rather than presence: a section that mentioned the flag
     without saying it is off by default would be worse than silence.
     """
-    skill = Path("skills/repoatlas-investigation/SKILL.md").read_text(encoding="utf-8")
+    skill = Path("skills/repoatlas-code-trace/SKILL.md").read_text(encoding="utf-8")
     lowered = skill.lower()
 
     assert "host paths are private by default" in lowered

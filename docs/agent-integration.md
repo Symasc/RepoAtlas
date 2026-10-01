@@ -2,7 +2,8 @@
 
 RepoAtlas serves its capabilities to an agent over the Model Context Protocol on
 stdio. This document covers setup. The behaviour an agent should follow lives in
-one place, [`skills/repoatlas-investigation/SKILL.md`](../skills/repoatlas-investigation/SKILL.md),
+the five task skills under [`skills/`](../skills/), starting with
+[`skills/repoatlas-code-trace/SKILL.md`](../skills/repoatlas-code-trace/SKILL.md),
 and is not repeated here.
 
 For request migration notes, source previews, workspace HTTP discovery and the
@@ -72,26 +73,39 @@ host's choice.
 each repeated fact once instead of per evidence item. The default, `full`, is
 unchanged, and the capability does the same work either way.
 
-## 3. Load the skill
+## 3. Load the skills
 
-Give the agent the canonical skill. It is vendor-neutral and lives at the
-repository root:
+Give the agent all five canonical skills. Each one covers one kind of task, and
+its description says when to load it:
+
+| Skill | For |
+|---|---|
+| `repoatlas-change-impact` | what a proposed change may affect |
+| `repoatlas-code-trace` | where something is defined, what calls or uses it, and how code connects |
+| `repoatlas-dependencies` | package declarations, resolutions and providers |
+| `repoatlas-http` | routes, callers and handlers |
+| `repoatlas-index` | what is indexed, freshness and sync |
+
+They are vendor-neutral and live at the repository root:
 
 ```
-skills/repoatlas-investigation/SKILL.md
+skills/repoatlas-code-trace/SKILL.md
+skills/repoatlas-change-impact/SKILL.md   (and the three others beside them)
 ```
 
 An installed copy ships inside the package, so a `pip`- or `uv`-installed
-RepoAtlas carries it too:
+RepoAtlas carries them too:
 
 ```
-<site-packages>/repoatlas/skills/repoatlas-investigation/SKILL.md
+<site-packages>/repoatlas/skills/<skill>/SKILL.md
 ```
 
-Both are the same file; the wheel maps the root artifact into the package rather
-than keeping a second copy. If a client has its own convention for where skills
-or instructions live, point it at this file rather than transcribing it, so there
-is one source of behavioural truth.
+Both are the same files; the wheel maps the root artifacts into the package rather
+than keeping second copies. Install the five side by side, one directory each:
+they share one contract reference, `repoatlas-code-trace/references/contracts.md`,
+through a relative link. If a client has its own convention for where skills or
+instructions live, point it at these directories rather than transcribing them, so
+there is one source of behavioural truth.
 
 ## 4. What the agent gets
 
