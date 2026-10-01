@@ -52,6 +52,10 @@ RETIRED_SURFACES = (
 )
 
 
+#: The §1 layering diagram: a fenced block, drawn in Mermaid or as plain text.
+_LAYERING = re.compile(r"```(?:mermaid)?\n(.*?)```", re.DOTALL)
+
+
 @pytest.fixture(scope="module")
 def document() -> str:
     return ARCHITECTURE.read_text(encoding="utf-8")
@@ -92,7 +96,7 @@ def test_the_layering_diagram_names_only_packages_that_exist(document: str) -> N
     it because nothing was comparing the picture to the tree.
     """
     section = _sections(document)["1"]
-    block = re.search(r"```\n(.*?)```", section, re.DOTALL)
+    block = _LAYERING.search(section)
     assert block, "§1 still contains a fenced layering diagram"
 
     named = sorted(set(re.findall(r"\b([a-z][a-z_]*)/", block.group(1))))
@@ -104,7 +108,7 @@ def test_the_layering_diagram_names_only_packages_that_exist(document: str) -> N
 
 def test_the_layering_diagram_shows_the_layers_an_agent_talks_to(document: str) -> None:
     """The two packages that constitute V2 are in the picture, not only in prose."""
-    block = re.search(r"```\n(.*?)```", _sections(document)["1"], re.DOTALL)
+    block = _LAYERING.search(_sections(document)["1"])
     assert block
     diagram = block.group(1)
     for package in ("capabilities/", "mcp/", "api/", "services/", "storage/", "models/"):

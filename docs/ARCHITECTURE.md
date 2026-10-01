@@ -32,33 +32,33 @@ decision changes, update this file in the same commit as the code.
 
 ## 1. Layering and boundaries
 
-Dependencies flow in one direction only:
+Dependencies flow in one direction only, downward:
 
-```
-                 cli/
-                  │
-                  ├──────────────► mcp/           (stdio transport adapter; cli/ is its only caller)
-                  ├──────────────► api/           (loopback HTTP transport for a local app; likewise)
-                  │                 │
-                  │                 ▼
-                  │           capabilities/       (what an external agent talks to)
-                  │                 │
-                  ▼                 │
-             services/ ◄────────────┘             (one module per command; orchestration only)
-                  │
-      ┌───────────┼────────────┬─────────────┐
-      ▼           ▼            ▼             ▼
-  context/    discovery/    sync/       retrieval/
-      │           │            │             │
-      └───────────┴────┬───────┴─────────────┘
-                       ▼
-        parsers/  dependencies/  graph/  indexing/
-                       │
-                       ▼
-                   storage/
-                       │
-                       ▼
-                   models/            (Pydantic; depends on nothing internal)
+```mermaid
+flowchart TD
+    cli["cli/"]
+    ui["ui/<br>explorer launcher;<br>cli/ is its only caller"]
+    mcp["mcp/<br>stdio transport adapter;<br>cli/ is its only caller"]
+    api["api/<br>loopback HTTP transport<br>for a local app; likewise"]
+    capabilities["capabilities/<br>what an external agent talks to"]
+    services["services/<br>one module per command;<br>orchestration only"]
+    context["context/"]
+    discovery["discovery/"]
+    sync["sync/"]
+    retrieval["retrieval/"]
+    facts["parsers/ · dependencies/ · graph/ · indexing/"]
+    storage["storage/"]
+    models["models/<br>Pydantic; depends on nothing internal"]
+
+    cli --> ui & mcp & api & services
+    ui --> api
+    mcp --> capabilities
+    api --> capabilities
+    capabilities --> services
+    services --> context & discovery & sync & retrieval
+    context & discovery & sync & retrieval --> facts
+    facts --> storage
+    storage --> models
 ```
 
 ### Hard rules (invariants, enforced by a layering test)
@@ -73,7 +73,11 @@ Dependencies flow in one direction only:
 6. **`storage/` exposes Protocols; only `storage/sqlite/` knows SQL.** No SQL string appears outside that package.
 
 A test walks the AST of every module and asserts the import graph respects this ordering. Violations fail CI, not
-review.
+review. The diagram itself is checked too: every package it names must exist.
+
+`ui/` is the one module above the transports. It starts the local API in its own process and the explorer
+beside it (§12, "Processes RepoAtlas starts"), so it may import `api/`, and nothing but `cli/` may import it.
+It never reaches the capability layer directly, and neither transport knows it exists.
 
 ---
 
@@ -82,18 +86,25 @@ review.
 ```
 RepoAtlas/
 ├── pyproject.toml
+├── uv.lock
+├── install.sh          one-command installer (docs/installation.md)
 ├── README.md
 ├── Dockerfile
 ├── docker-compose.yml
 │
 ├── repoatlas/
-│   ├── cli/            Typer app; one module per command; argument parsing + rendering only
+│   ├── cli/            Typer app; argument parsing + rendering only
+│   ├── ui/             `repoatlas ui`: the local API and the explorer, started and stopped together (§12)
+│   ├── mcp/            stdio MCP transport: tool definitions and the server (docs/agent-integration.md)
+│   ├── api/            loopback HTTP transport for a local app, and its schema dump (docs/local-api.md)
+│   ├── capabilities/   the vendor-neutral capability service: search, inspect, relationships, impact,
+│   │                   dependencies, HTTP operations, topology, sync, grounding; investigations and ledgers
 │   ├── services/       per-command orchestration (init, sync, query, status)
 │   ├── config/         Pydantic settings, YAML load/save, XDG paths, defaults
 │   ├── discovery/      repository finding, ignore rules, language detection, manifest detection
 │   ├── context/        RepositoryContextResolver — shared by every command (§7)
 │   ├── gitstate/       hardened git CLI wrapper: branch, HEAD, dirty, file enumeration (§8)
-│   ├── sync/           file-state diffing, sync planning, run orchestration (§9)
+│   ├── sync/           file-state diffing, sync planning, run orchestration, progress events (§9)
 │   ├── indexing/       chunking, FTS population, embedding population, orphan GC
 │   ├── embeddings/     EmbeddingModel protocol, fastembed backend, deterministic stub
 │   │   ├── protocol.py     EmbeddingModel; a ranking aid, never a source of facts
@@ -124,21 +135,38 @@ RepoAtlas/
 │   ├── graph/          reference linker, cross-repo resolution, bounded traversal
 │   │   ├── keys.py         natural keys for every entity tier
 │   │   ├── resolution.py   ResolutionIndex — every match rule, in one place
-│   │   └── linker.py       the two link passes
+│   │   ├── linker.py       the two link passes
+│   │   ├── uses*.py, py_*.py, modules.py, packages.py   declaration uses, module and package resolution
+│   │   ├── http_claims.py, http_crossings.py   HTTP routes matched within and across repositories
+│   │   └── impact.py, traversal.py, neighbourhood.py   the change-impact walk and bounded expansion
 │   ├── retrieval/      query analysis, exact/semantic/graph retrievers, fusion, reranker seam
 │   ├── grounding.py    citation verification — deterministic, and the whole of §11
+│   ├── freshness.py    the index-freshness state machine, shared by services and capabilities
+│   ├── containment.py  the filesystem containment boundary: bounded, contained content reads (§12)
+│   ├── security.py     the built-in secret-exclusion policy (§12)
+│   ├── errors.py       exceptions and the exit codes they map to
 │   ├── storage/        Protocols + sqlite implementation + migrations
-│   ├── rendering/      text renderer (the concise format) + json renderer
+│   ├── rendering/      text renderer (the concise format), and the terminal progress line (§6)
 │   └── models/         Pydantic domain models shared everywhere
+│
+├── skills/             the five agent skills, vendor-neutral; shipped inside the wheel
+├── frontend/           the graph explorer: Next.js, read through the local API (frontend/README.md)
 │
 ├── tests/
 │   ├── fixtures/       synthetic repositories (§13)
 │   ├── test_e2e.py     the §21 scenario through the installed console script
 │   ├── test_docker.py  container delivery invariants, without a daemon
-│   └── test_performance.py  §20 shape properties, measured through the traces
+│   ├── test_performance.py  §20 shape properties, measured through the traces
+│   ├── test_ui_launcher.py  `repoatlas ui` through the real command, with stand-in Node
+│   └── test_installer.py    `install.sh` in a scratch HOME, with stand-in tools
 │
 └── docs/
-    ├── V1_SPEC.md
+    ├── installation.md       installing, updating, uninstalling
+    ├── agent-integration.md  connecting an agent over MCP
+    ├── local-api.md          the loopback HTTP contract, and `repoatlas ui`
+    ├── agent-efficiency.md   request changes and their evaluation
+    ├── V1_SPEC.md            the V1 specification, kept as its record
+    ├── V1_ARCHITECTURE_DOSSIER.md
     └── ARCHITECTURE.md
 ```
 
@@ -1831,6 +1859,26 @@ endpoint, starts a server, or imports repository code.
 
 ## 6. The indexing pipeline
 
+One run of `init` or `sync`, end to end. Each box is described below, and §9 explains why the commits fall where
+they do:
+
+```mermaid
+flowchart TD
+    run(["repoatlas init / repoatlas sync"]) --> lock["take the writer lock (§9)"]
+    lock --> discover["discover the repositories under the root<br/>(init, or a sync that covers the root)"]
+    discover --> enumerate
+    subgraph repository["for each repository in scope"]
+        direction TB
+        enumerate["enumerate files: git ls-files,<br/>ignore rules, secrets excluded"] --> plan["plan: unchanged, changed, new, deleted<br/>(stat, or a content hash where stat can lie)"]
+        plan --> delete["delete the facts of deleted files"]
+        delete --> file["each new or changed file, in one transaction:<br/>bounded read, parse, entities, chunks,<br/>claims, dependencies, links within the file"]
+        file --> requirements["requirements files the root<br/>requirements.txt reaches"]
+    end
+    requirements --> prepare["global link pass, computed without writing:<br/>index, resolve, uses, dependencies"]
+    prepare --> swap["one transaction: swap the graph in<br/>and mark every repository synchronized"]
+    swap --> embed["embed changed chunks<br/>(optional; never fails the run)"]
+```
+
 ### Repository discovery
 
 Discovery runs before the pipeline below and decides *which* repositories exist. It is the only way a repository
@@ -2173,6 +2221,26 @@ Two alternatives were rejected. Raising or removing the cap does not fix anythin
 correctness only for literals shorter than the constant, and there is no honest way to pick one: the guarantee
 would silently become "exact for strings we guessed the length of". Recovery derives its window from the *query*
 instead (§10), which has no constant to be wrong about.
+
+### Progress
+
+A run reports how far it has got to a `SyncProgress` listener (`repoatlas/sync/progress.py`): discovery
+starting, each repository being scanned (with a count of the files it had to hash), each file of the ones it must
+reindex being written, each of the global link pass's five stages being entered (`index`, `resolve`, `uses`,
+`dependencies`, then `swap`), and chunks being embedded. The linker hears nothing of the protocol:
+`prepare_global` takes a plain stage callback, because `graph/` may not import `sync/`, and the engine reports
+the swap itself, so `commit_global` keeps the signature the failure-injection tests replace it with.
+
+Reporting is an observation and never part of the run. The events carry counts and repository names, never
+content; a listener cannot change what is indexed; and a run without one does the same work. A test asserts
+that a watched run writes exactly the facts an unwatched one writes, and that the counts are the report's own:
+the last file event is the number of files the report says were indexed.
+
+The command line is the only listener. `init` and `sync` draw the events as one line on stderr, when stderr is
+a terminal (`repoatlas/rendering/progress.py`): redrawn in place at most every 80 ms (except that a new phase
+and a finished count always draw), never as wide as the terminal, and erased before the report, an error or
+`--json` is printed. The renderer satisfies the protocol by shape, since the CLI may not import `sync/` either.
+The MCP `repoatlas_sync` tool passes no listener: on that transport, stdout is the protocol.
 
 ---
 
@@ -3356,6 +3424,7 @@ Repositories are **untrusted input**. Static analysis only.
 | Git hooks / config | `core.hooksPath=/dev/null`, read-only plumbing allowlist (§8) |
 | Path traversal via symlinks | Every read goes through the containment boundary below: the *object opened*, not the path, is proven to be inside the root |
 | Zip-bomb / huge files | `max_file_bytes` enforced *by the reader*, on the descriptor it reads from, with a hard ceiling independent of any prior `stat` (below) |
+| The explorer launcher (`repoatlas ui`) | Runs Node on RepoAtlas's own `frontend/`, never on repository content and never git; both servers on loopback; the token passed by an owner-only file (below) |
 
 ### Bounded repository-content reads
 
@@ -3710,6 +3779,42 @@ enumeration, chunks, the FTS index, embeddings (including the strings handed to 
 evidence sets, the model prompt and `--verbose` output. A single choke point is only a guarantee if the stages
 behind it genuinely depend on it, and a test per stage is what keeps that true as stages are added.
 
+### Processes RepoAtlas starts
+
+Two modules start a process, and a layering test names both (`tests/test_layering.py`):
+
+- **`gitstate/`** runs `git`, through the allowlist and hardening of §8. It is the only module that does.
+- **`ui/launcher.py`** runs what `repoatlas ui` needs: `node --version`; pnpm (or corepack) to install the
+  explorer's locked packages; Node running the explorer's own Next.js to build it and serve it; and the platform's
+  browser opener. A test asserts it never names git.
+
+What the launcher starts is RepoAtlas's own explorer, found beside the installed package or named by the
+operator. Nothing it runs is chosen by a repository, and no repository file is an argument to anything it runs.
+It reads no file either: deciding whether to install or rebuild compares modification times, and the
+connection file is written by the API in the same process.
+
+```mermaid
+flowchart LR
+    launcher["repoatlas ui"] --> api["local API<br/>in-process, loopback, free port"]
+    api -->|"writes, mode 0600"| file[("connection file<br/>url and token")]
+    launcher -->|"own process group"| next["Next.js server<br/>127.0.0.1 only"]
+    next -->|"reads"| file
+    next -->|"bearer token"| api
+```
+
+- **Both servers listen on loopback only.** The API refuses any other host (`docs/local-api.md`), and the explorer
+  is started with `--hostname 127.0.0.1`. The explorer's `/api/ra` route answers only a loopback `Host` and
+  same-origin requests, and forwards only to the loopback address the connection file names.
+- **The token travels by file.** The child is given the connection file's path in
+  `REPOATLAS_API_CONNECTION_FILE`, and `REPOATLAS_API_TOKEN` is removed from its environment, so the token is in
+  no argument list and no environment a process listing could show.
+- **Nothing is left running.** The explorer is started in a process group of its own and stopped as a group,
+  SIGTERM then SIGKILL, when the API stops for any reason; the API is stopped when the explorer exits. A test
+  starts a worker inside the stand-in explorer and asserts the worker is gone afterwards.
+- **No network of its own.** Next.js telemetry is turned off. Installing the explorer's packages is the one step
+  that downloads, as installing RepoAtlas is: `pnpm install --frozen-lockfile`, once, and again only when the
+  lockfile changes.
+
 ### Container posture
 
 The image and compose file are part of the security model, not merely packaging:
@@ -3761,6 +3866,9 @@ Test layers:
 | Malformed input | A matrix of broken YAML, Salt and Jinja fed to every parser claiming the extension. Nothing may raise, no line number may fall outside the file, and anything recovered must be marked below full confidence |
 | Performance | Shape properties from the traces (§10) plus wall-clock ceilings roughly 20× the observed cost |
 | Container | The delivery invariants of §12, parsed out of `Dockerfile` and `docker-compose.yml`, so they need no daemon |
+| Progress | The events of a real run checked against its own report, the terminal line checked on what it writes, and a watched run's facts compared with an unwatched run's (§6) |
+| Explorer launcher | `repoatlas ui` run as a subprocess with stand-in `node` and `pnpm`; the stand-in server reads the connection file and calls the API. A real SIGINT, an explorer that stops or never starts, a taken port, an old Node, and a worker that must not outlive it (§12) |
+| Installer | `install.sh` in a scratch HOME with stand-in `uv`, `claude`, `node` and `pnpm`: the exact commands it issues, a rerun that changes nothing, and links it did not create left alone |
 
 Once dependencies are installed, the tests require no network and no embedding-model download.
 - **Embeddings.** Semantic-search tests use a deterministic stub `EmbeddingModel` (hash-based pseudo-vectors).
@@ -3831,7 +3939,8 @@ Every deferred capability (V1_SPEC §22) has a place to land that requires no re
 | Version-specific documentation retrieval | A `DocumentationSource` protocol fed by `ResolvedDependency`. The retrieval funnel gains a source at stage 3; fusion and budgeting are unchanged |
 | Internet research / web provenance | `Evidence` gains an optional origin discriminator; the citation verifier (§11) extends to verify web citations against the fetched set, with the same drop-and-demote logic |
 | Git-history debugging, regression introduction | The provenance columns already pin every fact to `repo/file/lines`; history analysis joins against them without schema change |
-| Blast-radius analysis | A traversal over existing `edges` — a new query, not new data |
+| Blast-radius analysis | **Delivered** as the `impact` capability (`repoatlas_impact`; `repoatlas/graph/impact.py`): a bounded walk over the existing `edges`, as this seam said — a new query, not new data |
+| A visual explorer | **Delivered** as the local API (`api/`, `docs/local-api.md`) and the explorer in `frontend/`, started together by `repoatlas ui`. The topology capabilities it reads are served over HTTP only, never as agent tools |
 | Alternative vector backends | `VectorIndex` protocol; `sqlite-vec` or FAISS replaces `SqliteVectorIndex` without touching a caller |
 | Performance work of any kind | `RetrievalTrace` and `LinkTrace` already report per-stage cost and candidate counts, so a regression is measurable before anything is restructured |
 
@@ -3975,3 +4084,9 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | A legacy index is marked by the first **write**, never at open | Stamp on first open, whoever opened it | `status` would rewrite the database in order to report that nothing changed, and a read-only historical index would be reported as foreign because the marker could not be written. Recognition first, write second (§3, §6) |
 | A marked database below the current version still has its shape checked | Trust the marker and migrate | A marker proves ownership, not schema correctness. Where a write is imminent anyway, inspecting the schema is strictly cheaper than migrating it blind; on the hot path (marked, current) nothing is inspected at all (§3) |
 | A route named in prose is honest when the investigation supplied it | Exempt any token with an uppercase method in front of it; or check the route against the index | Supplied routes are honest route mentions for the same reason supplied files are honest file mentions — the agent was shown them. Exempting by form lets `GET /etc/shadow` through, and an index check cannot cover the case worth reporting: a route nothing serves has no node (§11) |
+| Sync progress is an observer protocol, drawn only by the CLI | Print progress lines from the engine; or give every caller a progress bar | The engine reaches no terminal (§1 rule 3), and a line on stdout would break `--json` and the MCP transport. Counts and names only, so a listener can never become a second reader of repository content, and a watched run is asserted to write what an unwatched one writes (§6) |
+| The progress line is erased, not kept | Leave one finished line per repository on screen | The report that follows already lists every repository, so a kept line would print each one twice; erasing keeps the command's output exactly what it was before (§6) |
+| `repoatlas ui` runs the API in-process and the explorer as a child | Two daemons; or a launcher that shells out to `repoatlas serve` | One process owns the API's lifetime and the explorer's, so stopping either stops both, and the connection file is written in the process that knows where it is. No pidfile, no daemon, nothing to clean up after a crash beyond a file the next start replaces (§12) |
+| The launcher has its own connection file (`ui-api.json`) | Reuse `api.json` | A `repoatlas serve` running beside it keeps working, and stopping one never removes the other's file |
+| The explorer is installed and built on first use, and again only when its inputs change | Ship a prebuilt explorer in the wheel; or build on every start | A wheel carrying Node output would tie the Python package to a Node build. Rebuilding every time costs a minute per start; comparing modification times costs a directory walk and reads no file (§12) |
+| `install.sh` reruns safely and replaces nothing it did not create | An installer that overwrites existing links and registrations | Running it again is how an installation is updated, and the operator's own `repoatlas` on PATH, their skills and their MCP registration are theirs (docs/installation.md) |

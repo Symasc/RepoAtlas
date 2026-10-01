@@ -5,11 +5,37 @@ machine. It reads the live index through `repoatlas serve` (see
 [docs/local-api.md](../docs/local-api.md)); it never opens the database and
 ships no data of its own.
 
-```
-browser ──► Next.js server (/api/ra/*) ──► repoatlas serve (loopback) ──► the index
+```mermaid
+flowchart LR
+    browser["browser"] --> next["Next.js server<br/>/api/ra/*"]
+    next -->|"token from the<br/>connection file"| api["local API<br/>loopback"]
+    api --> index[("the index")]
 ```
 
 ## Run it
+
+```sh
+repoatlas ui
+```
+
+That is all. It starts the local API and this app together, opens
+<http://127.0.0.1:7318> in your browser, and stops both on Ctrl-C. The first run
+installs the packages and makes a production build (into `.next-ui/`); later
+runs rebuild only when a source has changed. It needs Node.js 22 and pnpm 11
+(or Node's corepack).
+
+| Option | Effect |
+|---|---|
+| `--port 7320` | serve the explorer on another port |
+| `--no-open` | do not open a browser |
+| `--dev` | run `next dev` instead, with hot reload: for working on the explorer |
+| `--rebuild` | rebuild even if the build looks current |
+| `--prepare` | install and build, then exit (what `install.sh` runs) |
+| `--frontend DIR` | run the explorer from another directory |
+
+How the launcher works is in [docs/local-api.md](../docs/local-api.md#the-usual-way-repoatlas-ui).
+
+### By hand, in two terminals
 
 1. Start the local API. It prints where it wrote its connection file:
 
@@ -17,7 +43,7 @@ browser ──► Next.js server (/api/ra/*) ──► repoatlas serve (loopback
    repoatlas serve
    ```
 
-2. Point the explorer at that file and start it (Node 22, pnpm 11):
+2. Point the explorer at that file and start it:
 
    ```sh
    cd frontend
@@ -50,9 +76,31 @@ summary first and the detail when you ask for it.
   the level's totals are drawn: lanes from the frame to other repositories and
   elsewhere in this one (left), and to modules, packages, environment
   variables, commands and endpoints shared across the index (right).
-- **A file.** The file is the anchor. What links to it is on the left, and what
-  it links to is on the right. Only the strongest few on each side are shown;
-  "+N more" expands the rest.
+- **A file.** It opens on its code, highlighted, with line numbers. Every name
+  the file declares or refers to can be pressed: the first press selects it,
+  and a second press, or **Trace**, follows it. **Links** switches to the
+  file's neighbourhood: what links to it on the left, what it links to on the
+  right, the strongest few on each side and "+N more" for the rest.
+- **A trace.** What a change to one name, file or directory reaches, and by
+  which indexed steps. It opens close on the thing that changes, then pulls
+  back over the whole chain: each column one step further, each card a file the
+  chain lands in, framed by repository when the chain leaves the one it
+  started in. Choosing a row reads that step's lines.
+
+```mermaid
+flowchart LR
+    overview["All repositories"] -->|"open a repository"| repo["A repository<br/>(directories)"]
+    repo -->|"open a directory"| repo
+    repo -->|"open a file"| file["A file<br/>Code or Links"]
+    file -->|"Trace a name"| trace["A trace"]
+    repo -->|"Trace a directory"| trace
+    trace -->|"open a step's file"| file
+```
+
+**Search** (Ctrl+K or ⌘K, or `/`) finds repositories and files from two
+letters; Enter takes the first result. With **Include variables** on, it also
+finds the names code declares: functions, classes, methods, variables and the
+environment variables code reads. The switch is remembered, and off at first.
 
 Lines are drawn per family and never merged into one line:
 
@@ -90,13 +138,17 @@ the detail:
   it (`topology/edge`) and the lines that assert them. Evidence and source for
   one inspected thing share one investigation.
 
-Where you are is in the URL (`?repo=<slug>&path=<dir or file>&sel=<node>`), so
-a view can be shared. Selecting replaces the history entry and going somewhere
-adds one, so Back climbs out.
+Where you are is in the URL
+(`?repo=<slug>&path=<dir or file>&trace=<seed>&sel=<node>`), so a view can be
+shared. Selecting replaces the history entry and going somewhere adds one, so
+Back climbs out. Every step of the path a level shows is a button that climbs
+straight to it.
 
 Motion is limited to viewport transforms and opacity, from about 250ms to
-560ms, with no animated backgrounds. With reduced motion, everything moves
-instantly.
+560ms, with no animated backgrounds. The header's **Turn animations off**
+switch stops it; until you choose, your system's reduced-motion setting
+decides, and once you have chosen, your choice wins. The theme follows your
+system, light or dark, until you switch it with the header's theme button.
 
 ## The `/api/ra` route
 
