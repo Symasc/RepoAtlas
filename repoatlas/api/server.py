@@ -82,6 +82,8 @@ from repoatlas.models.topology import (
     TopologyEdgeResponse,
     TopologyFilesRequest,
     TopologyFilesResponse,
+    TopologyNamesRequest,
+    TopologyNamesResponse,
     TopologyOverviewRequest,
     TopologyOverviewResponse,
     TopologyReferencesRequest,
@@ -159,6 +161,7 @@ ENDPOINTS: tuple[Endpoint, ...] = (
     ),
     Endpoint("topology/edge", TopologyEdgeRequest, TopologyEdgeResponse, "topology_edge"),
     Endpoint("topology/files", TopologyFilesRequest, TopologyFilesResponse, "topology_files"),
+    Endpoint("topology/names", TopologyNamesRequest, TopologyNamesResponse, "topology_names"),
     Endpoint(
         "topology/references",
         TopologyReferencesRequest,
