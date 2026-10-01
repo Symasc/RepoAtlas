@@ -96,6 +96,7 @@ from repoatlas.graph.py_modules import PythonModules
 from repoatlas.graph.py_routes import plan_python_routes
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.graph.ts_injection import plan_injected_requests
+from repoatlas.graph.ts_oas3 import plan_spec_routed
 from repoatlas.graph.ts_routes import plan_fastify_routes
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType, EntityType
@@ -564,6 +565,27 @@ def plan_http_claims(
     declared_routes.update(fastify.declared)
     resolved += fastify.resolved
     unresolved += fastify.unresolved
+
+    # -- operations an oas3-tools application routes to its controllers -------------
+    oas3 = plan_spec_routed(grouped, index, by_id)
+    for route in oas3.routes:
+        _keep(
+            pending,
+            (route.src_id, route.body),
+            PendingHttpEdge(
+                src_id=route.src_id,
+                target=route.target,
+                type=EdgeType.SERVES_HTTP_ROUTE,
+                repo_id=route.repo_id,
+                file_id=route.file_id,
+                line_start=route.line_start,
+                line_end=route.line_end,
+            ),
+        )
+    route_outcomes.update(oas3.outcomes)
+    promoted_routes.update(oas3.promoted)
+    resolved += oas3.resolved
+    unresolved += oas3.unresolved
 
     # -- what each repository serves ----------------------------------------------------
     # Per-file routes and the routes proven above, and nothing else: template calls

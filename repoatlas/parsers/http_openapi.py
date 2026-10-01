@@ -29,6 +29,11 @@ linker stores it without one, which leaves it uncitable while its constituents
 stay citable on their own lines. Stitching two distant lines into one "span"
 would cite text that was never written together.
 
+An OpenAPI 3 document also records, as one claim, each operation's ``operationId``
+(and ``x-swagger-router-controller``) and the base paths its root ``servers`` give
+it: an ``oas3-tools`` application serves the document through handlers named by them
+(:mod:`repoatlas.graph.ts_oas3`). The claim is a table, not a fact.
+
 **Fail closed.** Nothing is fetched and nothing is guessed: a ``$ref`` path item
 is left unresolved, a server URL with a variable (``https://{env}.example.com``)
 names no deployment, a relative server names none either, and a level whose
@@ -38,6 +43,7 @@ back to a base the document overrode.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -46,6 +52,7 @@ import yaml
 
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedReference
+from repoatlas.parsers.http_facts import OPENAPI_OPERATIONS, pending_reference
 from repoatlas.parsers.marks import node_span
 
 #: The operation fields of an OpenAPI path item, and nothing else: ``parameters``,
@@ -114,12 +121,14 @@ class _Collector:
         self._lines = lines
         self._source = source
         self._seen: dict[tuple[str, str, str, int, int], ParsedReference] = {}
+        #: Claims for the global pass, recorded as they are.
+        self.claims: list[ParsedReference] = []
         self.operations = 0
         self.truncated = False
 
     @property
     def references(self) -> list[ParsedReference]:
-        return list(self._seen.values())
+        return [*self._seen.values(), *self.claims]
 
     def span(self, node: yaml.Node) -> tuple[int, int]:
         return node_span(node, self._lines)
@@ -221,7 +230,21 @@ def _openapi3(root: dict[str, _Field], collector: _Collector) -> None:
     root_bases = _servers(root.get("servers"), collector)
     collector.deployments(root_bases or [])
 
+    named: list[list[object]] = []
     for method, path, path_line, operation_line, item, operation in _operations(root, collector):
+        named_by = operation.get("operationId")
+        operation_id = _scalar(named_by.value) if named_by is not None else None
+        if named_by is not None and operation_id:
+            controller = operation.get("x-swagger-router-controller")
+            named.append(
+                [
+                    method,
+                    path,
+                    operation_id,
+                    _scalar(controller.value) if controller is not None else None,
+                    named_by.key.start_mark.line + 1,
+                ]
+            )
         collector.add(
             EdgeType.SERVES_HTTP_ROUTE,
             EntityType.HTTP_ROUTE,
@@ -243,6 +266,51 @@ def _openapi3(root: dict[str, _Field], collector: _Collector) -> None:
         else:
             bases = root_bases or []
         _endpoints(collector, method, path, bases, operation_line)
+    if named:
+        lines = [int(str(operation[4])) for operation in named]
+        collector.claims.append(
+            pending_reference(
+                EdgeType.REFERENCES,
+                EntityType.CONFIG,
+                OPENAPI_OPERATIONS,
+                min(lines),
+                max(lines),
+                role=OPENAPI_OPERATIONS,
+                operations=json.dumps(named),
+                bases=json.dumps(_validator_bases(root.get("servers"))),
+            )
+        )
+
+
+def _validator_bases(field: _Field | None) -> list[str] | None:
+    """The base paths ``express-openapi-validator`` serves the paths under, or ``None``.
+
+    Its own reading (``BasePath.findUrlPath``): each root server URL's path -- what
+    follows its first ``/`` after any ``://``, else ``/`` -- with one trailing slash
+    dropped; no servers is one empty base. A server with ``variables``, or a path with
+    a placeholder or a query, is expanded or matched in ways not read here: ``None``.
+    """
+    if field is None:
+        return [""]
+    node = field.value
+    if not isinstance(node, yaml.SequenceNode):
+        return None
+    bases: list[str] = []
+    for item in node.value:
+        server = _fields(item)
+        url = _scalar(server["url"].value) if server is not None and "url" in server else None
+        if server is None or url is None or "variables" in server:
+            return None
+        start = url.find("://")
+        rest = url[start + 3 :] if start != -1 else url
+        slash = rest.find("/")
+        path = rest[slash:] if slash != -1 else "/"
+        if any(mark in path for mark in "{}?#"):
+            return None
+        base = path.removesuffix("/")
+        if base not in bases:
+            bases.append(base)
+    return bases or [""]
 
 
 def _servers(field: _Field | None, collector: _Collector) -> list[_Base] | None:

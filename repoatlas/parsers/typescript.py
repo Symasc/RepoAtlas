@@ -26,6 +26,7 @@ from repoatlas.models.parsing import (
 )
 from repoatlas.parsers.http_fastify import FastifyDeclarations
 from repoatlas.parsers.http_nestjs import NestDeclarations
+from repoatlas.parsers.http_oas3 import SpecRoutedApps
 from repoatlas.parsers.http_ts_injection import Injections
 from repoatlas.parsers.http_ts_wrappers import FetchWrappers
 from repoatlas.parsers.http_typescript import TypeScriptHttp, endpoint_claims
@@ -99,6 +100,7 @@ class _Walker:
         uses: UseAnalysis | None = None,
         fastify: FastifyDeclarations | None = None,
         injections: Injections | None = None,
+        oas3: SpecRoutedApps | None = None,
     ) -> None:
         self._source = source
         self._language = language
@@ -107,6 +109,7 @@ class _Walker:
         self._wrappers = wrappers
         self._fastify = fastify
         self._injections = injections
+        self._oas3 = oas3
         self.symbols: list[ParsedSymbol] = []
         self.references: list[ParsedReference] = []
         self._scope: list[str] = []
@@ -603,6 +606,8 @@ class _Walker:
             self.references.extend(self._fastify.call_references(node, self._current))
         if self._injections is not None:
             self.references.extend(self._injections.call_references(node, self._current))
+        if self._oas3 is not None:
+            self.references.extend(self._oas3.call_references(node, self._current))
         self.references.append(
             ParsedReference(
                 edge_type=EdgeType.CALLS,
@@ -733,7 +738,9 @@ class TypeScriptParser:
     # 13: transports and bases handed on in options objects: injected requests, the
     #    calls that supply or forward them, and the functions that own them
     #    (repoatlas.parsers.http_ts_injection).
-    version = "13"
+    # 14: oas3-tools applications, and the module-level objects of functions their
+    #    controllers may be made of (repoatlas.parsers.http_oas3).
+    version = "14"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
@@ -766,10 +773,11 @@ class TypeScriptParser:
         wrappers = FetchWrappers(source, tree.root_node, http.counts)
         fastify = FastifyDeclarations(source, tree.root_node, http.counts)
         injections = Injections(source, tree.root_node, http.counts, wrappers)
+        oas3 = SpecRoutedApps(source, tree.root_node, http.counts, wrappers)
         # Uses are proven by scoping, and a tree the grammar had to recover may have
         # lost a declaration: such a file states no uses at all.
         uses = None if has_error(tree) else UseAnalysis(source, tree.root_node)
-        walker = _Walker(source, grammar, http, nest, wrappers, uses, fastify, injections)
+        walker = _Walker(source, grammar, http, nest, wrappers, uses, fastify, injections, oas3)
         walker.run(tree.root_node)
 
         whole_file_start, whole_file_last = whole_file_span(content)
@@ -803,6 +811,7 @@ class TypeScriptParser:
                 *nest.references(),
                 *fastify.references(),
                 *injections.references(),
+                *oas3.references(),
                 *wrappers.declarations(),
                 *(
                     use_references(walker.uses, walker.symbols, uses.exports)
