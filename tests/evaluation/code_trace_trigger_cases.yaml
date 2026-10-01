@@ -1,0 +1,272 @@
+# RepoAtlas code-trace trigger corpus.
+#
+# The second trigger benchmark. It asks one narrow question: does the code-trace skill
+# load for graph-shaped investigations, and stay out of ordinary coding work? The
+# first corpus (skill_trigger_cases.yaml) is history: it measured the generic
+# investigation skill 0 of 5, and none of its prompts or ids are reused here.
+#
+# GROUND TRUTH IS MANUAL. Three kinds of case:
+#
+#   trace      a question whose answer is a path through the code: where something is
+#              defined and what calls, imports, reads or uses it; how two parts
+#              connect; an entrypoint to its implementation; which services or
+#              repositories take part.                          -> repoatlas-code-trace
+#   local      ordinary coding work an agent does with its own tools: one named file
+#              to explain or edit, a local rename, a language question.   -> none
+#   neighbour  a question for another RepoAtlas skill, to check code-trace does not
+#              take its traffic: a proposed change (change impact), package facts
+#              (dependencies), routes and their callers (http).  -> that skill
+#
+# Every prompt names real code in the benchmark workspace (lvl at bc671bc, pitch),
+# and none names RepoAtlas, a RepoAtlas skill or a RepoAtlas tool.
+#
+# Readers:
+#   tests/evaluation/test_code_trace_trigger_corpus.py  deterministic; no model
+#   ~/repoatlas-bench/topology/code-trace-trigger/      the paid harness and its
+#       pre-registered protocol
+#
+# Fields
+#   id            stable identifier
+#   kind          trace | local | neighbour
+#   prompt        the request, verbatim
+#   expect        the skill that should load, or none
+#   first_tool    optional: RepoAtlas tools acceptable as the first one called
+#   forbid_tools  RepoAtlas tools that must not be called at all
+
+cases:
+  # -- trace: graph-shaped investigations ------------------------------------------
+  - id: trace-device-proof-guard
+    kind: trace
+    prompt: >-
+      Where is DeviceProofGuard defined in lvl, and which services actually put it in
+      front of their routes?
+    expect: repoatlas-code-trace
+    first_tool: [repoatlas_search, repoatlas_relationships, repoatlas_inspect]
+    forbid_tools: [repoatlas_sync]
+
+  - id: trace-organization-authorization
+    kind: trace
+    prompt: >-
+      How does lvl decide whether a caller may act on an organization? Find where that
+      decision is made in the identity service and which other services ask for it.
+    expect: repoatlas-code-trace
+    first_tool: [repoatlas_search, repoatlas_relationships, repoatlas_inspect]
+    forbid_tools: [repoatlas_sync]
+
+  - id: trace-password-reset-email
+    kind: trace
+    prompt: >-
+      Trace lvl's password reset from the forgot-password page in the web app to the
+      code that sends the reset email.
+    expect: repoatlas-code-trace
+    first_tool: [repoatlas_search, repoatlas_relationships, repoatlas_inspect]
+    forbid_tools: [repoatlas_sync]
+
+  - id: trace-lti-launch-user
+    kind: trace
+    prompt: >-
+      Follow pitch's LTI 1.3 launch from the gateway controller to the microservice code
+      that looks up or creates the user.
+    expect: repoatlas-code-trace
+    first_tool: [repoatlas_search, repoatlas_relationships, repoatlas_inspect]
+    forbid_tools: [repoatlas_sync]
+
+  - id: trace-auth-whitelist-jwt
+    kind: trace
+    prompt: >-
+      How does AUTH_WHITELIST_ROUTES in pitch's API gateway connect to the JWT check?
+      Show me what reads it and where the check is enforced.
+    expect: repoatlas-code-trace
+    first_tool: [repoatlas_search, repoatlas_relationships, repoatlas_inspect]
+    forbid_tools: [repoatlas_sync]
+
+  - id: trace-who-calls-create-clients
+    kind: trace
+    prompt: >-
+      Who calls createClients in lvl's desktop app, and what does it wire together?
+    expect: repoatlas-code-trace
+    first_tool: [repoatlas_search, repoatlas_relationships, repoatlas_inspect]
+    forbid_tools: [repoatlas_sync]
+
+  - id: trace-identity-client-users
+    kind: trace
+    prompt: >-
+      Where is createIdentityClient defined, and which apps and services in lvl use it?
+    expect: repoatlas-code-trace
+    first_tool: [repoatlas_search, repoatlas_relationships, repoatlas_inspect]
+    forbid_tools: [repoatlas_sync]
+
+  - id: trace-alerts-end-to-end
+    kind: trace
+    prompt: >-
+      Which parts of lvl take part in alerts, from where an alert is raised to where it
+      reaches the user?
+    expect: repoatlas-code-trace
+    first_tool: [repoatlas_search, repoatlas_relationships, repoatlas_inspect]
+    forbid_tools: [repoatlas_sync]
+
+  - id: trace-learning-entrypoint-rpc
+    kind: trace
+    prompt: >-
+      Show me the path from lvl's learning service entrypoint to where its RabbitMQ RPC
+      handlers are registered.
+    expect: repoatlas-code-trace
+    first_tool: [repoatlas_search, repoatlas_relationships, repoatlas_inspect]
+    forbid_tools: [repoatlas_sync]
+
+  - id: trace-device-policy-key
+    kind: trace
+    prompt: >-
+      Where is the DEVICE_POLICY_KEY metadata from lvl's packages/auth set on handlers,
+      and where is it read back?
+    expect: repoatlas-code-trace
+    first_tool: [repoatlas_search, repoatlas_relationships, repoatlas_inspect]
+    forbid_tools: [repoatlas_sync]
+
+  - id: trace-gateway-user-claims
+    kind: trace
+    prompt: >-
+      Where do the user claims that pitch's gateway attaches to a request come from, and
+      which controllers rely on them?
+    expect: repoatlas-code-trace
+    first_tool: [repoatlas_search, repoatlas_relationships, repoatlas_inspect]
+    forbid_tools: [repoatlas_sync]
+
+  - id: trace-sign-in-across-repositories
+    kind: trace
+    prompt: >-
+      Which of my repositories take part in signing a user in, from the login form to
+      token validation?
+    expect: repoatlas-code-trace
+    first_tool: [repoatlas_search, repoatlas_relationships, repoatlas_inspect, repoatlas_repositories]
+    forbid_tools: [repoatlas_sync]
+
+  # -- local: ordinary coding work -------------------------------------------------
+  - id: local-explain-loading-state
+    kind: local
+    prompt: >-
+      Open lvl's apps/web/src/components/ui/button.tsx and explain what the component
+      does while isLoading is true.
+    expect: none
+    forbid_tools: [repoatlas_sync]
+
+  - id: local-default-variant
+    kind: local
+    prompt: >-
+      In lvl's apps/web/src/components/ui/button.tsx, make the default variant
+      secondary instead of primary.
+    expect: none
+    forbid_tools: [repoatlas_sync]
+
+  - id: local-rename-test-variable
+    kind: local
+    prompt: >-
+      In lvl's apps/web/src/__tests__/button.spec.tsx, rename the local variable button
+      to submitButton in the test that declares it.
+    expect: none
+    forbid_tools: [repoatlas_sync]
+
+  - id: local-size-type-error
+    kind: local
+    prompt: >-
+      I set size = "xl" as the default in lvl's apps/web/src/components/ui/button.tsx
+      and TypeScript says "xl" is not assignable to ButtonSize. What's wrong?
+    expect: none
+    forbid_tools: [repoatlas_sync]
+
+  - id: local-python-sort-none
+    kind: local
+    prompt: >-
+      Why does print([3, 1, 2].sort()) print None in Python?
+    expect: none
+    forbid_tools: [repoatlas_sync]
+
+  - id: local-typescript-unknown-any
+    kind: local
+    prompt: >-
+      In TypeScript, when should I use unknown instead of any?
+    expect: none
+    forbid_tools: [repoatlas_sync]
+
+  - id: local-mobile-config-fallback
+    kind: local
+    prompt: >-
+      Read lvl's apps/mobile/src/config.ts and tell me what the API base URL falls back
+      to when no environment variable is set.
+    expect: none
+    forbid_tools: [repoatlas_sync]
+
+  - id: local-copy-edit
+    kind: local
+    prompt: >-
+      In lvl's apps/web/src/features/landing/copy/en.ts, change the title on line 163
+      from "This link no longer works" to "This reset link has expired".
+    expect: none
+    forbid_tools: [repoatlas_sync]
+
+  - id: local-regex-question
+    kind: local
+    prompt: >-
+      Explain what this regular expression matches: ^(?:[a-z0-9-]+\.)+[a-z]{2,}$
+    expect: none
+    forbid_tools: [repoatlas_sync]
+
+  - id: local-comment-config-exports
+    kind: local
+    prompt: >-
+      Add a one-line comment above each export in lvl's apps/web/src/lib/config.ts.
+    expect: none
+    forbid_tools: [repoatlas_sync]
+
+  # -- neighbour: other RepoAtlas skills' traffic ----------------------------------
+  - id: neighbour-impact-device-proof-options
+    kind: neighbour
+    prompt: >-
+      If I change DEVICE_PROOF_OPTIONS in lvl's packages/auth, which services could
+      behave differently?
+    expect: repoatlas-change-impact
+    first_tool: [repoatlas_impact, repoatlas_search]
+    forbid_tools: [repoatlas_sync]
+
+  - id: neighbour-impact-split-create-clients
+    kind: neighbour
+    prompt: >-
+      I'm planning to split createClients in lvl's desktop app into one function per
+      service. What would need updating?
+    expect: repoatlas-change-impact
+    first_tool: [repoatlas_impact, repoatlas_search]
+    forbid_tools: [repoatlas_sync]
+
+  - id: neighbour-dependencies-zod-lock
+    kind: neighbour
+    prompt: >-
+      pitch's root package.json asks for zod ^4.1.12. What does the lockfile actually
+      resolve, and does packages/shared ask for the same?
+    expect: repoatlas-dependencies
+    first_tool: [repoatlas_dependencies]
+    forbid_tools: [repoatlas_sync]
+
+  - id: neighbour-dependencies-messaging-declarers
+    kind: neighbour
+    prompt: >-
+      Which packages in lvl declare a dependency on @lvl/messaging?
+    expect: repoatlas-dependencies
+    first_tool: [repoatlas_dependencies]
+    forbid_tools: [repoatlas_sync]
+
+  - id: neighbour-http-courses-route
+    kind: neighbour
+    prompt: >-
+      Which client code calls GET /v1/courses, and which controller in lvl's identity
+      service serves it?
+    expect: repoatlas-http
+    first_tool: [repoatlas_http_operations, repoatlas_search]
+    forbid_tools: [repoatlas_sync]
+
+  - id: neighbour-http-identity-uncalled
+    kind: neighbour
+    prompt: >-
+      Which of lvl's identity service HTTP routes have no caller anywhere in the repo?
+    expect: repoatlas-http
+    first_tool: [repoatlas_http_operations]
+    forbid_tools: [repoatlas_sync]
