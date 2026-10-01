@@ -351,13 +351,84 @@ export const apiClient = {
 
 def test_a_closure_the_wrapper_calls_is_read_as_its_own_body() -> None:
     # an object literal's members are not declarations: the file makes the request
-    assert _calls(RETRYING) == {("GET /users", None), ("POST /users", None)}
-    # the base is computed (an environment variable first), so nothing is absolute
-    assert {r.target_kind for r in _http(RETRYING)} == {EntityType.HTTP_ROUTE}
+    assert _calls(RETRYING) == {
+        ("GET http://localhost:8000/api/v1/users", None),
+        ("GET /api/v1/users", None),
+        ("POST http://localhost:8000/api/v1/users", None),
+        ("POST /api/v1/users", None),
+    }
     # the template is the global pass's to decide, as for any wrapper
     [pending] = _claims(RETRYING)
     assert pending.meta["transport"] == "wrapper"
     assert json.loads(pending.meta["path"])["parts"] == [["l", "/users/"], ["s", "id"]]
+    assert pending.meta["base"] == "http://localhost:8000/api/v1"
+
+
+def _base(declaration: str, base: str = "API.base", tail: str = "") -> set[str]:
+    """What ``request("/users")`` names through a wrapper over ``${base}${path}``."""
+    source = (
+        f"{declaration}\n"
+        f"export function request(path: string) {{\n"
+        f"  return fetch(`${{{base}}}${{path}}`);\n"
+        f"}}\n"
+        f'export function load() {{ return request("/users"); }}\n'
+        f"{tail}"
+    )
+    return {r.target_key for r in _http(source)}
+
+
+ABSOLUTE = {"GET http://localhost:8000/api/v1/users", "GET /api/v1/users"}
+RELATIVE = {"GET /users"}
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        'const API = { base: process.env.API_URL || "http://localhost:8000/api/v1" };',
+        'export const API = { base: process.env["API_URL"] ?? "http://localhost:8000/api/v1" };',
+        'const API = { "base": import.meta.env.VITE_API ?? "http://localhost:8000/api/v1" }'
+        " as const;",
+        'const DEFAULT = "http://localhost:8000/api/v1";\n'
+        "const API = { base: process.env.API_URL || DEFAULT, timeout: 10 };",
+    ],
+)
+def test_a_deployment_setting_with_a_literal_default_is_that_default(declaration: str) -> None:
+    assert _base(declaration) == ABSOLUTE
+
+
+def test_a_setting_with_a_default_needs_no_object_around_it() -> None:
+    declaration = 'const BASE = process.env.API_URL || "http://localhost:8000/api/v1";'
+    assert _base(declaration, base="BASE") == ABSOLUTE
+
+
+@pytest.mark.parametrize(
+    ("declaration", "tail"),
+    [
+        # the object can be changed: by assignment, by delete, or by whoever is handed it
+        ('const API = { base: "http://localhost:8000/api/v1" };', 'API.base = "/other";\n'),
+        ('const API = { base: "http://localhost:8000/api/v1" };', "delete API.base;\n"),
+        ('const API = { base: "http://localhost:8000/api/v1" };', "configure(API);\n"),
+        ('const API = { base: "http://localhost:8000/api/v1" };', "export { API };\n"),
+        # a spread, a computed key or a second entry could be the one that counts
+        ('const API = { base: "http://localhost:8000/api/v1", ...overrides };', ""),
+        ('const API = { [key]: "/x", base: "http://localhost:8000/api/v1" };', ""),
+        ('const API = { base: "http://a/api", base: "http://localhost:8000/api/v1" };', ""),
+        ('const API = { base() { return "http://localhost:8000/api/v1"; } };', ""),
+        # only a deployment setting has a default to read
+        ('const API = { base: settings.url || "http://localhost:8000/api/v1" };', ""),
+        ('const API = { base: window.env.API_URL || "http://localhost:8000/api/v1" };', ""),
+        (
+            "const process = load();\n"
+            'const API = { base: process.env.API_URL || "http://localhost:8000/api/v1" };',
+            "",
+        ),
+        ('const API = { base: process.env.API_URL && "http://localhost:8000/api/v1" };', ""),
+        ('const API = { base: "http://localhost:8000/api/v1" || process.env.API_URL };', ""),
+        ('let API = { base: "http://localhost:8000/api/v1" };', ""),
+    ],
+)
+def test_a_base_that_is_not_proven_stays_relative(declaration: str, tail: str) -> None:
+    assert _base(declaration, tail=tail) == RELATIVE
 
 
 def test_a_function_outside_the_wrapper_is_not_its_body() -> None:
