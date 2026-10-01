@@ -6,10 +6,7 @@
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  border: 1px solid var(--ra-border);
-  border-radius: 14px;
   background-color: var(--ra-code-background);
-  box-shadow: var(--ra-shadow);
   overflow: hidden;
   transform-origin: 50% 40%;
 
@@ -116,7 +113,7 @@
   /* no padding: a name keeps its column, so the code stays aligned */
   padding: 0;
   border: 0;
-  border-radius: 2px;
+  border-radius: var(--ra-radius-s);
   background: transparent;
   font: inherit;
   color: inherit;
@@ -159,7 +156,7 @@
 .gapButton {
   font-size: var(--mantine-font-size-sm);
   font-weight: 600;
-  color: var(--ra-accent-strong);
+  color: var(--ra-accent);
 
   &:hover {
     text-decoration: underline;

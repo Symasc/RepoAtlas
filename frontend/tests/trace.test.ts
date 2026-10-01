@@ -11,6 +11,7 @@ import {
   buildTrace,
   chainOf,
   nameFromKey,
+  reachOf,
   rowId,
   SEED_ID,
   splitAt,
@@ -296,6 +297,20 @@ describe("a trace", () => {
     expect(nameFromKey(ROLE)).toBe("CourseRole");
     expect(nameFromKey("file:app:src/policy.ts")).toBe("policy.ts");
     expect(nameFromKey("contracts:src/legacy/")).toBe("legacy");
+  });
+
+  it("never counts what changes as something a change reaches", () => {
+    // a file whose six declarations nothing else uses: impact reaches the six, lists none
+    const alone = { ...impact([]), summary: { policy: "p", reached: 6, returned: 0 }, omitted: { by_reason: {}, by_unit: {} } } as ImpactResponse;
+    expect(reachOf(alone)).toEqual({ outside: 0, beyond: 0, within: 6 });
+    // seven listed, two named only as a file, three past the limit, four of its own
+    const cut = {
+      ...CHAIN,
+      unresolved: [{ entity: "file:app:a.ts" }, { entity: "file:app:b.ts" }],
+      omitted: { by_reason: { budget: 3 }, by_unit: {} },
+      summary: { policy: "p", reached: 16, returned: 7 },
+    } as unknown as ImpactResponse;
+    expect(reachOf(cut)).toEqual({ outside: 12, beyond: 3, within: 4 });
   });
 });
 

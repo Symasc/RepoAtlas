@@ -6,123 +6,48 @@
   height: 100%;
 }
 
-/* -- the overview's figures ------------------------------------------------- */
+/* -- the toolbar's words -------------------------------------------------------- */
 
-.metrics {
-  display: flex;
-  gap: var(--mantine-spacing-sm);
+.levelTitle {
   margin: 0;
-  padding: var(--mantine-spacing-md) var(--mantine-spacing-lg);
-  border-bottom: 1px solid var(--ra-border);
-  background-color: var(--ra-surface);
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.tile {
-  position: relative;
-  min-width: 148px;
-  padding: 9px 14px 9px 46px;
-  border: 1px solid var(--ra-border);
-  border-radius: var(--mantine-radius-md);
-  background-color: var(--ra-canvas);
-}
-
-/* inside the term, set beside both lines */
-.tileIcon {
-  position: absolute;
-  left: 15px;
-  top: 50%;
-  transform: translateY(-50%);
-  color: var(--ra-accent);
-}
-
-.tileLabel {
-  font-size: var(--mantine-font-size-xs);
-  color: var(--ra-text-muted);
+  font-size: var(--mantine-font-size-lg);
+  font-weight: 600;
   white-space: nowrap;
 }
 
-.tileValue {
-  margin: 0;
-  font-size: var(--mantine-font-size-xl);
-  font-weight: 600;
-  line-height: 1.25;
-  font-variant-numeric: tabular-nums;
-}
-
-@media (max-width: $mantine-breakpoint-sm) {
-  .metrics {
-    padding: var(--mantine-spacing-sm) var(--mantine-spacing-md);
-  }
-
-  .tile {
-    min-width: 0;
-    padding: 6px 10px;
-  }
-
-  .tileIcon {
-    display: none;
-  }
-}
-
-/* -- panels over the canvas -------------------------------------------------- */
-
-.note {
+/* the workspace in one line: "4 repositories · 3,950 files · …" */
+.totals {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  max-width: 560px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 2px 14px;
   margin: 0;
-  padding: 7px 14px;
-  font-size: var(--mantine-font-size-md);
-  color: var(--ra-text-muted);
-  text-align: center;
-  background-color: var(--ra-surface);
-  border: 1px solid var(--ra-border);
-  border-radius: var(--mantine-radius-md);
 }
 
-.problem {
+.figure {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--mantine-spacing-sm);
-  padding: var(--mantine-spacing-md) var(--mantine-spacing-lg);
-  background-color: var(--ra-surface);
-  border: 1px solid var(--ra-border);
-  border-radius: var(--mantine-radius-md);
+  flex-direction: row-reverse;
+  gap: 4px;
 
-  p {
+  dt {
+    color: var(--ra-text-subtle);
+  }
+
+  dd {
     margin: 0;
     color: var(--ra-text);
+    font-weight: 500;
   }
 }
 
-/* the trail, and beneath it what the level says about itself */
-.overlayStack {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 8px;
-  max-width: min(640px, 60vw);
-
-  .note {
-    text-align: left;
-  }
-}
-
+/* where you are, each step a way back out */
 .trail {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
-  max-width: min(640px, 60vw);
-  padding: 6px 12px;
-  background-color: color-mix(in oklch, var(--ra-surface) 88%, transparent);
-  border: 1px solid var(--ra-border);
-  border-radius: var(--mantine-radius-md);
-  backdrop-filter: blur(6px);
+  gap: 2px 6px;
+  min-width: 0;
 }
 
 .step {
@@ -132,7 +57,7 @@
 .crumb {
   font-size: var(--mantine-font-size-md);
   color: var(--ra-text-muted);
-  border-radius: var(--mantine-radius-xs);
+  border-radius: var(--ra-radius-s);
   white-space: nowrap;
 
   &[data-current] {
@@ -141,38 +66,54 @@
   }
 }
 
-button.crumb:hover {
-  color: var(--ra-text);
+button.crumb {
+  text-decoration: underline transparent;
+  text-underline-offset: 3px;
+
+  &:hover {
+    color: var(--ra-text);
+    text-decoration-color: currentColor;
+  }
 }
 
 .separator {
   color: var(--ra-text-subtle);
 }
 
+/* what the level holds: plain figures, separated as a sentence would be */
 .levelInfo {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 5px 10px;
-  font-size: var(--mantine-font-size-sm);
-  color: var(--ra-text-muted);
-  background-color: color-mix(in oklch, var(--ra-surface) 88%, transparent);
-  border: 1px solid var(--ra-border);
-  border-radius: var(--mantine-radius-md);
-  font-variant-numeric: tabular-nums;
-  backdrop-filter: blur(6px);
+  gap: 8px;
 
-  @media (max-width: $mantine-breakpoint-sm) {
-    display: none;
+  > span + span::before {
+    content: "·";
+    margin-right: 8px;
+    color: var(--ra-text-subtle);
   }
 }
 
 .depth {
-  padding: 1px 7px;
   color: var(--ra-text);
   font-weight: 500;
-  border: 1px solid var(--ra-border-strong);
-  border-radius: var(--mantine-radius-xs);
+}
+
+.problem {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+
+  p {
+    margin: 0;
+    color: var(--ra-danger);
+  }
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 /* -- the canvas and, beside it (below it on a narrow window), the inspector ------- */
@@ -203,50 +144,19 @@ button.crumb:hover {
   min-height: 0;
 }
 
-/* -- a file read as code: the trail and the file's facts above its source ---------- */
+/* -- a file read as code: the toolbar, then its source, edge to edge -------------- */
 
 .reading {
   display: flex;
   flex-direction: column;
-  gap: 12px;
   flex: 1;
   min-width: 0;
   min-height: 0;
-  padding: 16px;
-  background-color: var(--ra-canvas);
-
-  .note {
-    align-self: flex-start;
-    text-align: left;
-  }
-}
-
-.readingBar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 10px 16px;
-}
-
-.readingInfo {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-size: var(--mantine-font-size-sm);
-  color: var(--ra-text-muted);
-  font-variant-numeric: tabular-nums;
-
-  > span + span::before {
-    content: "·";
-    margin-right: 12px;
-    color: var(--ra-text-subtle);
-  }
+  background-color: var(--ra-code-background);
 }
 
 .modeSwitch {
-  background-color: var(--ra-surface);
-  border: 1px solid var(--ra-border);
+  flex-shrink: 0;
 }
 
 .lineChips {
@@ -256,10 +166,10 @@ button.crumb:hover {
 }
 
 .lineChip {
-  padding: 2px 8px;
-  border: 1px solid var(--ra-border);
-  border-radius: 6px;
-  background-color: var(--ra-surface);
+  padding: 1px 6px;
+  border: 1px solid var(--ra-border-strong);
+  border-radius: var(--ra-radius-s);
+  background-color: transparent;
   color: var(--ra-text-muted);
   font-family: var(--mantine-font-family-monospace);
   font-size: var(--mantine-font-size-sm);
@@ -267,7 +177,7 @@ button.crumb:hover {
 
   &:hover {
     color: var(--ra-text);
-    border-color: var(--ra-border-strong);
+    border-color: var(--ra-text-subtle);
   }
 
   &:focus-visible {
@@ -284,24 +194,19 @@ button.crumb:hover {
 
 /* -- a trace ---------------------------------------------------------------------- */
 
-.traceTrail {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
+/* the trace is the trail's last step: what is traced, named after an arrow */
 .traceStep {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 12px;
-  border: 1px solid color-mix(in oklch, var(--ra-accent) 55%, var(--ra-border));
-  border-radius: var(--mantine-radius-md);
-  background-color: color-mix(in oklch, var(--ra-accent) 12%, var(--ra-surface));
   font-size: var(--mantine-font-size-md);
   font-weight: 600;
   color: var(--ra-text);
+  white-space: nowrap;
+
+  svg {
+    color: var(--ra-accent);
+  }
 }
 
 /* a trace that has nothing to draw: said in the middle of where it would be */
@@ -310,7 +215,6 @@ button.crumb:hover {
   flex-direction: column;
   flex: 1;
   min-width: 0;
-  padding: 16px;
   background-color: var(--ra-canvas);
 }
 
@@ -323,6 +227,7 @@ button.crumb:hover {
   flex: 1;
   max-width: 520px;
   margin: 0 auto;
+  padding: 16px;
   text-align: center;
   color: var(--ra-text-muted);
 
@@ -364,6 +269,10 @@ button.crumb:hover {
   gap: 10px;
   padding: 6px 4px 6px 6px;
 
+  > svg {
+    margin-top: 2px;
+  }
+
   > span:last-child {
     display: flex;
     flex-direction: column;
@@ -374,8 +283,8 @@ button.crumb:hover {
   &:not(:last-child)::after {
     content: "";
     position: absolute;
-    left: 15px;
-    top: 30px;
+    left: 13px;
+    top: 26px;
     bottom: -6px;
     width: 1px;
     background-color: var(--ra-border-strong);
@@ -388,7 +297,7 @@ button.crumb:hover {
   min-width: 0;
   padding: 0 6px;
   border: 0;
-  border-radius: var(--mantine-radius-xs);
+  border-radius: var(--ra-radius-s);
   background: transparent;
   color: var(--ra-text);
   font: inherit;
@@ -400,7 +309,7 @@ button.crumb:hover {
   }
 
   &[data-current] strong {
-    color: var(--ra-accent-strong);
+    color: var(--ra-accent);
   }
 
   &:focus-visible {

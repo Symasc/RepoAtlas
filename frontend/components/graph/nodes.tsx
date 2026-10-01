@@ -2,10 +2,9 @@
 
 import { ArrowRightIcon, CaretRightIcon, FileIcon, FolderSimpleIcon, PuzzlePieceIcon } from "@phosphor-icons/react";
 import { Handle, Position, type Node, type NodeProps, type NodeTypes } from "@xyflow/react";
-import Image from "next/image";
-import { Fragment, memo, type CSSProperties, type MouseEvent, type ReactNode } from "react";
+import { Fragment, memo, type MouseEvent, type ReactNode } from "react";
 
-import mark from "@/assets/brand/repoatlas-mark-256.png";
+import { RepoSwatch } from "@/components/common/RepoSwatch";
 import type { ChildEntry } from "@/lib/api/generated";
 import { compactCount, formatCount, plural, shortSha } from "@/lib/model/format";
 import type { FreshnessModel } from "@/lib/model/freshness";
@@ -25,7 +24,7 @@ import {
 import type { RepositoryModel } from "@/lib/model/repositories";
 
 import { FAMILY_NOUN } from "./edges";
-import { EntityBadge, LineGlyph, Monogram, PathBadge } from "./glyphs";
+import { EntityBadge, LineGlyph, PathBadge } from "./glyphs";
 import classes from "./Graph.module.css";
 import type { TraceNode } from "./traceNodes";
 
@@ -132,15 +131,16 @@ function Cover({
 function OpenHint() {
   return (
     <span className={classes.openHint} aria-hidden>
-      Open <ArrowRightIcon size={11} weight="bold" />
+      Open <ArrowRightIcon size={12} weight="bold" />
     </span>
   );
 }
 
-function FreshnessDot({ freshness }: { freshness: FreshnessModel }) {
+/** A repository's freshness, said in words in its own tone: never a bare dot. */
+function FreshnessWord({ freshness }: { freshness: FreshnessModel }) {
   return (
-    <span className={classes.freshness} data-tone={freshness.tone} title={freshness.label}>
-      <span className={classes.srOnly}>{freshness.label}</span>
+    <span className={classes.freshness} data-tone={freshness.tone} title={freshness.explanation.replace(/`/g, "")}>
+      {freshness.label}
     </span>
   );
 }
@@ -160,23 +160,19 @@ export function languagesOf(repository: RepositoryModel, max = 3): string {
   return list.length > max ? `${shown} +${list.length - max}` : shown;
 }
 
-function hueStyle(hue: number | null): CSSProperties | undefined {
-  return hue ? ({ "--hue": `var(--ra-repo-${hue})` } as CSSProperties) : undefined;
-}
-
 // -- the overview ---------------------------------------------------------------------
 
 function RepositoryNode({ id, data }: NodeProps<Node<RepositoryNodeData, "repository">>) {
   const { repository: r, selected = false, actions, partners } = data;
   return (
-    <div className={classes.repository} data-selected={selected || undefined} style={hueStyle(r.hue)}>
+    <div className={classes.repository} data-selected={selected || undefined}>
       <Anchors />
       <Cover id={id} name={r.name} selected={selected} openable actions={actions} />
-      <Monogram name={r.name} hue={r.hue} />
       <span className={classes.body}>
         <span className={classes.titleLine}>
+          <RepoSwatch hue={r.hue} />
           <span className={classes.name}>{r.name}</span>
-          {selected ? <OpenHint /> : <FreshnessDot freshness={r.freshness} />}
+          {selected ? <OpenHint /> : <FreshnessWord freshness={r.freshness} />}
         </span>
         <span className={classes.meta}>{languagesOf(r) || "No languages recorded"}</span>
         <span className={classes.stats}>
@@ -188,12 +184,11 @@ function RepositoryNode({ id, data }: NodeProps<Node<RepositoryNodeData, "reposi
   );
 }
 
-/** The workspace itself, at the centre when no repository is. */
+/** The workspace itself, at the centre when no repository is: a label on the map, not a badge. */
 function HubNode({ data }: NodeProps<Node<HubNodeData, "hub">>) {
   return (
     <div className={classes.hub}>
       <Anchors />
-      <Image src={mark} alt="" width={30} height={30} className={classes.hubMark} />
       <span className={classes.hubTitle}>Workspace</span>
       <span className={classes.hubMeta}>
         {plural(data.repositories, "repository", "repositories")} · {plural(data.files, "file")}
@@ -269,9 +264,9 @@ function FrameNode({ data }: NodeProps<Node<FrameNodeData, "frame">>) {
       <Anchors />
       <div className={classes.frameHeader}>
         {frame.path ? (
-          <FolderSimpleIcon size={22} weight="fill" className={classes.folder} aria-hidden />
+          <FolderSimpleIcon size={18} className={classes.folder} aria-hidden />
         ) : (
-          <Monogram name={repository.name} hue={repository.hue} size={30} />
+          <RepoSwatch hue={repository.hue} size={12} />
         )}
         <span className={classes.frameTitle}>
           <span className={classes.frameName}>{frame.name}</span>
@@ -312,11 +307,11 @@ function Tally({ summary }: { summary: FamilyCounts }) {
 function EntryRow({ entry, repository, actions }: { entry: ChildEntry; repository: string; actions: NodeActions }) {
   const directory = entry.kind === "directory";
   const icon = directory ? (
-    <FolderSimpleIcon size={15} weight="fill" className={classes.folder} aria-hidden />
+    <FolderSimpleIcon size={14} className={classes.folder} aria-hidden />
   ) : entry.kind === "declaration" ? (
-    <PuzzlePieceIcon size={15} className={classes.fileIcon} aria-hidden />
+    <PuzzlePieceIcon size={14} className={classes.fileIcon} aria-hidden />
   ) : (
-    <FileIcon size={15} className={classes.fileIcon} aria-hidden />
+    <FileIcon size={14} className={classes.fileIcon} aria-hidden />
   );
   if (entry.kind === "declaration") {
     return (
@@ -379,7 +374,7 @@ function DirectoryNode({ id, data }: NodeProps<Node<DirectoryNodeData, "director
           onClick={stop(() => actions.activate(id))}
           aria-label={selected ? `Open ${card.name}` : `Select ${card.name}, ${plural(card.files, "file")}`}
         >
-          <FolderSimpleIcon size={20} weight="fill" className={classes.folder} aria-hidden />
+          <FolderSimpleIcon size={16} className={classes.folder} aria-hidden />
           <span className={classes.cardTitle}>{card.name}</span>
           {selected ? <OpenHint /> : <span className={classes.cardCount}>{formatCount(card.files)}</span>}
         </button>
@@ -415,7 +410,7 @@ function FilesNode({ id, data }: NodeProps<Node<FilesNodeData, "files">>) {
           onClick={stop(() => actions.activate(id))}
           aria-label={selected ? "Files here, selected" : `Select the files here, ${plural(card.total, "file")}`}
         >
-          <FileIcon size={18} className={classes.fileIcon} aria-hidden />
+          <FileIcon size={16} className={classes.fileIcon} aria-hidden />
           <span className={classes.cardTitle}>Files</span>
           <span className={classes.cardCount}>{formatCount(card.total)}</span>
         </button>
@@ -452,10 +447,10 @@ function SharedNodeView({ id, data }: NodeProps<Node<SharedNodeData, "shared">>)
 function PeerNodeView({ id, data }: NodeProps<Node<PeerNodeData, "peer">>) {
   const { node, hue, actions, selected = false } = data;
   return (
-    <div className={classes.peer} style={hueStyle(hue)} data-selected={selected || undefined}>
+    <div className={classes.peer} data-selected={selected || undefined}>
       <Anchors />
       <Cover id={id} name={node.repository} selected={selected} openable actions={actions} />
-      <Monogram name={node.repository} hue={hue} size={28} />
+      <RepoSwatch hue={hue} />
       <span className={classes.body}>
         <span className={classes.name}>{node.repository}</span>
         <span className={classes.meta}>Another repository · {compactCount(node.count)}</span>
@@ -474,7 +469,7 @@ function PlaceNodeView({ id, data }: NodeProps<Node<PlaceNodeData, "place">>) {
     <div className={classes.place} data-selected={selected || undefined}>
       <Anchors />
       <Cover id={id} name={node.path} selected={selected} openable actions={actions} />
-      <PathBadge path={node.path} size={26} />
+      <PathBadge path={node.path} />
       <span className={classes.body}>
         <span className={classes.name}>{name}</span>
         <span className={classes.meta}>{cut > 0 ? `${node.path.slice(0, cut)}/` : `${data.repository} root`}</span>
@@ -491,7 +486,7 @@ function MoreNodeView({ id, data }: NodeProps<Node<MoreNodeData, "more">>) {
     <div className={classes.moreNode} data-selected={selected || undefined}>
       <Anchors />
       <Cover id={id} name={label} selected={selected} openable={false} actions={actions} />
-      <span className={classes.moreLabel}>+ {label}</span>
+      <span className={classes.moreLabel}>{label}</span>
       <span className={classes.sharedCount}>{compactCount(node.count)}</span>
     </div>
   );
@@ -511,9 +506,7 @@ function AnchorNode({ id, data }: NodeProps<Node<AnchorNodeData, "anchor">>) {
         onClick={stop(() => actions.activate(id))}
         aria-label={`${name}, this file`}
       />
-      <span className={classes.anchorIcon} aria-hidden>
-        <FileIcon size={24} />
-      </span>
+      <FileIcon size={22} className={classes.anchorIcon} aria-hidden />
       <span className={classes.body}>
         <span className={classes.anchorName}>{name}</span>
         <span className={classes.meta}>
@@ -535,7 +528,7 @@ function NeighbourNode({ id, data }: NodeProps<Node<NeighbourNodeData, "neighbou
     <div className={classes.place} data-neighbour data-selected={selected || undefined}>
       <Anchors />
       <Cover id={id} name={node.detail ? `${node.detail}/${node.label}` : node.label} selected={selected} openable actions={actions} />
-      <PathBadge path={node.target} size={26} />
+      <PathBadge path={node.target} />
       <span className={classes.body}>
         <span className={classes.name}>{node.label}</span>
         <span className={classes.meta}>{node.detail ? `${node.detail}/` : "repository root"}</span>

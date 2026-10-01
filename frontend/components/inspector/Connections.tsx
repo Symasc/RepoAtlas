@@ -4,7 +4,8 @@ import { ActionIcon, Tooltip } from "@mantine/core";
 import { ArrowRightIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 
-import { EntityBadge, LineGlyph, Monogram, PathBadge } from "@/components/graph/glyphs";
+import { RepoSwatch } from "@/components/common/RepoSwatch";
+import { EntityBadge, LineGlyph, PathBadge } from "@/components/graph/glyphs";
 import { compactCount, formatCount } from "@/lib/model/format";
 import { FAMILIES, type Connection, type Family, type Partner } from "@/lib/model/graph";
 
@@ -24,17 +25,21 @@ const SHOWN = 12;
 export function PartnerIcon({ partner, hue = null }: { partner: Partner; hue?: number | null }) {
   switch (partner.kind) {
     case "repository":
-      return <Monogram name={partner.label} hue={hue} size={24} />;
+      return (
+        <span className={classes.markCell}>
+          <RepoSwatch hue={hue} />
+        </span>
+      );
     case "shared":
-      return <EntityBadge entityType={partner.entityType} size={24} />;
+      return <EntityBadge entityType={partner.entityType} />;
     case "directory":
-      return <PathBadge path={partner.path ?? partner.label} file={false} size={24} />;
+      return <PathBadge path={partner.path ?? partner.label} file={false} />;
     case "file":
-      return <PathBadge path={partner.path ?? partner.label} file size={24} />;
+      return <PathBadge path={partner.path ?? partner.label} file />;
     case "place":
-      return <PathBadge path={partner.path ?? partner.label} size={24} />;
+      return <PathBadge path={partner.path ?? partner.label} />;
     default:
-      return <PathBadge path={partner.label} size={24} />;
+      return <PathBadge path={partner.label} />;
   }
 }
 
@@ -119,7 +124,7 @@ function FamilyGroup({
   return (
     <div className={classes.family}>
       <div className={classes.familyTitle}>
-        <LineGlyph family={family} width={22} />
+        <LineGlyph family={family} width={20} />
         <span>{FAMILY_LABEL[family]}</span>
         <span className={classes.familyCount}>{formatCount(total)}</span>
       </div>

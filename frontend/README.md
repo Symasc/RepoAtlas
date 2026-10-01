@@ -106,15 +106,25 @@ Lines are drawn per family and never merged into one line:
 
 | Family | Line |
 |---|---|
-| code (imports, uses, calls…) | solid |
-| HTTP | dashed |
-| package dependency | double |
-| configuration and environment variables | dotted |
-| the connection being explained | thick, in the accent colour |
+| code (imports, uses, calls…) | solid, in ink |
+| HTTP | dashed, teal |
+| package dependency | double, plum |
+| configuration and environment variables | dotted, ochre |
+| the connection being explained | thick, in the accent (vermilion) |
 
 Every line has an arrowhead for its direction. Its width grows with its count.
-Node families differ by shape, icon and border as well as colour. The legend's
-shapes button names them.
+Each kind of node carries its own icon, drawn in the colour of the family of
+link that reaches it, so the outline tells kinds apart as well as the colour. A
+repository carries a small square in its own colour, wherever it appears. Each
+view has a toolbar above the canvas, saying where you are and what the level
+holds. Below the canvas, a status bar holds the zoom and the key to the lines;
+its ⓘ button names the marks.
+
+The look is deliberately plain. It uses IBM Plex Sans and Plex Mono, served
+from the app itself, and warm neutrals in both themes. The accent marks only
+what is selected, focused or pressed next, and there are three corner radii
+(2, 4 and 6 px). The colour tokens are in `lib/theme/tokens.ts`; every text
+tone keeps 4.5:1 contrast on the backgrounds it sits on.
 
 HTTP has three kinds of shared node, each in its own group: **HTTP routes**
 (a method and path some code serves or calls), **HTTP endpoints** (a route at a

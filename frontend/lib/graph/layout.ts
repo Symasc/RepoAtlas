@@ -20,7 +20,7 @@ import { SEED_ID, type TraceCard, type TraceGraph } from "@/lib/model/trace";
  */
 
 export const SIZE = {
-  repository: { width: 264, height: 84 },
+  repository: { width: 288, height: 84 },
   hub: { width: 184, height: 184 },
   card: { width: 236 },
   shared: { width: 236, height: 48 },
@@ -31,7 +31,7 @@ export const SIZE = {
   neighbour: { width: 244, height: 56 },
 } as const;
 
-export const CARD = { header: 52, row: 26, padding: 8, footer: 34 } as const;
+export const CARD = { header: 44, row: 26, padding: 8, footer: 30 } as const;
 export const FRAME = { header: 64, padding: 24 } as const;
 export const HUB_ID = "hub";
 export const GROUP_ID = "group:unlinked";
@@ -493,7 +493,7 @@ export function layoutFile(graph: FileGraph): Layout {
 
 export const TRACE = {
   seed: { width: 320, height: 168 },
-  card: { width: 300, header: 54, row: 30, more: 28, padding: 10 },
+  card: { width: 300, header: 50, row: 30, more: 28, padding: 10 },
   frame: { header: 38, padding: 12 },
   label: { height: 24, above: 40 },
   gap: { column: 170, card: 14, frame: 26 },

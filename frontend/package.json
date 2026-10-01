@@ -20,13 +20,14 @@
     "check": "pnpm dto:check && pnpm typecheck && pnpm lint && pnpm test"
   },
   "dependencies": {
+    "@fontsource-variable/ibm-plex-sans": "5.3.0",
+    "@fontsource/ibm-plex-mono": "5.3.0",
     "@mantine/core": "^9.6.3",
     "@mantine/hooks": "^9.6.3",
     "@mantine/spotlight": "^9.6.3",
     "@phosphor-icons/react": "^2.1.10",
     "@tanstack/react-query": "^5.104.0",
     "@xyflow/react": "^12.12.0",
-    "geist": "^1.7.2",
     "next": "16.3.6",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",

@@ -21,21 +21,22 @@
   color: var(--ra-text);
   text-decoration: none;
   flex-shrink: 0;
-  border-radius: var(--mantine-radius-xs);
+  border-radius: var(--ra-radius-s);
+
+  &:focus-visible {
+    outline: 2px solid var(--ra-focus);
+    outline-offset: 2px;
+  }
+}
+
+.mark {
+  display: flex;
+  color: var(--ra-accent);
 }
 
 .wordmark {
-  font-size: var(--mantine-font-size-lg);
+  font-size: var(--mantine-font-size-xl);
   font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.title {
-  padding-left: var(--mantine-spacing-lg);
-  border-left: 1px solid var(--ra-border);
-  font-size: var(--mantine-font-size-md);
-  color: var(--ra-text-muted);
-  white-space: nowrap;
 }
 
 .center {
@@ -70,7 +71,6 @@
     padding-inline: var(--mantine-spacing-md);
   }
 
-  .title,
   .wordmark {
     display: none;
   }

@@ -2,12 +2,12 @@
 
 import { Button, Loader } from "@mantine/core";
 import { ArrowSquareOutIcon, FlowArrowIcon } from "@phosphor-icons/react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 
 import { Snippet } from "@/components/code/Snippet";
-import { Graph } from "@/components/graph/Graph";
+import { Graph, Notice, Toolbar } from "@/components/graph/Graph";
 import { flowEdges, place } from "@/components/graph/flow";
-import { EntityBadge, Monogram, PathBadge } from "@/components/graph/glyphs";
+import { EntityBadge, PathBadge } from "@/components/graph/glyphs";
 import type { GraphNode } from "@/components/graph/nodes";
 import { typeNoun, type TraceActions } from "@/components/graph/traceNodes";
 import { Inspector, Quiet, type InspectorTab } from "@/components/inspector/Inspector";
@@ -19,7 +19,18 @@ import { formatCount, plural } from "@/lib/model/format";
 import { FAMILIES, type Family } from "@/lib/model/graph";
 import { DIRECTORY_TRACE, traceSeed } from "@/lib/model/location";
 import type { RepositoryModel } from "@/lib/model/repositories";
-import { boundaryLabel, buildTrace, chainOf, nameFromKey, SEED_ID, splitAt, unitLabel, type TraceGraph, type TraceRow } from "@/lib/model/trace";
+import {
+  boundaryLabel,
+  buildTrace,
+  chainOf,
+  nameFromKey,
+  reachOf,
+  SEED_ID,
+  splitAt,
+  unitLabel,
+  type TraceGraph,
+  type TraceRow,
+} from "@/lib/model/trace";
 
 import type { Navigation } from "./navigation";
 import { Trail } from "./Trail";
@@ -185,23 +196,22 @@ export function TraceLevel({
 
   // -- what the canvas says, whatever state it is in --------------------------------------
   const title = graph?.seed.name ?? (seed ? nameFromKey(seed) : "Trace");
-  const trail = repository ? (
-    <div className={classes.overlayStack}>
-      <div className={classes.traceTrail}>
-        <Trail repository={repository} nav={nav} file={!!nav.place.path && !nav.place.trace?.startsWith(DIRECTORY_TRACE)} />
-        <span className={classes.traceStep}>
-          <FlowArrowIcon size={14} aria-hidden /> {title}
-        </span>
-      </div>
-      {graph && <TraceNote impact={impact.data!} graph={graph} />}
-    </div>
-  ) : null;
+  const start = (
+    <>
+      {repository && <Trail repository={repository} nav={nav} file={!!nav.place.path && !nav.place.trace?.startsWith(DIRECTORY_TRACE)} />}
+      <span className={classes.traceStep}>
+        <FlowArrowIcon size={14} aria-hidden /> Trace of {title}
+      </span>
+    </>
+  );
+  const notice = graph ? traceNote(impact.data!, graph) : null;
 
   let canvas;
   if (impact.isPending) {
     canvas = (
       <div className={classes.traceState} aria-busy="true">
-        <Loader size="sm" type="dots" /> Following what a change to {title} reaches
+        <Loader size="sm" type="dots" />
+        <p>Following what a change to {title} reaches</p>
       </div>
     );
   } else if (impact.error) {
@@ -215,8 +225,8 @@ export function TraceLevel({
   } else if (graph && graph.listed === 0) {
     canvas = (
       <div className={classes.traceState}>
-        <EntityBadge entityType={graph.seed.type ?? "file"} size={34} />
-        <p>Nothing the index holds depends on {graph.seed.name}: a change to it reaches no other indexed code.</p>
+        <EntityBadge entityType={graph.seed.type ?? "file"} size={24} />
+        <p>Nothing outside {graph.seed.name} depends on it: a change to it reaches no other indexed code.</p>
       </div>
     );
   } else {
@@ -239,17 +249,17 @@ export function TraceLevel({
         // a long chain stays legible: it starts at the seed and pans to the right
         minFit={0.7}
         families={families}
-        topLeft={trail}
-        topRight={
+        start={start}
+        end={
           graph && (
             <div className={classes.levelInfo}>
-              <span className={classes.depth}>Trace</span>
               <span>
                 {plural(graph.listed, "thing")} in {plural(graph.columns.reduce((s, c) => s + c.cards.length, 0), "place")}
               </span>
             </div>
           )
         }
+        notice={notice}
       />
     );
   }
@@ -260,7 +270,8 @@ export function TraceLevel({
         <div className={classes.canvas}>
           {!graph || graph.listed === 0 ? (
             <div className={classes.traceFrame}>
-              {trail}
+              <Toolbar start={start} />
+              {notice && <Notice>{notice}</Notice>}
               {canvas}
             </div>
           ) : (
@@ -275,7 +286,6 @@ export function TraceLevel({
             card={card}
             subject={subject}
             slugs={slugs}
-            hues={hues}
             origin={origin}
             tab={tab}
             onTab={setTab}
@@ -287,7 +297,7 @@ export function TraceLevel({
         ) : (
           <Inspector
             label={`${title}, inspected`}
-            icon={<FlowArrowIcon size={30} />}
+            icon={<FlowArrowIcon size={18} />}
             title={title}
             subtitle="Trace"
             tab="about"
@@ -311,14 +321,15 @@ function stepFile(row: TraceRow, slugs: readonly string[]): { repository: string
   return splitAt(row.candidate.step.at, slugs) ?? { repository: row.candidate.repository ?? null, path: row.candidate.path ?? null };
 }
 
-function TraceNote({ impact, graph }: { impact: ImpactResponse; graph: TraceGraph }) {
-  const reached = impact.summary.reached ?? graph.listed;
+/** What the trace leaves out or crosses, said plainly; `null` when there is nothing to say. */
+function traceNote(impact: ImpactResponse, graph: TraceGraph): ReactNode {
+  const reach = reachOf(impact);
   const notes: string[] = [];
-  if (reached > graph.listed) notes.push(`Showing the nearest ${formatCount(graph.listed)} of ${formatCount(reached)} things a change reaches.`);
+  if (reach.beyond > 0) notes.push(`Showing the nearest ${formatCount(graph.listed)} of ${formatCount(reach.outside)} things a change reaches.`);
   if (impact.summary.complete === false) notes.push("The walk stopped at its limits; there may be more.");
   if (graph.repositories.length > 1) notes.push(`Crosses into ${plural(graph.repositories.length - 1, "other repository", "other repositories")}.`);
   if (notes.length === 0) return null;
-  return <p className={classes.note}>{notes.join(" ")}</p>;
+  return <p>{notes.join(" ")}</p>;
 }
 
 function Unresolved({ impact, onChoose }: { impact: ImpactResponse; onChoose: (entity: string) => void }) {
@@ -335,7 +346,7 @@ function Unresolved({ impact, onChoose }: { impact: ImpactResponse; onChoose: (e
           {candidates.map((c) => (
             <li key={c.entity}>
               <button type="button" className={inspectorClasses.row} onClick={() => onChoose(c.entity)}>
-                <EntityBadge entityType={c.type} size={22} />
+                <EntityBadge entityType={c.type} />
                 <span className={inspectorClasses.rowText}>
                   <span className={inspectorClasses.rowLabel}>{nameFromKey(c.entity)}</span>
                   <span className={inspectorClasses.rowDetail}>
@@ -359,7 +370,6 @@ function TraceInspector({
   card,
   subject,
   slugs,
-  hues,
   origin,
   tab,
   onTab,
@@ -374,7 +384,6 @@ function TraceInspector({
   card: string | null;
   subject: string;
   slugs: readonly string[];
-  hues: Map<string, number | null>;
   origin: Navigation["arrival"]["previous"];
   tab: string;
   onTab: (tab: string) => void;
@@ -478,7 +487,7 @@ function TraceInspector({
         panel: (
           <ol className={classes.chain}>
             <li className={classes.chainStep}>
-              <EntityBadge entityType={seed.type ?? "file"} size={20} />
+              <EntityBadge entityType={seed.type ?? "file"} />
               <span>
                 <strong>{seed.name}</strong>
                 <span className={inspectorClasses.rowDetail}>what changes</span>
@@ -486,7 +495,7 @@ function TraceInspector({
             </li>
             {chain.map((step) => (
               <li key={step.id} className={classes.chainStep}>
-                <EntityBadge entityType={step.candidate.type} size={20} />
+                <EntityBadge entityType={step.candidate.type} />
                 <button type="button" className={classes.chainButton} data-current={step.id === row.id || undefined} onClick={() => onPick(step.id)}>
                   <strong>{step.candidate.name}</strong>
                   <span className={inspectorClasses.rowDetail}>
@@ -504,7 +513,7 @@ function TraceInspector({
     return (
       <Inspector
         label={`${c.name}, inspected`}
-        icon={<EntityBadge entityType={c.type} size={38} />}
+        icon={<EntityBadge entityType={c.type} size={18} />}
         title={c.name}
         subtitle={`${typeNoun(c.type)} · ${stepsAway(c.distance).toLowerCase()}${alt ? ` · reached ${plural(alt, "other way")} too` : ""}`}
         onClose={onClose}
@@ -531,7 +540,7 @@ function TraceInspector({
     return (
       <Inspector
         label={`${shown.name}, inspected`}
-        icon={shown.path ? <PathBadge path={shown.path} file size={38} /> : <EntityBadge entityType={shown.rows[0]?.candidate.type} size={38} />}
+        icon={shown.path ? <PathBadge path={shown.path} file size={18} /> : <EntityBadge entityType={shown.rows[0]?.candidate.type} size={18} />}
         title={shown.name}
         subtitle={`${shown.repository ?? "shared"}${shown.path ? ` / ${shown.path.includes("/") ? shown.path.slice(0, shown.path.lastIndexOf("/")) : "root"}` : ""}`}
         onClose={onClose}
@@ -554,7 +563,7 @@ function TraceInspector({
                 {shown.rows.map((r) => (
                   <li key={r.id} className={inspectorClasses.rowItem}>
                     <button type="button" className={inspectorClasses.row} onClick={() => onPick(r.id)}>
-                      <EntityBadge entityType={r.candidate.type} size={22} />
+                      <EntityBadge entityType={r.candidate.type} />
                       <span className={inspectorClasses.rowText}>
                         <span className={inspectorClasses.rowLabel}>{r.candidate.name}</span>
                         <span className={inspectorClasses.rowDetail}>
@@ -580,10 +589,11 @@ function TraceInspector({
   const hubs = impact.hubs ?? [];
   const unresolved = impact.unresolved ?? [];
   const cameFrom = origin?.path ? `${origin.repository}/${origin.path}` : null;
+  const reach = reachOf(impact);
   return (
     <Inspector
       label={`${seed.name}, inspected`}
-      icon={seed.repository ? <Monogram name={seed.repository} hue={hues.get(seed.repository) ?? null} size={38} /> : <EntityBadge entityType={seed.type} size={38} />}
+      icon={<EntityBadge entityType={seed.type ?? "file"} size={18} />}
       title={seed.name}
       subtitle={`${typeNoun(seed.type)}${seed.repository ? ` · ${seed.repository}` : ""}`}
       actions={
@@ -614,10 +624,16 @@ function TraceInspector({
                 )}
                 <dt>Reaches</dt>
                 <dd>
-                  {formatCount(impact.summary.reached ?? graph.listed)} {impact.summary.reached === 1 ? "thing" : "things"}
+                  {reach.outside === 0 ? "Nothing outside it" : plural(reach.outside, "thing")}
                   {impact.summary.units ? ` in ${plural(impact.summary.units, "unit")}` : ""}
                   {impact.summary.complete === false ? ", and possibly more" : ""}
                 </dd>
+                {reach.within > 0 && (
+                  <>
+                    <dt>Inside it</dt>
+                    <dd>{plural(reach.within, "thing")} the walk starts from</dd>
+                  </>
+                )}
                 <dt>Shown</dt>
                 <dd>
                   {formatCount(graph.listed)}

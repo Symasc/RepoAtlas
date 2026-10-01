@@ -1,3 +1,60 @@
+/* -- a view: its toolbar, the canvas, and the status bar under it ------------------ */
+
+.view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-shrink: 0;
+  min-height: 40px;
+  padding: 4px 16px;
+  border-bottom: 1px solid var(--ra-border);
+  background-color: var(--ra-surface);
+}
+
+.toolbarStart {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.toolbarEnd {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-muted);
+  font-variant-numeric: tabular-nums;
+
+  @media (max-width: $mantine-breakpoint-sm) {
+    display: none;
+  }
+}
+
+/* what is on screen but incomplete: one plain line, not a floating card */
+.notice {
+  flex-shrink: 0;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--ra-border);
+  background-color: var(--ra-canvas);
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-muted);
+
+  p {
+    margin: 0;
+  }
+}
+
 /* -- the stage: the canvas fades as it leaves a level and as it arrives ---------- */
 
 .stage {
@@ -21,13 +78,12 @@
 
 .flow {
   --xy-background-color: var(--ra-canvas);
-  --xy-background-pattern-color: var(--ra-grid-dot);
   flex: 1;
   min-width: 0;
 
+  /* the library's credit, kept, in the quietest tone that still reads at 4.5:1 */
   :global(.react-flow__attribution) {
     background: transparent;
-    opacity: 0.45;
     font-size: 10px;
 
     a {
@@ -53,7 +109,6 @@
   --ra-text: var(--ra-text-subtle);
   --ra-text-muted: var(--ra-text-subtle);
   --ra-border-strong: var(--ra-border);
-  --ra-shadow: none;
   filter: grayscale(1);
 }
 
@@ -94,7 +149,7 @@
   }
 }
 
-/* the press that follows a selection opens it */
+/* the press that follows a selection opens it: said in words, in the accent */
 .openHint {
   position: relative;
   z-index: 2;
@@ -102,21 +157,11 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: var(--mantine-font-size-xs);
+  margin-left: auto;
+  font-size: var(--mantine-font-size-sm);
   font-weight: 600;
-  color: var(--ra-on-accent);
-  background-color: var(--ra-accent);
+  color: var(--ra-accent);
   pointer-events: none;
-}
-
-/* the selected thing: an accent ring, a quiet lift */
-:is(.place, .card, .shared, .moreNode)[data-selected] {
-  border-color: var(--ra-accent);
-  box-shadow:
-    0 0 0 3px var(--ra-selected),
-    var(--ra-shadow);
 }
 
 /* -- repositories ---------------------------------------------------------------- */
@@ -128,34 +173,18 @@
   position: relative;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   width: 100%;
   height: 100%;
   padding: 0 14px;
   background-color: var(--ra-surface);
-  border: 1px solid var(--ra-border);
-  border-radius: 12px;
+  border: 1px solid var(--ra-border-strong);
+  border-radius: var(--ra-radius);
   color: var(--ra-text);
-  transition:
-    border-color var(--ra-duration-fast) var(--ra-ease),
-    box-shadow var(--ra-duration-fast) var(--ra-ease);
+  transition: border-color var(--ra-duration-fast) var(--ra-ease);
 
   &:hover {
-    border-color: var(--ra-border-strong);
-  }
-}
-
-/* a repository's identity runs down its left edge */
-.repository,
-.peer {
-  box-shadow: inset 3px 0 0 color-mix(in oklch, var(--hue, var(--ra-border-strong)) 70%, transparent);
-
-  &[data-selected] {
-    border-color: var(--ra-accent);
-    box-shadow:
-      inset 3px 0 0 var(--hue, var(--ra-accent)),
-      0 0 0 3px var(--ra-selected),
-      var(--ra-shadow);
+    border-color: var(--ra-text-subtle);
   }
 }
 
@@ -170,14 +199,13 @@
 .titleLine {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
+  min-width: 0;
 }
 
 .name {
   font-size: var(--mantine-font-size-lg);
   font-weight: 600;
-  letter-spacing: -0.005em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -186,7 +214,7 @@
 .meta,
 .stats {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   font-size: var(--mantine-font-size-sm);
   color: var(--ra-text-muted);
   overflow: hidden;
@@ -201,29 +229,35 @@
 .stats {
   color: var(--ra-text-subtle);
   font-variant-numeric: tabular-nums;
+
+  > * + *::before {
+    content: "·";
+    margin-right: 8px;
+    color: var(--ra-text-subtle);
+    font-weight: 400;
+  }
 }
 
+/* a repository's freshness, in words, in the tone of what to do about it */
 .freshness {
   flex-shrink: 0;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background-color: var(--tone);
+  margin-left: auto;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--ra-text-muted);
 
   &[data-tone="current"] {
-    --tone: var(--ra-success);
-  }
-  &[data-tone="unverified"] {
-    --tone: var(--ra-text-subtle);
+    color: var(--ra-success);
   }
   &[data-tone="unknown"] {
-    --tone: var(--ra-border-strong);
+    color: var(--ra-text-subtle);
   }
   &[data-tone="attention"] {
-    --tone: var(--ra-warning);
+    color: var(--ra-warning);
   }
   &[data-tone="problem"] {
-    --tone: var(--ra-danger);
+    color: var(--ra-danger);
   }
 }
 
@@ -232,8 +266,9 @@
   font-size: var(--mantine-font-size-md);
 }
 
-/* -- the workspace hub and its orbits ---------------------------------------------- */
+/* -- the workspace, when no repository is at the centre, and the orbits ----------- */
 
+/* a label on the map, not a badge */
 .hub {
   display: flex;
   flex-direction: column;
@@ -243,34 +278,24 @@
   width: 100%;
   height: 100%;
   padding: 18px;
-  border-radius: 50%;
   text-align: center;
   color: var(--ra-text);
-  background:
-    radial-gradient(circle at 50% 35%, color-mix(in oklch, var(--ra-accent) 14%, transparent), transparent 70%),
-    var(--ra-surface);
-  border: 1px solid color-mix(in oklch, var(--ra-accent) 35%, var(--ra-border));
-  box-shadow: 0 0 0 10px color-mix(in oklch, var(--ra-accent) 5%, transparent);
-}
-
-.hubMark {
-  margin-bottom: 2px;
 }
 
 .hubTitle {
-  font-size: var(--mantine-font-size-lg);
-  font-weight: 650;
+  font-size: var(--mantine-font-size-xl);
+  font-weight: 600;
 }
 
 .hubMeta {
-  font-size: var(--mantine-font-size-xs);
+  font-size: var(--mantine-font-size-sm);
   color: var(--ra-text-muted);
   font-variant-numeric: tabular-nums;
 }
 
 .hubNote {
-  max-width: 130px;
-  font-size: var(--mantine-font-size-xs);
+  max-width: 150px;
+  font-size: var(--mantine-font-size-sm);
   line-height: 1.35;
   color: var(--ra-text-subtle);
 }
@@ -282,9 +307,9 @@
 
   ellipse {
     fill: none;
-    stroke: var(--ra-border);
+    stroke: var(--ra-border-strong);
     stroke-width: 1;
-    stroke-dasharray: 2 6;
+    stroke-dasharray: 3 5;
   }
 }
 
@@ -292,19 +317,16 @@
   width: 100%;
   height: 100%;
   border: 1px dashed var(--ra-border-strong);
-  border-radius: 16px;
-  background-color: color-mix(in oklch, var(--ra-surface) 35%, transparent);
+  border-radius: var(--ra-radius-l);
   pointer-events: none;
 }
 
 .groupLabel {
   display: block;
-  padding: 11px 18px 0;
-  font-size: var(--mantine-font-size-xs);
+  padding: 10px 16px 0;
+  font-size: var(--mantine-font-size-sm);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--ra-text-subtle);
+  color: var(--ra-text-muted);
 }
 
 /* -- an opened level: the frame and its cards ------------------------------------- */
@@ -312,16 +334,15 @@
 .frame {
   width: 100%;
   height: 100%;
-  border: 1px solid var(--ra-border);
-  border-radius: 18px;
-  background-color: color-mix(in oklch, var(--ra-surface) 45%, transparent);
+  border: 1px solid var(--ra-border-strong);
+  border-radius: var(--ra-radius-l);
   pointer-events: none;
 }
 
 .frameHeader {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   height: 64px;
   padding: 0 22px;
 }
@@ -335,8 +356,7 @@
 
 .frameName {
   font-size: var(--mantine-font-size-xl);
-  font-weight: 650;
-  letter-spacing: -0.01em;
+  font-weight: 600;
   color: var(--ra-text);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -362,7 +382,7 @@
 .crumb {
   padding: 0 1px;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--ra-radius-s);
   background: none;
   font: inherit;
   color: inherit;
@@ -375,7 +395,7 @@
     text-decoration-color var(--ra-duration-fast) var(--ra-ease);
 
   @mixin hover {
-    color: var(--ra-accent-strong);
+    color: var(--ra-text);
     text-decoration-color: currentColor;
   }
 
@@ -405,11 +425,7 @@
   color: var(--ra-text-subtle);
 }
 
-.folder {
-  flex-shrink: 0;
-  color: var(--ra-accent);
-}
-
+.folder,
 .fileIcon {
   flex-shrink: 0;
   color: var(--ra-text-subtle);
@@ -422,27 +438,24 @@
   width: 100%;
   height: 100%;
   background-color: var(--ra-surface);
-  border: 1px solid var(--ra-border);
-  border-radius: 12px;
+  border: 1px solid var(--ra-border-strong);
+  border-radius: var(--ra-radius);
   overflow: hidden;
-  transition:
-    border-color var(--ra-duration-fast) var(--ra-ease),
-    box-shadow var(--ra-duration-fast) var(--ra-ease);
+  transition: border-color var(--ra-duration-fast) var(--ra-ease);
 
   &:hover {
-    border-color: var(--ra-border-strong);
+    border-color: var(--ra-text-subtle);
   }
 }
 
 .cardHeader {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-shrink: 0;
-  height: 52px;
+  height: 44px;
   padding: 0 14px;
   border: 0;
-  border-bottom: 1px solid var(--ra-border);
   background: transparent;
   color: var(--ra-text);
   font: inherit;
@@ -478,7 +491,7 @@
 .rows {
   flex: 1;
   margin: 0;
-  padding: 4px 6px 4px;
+  padding: 4px 6px;
   list-style: none;
 }
 
@@ -490,7 +503,7 @@
   height: 26px;
   padding: 0 8px;
   border: 0;
-  border-radius: var(--mantine-radius-xs);
+  border-radius: var(--ra-radius-s);
   background: transparent;
   color: var(--ra-text-muted);
   font: inherit;
@@ -533,9 +546,9 @@
 }
 
 .placeholder {
-  height: 14px;
-  margin: 6px 8px;
-  border-radius: 3px;
+  height: 12px;
+  margin: 7px 8px;
+  border-radius: var(--ra-radius-s);
   background-color: var(--ra-hover);
 }
 
@@ -546,7 +559,7 @@
   height: 26px;
   padding: 0 8px;
   border: 0;
-  border-radius: var(--mantine-radius-xs);
+  border-radius: var(--ra-radius-s);
   background: transparent;
   font: inherit;
   font-size: var(--mantine-font-size-sm);
@@ -570,9 +583,8 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  height: 34px;
-  padding: 0 14px;
-  border-top: 1px solid var(--ra-border);
+  height: 30px;
+  padding: 0 14px 4px;
   font-size: var(--mantine-font-size-xs);
   color: var(--ra-text-muted);
   font-variant-numeric: tabular-nums;
@@ -591,41 +603,19 @@
   position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
   height: 100%;
-  padding: 0 14px 0 10px;
+  padding: 0 12px;
   background-color: var(--ra-surface);
-  border: 1px solid var(--ra-border);
-  border-radius: 999px;
+  border: 1px solid var(--ra-border-strong);
+  border-radius: var(--ra-radius);
   color: var(--ra-text);
   transition: border-color var(--ra-duration-fast) var(--ra-ease);
 
   &:hover {
-    border-color: var(--ra-border-strong);
+    border-color: var(--ra-text-subtle);
   }
-}
-
-/* the border repeats the family's line: dashed HTTP, double packages, dotted config */
-.shared[data-entity^="http_"] {
-  border-style: dashed;
-  border-color: color-mix(in oklch, var(--ra-endpoint) 45%, var(--ra-border));
-}
-
-.shared[data-entity="package"] {
-  border: 3px double color-mix(in oklch, var(--ra-package) 50%, var(--ra-border));
-}
-
-.shared[data-entity="env_var"],
-.shared[data-entity="config"] {
-  border-style: dotted;
-  border-width: 2px;
-  border-color: color-mix(in oklch, var(--ra-config) 50%, var(--ra-border));
-}
-
-.shared[data-selected],
-.moreNode[data-selected] {
-  border-color: var(--ra-accent);
 }
 
 .sharedLabel,
@@ -640,10 +630,10 @@
 }
 
 .moreLabel {
-  padding-left: 6px;
   color: var(--ra-text-muted);
 }
 
+/* folded: what is not drawn one by one */
 .moreNode {
   border-style: dashed;
   background-color: transparent;
@@ -660,10 +650,10 @@
 
 /* elsewhere in this repository: lighter than what is here */
 .place {
-  gap: 10px;
+  gap: 8px;
   padding: 0 12px;
-  background-color: color-mix(in oklch, var(--ra-surface) 60%, transparent);
-  border-radius: 10px;
+  background-color: var(--ra-canvas);
+  border-color: var(--ra-border-strong);
 
   &[data-neighbour] {
     background-color: var(--ra-surface);
@@ -673,32 +663,29 @@
 /* -- a file, at the centre of its neighbourhood -------------------------------------- */
 
 .fileAnchor {
-  gap: 14px;
+  gap: 12px;
   padding: 0 18px;
-  border-color: color-mix(in oklch, var(--ra-accent) 60%, var(--ra-border));
-  box-shadow:
-    0 0 0 4px var(--ra-selected),
-    var(--ra-shadow);
+  border: 2px solid var(--ra-text-muted);
 }
 
 .anchorIcon {
-  display: grid;
-  place-items: center;
   flex-shrink: 0;
-  width: 44px;
-  height: 44px;
-  border-radius: 10px;
-  color: var(--ra-accent);
-  background-color: color-mix(in oklch, var(--ra-accent) 14%, transparent);
+  color: var(--ra-text-muted);
 }
 
 .anchorName {
   font-size: var(--mantine-font-size-xl);
-  font-weight: 650;
-  letter-spacing: -0.01em;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* the selected thing: an accent outline, nothing lifted or glowing; after the
+   hover rules, so pointing at it keeps it marked */
+:is(.repository, .peer, .place, .card, .shared, .moreNode)[data-selected] {
+  border-color: var(--ra-accent);
+  outline: 1px solid var(--ra-accent);
 }
 
 /* -- lines ----------------------------------------------------------------------------- */
@@ -718,7 +705,7 @@
   }
 
   &[data-emphasis="rest"] {
-    opacity: 0.5;
+    opacity: 0.55;
   }
   &[data-emphasis="lit"],
   &[data-emphasis="selected"] {
@@ -774,6 +761,7 @@
   fill: var(--ra-accent);
 }
 
+/* the selected line's casing, as a map draws a route: a wider, paler band beneath */
 .halo {
   fill: none;
   stroke: var(--ra-halo);
@@ -782,29 +770,17 @@
 
 .edgeLabel {
   position: absolute;
-  padding: 1px 7px;
+  padding: 0 5px;
   font-size: var(--mantine-font-size-xs);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   line-height: 16px;
   color: var(--ra-text);
   background-color: var(--ra-surface-elevated);
-  border: 1px solid color-mix(in oklch, var(--stroke, var(--ra-border-strong)) 55%, var(--ra-border));
-  border-radius: 9px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--ra-border-strong);
+  border-radius: var(--ra-radius-s);
   pointer-events: none;
 
-  --stroke: var(--ra-edge-cross);
-
-  &[data-family="http"] {
-    --stroke: var(--ra-endpoint);
-  }
-  &[data-family="dependency"] {
-    --stroke: var(--ra-package);
-  }
-  &[data-family="config"] {
-    --stroke: var(--ra-config);
-  }
   &[data-emphasis="selected"] {
     color: var(--ra-on-accent);
     background-color: var(--ra-accent);
@@ -812,41 +788,39 @@
   }
 }
 
-/* -- controls ---------------------------------------------------------------------------- */
+/* -- the status bar: zoom at the start, the key to the lines at the end -------------- */
 
-.zoom,
-.legendBar {
+.statusBar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 8px;
+  border-top: 1px solid var(--ra-border);
   background-color: var(--ra-surface);
-  border: 1px solid var(--ra-border);
-  border-radius: var(--mantine-radius-md);
-  box-shadow: var(--ra-shadow);
 }
 
 .zoom {
+  display: flex;
+  align-items: center;
   gap: 2px;
-  padding: 3px;
 }
 
 .zoomValue {
-  min-width: 44px;
+  min-width: 42px;
   text-align: center;
   font-size: var(--mantine-font-size-sm);
   font-variant-numeric: tabular-nums;
   color: var(--ra-text-muted);
 }
 
-.zoomDivider {
-  width: 1px;
-  height: 18px;
-  margin: 0 3px;
-  background-color: var(--ra-border);
-}
-
 .legendBar {
-  gap: 6px;
-  padding: 3px 4px 3px 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 
   @media (max-width: $mantine-breakpoint-sm) {
     display: none;
@@ -858,7 +832,7 @@
   align-items: center;
   gap: 16px;
   margin: 0;
-  padding: 4px 0;
+  padding: 0;
   list-style: none;
   font-size: var(--mantine-font-size-sm);
   color: var(--ra-text-muted);
@@ -867,11 +841,11 @@
 .legendItem {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   white-space: nowrap;
 }
 
-.shapes {
+.marks {
   display: grid;
   gap: 8px;
   margin: 0;
@@ -885,4 +859,10 @@
     align-items: center;
     gap: 10px;
   }
+}
+
+.markCell {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
 }
