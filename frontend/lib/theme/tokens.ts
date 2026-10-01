@@ -3,9 +3,10 @@
  *
  * Neutrals are warm, like paper and graphite, not the blue-black of a default
  * dark theme. One accent, a vermilion, marks what is selected, focused or
- * pressed next, and nothing else: no chrome is tinted with it. Code links are
- * drawn in ink; the other families of link keep a hue each (HTTP teal, package
- * dependencies plum, configuration ochre), because a line's colour is data.
+ * pressed next, and nothing else: no chrome is tinted with it. A line's colour
+ * is data: each relationship has its own (imports blue, calls green, uses
+ * violet, other code links ink, HTTP teal, package dependencies plum,
+ * configuration ochre), and each keeps 4.5:1 on the canvas.
  * Light is designed on its own terms, not derived by inverting dark. Every text
  * tone keeps 4.5:1 on every background it sits on, tints included.
  */
@@ -33,8 +34,12 @@ export interface ColorTokens {
   danger: string;
   evidence: string;
   edge: string;
-  /** Code links, and the mark a step into another repository carries. */
+  /** Code links that are none of the relationships below: structure, mostly. */
   edgeCross: string;
+  /** Code links by relationship. */
+  relImports: string;
+  relCalls: string;
+  relUses: string;
   shadow: string;
 }
 
@@ -63,6 +68,9 @@ export const DARK: ColorTokens = {
   evidence: "rgba(226, 196, 92, 0.13)",
   edge: "#45433f",
   edgeCross: "#a29d93",
+  relImports: "#6fa6e8",
+  relCalls: "#86c46b",
+  relUses: "#a493ec",
   shadow: "0 1px 0 rgba(0, 0, 0, 0.3), 0 6px 20px rgba(0, 0, 0, 0.35)",
 };
 
@@ -93,6 +101,9 @@ export const LIGHT: ColorTokens = {
   evidence: "#ecdb95",
   edge: "#b4afa4",
   edgeCross: "#5a554c",
+  relImports: "#2c5f9e",
+  relCalls: "#3b6e22",
+  relUses: "#5b47b0",
   shadow: "0 1px 2px rgba(28, 26, 23, 0.07), 0 6px 18px rgba(28, 26, 23, 0.08)",
 };
 

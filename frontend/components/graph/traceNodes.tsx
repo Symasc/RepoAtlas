@@ -6,11 +6,12 @@ import { memo } from "react";
 
 import { TRACE_ROWS } from "@/lib/graph/layout";
 import { formatCount } from "@/lib/model/format";
-import { SEED_ID, type TraceCard, type TraceSeedView } from "@/lib/model/trace";
+import { familyOfRelation } from "@/lib/model/graph";
+import { relationOfRow, SEED_ID, type TraceCard, type TraceSeedView } from "@/lib/model/trace";
 
 import { RepoSwatch } from "@/components/common/RepoSwatch";
 
-import { EntityBadge, PathBadge } from "./glyphs";
+import { EntityBadge, LineGlyph, PathBadge } from "./glyphs";
 import { Anchors, stop, type NodeActions } from "./nodes";
 import classes from "./Trace.module.css";
 
@@ -155,7 +156,10 @@ function TraceCardNode({ id, data }: NodeProps<Node<TraceCardData, "traceCard">>
               <span className={classes.rowName}>{row.candidate.name}</span>
               {row.crossing === "package" && <PackageIcon size={13} className={classes.crossing} aria-hidden />}
               {row.crossing === "http" && <GlobeSimpleIcon size={13} className={classes.crossing} aria-hidden />}
-              <span className={classes.reading}>{row.reading}</span>
+              <span className={classes.reading}>
+                <LineGlyph family={familyOfRelation(relationOfRow(row))} relation={relationOfRow(row)} width={12} />
+                {row.reading}
+              </span>
               {row.line !== null && <span className={classes.lineNo}>L{row.line}</span>}
             </button>
           </li>

@@ -12,6 +12,7 @@ import {
   chainOf,
   nameFromKey,
   reachOf,
+  relationOfRow,
   rowId,
   SEED_ID,
   splitAt,
@@ -276,6 +277,10 @@ describe("a trace", () => {
     ]);
     const seedToAliases = graph.edges.find((e) => e.source === SEED_ID && e.target === graph.cardOf.get(rowId(2)))!;
     expect([seedToAliases.link.count, seedToAliases.link.label]).toEqual([2, "uses"]);
+    // the line is the relationship's, and counts every step it carries by type
+    expect(seedToAliases.id.endsWith(":uses")).toBe(true);
+    expect(seedToAliases.link.types).toEqual([{ type: "USES", count: 2 }]);
+    expect(relationOfRow(graph.rows.get(rowId(5))!)).toBe("calls");
   });
 
   it("follows a step back to the seed", () => {

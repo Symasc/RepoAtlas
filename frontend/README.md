@@ -102,17 +102,26 @@ letters; Enter takes the first result. With **Include variables** on, it also
 finds the names code declares: functions, classes, methods, variables and the
 environment variables code reads. The switch is remembered, and off at first.
 
-Lines are drawn per family and never merged into one line:
+A line's pattern is its family and its colour is its relationship. Families are
+never merged into one line, and a code link is drawn as one line per
+relationship it carries, side by side:
 
-| Family | Line |
-|---|---|
-| code (imports, uses, calls…) | solid, in ink |
-| HTTP | dashed, teal |
-| package dependency | double, plum |
-| configuration and environment variables | dotted, ochre |
-| the connection being explained | thick, in the accent (vermilion) |
+| Family | Relationship | Line |
+|---|---|---|
+| code | imports (imports, exports, requires, includes, sources) | solid, blue |
+| code | calls (calls, executes) | solid, green |
+| code | uses (uses, references) | solid, violet |
+| code | other (defines, contains…) | solid, ink |
+| HTTP | serves or calls a route or endpoint | dashed, teal |
+| package dependency | depends on | double, plum |
+| configuration and environment variables | reads, configures | dotted, ochre |
+| the connection being explained | any | thick, in the accent (vermilion) |
 
-Every line has an arrowhead for its direction. Its width grows with its count.
+Every line has an arrowhead for its direction. Its width grows with its count,
+and one line of each link carries the link's total. The legend lists what the
+level draws. Where code is summed (a card's tally, a family's heading in the
+inspector) its mark shows blue, green and violet together. Each connection in
+the inspector lists its relationships with their colours.
 Each kind of node carries its own icon, drawn in the colour of the family of
 link that reaches it, so the outline tells kinds apart as well as the colour. A
 repository carries a small square in its own colour, wherever it appears. Each

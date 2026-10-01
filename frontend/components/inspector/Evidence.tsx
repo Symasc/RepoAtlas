@@ -8,7 +8,7 @@ import { ApiError } from "@/lib/api/client";
 import type { EvidenceItem, TopologyEdgeResponse } from "@/lib/api/generated";
 import { useEdges } from "@/lib/api/topology";
 import { formatCount, plural } from "@/lib/model/format";
-import type { Connection } from "@/lib/model/graph";
+import { relationOf, type Connection, type Family } from "@/lib/model/graph";
 
 import { Quiet } from "./Inspector";
 import classes from "./Inspector.module.css";
@@ -67,7 +67,7 @@ export function Evidence({
           {results.map((result, i) => (
             <li key={refs[i]}>
               {result.data ? (
-                <EdgeCard edge={result.data} here={here} onShowInCode={onShowInCode} />
+                <EdgeCard edge={result.data} family={link.family} here={here} onShowInCode={onShowInCode} />
               ) : result.error ? (
                 <p className={classes.problem}>
                   {result.error instanceof ApiError && result.error.code === "EDGE_NOT_FOUND"
@@ -94,10 +94,12 @@ export function Evidence({
 
 function EdgeCard({
   edge,
+  family,
   here,
   onShowInCode,
 }: {
   edge: TopologyEdgeResponse;
+  family: Family;
   here?: { repository: string; path: string };
   onShowInCode?: (span: LineSpan) => void;
 }) {
@@ -115,6 +117,7 @@ function EdgeCard({
       <p className={classes.edgeLine}>
         <span className={classes.edgeEnd}>{source.name || source.key}</span>
         <span className={classes.edgeType}>
+          <LineGlyph family={family} relation={relationOf(family, type)} width={12} />
           {type.toLowerCase().replace(/_/g, " ")}
           <ArrowRightIcon size={11} weight="bold" aria-hidden />
         </span>

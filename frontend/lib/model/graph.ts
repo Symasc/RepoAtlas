@@ -51,6 +51,60 @@ export function familyOf(
   return "code";
 }
 
+/**
+ * What a link does, which picks its colour, as its family picks its pattern. A
+ * code link is one of a few relationships (what one thing imports, calls or
+ * uses of another, or something structural); every other family is one
+ * relationship of its own.
+ */
+export type Relation = "imports" | "calls" | "uses" | "other" | "http" | "dependency" | "config";
+export const CODE_RELATIONS = ["imports", "calls", "uses", "other"] as const satisfies readonly Relation[];
+export const RELATIONS: readonly Relation[] = [...CODE_RELATIONS, "http", "dependency", "config"];
+
+const RELATION_OF_TYPE: Readonly<Record<string, Relation>> = {
+  IMPORTS: "imports",
+  EXPORTS: "imports",
+  REQUIRES: "imports",
+  INCLUDES: "imports",
+  SOURCES: "imports",
+  CALLS: "calls",
+  EXECUTES: "calls",
+  CALLS_HTTP_HANDLER: "calls",
+  USES: "uses",
+  REFERENCES: "uses",
+};
+
+/** The family a relationship belongs to, which picks its line's pattern. */
+export function familyOfRelation(relation: Relation): Family {
+  return relation === "http" || relation === "dependency" || relation === "config" ? relation : "code";
+}
+
+/** The relationship one edge type is, within its family. */
+export function relationOf(family: Family, type: string | null | undefined): Relation {
+  if (family !== "code") return family;
+  return RELATION_OF_TYPE[type ?? ""] ?? "other";
+}
+
+/**
+ * A link split by relationship, in a fixed order so a pair's lines keep their
+ * places from one view to the next: one part per relationship it carries, each
+ * with its own types and count. A link of another family, or of one
+ * relationship, comes back whole.
+ */
+export function byRelation(link: LinkData): { relation: Relation; link: LinkData }[] {
+  if (link.family !== "code") return [{ relation: link.family, link }];
+  const parts = new Map<Relation, EdgeTypeCount[]>();
+  for (const t of link.types) {
+    const relation = relationOf("code", t.type);
+    parts.set(relation, [...(parts.get(relation) ?? []), t]);
+  }
+  if (parts.size <= 1) return [{ relation: [...parts.keys()][0] ?? "other", link }];
+  return CODE_RELATIONS.filter((r) => parts.has(r)).map((relation) => {
+    const types = parts.get(relation)!;
+    return { relation, link: { ...link, types, count: types.reduce((sum, t) => sum + t.count, 0) } };
+  });
+}
+
 export interface LinkData {
   kind: LinkKind;
   family: Family;

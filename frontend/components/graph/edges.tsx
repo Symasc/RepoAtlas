@@ -14,7 +14,7 @@ import { memo } from "react";
 import { arrowhead, floating, sideways, type Route } from "@/lib/graph/geometry";
 import { strokeFor } from "@/lib/graph/layout";
 import { compactCount, formatCount } from "@/lib/model/format";
-import type { Box, Family, LinkData } from "@/lib/model/graph";
+import type { Box, Family, LinkData, Relation } from "@/lib/model/graph";
 
 import classes from "./Graph.module.css";
 
@@ -28,7 +28,14 @@ export type Emphasis = "rest" | "lit" | "dim" | "selected";
 export type RouteKind = "float" | "side" | "lane";
 
 export type LinkEdgeData = {
+  /** What this line draws: the whole link, or the part of it of one relationship. */
   link: LinkData;
+  /** The relationship it is, which picks its colour. */
+  relation: Relation;
+  /** The link it draws (part of): what is selected, pointed at and explained. */
+  base: string;
+  /** The whole link, on the one line of it that carries its count; else `null`. */
+  badge: LinkData | null;
   emphasis: Emphasis;
   /** Show the count even at rest: a small neighbourhood can afford it. */
   labelled: boolean;
@@ -49,10 +56,32 @@ export const FAMILY_NOUN: Record<Family, string> = {
   config: "configuration",
 };
 
-export function describeLink(link: LinkData): string {
+/** A relationship, named as a reader would: the legend's words. */
+export const RELATION_LABEL: Record<Relation, string> = {
+  imports: "Imports",
+  calls: "Calls",
+  uses: "Uses",
+  other: "Other code",
+  http: "HTTP",
+  dependency: "Package dependency",
+  config: "Config & env",
+};
+
+const RELATION_NOUN: Record<Relation, string> = {
+  imports: "import",
+  calls: "call",
+  uses: "use",
+  other: "code",
+  http: "HTTP",
+  dependency: "package dependency",
+  config: "configuration",
+};
+
+export function describeLink(link: LinkData, relation?: Relation): string {
   const types = link.types.map((t) => `${t.type.toLowerCase().replace(/_/g, " ")} ${formatCount(t.count)}`);
   const packages = link.packages.length > 0 ? `; packages: ${link.packages.slice(0, 5).join(", ")}` : "";
-  return `${formatCount(link.count)} ${FAMILY_NOUN[link.family]} ${link.count === 1 ? "relationship" : "relationships"}${types.length ? ` (${types.join(", ")})` : ""}${packages}`;
+  const noun = relation ? RELATION_NOUN[relation] : FAMILY_NOUN[link.family];
+  return `${formatCount(link.count)} ${noun} ${link.count === 1 ? "relationship" : "relationships"}${types.length ? ` (${types.join(", ")})` : ""}${packages}`;
 }
 
 function boxOf(node: InternalNode): Box {
@@ -73,7 +102,7 @@ function LinkEdge({ id, source, target, data }: EdgeProps<GraphEdge>) {
   const from = useInternalNode(source);
   const to = useInternalNode(target);
   if (!from || !to || !data) return null;
-  const { link, emphasis, labelled, offset } = data;
+  const { link, relation, badge, emphasis, labelled, offset } = data;
   const s = boxOf(from);
   const t = boxOf(to);
   let route: Route;
@@ -87,8 +116,15 @@ function LinkEdge({ id, source, target, data }: EdgeProps<GraphEdge>) {
   const head = arrowhead(route.end, route.towards, 5 + width * 1.6);
   return (
     <>
-      <g className={classes.link} data-family={link.family} data-kind={link.kind} data-emphasis={emphasis}>
-        <title>{describeLink(link)}</title>
+      <g
+        className={classes.link}
+        data-family={link.family}
+        data-relation={relation}
+        data-kind={link.kind}
+        data-link={data.base}
+        data-emphasis={emphasis}
+      >
+        <title>{describeLink(link, relation)}</title>
         {emphasis === "selected" && <path d={route.path} className={classes.halo} style={{ strokeWidth: width + 9 }} />}
         {link.family === "dependency" ? (
           <>
@@ -105,15 +141,15 @@ function LinkEdge({ id, source, target, data }: EdgeProps<GraphEdge>) {
         )}
         <path d={head} className={classes.arrow} />
       </g>
-      {(labelled || emphasis === "lit" || emphasis === "selected") && emphasis !== "dim" && (
+      {badge && (labelled || emphasis === "lit" || emphasis === "selected") && emphasis !== "dim" && (
         <EdgeLabelRenderer>
           <span
             className={classes.edgeLabel}
-            data-family={link.family}
+            data-family={badge.family}
             data-emphasis={emphasis}
             style={{ transform: `translate(-50%, -50%) translate(${route.label.x}px, ${route.label.y}px)` }}
           >
-            {link.label ? (link.count > 1 ? `${link.label} · ${compactCount(link.count)}` : link.label) : compactCount(link.count)}
+            {badge.label ? (badge.count > 1 ? `${badge.label} · ${compactCount(badge.count)}` : badge.label) : compactCount(badge.count)}
           </span>
         </EdgeLabelRenderer>
       )}

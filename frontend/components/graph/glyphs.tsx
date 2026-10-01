@@ -17,7 +17,7 @@ import {
   type Icon,
 } from "@phosphor-icons/react";
 
-import type { Family } from "@/lib/model/graph";
+import type { Family, Relation } from "@/lib/model/graph";
 
 import classes from "./glyphs.module.css";
 
@@ -28,14 +28,53 @@ import classes from "./glyphs.module.css";
  * well as its colour, so colour is never the only difference.
  */
 
-export function LineGlyph({ family, width = 24 }: { family: Family | "selected"; width?: number }) {
+/** The code relationships a bare code mark stands for, in the order they are drawn. */
+const CODE_SAMPLE: readonly Relation[] = ["imports", "calls", "uses"];
+
+/**
+ * A line's sample: its family's pattern, in its relationship's colour. Code
+ * with no one relationship named (a card's tally, a family's heading) is drawn
+ * in the colours of the relationships it gathers, end to end.
+ */
+export function LineGlyph({
+  family,
+  relation,
+  width = 24,
+}: {
+  family: Family | "selected";
+  relation?: Relation;
+  width?: number;
+}) {
+  // a bare code mark's three segments, with a hairline gap so each colour reads
+  const gap = 1.5;
+  const segment = (width - 2 - gap * (CODE_SAMPLE.length - 1)) / CODE_SAMPLE.length;
   return (
-    <svg width={width} height="10" viewBox={`0 0 ${width} 10`} aria-hidden className={classes.line} data-family={family}>
+    <svg
+      width={width}
+      height="10"
+      viewBox={`0 0 ${width} 10`}
+      aria-hidden
+      className={classes.line}
+      data-family={family}
+      data-relation={relation ?? (family === "code" ? undefined : family)}
+    >
       {family === "dependency" ? (
         <>
           <line x1="1" y1="5" x2={width - 1} y2="5" className={classes.outer} />
           <line x1="1" y1="5" x2={width - 1} y2="5" className={classes.inner} />
         </>
+      ) : family === "code" && !relation ? (
+        CODE_SAMPLE.map((r, i) => (
+          <line
+            key={r}
+            x1={1 + (segment + gap) * i}
+            y1="5"
+            x2={1 + (segment + gap) * i + segment}
+            y2="5"
+            className={classes.segment}
+            data-relation={r}
+          />
+        ))
       ) : (
         <line x1="1" y1="5" x2={width - 1} y2="5" className={classes.stroke} />
       )}

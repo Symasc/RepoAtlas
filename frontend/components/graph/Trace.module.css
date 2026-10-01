@@ -245,6 +245,9 @@
 }
 
 .reading {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   flex-shrink: 0;
   font-size: var(--mantine-font-size-xs);
   color: var(--ra-text-subtle);

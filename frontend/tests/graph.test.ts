@@ -21,14 +21,17 @@ import {
   buildFile,
   buildOpened,
   buildOverview,
+  byRelation,
   childOf,
   familyOf,
+  relationOf,
   FILE_ID,
   FILES_ID,
   FRAME_ID,
   repositoryId,
   SIDE_LIMIT,
   type Box,
+  type LinkData,
 } from "@/lib/model/graph";
 import { depth, direction, search } from "@/lib/model/location";
 import type { RepositoryModel } from "@/lib/model/repositories";
@@ -473,6 +476,76 @@ describe("line geometry", () => {
     // opposite directions: equal signs here put them on opposite sides
     expect(one).toBe(two);
     expect(one).not.toBe(0);
+  });
+
+  it("names a code link's relationship by what it does, and every other family as itself", () => {
+    expect(["IMPORTS", "EXPORTS", "CALLS", "EXECUTES", "USES", "REFERENCES", "DEFINES"].map((t) => relationOf("code", t))).toEqual([
+      "imports",
+      "imports",
+      "calls",
+      "calls",
+      "uses",
+      "uses",
+      "other",
+    ]);
+    expect(relationOf("http", "CALLS_HTTP_ROUTE")).toBe("http");
+    expect(relationOf("dependency", "DEPENDS_ON")).toBe("dependency");
+    expect(relationOf("config", "READS")).toBe("config");
+  });
+
+  it("splits a code link into one part per relationship, in a fixed order, counts kept", () => {
+    const link: LinkData = {
+      kind: "observed",
+      family: "code",
+      count: 19,
+      types: [
+        { type: "USES", count: 9 },
+        { type: "IMPORTS", count: 6 },
+        { type: "CALLS", count: 3 },
+        { type: "EXPORTS", count: 1 },
+      ],
+      packages: [],
+      examples: ["e1"],
+    };
+    const parts = byRelation(link);
+    expect(parts.map((p) => [p.relation, p.link.count, p.link.types.map((t) => t.type)])).toEqual([
+      ["imports", 7, ["IMPORTS", "EXPORTS"]],
+      ["calls", 3, ["CALLS"]],
+      ["uses", 9, ["USES"]],
+    ]);
+    // one relationship, or another family: the link itself, whole
+    const single: LinkData = { ...link, types: [{ type: "CALLS", count: 19 }] };
+    expect(byRelation(single)).toEqual([{ relation: "calls", link: single }]);
+    const http: LinkData = { ...link, kind: "http", family: "http" };
+    expect(byRelation(http)).toEqual([{ relation: "http", link: http }]);
+  });
+
+  it("draws each relationship of a code link as its own line, side by side, the count on one", () => {
+    const code: LinkData = {
+      kind: "observed",
+      family: "code",
+      count: 10,
+      types: [
+        { type: "IMPORTS", count: 4 },
+        { type: "CALLS", count: 6 },
+      ],
+      packages: [],
+      examples: [],
+    };
+    const edges = flowEdges(
+      [
+        { id: "code:a->b", source: "a", target: "b", link: code },
+        { id: "http:a->b", source: "a", target: "b", link: { ...code, kind: "http", family: "http", types: [] } },
+      ],
+      { route: () => "side" },
+    );
+    expect(edges.map((e) => [e.id, e.data!.relation, e.data!.base, e.data!.link.count, e.data!.badge?.count ?? null])).toEqual([
+      ["code:a->b~imports", "imports", "code:a->b", 4, 10],
+      ["code:a->b~calls", "calls", "code:a->b", 6, null],
+      ["http:a->b", "http", "http:a->b", 10, 10],
+    ]);
+    // three lines between one pair, none on top of another
+    expect(new Set(edges.map((e) => e.data!.offset)).size).toBe(3);
   });
 
   it("thickens with the count, within bounds", () => {
