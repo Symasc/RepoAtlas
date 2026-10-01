@@ -45,7 +45,7 @@ from repoatlas.models.http_inventory import (
     OperationSummary,
 )
 from repoatlas.models.parsing import EdgeType, EntityType
-from repoatlas.parsers.http_facts import EXACT, PENDING_FACT
+from repoatlas.parsers.http_facts import EXACT, PENDING_FACT, PYTHON_ROUTE
 from repoatlas.storage.protocols import EntityIdentity, FileRow, HttpEdgeRow, UnresolvedRefRecord
 
 #: Version of the cursor payload. A token from another shape is refused.
@@ -286,8 +286,11 @@ def build_inventory(
         if edge.type is EdgeType.SERVES_HTTP_ROUTE
     }
     for claim in claims:
-        if claim.id is None or _role(claim) != http_claims.NESTJS_ROUTE:
+        role = _role(claim)
+        if claim.id is None or role not in {http_claims.NESTJS_ROUTE, PYTHON_ROUTE}:
             continue
+        if role == PYTHON_ROUTE and claim.id not in plan.promoted and claim.id not in plan.declared:
+            continue  # served by its own module, whose edges are listed with the per-file ones
         origin = by_file.get(claim.file_id)
         entity = entities.get(claim.src_id)
         meta = _meta(claim)

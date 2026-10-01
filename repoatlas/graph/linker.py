@@ -504,7 +504,12 @@ class ReferenceLinker:
             # never this pass's previous output.
             served = self._knowledge.list_served_routes(exclude_parser=GLOBAL_PARSER)
             decided = plan_http_claims(
-                pending, index, file_rows, producer=GLOBAL_PARSER, served_routes=served
+                pending,
+                index,
+                file_rows,
+                producer=GLOBAL_PARSER,
+                served_routes=served,
+                module_facts=[claim for claim in recorded if _is_module_fact(claim)],
             )
             edges.extend(decided.edges)
             # The one HTTP decision that joins two repositories: exposure and request
@@ -919,7 +924,11 @@ def plan_repository_http(knowledge: SqliteKnowledgeStore, repo_id: int) -> Repos
     ]
     served = knowledge.list_served_routes(exclude_parser=GLOBAL_PARSER, repo_id=repo_id)
     index = ResolutionIndex.build(files, symbols)
-    plan = plan_http_claims(claims, index, files, producer=GLOBAL_PARSER, served_routes=served)
+    own = {row.file_id for row in files}
+    facts = [fact for fact in knowledge.list_module_facts() if fact.file_id in own]
+    plan = plan_http_claims(
+        claims, index, files, producer=GLOBAL_PARSER, served_routes=served, module_facts=facts
+    )
     return RepositoryHttp(plan=plan, files=files, claims=claims, index=index)
 
 

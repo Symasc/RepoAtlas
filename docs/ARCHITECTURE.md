@@ -1676,9 +1676,10 @@ Five edge types, every one oriented *repository-owned fact → shared node*:
 | `CALLS_HTTP_ENDPOINT` | calling symbol or file | absolute client calls |
 
 **Sources and their limits.** Parsers extract local facts and the linker interns them, and most sides meet by key
-equality alone. Three kinds of fact need the global pass, because one file cannot prove them
+equality alone. Four kinds of fact need the global pass, because one file cannot prove them
 (`repoatlas/graph/http_claims.py`):
 - a NestJS route, proven only under an application that registers it;
+- a FastAPI or Flask route on a router mounted from another module (`repoatlas/graph/py_routes.py`, below);
 - a request through a helper imported from another file, joined across exactly one import;
 - a request whose path is a template, matched against its own repository's served routes (below).
 
@@ -1695,7 +1696,22 @@ Until the pass proves one, it stays a pending claim that records the declaration
   or `schemes` there is no deployment.
 - **FastAPI and Flask.** Routes count only on an application or router whose identity the module proves: imported
   from `fastapi`/`flask`, constructed at module level, and bound exactly once in the module.
-  - `APIRouter` and `Blueprint` routes are recorded only under a literal mount in the same file.
+  - `APIRouter` and `Blueprint` routes are served only under a literal mount. A mount in the same file is decided
+    there. A mount made from another module, or inside an application factory, is decided by the global pass from
+    claims each module records: its receivers and their own prefixes, its routes, its mounts of imported routers,
+    and its path-like string constants. The pass serves a route only when:
+    - every module named resolves to exactly one indexed file: first from the directory of the script the program
+      runs from, then in the importer's project, then (for a name headed by the importer's own outermost package)
+      from that package's parent;
+    - the receiver is declared there by that name, and is of the kind the decorator or mount applies to;
+    - every name in its path is a string constant that its module binds once, imported in one hop;
+    - a chain of readable mounts at most 4 deep reaches an application. A FastAPI route is served at the chain's
+      prefixes, the router's own prefix and its path. A blueprint is served at the mount's `url_prefix`, else its
+      own, and only directly on an application.
+  - An application factory is a module-level function that constructs one application, bound once in it. Only the
+    function's top-level mounts count: a conditional mount, or one on a parameter, is not read.
+  - A mount that cannot be read (a dynamic prefix, `**kwargs`, `.mount()`, a blueprint in a blueprint) leaves its
+    router unserved everywhere. A route is exact only when every prefix is empty and its path is literal.
   - An application passed to `.mount()` is a sub-application and yields nothing.
   - `api_route` needs literal `methods`.
   - Flask's `route` default is GET; the HEAD and OPTIONS Flask adds implicitly are not recorded.
