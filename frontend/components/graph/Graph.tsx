@@ -333,7 +333,7 @@ function Canvas({
           minZoom={MIN_ZOOM}
           maxZoom={MAX_ZOOM}
           onlyRenderVisibleElements
-          proOptions={{ hideAttribution: false }}
+          proOptions={{ hideAttribution: true }}
         />
       </div>
       <div className={classes.statusBar}>
