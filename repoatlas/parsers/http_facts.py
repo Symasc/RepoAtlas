@@ -104,6 +104,15 @@ FASTIFY_REGISTER = "fastify-register"
 #: A TypeScript module's exported string constants that could be part of a path or a URL,
 #: for the routes and requests in other modules that import them.
 TS_CONSTANTS = "ts-constants"
+#: A call handing a function an options object whose leaves the source proves --
+#: superagent itself, a stated string, a key of the caller's own destructured options --
+#: so the global pass can follow a transport and a base into the function.
+TS_INJECTION = "ts-injection"
+#: ``fetcher.<verb>(`${base}/...`)`` on a function's destructured options: a request whose
+#: transport (and base) only the callers that supply them decide.
+TS_INJECTED_REQUEST = "ts-injected-request"
+#: A module-level function that owns injection claims, and the names it is exported under.
+TS_FUNCTION = "ts-function"
 
 #: ``transport`` values of :data:`HTTP_LOCAL_CALL`.
 TRANSPORT_WRAPPER = "wrapper"

@@ -116,7 +116,7 @@ SUPERAGENT = "superagent"
 _TEMPLATE_CONTENT = frozenset({"string_fragment", "escape_sequence", "template_substitution"})
 
 #: superagent's request methods; ``del`` is its alias for DELETE.
-_SUPERAGENT_VERBS = {
+SUPERAGENT_VERBS = {
     "get": "GET",
     "head": "HEAD",
     "post": "POST",
@@ -407,7 +407,11 @@ class FetchWrappers:
             ):
                 self._agents.discard(node_text(self._source, owner))
 
-    def _module_binding(self, name: str, at: Node) -> bool:
+    def is_superagent(self, name: str, at: Node) -> bool:
+        """Whether ``name`` at ``at`` is superagent itself, imported at module level."""
+        return name in self._superagent and self.module_binding(name, at)
+
+    def module_binding(self, name: str, at: Node) -> bool:
         """Whether ``name`` at ``at`` is its module-level binding, bound once in the file."""
         scope = _enclosing_function(at)
         while scope is not None:
@@ -426,14 +430,14 @@ class FetchWrappers:
             return []
         name = node_text(self._source, operand(owner))
         verb = node_text(self._source, prop)
-        if verb not in _SUPERAGENT_VERBS or not (name in self._superagent or name in self._agents):
+        if verb not in SUPERAGENT_VERBS or not (name in self._superagent or name in self._agents):
             return []
         arguments = arguments_of(node) or []
-        if not 1 <= len(arguments) <= 3 or not self._module_binding(name, node):
+        if not 1 <= len(arguments) <= 3 or not self.module_binding(name, node):
             return []
-        if _reconfigured(self._source, node):
+        if reconfigured(self._source, node):
             return []
-        method = _SUPERAGENT_VERBS[verb]
+        method = SUPERAGENT_VERBS[verb]
         start, _ = line_range(node)
         _, end = line_range(arguments[0])
         literal = static_string(self._source, arguments[0])
@@ -504,7 +508,7 @@ class FetchWrappers:
         node = operand(node)
         library = SUPERAGENT if default_scheme is not None else None
         if node.type == "identifier":
-            base = self._literal_node(node)
+            base = self.literal_node(node)
             value = static_string(self._source, base) if base is not None else None
             if base is None or value is None:
                 return None
@@ -523,7 +527,7 @@ class FetchWrappers:
         head, base_at, rest_at = "", None, 0
         if content and content[0].type == "template_substitution":
             inner = next((c for c in content[0].named_children if c.type != "comment"), None)
-            base = self._literal_node(inner) if inner is not None else None
+            base = self.literal_node(inner) if inner is not None else None
             value = static_string(self._source, base) if base is not None else None
             if base is None or value is None:
                 return None
@@ -1292,10 +1296,10 @@ class FetchWrappers:
         ``process.env.API_URL || "http://localhost:8000/api"`` — is its default: the
         URL this source requests unless its deployment says otherwise.
         """
-        found = self._literal_node(node, depth)
+        found = self.literal_node(node, depth)
         return static_string(self._source, found) if found is not None else None
 
-    def _literal_node(self, node: Node, depth: int = 0) -> Node | None:
+    def literal_node(self, node: Node, depth: int = 0) -> Node | None:
         """The literal :meth:`_literal` reads a base from: where its value is written."""
         node = operand(node)
         if static_string(self._source, node) is not None:
@@ -1306,10 +1310,10 @@ class FetchWrappers:
             binding = self.lookup(node_text(self._source, node), node)
             if not isinstance(binding, Const):
                 return None
-            return self._literal_node(binding.value, depth + 1)
+            return self.literal_node(binding.value, depth + 1)
         if node.type == "member_expression":
             value_node = self._const_property(node)
-            return self._literal_node(value_node, depth + 1) if value_node is not None else None
+            return self.literal_node(value_node, depth + 1) if value_node is not None else None
         if node.type == "binary_expression":
             operator = node.child_by_field_name("operator")
             setting = node.child_by_field_name("left")
@@ -1322,7 +1326,7 @@ class FetchWrappers:
                 or not self._setting(setting)
             ):
                 return None
-            return self._literal_node(default, depth + 1)
+            return self.literal_node(default, depth + 1)
         return None
 
     def _setting(self, node: Node) -> bool:
@@ -1726,7 +1730,7 @@ def helper_from(meta: object) -> InitHelper | None:
     return InitHelper(method, parameter, default, silent=silent)
 
 
-def _reconfigured(source: bytes, call: Node) -> bool:
+def reconfigured(source: bytes, call: Node) -> bool:
     """Whether a request's own chain calls ``.use(plugin)``, which can rewrite its URL."""
     current = call
     while True:

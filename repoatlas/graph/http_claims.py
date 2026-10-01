@@ -95,6 +95,7 @@ from repoatlas.graph.keys import global_key
 from repoatlas.graph.py_modules import PythonModules
 from repoatlas.graph.py_routes import plan_python_routes
 from repoatlas.graph.resolution import ResolutionIndex
+from repoatlas.graph.ts_injection import plan_injected_requests
 from repoatlas.graph.ts_routes import plan_fastify_routes
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType, EntityType
@@ -243,6 +244,9 @@ class HttpClaimPlan:
     #: Route declaration claim id → its controller-relative route body, for every
     #: declaration whose mount is not proven. A hint for readers; never an edge.
     declared: dict[int, str] = field(default_factory=dict)
+    #: The join claims requests on an injected transport make, one per root that
+    #: reaches them (repoatlas.graph.ts_injection): for the cross-repository join.
+    injected: tuple[UnresolvedRefRecord, ...] = ()
 
     @property
     def detail(self) -> str:
@@ -615,6 +619,7 @@ def plan_http_claims(
         calls=call_decisions,
         promoted=promoted_routes,
         declared=declared_routes,
+        injected=plan_injected_requests(grouped, index, by_id),
     )
 
 
