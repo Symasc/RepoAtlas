@@ -186,12 +186,17 @@ class SeedResolver:
         return _unique([i for i in identities.values() if in_scope(i, self._slugs)])
 
     def _by_directory(self, term: str) -> Seed | None:
+        slugs = sorted(self._slugs)
         path = term.strip("/")
+        named, colon, rest = term.partition(":")
+        if colon and rest.endswith("/") and named in self._slugs:
+            # a directory candidate as it is listed, `<repository>:<path>/`: asked for again
+            slugs, path = [named], rest.strip("/")
         if not path or path == ".":
             return None
         found = [
             (slug, count)
-            for slug in sorted(self._slugs)
+            for slug in slugs
             if (count := self._knowledge.count_keys_with_prefix(file_key(slug, path) + "/")) > 0
         ]
         if len(found) > 1:
