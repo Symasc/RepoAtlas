@@ -21,12 +21,12 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "skills"
 SKILL_NAMES = (
     "repoatlas-change-impact",
-    "repoatlas-investigation",
+    "repoatlas-code-trace",
     "repoatlas-dependencies",
     "repoatlas-http",
     "repoatlas-index",
 )
-CONTRACTS = SKILLS / "repoatlas-investigation" / "references" / "contracts.md"
+CONTRACTS = SKILLS / "repoatlas-code-trace" / "references" / "contracts.md"
 
 #: A sentence about what a change affects.
 ABOUT_IMPACT = re.compile(r"change[- ]impact|what a change\b[^.|]*\baffects?|what depends on", re.I)
@@ -90,7 +90,7 @@ def test_where_an_agent_reads_first_the_impact_tool_is_named() -> None:
     for surface in (
         "instructions",
         "repoatlas-change-impact",
-        "repoatlas-investigation",
+        "repoatlas-code-trace",
         "contracts",
     ):
         assert any(name == surface and NAMES_IMPACT.search(sentence) for name, sentence in found), (

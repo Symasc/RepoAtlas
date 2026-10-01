@@ -36,7 +36,7 @@ def test_the_integration_document_exists(integration: str) -> None:
 
 
 def test_it_links_to_the_canonical_skill_rather_than_copying_it(integration: str) -> None:
-    assert "skills/repoatlas-investigation/SKILL.md" in integration
+    assert "skills/repoatlas-code-trace/SKILL.md" in integration
     # The one place policy is defined is the skill, so the setup page must not
     # carry the skill's own decision table or its "do not" list.
     assert "## Decision table" not in integration
@@ -87,7 +87,7 @@ def test_it_adds_no_client_specific_configuration_file() -> None:
 
 def test_the_readme_points_at_both_documents() -> None:
     text = README.read_text(encoding="utf-8")
-    assert "skills/repoatlas-investigation/SKILL.md" in text
+    assert "skills/repoatlas-code-trace/SKILL.md" in text
     assert "docs/agent-integration.md" in text
     assert "repoatlas mcp" in text
 

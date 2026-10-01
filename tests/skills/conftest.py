@@ -25,17 +25,17 @@ SKILLS_ROOT = Path(__file__).parent.parent.parent / "skills"
 
 #: The five task skills, one directory each. Each is the workflow for one kind of
 #: task; none is a copy of another, and the contract they share lives once, under
-#: ``repoatlas-investigation/references``.
+#: ``repoatlas-code-trace/references``.
 SKILL_NAMES = (
     "repoatlas-change-impact",
-    "repoatlas-investigation",
+    "repoatlas-code-trace",
     "repoatlas-dependencies",
     "repoatlas-http",
     "repoatlas-index",
 )
 
-#: The investigation skill, which also carries the shared contract reference.
-SKILL_PATH = SKILLS_ROOT / "repoatlas-investigation" / "SKILL.md"
+#: The code-trace skill, which also carries the shared contract reference.
+SKILL_PATH = SKILLS_ROOT / "repoatlas-code-trace" / "SKILL.md"
 
 
 def skill_paths() -> dict[str, Path]:

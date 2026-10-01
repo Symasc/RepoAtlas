@@ -34,7 +34,7 @@ EXPECTED_TOOLS = frozenset(spec.name for spec in TOOLS)
 #: The tools each skill leads with, which its opening paragraph must name.
 PRIMARY = {
     "repoatlas-change-impact": ("repoatlas_impact",),
-    "repoatlas-investigation": ("repoatlas_search",),
+    "repoatlas-code-trace": ("repoatlas_search", "repoatlas_relationships"),
     "repoatlas-dependencies": ("repoatlas_dependencies",),
     "repoatlas-http": ("repoatlas_http_operations",),
     "repoatlas-index": ("repoatlas_repositories", "repoatlas_status", "repoatlas_sync"),
@@ -72,7 +72,7 @@ def test_every_other_skill_sends_a_proposed_change_to_change_impact(name: str) -
     description = frontmatter(text(name))["description"]
     if name == "repoatlas-change-impact":
         assert "repoatlas_impact" in description
-        assert "repoatlas-investigation" in description
+        assert "repoatlas-code-trace" in description
     else:
         assert "repoatlas-change-impact" in description, name
 
@@ -107,7 +107,7 @@ def test_the_ground_rules_are_one_block_in_all_five() -> None:
 
 
 def test_the_ground_rules_keep_the_epistemic_boundary() -> None:
-    rules = sections(text("repoatlas-investigation"))["ground rules"]
+    rules = sections(text("repoatlas-code-trace"))["ground rules"]
     # Evidence and interpretation: an indexed path is a reason to read, not a verdict.
     assert "you read the source and decide" in rules
     assert "compiler, tests and running code decide what actually breaks" in rules
@@ -136,6 +136,21 @@ def test_change_impact_is_not_rebuilt_from_walks() -> None:
     workflow = sections(text("repoatlas-change-impact"))["workflow"]
     assert "do not rebuild impact from repeated" in workflow
     assert "not a list of breakages" in opening("repoatlas-change-impact")
+
+
+def test_code_trace_leaves_ordinary_coding_to_the_agent() -> None:
+    """The first trigger run loaded a generic "understand existing code" skill 0 of 5
+    times: that is what an agent already does with its own tools. The trace skill
+    claims only graph-shaped questions and says so in the description it is chosen by."""
+    description = frontmatter(text("repoatlas-code-trace"))["description"].lower()
+    for claimed in ("trace", "defined", "calls", "connects", "entrypoint", "repositories"):
+        assert claimed in description, claimed
+    for excluded in ("explaining one file", "small local edit", "language question"):
+        assert f"not for {excluded}" in description or excluded in description, excluded
+    workflow = sections(text("repoatlas-code-trace"))["workflow"]
+    assert "stop searching once you hold the exact entity" in workflow
+    assert "do not turn a trace into an impact analysis" in workflow
+    assert "not a dump of the workspace" in workflow
 
 
 def test_no_skill_offers_the_graph_explorer_api(name: str) -> None:

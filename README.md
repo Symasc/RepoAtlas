@@ -94,13 +94,13 @@ The MCP server exposes ten tools. Five skills teach an agent which tools to use 
 | Skill | For |
 |---|---|
 | [`repoatlas-change-impact`](skills/repoatlas-change-impact/SKILL.md) | what a proposed change may affect |
-| [`repoatlas-investigation`](skills/repoatlas-investigation/SKILL.md) | where and how existing code works |
+| [`repoatlas-code-trace`](skills/repoatlas-code-trace/SKILL.md) | where something is defined, what calls or uses it, and how code connects across files, services and repositories |
 | [`repoatlas-dependencies`](skills/repoatlas-dependencies/SKILL.md) | which packages are declared, resolved and provided, and by whom |
 | [`repoatlas-http`](skills/repoatlas-http/SKILL.md) | which code calls a route, and what serves it |
 | [`repoatlas-index`](skills/repoatlas-index/SKILL.md) | what is indexed, how current it is, and updating it |
 
 The skills are vendor-neutral and ship inside the installed package. The detailed contract they share is
-[`skills/repoatlas-investigation/references/contracts.md`](skills/repoatlas-investigation/references/contracts.md).
+[`skills/repoatlas-code-trace/references/contracts.md`](skills/repoatlas-code-trace/references/contracts.md).
 
 ## Command line
 
