@@ -72,6 +72,8 @@ Content-Length: <n>
 | `topology/overview` | which repositories are linked to which, by kind: `observed`, `http`, `dependency` |
 | `topology/children` | one page of a directory's or file's children, and how every child links |
 | `topology/edge` | one exact stored edge: its evidence, crossing, and multiplicity |
+| `topology/files` | indexed files whose paths hold every term of a query, best-named first |
+| `topology/references` | what each line of one file declares and refers to, in source order |
 
 **Not served:** `sync`, the only write, and `verify_grounding`, which checks an agent's answer. Both remain
 agent tools over MCP. The topology capabilities are served here only; they are not MCP tools.
@@ -132,7 +134,9 @@ investigation exactly, and an unknown id is refused (409).
 
 So an edge reference taken from `topology/overview` or `topology/children` reaches source directly:
 `topology/edge {edge_ref}`, then `inspect {target: {evidence_id}, investigation_id}`, with no search
-beforehand. `topology/overview` and `topology/children` record no evidence and start no investigation.
+beforehand. `topology/overview`, `topology/children`, `topology/files` and `topology/references` record
+no evidence and start no investigation, so a client may ask them as often as it likes, a search box on
+every keystroke included.
 
 Investigations live in the server process: at most 32, each expiring after an hour idle, and none survives
 a restart.
@@ -147,3 +151,15 @@ unchanged and never parses it.
 - Rows that differ only in their resolution are different facts with different references.
 - A reference stops resolving when its edge is gone, for example after a sync, and is then refused as
   `EDGE_NOT_FOUND`. So is a reference outside the request's scope, so existence never leaks across scope.
+
+## Files and references
+
+`topology/files {query}` matches every whitespace-separated term against each file's repository-relative
+path, ignoring ASCII case; `%` and `_` are literal. Files whose own name holds the last term come first
+(named exactly that, then starting with it, then containing it), then the shortest paths. `total` counts
+every match in scope, and `limit` (at most 50) caps how many are listed.
+
+`topology/references {path}` reads one file: its declarations, and every located edge the file asserts,
+containment left out, in source order. A reference's lines are lines of that file, and its `target` is the
+entity the index resolved it to, wherever that is. Like `topology/children`, it lists references into other
+repositories only with `cross_repository`; otherwise it counts them in `other_repositories`.

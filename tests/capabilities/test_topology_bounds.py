@@ -17,7 +17,9 @@ from repoatlas.models.topology import (
     LinkKind,
     TopologyChildrenRequest,
     TopologyEdgeRequest,
+    TopologyFilesRequest,
     TopologyOverviewRequest,
+    TopologyReferencesRequest,
 )
 from repoatlas.services.workspace import Workspace
 from tests.topology_corpus import GLOBAL, open_corpus, repository, statements
@@ -53,6 +55,22 @@ def children_of(slug: str, path: str) -> Callable[[CapabilityService], object]:
     return call
 
 
+def files_named(query: str) -> Callable[[CapabilityService], object]:
+    def call(service: CapabilityService) -> object:
+        return service.topology_files(TopologyFilesRequest(context=GLOBAL, query=query))
+
+    return call
+
+
+def references_of(slug: str, path: str) -> Callable[[CapabilityService], object]:
+    def call(service: CapabilityService) -> object:
+        return service.topology_references(
+            TopologyReferencesRequest(context=repository(slug), path=path, cross_repository=True)
+        )
+
+    return call
+
+
 def first_edge(service: CapabilityService) -> object:
     links = service.topology_overview(TopologyOverviewRequest(context=GLOBAL)).links
     ref = next(link.examples[0] for link in links if link.kind is LinkKind.OBSERVED)
@@ -79,8 +97,21 @@ def test_the_corpora_differ_in_size(sizes: tuple[Workspace, Workspace]) -> None:
         children_of("hub-a", "packages/u0/src"),
         children_of("hub-a", "packages/u0/src/f0.ts"),
         first_edge,
+        files_named("f0"),
+        files_named("src f"),
+        references_of("hub-a", "packages/u0/src/f0.ts"),
     ],
-    ids=["overview", "children-root", "children-dir", "children-leaf-dir", "children-file", "edge"],
+    ids=[
+        "overview",
+        "children-root",
+        "children-dir",
+        "children-leaf-dir",
+        "children-file",
+        "edge",
+        "files",
+        "files-two-terms",
+        "references",
+    ],
 )
 def test_a_larger_index_costs_the_same_statements(
     sizes: tuple[Workspace, Workspace], call: Callable[[CapabilityService], object]

@@ -45,13 +45,13 @@ from repoatlas.capabilities.errors import (
     EdgeRefInvalidError,
     InvalidTopologyCursorError,
 )
-from repoatlas.graph.keys import file_key
+from repoatlas.graph.keys import file_key, is_positional
 from repoatlas.models.capability import CapabilityContext, ContextResolution
 from repoatlas.models.capability_io import ContextView
 from repoatlas.models.dependencies import DependencyObservation, DependencyPackage
 from repoatlas.models.dependency_inventory import AppliedPageLimits
 from repoatlas.models.parsing import EdgeType, EntityType
-from repoatlas.models.relationships import RelationshipDirection
+from repoatlas.models.relationships import EntityRef, RelationshipDirection
 from repoatlas.models.topology import (
     DEFAULT_CHILDREN_PAGE,
     MAX_AMBIGUOUS,
@@ -59,11 +59,14 @@ from repoatlas.models.topology import (
     MAX_CHILDREN_PAGE,
     MAX_EXAMPLES,
     MAX_PACKAGES,
+    MAX_REFERENCES,
     AmbiguousDependency,
     ChildEntry,
     ChildLink,
     EdgeTypeCount,
     EntryKind,
+    FileMatch,
+    LineReference,
     LinkKind,
     PackageLink,
     PeerKind,
@@ -72,7 +75,9 @@ from repoatlas.models.topology import (
 )
 from repoatlas.storage.protocols import (
     CrossingEdgeRow,
+    FileMatchRow,
     LinkEdgeRow,
+    ReferenceRow,
     StoredEdge,
     TopologyDeclarationRow,
     TopologyFileRow,
@@ -815,3 +820,90 @@ def context_view(context: CapabilityContext, resolution: ContextResolution) -> C
 def peer_repositories(links: Iterable[ChildLink]) -> set[str]:
     """Every repository a set of links names, for the freshness that covers them."""
     return {link.peer.repository for link in links if link.peer.repository is not None}
+
+
+# -- files and references ------------------------------------------------------------
+
+
+def query_terms(query: str) -> list[str]:
+    """The whitespace-separated terms of a file search, in the order typed."""
+    return query.split()
+
+
+def file_matches(rows: Sequence[FileMatchRow], slugs: Mapping[int, str]) -> list[FileMatch]:
+    return [
+        FileMatch(
+            repository=slugs[row.repo_id], path=row.path, name=row.name, language=row.language
+        )
+        for row in rows
+        if row.repo_id in slugs
+    ]
+
+
+@dataclass(frozen=True)
+class FileReferences:
+    """A file's located references, once each, and what was left out of them."""
+
+    references: tuple[LineReference, ...]
+    total: int
+    truncated: bool
+    #: Left out because they resolve into another repository and crossing was
+    #: not asked for.
+    other_repositories: int
+
+
+def line_references(
+    rows: Iterable[ReferenceRow],
+    *,
+    repo_id: int,
+    cross_repository: bool,
+    slugs: Mapping[int, str],
+) -> FileReferences:
+    """References in source order, each fact once, other repositories when asked.
+
+    A target that belongs to no repository (a module, a package, a variable) is in
+    every scope. One in another repository is listed only with ``cross_repository``.
+    """
+    seen: set[tuple[int, int, str, str, str]] = set()
+    listed: list[LineReference] = []
+    elsewhere = 0
+    for row in rows:
+        line_end = row.line_end if row.line_end is not None else row.line_start
+        identity = (row.line_start, line_end, row.type, row.source_key, row.target_key)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        far = row.target_repo_id
+        if far is not None and far != repo_id and not cross_repository:
+            elsewhere += 1
+            continue
+        listed.append(
+            LineReference(
+                line_start=row.line_start,
+                line_end=line_end,
+                type=EdgeType(row.type),
+                source=row.source_key,
+                target=EntityRef(
+                    key=row.target_key,
+                    type=EntityType(row.target_type),
+                    name=row.target_name,
+                    repository_slug=slugs.get(far) if far is not None else None,
+                    path=row.target_path,
+                    line_start=row.target_line_start,
+                    line_end=row.target_line_end,
+                    positional=is_positional(row.target_key),
+                ),
+            )
+        )
+    listed.sort(key=lambda r: (r.line_start, r.line_end, r.type, r.target.key, r.source))
+    return FileReferences(
+        references=tuple(listed[:MAX_REFERENCES]),
+        total=len(listed),
+        truncated=len(listed) > MAX_REFERENCES,
+        other_repositories=elsewhere,
+    )
+
+
+def referenced_repositories(references: Iterable[LineReference]) -> set[str]:
+    """Every repository a file's references reach, for the freshness that covers them."""
+    return {r.target.repository_slug for r in references if r.target.repository_slug is not None}

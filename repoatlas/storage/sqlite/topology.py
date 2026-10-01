@@ -9,7 +9,9 @@ ten files and one of ten thousand.
 Paths are matched as exact, case-sensitive ranges over ``idx_files_repo_path``:
 ``prefix/`` up to (but not including) ``prefix0``, ``0`` being the character
 after ``/``. ``LIKE`` would be neither: it folds ASCII case and treats ``_`` and
-``%`` inside a path as wildcards.
+``%`` inside a path as wildcards. A file search, which does want case folded,
+uses ``instr`` over ``lower()`` on both sides, so a ``%`` typed into it is a
+percent sign.
 """
 
 from __future__ import annotations
@@ -19,7 +21,9 @@ from collections.abc import Sequence
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.storage.protocols import (
     CrossingEdgeRow,
+    FileMatchRow,
     LinkEdgeRow,
+    ReferenceRow,
     StoredEdge,
     TopologyDeclarationRow,
     TopologyFileRow,
@@ -245,3 +249,65 @@ class SqliteTopologyStore:
             tuple(params),
         ).fetchall()
         return [LinkEdgeRow(*row) for row in rows]
+
+    def files_matching(
+        self, repo_ids: Sequence[int], terms: Sequence[str], *, limit: int
+    ) -> list[FileMatchRow]:
+        """Files in these repositories whose path holds every term, best first.
+
+        Case is folded by SQLite's ``lower()`` on both sides, so the query and the
+        path agree on what folding means. Ranked by how the file's own name holds
+        the last term (exactly, as a prefix, anywhere, not at all), then by the
+        shortest path. ``total`` counts every match, before the limit.
+        """
+        if not repo_ids or not terms:
+            return []
+        last = terms[-1]
+        contains = " AND ".join("instr(lower(f.rel_path), lower(?)) > 0" for _ in terms)
+        rows = self._db.execute(
+            f"""
+            SELECT f.repo_id, f.rel_path, f.basename, f.language, COUNT(*) OVER () AS total
+            FROM files f
+            JOIN repositories r ON r.id = f.repo_id
+            WHERE f.repo_id IN ({_placeholders(repo_ids)}) AND {contains}
+            ORDER BY
+                CASE
+                    WHEN lower(f.basename) = lower(?) THEN 0
+                    WHEN instr(lower(f.basename), lower(?)) = 1 THEN 1
+                    WHEN instr(lower(f.basename), lower(?)) > 0 THEN 2
+                    ELSE 3
+                END,
+                length(f.rel_path),
+                COALESCE(r.slug, r.name),
+                f.rel_path
+            LIMIT ?
+            """,  # noqa: S608 - placeholders and a fixed clause per term only
+            (*repo_ids, *terms, last, last, last, limit),
+        ).fetchall()
+        return [FileMatchRow(*row) for row in rows]
+
+    def references_in(
+        self, file_id: int, *, exclude: Sequence[EdgeType], limit: int
+    ) -> list[ReferenceRow]:
+        """Located edges asserted by one file, in source order (``idx_edges_file``).
+
+        Read by the asserting file rather than by where the source entity lives:
+        an edge's lines are lines of the file that asserts it.
+        """
+        rows = self._db.execute(
+            f"""
+            SELECT e.line_start, e.line_end, e.type, s.key,
+                   d.key, d.type, d.name, d.repo_id, df.rel_path, d.line_start, d.line_end
+            FROM edges e
+            JOIN entities s ON s.id = e.src_id
+            JOIN entities d ON d.id = e.dst_id
+            LEFT JOIN files df ON df.id = d.file_id
+            WHERE e.file_id = ?
+              AND e.line_start IS NOT NULL
+              AND e.type NOT IN ({_placeholders(exclude)})
+            ORDER BY e.line_start, e.line_end, e.type, d.key, s.key
+            LIMIT ?
+            """,  # noqa: S608 - placeholders only
+            (file_id, *[str(t) for t in exclude], limit),
+        ).fetchall()
+        return [ReferenceRow(*row) for row in rows]

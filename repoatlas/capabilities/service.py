@@ -156,10 +156,14 @@ from repoatlas.capabilities.topology import (
     encode_children_cursor,
     encode_edge_ref,
     file_entries,
+    file_matches,
+    line_references,
     matching_edges,
     page_limits,
     page_of,
     peer_repositories,
+    query_terms,
+    referenced_repositories,
     repository_links,
     with_declaration_counts,
 )
@@ -277,8 +281,12 @@ from repoatlas.models.topology import (
     TopologyChildrenResponse,
     TopologyEdgeRequest,
     TopologyEdgeResponse,
+    TopologyFilesRequest,
+    TopologyFilesResponse,
     TopologyOverviewRequest,
     TopologyOverviewResponse,
+    TopologyReferencesRequest,
+    TopologyReferencesResponse,
 )
 from repoatlas.models.verification import (
     AgentAnswer,
@@ -1452,6 +1460,107 @@ class CapabilityService:
                         )
                         for covered in self._covering_repositories(
                             resolution, peer_repositories(links)
+                        )
+                    ],
+                    depth=request.depth,
+                ),
+            )
+
+    def topology_files(self, request: TopologyFilesRequest) -> TopologyFilesResponse:
+        """Indexed files in scope whose paths hold every term of the query, best first.
+
+        One statement, ranked and counted in the database, whatever the index holds.
+        Evidence-free, like the rest of topology: it names files, it quotes nothing,
+        and it opens no investigation, so a search box may ask it on every keystroke.
+        """
+        with self._operation():
+            registered = self._workspace.repositories.list_all()
+            resolution = resolve_context(request.context, registered)
+            in_scope = {r.id: r.slug for r in resolution.repositories if r.id is not None}
+            store = self._workspace.topology()
+            with self._workspace.database.read_snapshot():
+                rows = store.files_matching(
+                    sorted(in_scope), query_terms(request.query), limit=request.limit
+                )
+            total = rows[0].total if rows else 0
+            facts = current_facts_version(self._workspace)
+            return TopologyFilesResponse(
+                context=context_view(request.context, resolution),
+                query=request.query,
+                files=tuple(file_matches(rows, in_scope)),
+                total=total,
+                truncated=total > len(rows),
+                freshness=index_freshness(
+                    [
+                        repository_freshness_for(
+                            self._workspace, repo, depth=request.depth, facts=facts
+                        )
+                        for repo in resolution.repositories
+                    ],
+                    depth=request.depth,
+                ),
+            )
+
+    def topology_references(self, request: TopologyReferencesRequest) -> TopologyReferencesResponse:
+        """What each line of one file declares and refers to, in source order.
+
+        Three statements whatever the file holds: the file, its declarations, and
+        the located edges it asserts. A reference resolved into another repository
+        is listed only with ``cross_repository``; otherwise it is counted.
+        """
+        with self._operation():
+            registered = self._workspace.repositories.list_all()
+            resolution = resolve_context(request.context, registered)
+            repo = resolution.primary
+            if (
+                resolution.scope is not CapabilityScope.REPOSITORY
+                or repo is None
+                or repo.id is None
+            ):
+                raise InvalidTopologyRequestError(
+                    "references are the references of a file in one repository",
+                    detail="Name the repository in a repository-scoped context.",
+                )
+            slugs = {r.id: r.slug for r in registered if r.id is not None}
+            store = self._workspace.topology()
+            with self._workspace.database.read_snapshot():
+                file_row = store.file_at(repo.id, request.path)
+                if file_row is None:
+                    if store.files_under(repo.id, request.path):
+                        raise InvalidTopologyRequestError(
+                            "references are read from one file, and that path is a directory",
+                            detail="Ask topology/children for what a directory holds.",
+                        )
+                    raise PathNotFoundError()
+                declarations = store.declarations_in(file_row.file_id)
+                rows = store.references_in(
+                    file_row.file_id, exclude=STRUCTURAL, limit=ROW_CEILING + 1
+                )
+            complete = len(rows) <= ROW_CEILING
+            found = line_references(
+                rows if complete else (),
+                repo_id=repo.id,
+                cross_repository=request.cross_repository,
+                slugs=slugs,
+            )
+            facts = current_facts_version(self._workspace)
+            return TopologyReferencesResponse(
+                context=context_view(request.context, resolution),
+                repository=repo.slug,
+                path=request.path,
+                declarations=tuple(item.entry for item in file_entries(request.path, declarations)),
+                references=found.references,
+                references_total=found.total,
+                truncated=found.truncated,
+                other_repositories=found.other_repositories,
+                complete=complete,
+                freshness=index_freshness(
+                    [
+                        repository_freshness_for(
+                            self._workspace, covered, depth=request.depth, facts=facts
+                        )
+                        for covered in self._covering_repositories(
+                            resolution, referenced_repositories(found.references)
                         )
                     ],
                     depth=request.depth,

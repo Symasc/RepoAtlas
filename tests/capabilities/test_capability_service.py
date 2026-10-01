@@ -307,6 +307,9 @@ def test_the_public_callable_surface_is_only_the_intended_operations() -> None:
         "topology_overview",
         "topology_children",
         "topology_edge",
+        # topology for the explorer's search box and code reader
+        "topology_files",
+        "topology_references",
         "verify_grounding",
         "sync",
     }

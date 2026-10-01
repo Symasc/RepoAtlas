@@ -1024,6 +1024,18 @@ export interface EvidenceBudget {
   max_total_chars?: number | null;
 }
 /**
+ * One indexed file a search found.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "FileMatch".
+ */
+export interface FileMatch {
+  language?: string | null;
+  name: string;
+  path: string;
+  repository: string;
+}
+/**
  * One deterministic relationship, oriented as the repository states it.
  *
  * This interface was referenced by `ApiIndex`'s JSON-Schema
@@ -1546,6 +1558,19 @@ export interface JsonValue {
   [k: string]: unknown | undefined;
 }
 /**
+ * One stored fact a line of the file asserts: what it refers to, and how.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "LineReference".
+ */
+export interface LineReference {
+  line_end: number;
+  line_start: number;
+  source: string;
+  target: EntityRef;
+  type: EdgeType;
+}
+/**
  * One package a dependency link rests on, with where each side says so.
  *
  * This interface was referenced by `ApiIndex`'s JSON-Schema
@@ -1909,6 +1934,37 @@ export interface TopologyEdgeResponse {
   } | null;
 }
 /**
+ * Ask which indexed files a name points at.
+ *
+ * Every whitespace-separated term must occur in a file's repository-relative
+ * path, ignoring ASCII case. Files whose own name holds the last term rank first:
+ * one named exactly that, then one starting with it, then one containing it.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "TopologyFilesRequest".
+ */
+export interface TopologyFilesRequest {
+  context: CapabilityContext;
+  depth?: FreshnessDepth;
+  limit?: number;
+  query: string;
+}
+/**
+ * The best-ranked files in scope that match, and how many match in all.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "TopologyFilesResponse".
+ */
+export interface TopologyFilesResponse {
+  context: ContextView;
+  files?: FileMatch[];
+  freshness: IndexFreshness;
+  policy?: string;
+  query: string;
+  total?: number;
+  truncated?: boolean;
+}
+/**
  * Ask which repositories in scope are linked to which.
  *
  * This interface was referenced by `ApiIndex`'s JSON-Schema
@@ -1934,11 +1990,42 @@ export interface TopologyOverviewResponse {
   policy?: string;
   repositories?: string[];
 }
+/**
+ * Ask what each line of one file declares and refers to.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "TopologyReferencesRequest".
+ */
+export interface TopologyReferencesRequest {
+  context: CapabilityContext;
+  cross_repository?: boolean;
+  depth?: FreshnessDepth;
+  path: string;
+}
+/**
+ * A file's declarations and its references, both in source order.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "TopologyReferencesResponse".
+ */
+export interface TopologyReferencesResponse {
+  complete?: boolean;
+  context: ContextView;
+  declarations?: ChildEntry[];
+  freshness: IndexFreshness;
+  other_repositories?: number;
+  path: string;
+  policy?: string;
+  references?: LineReference[];
+  references_total?: number;
+  repository: string;
+  truncated?: boolean;
+}
 
 export const CONTRACT = "repoatlas-local-api/1" as const;
 
 /** Every endpoint the local API serves, in the server's registry order. */
-export const ENDPOINT_NAMES = ["repositories","status","search","inspect","relationships","impact","dependencies","http_operations","topology/overview","topology/children","topology/edge"] as const;
+export const ENDPOINT_NAMES = ["repositories","status","search","inspect","relationships","impact","dependencies","http_operations","topology/overview","topology/children","topology/edge","topology/files","topology/references"] as const;
 
 export type EndpointName = (typeof ENDPOINT_NAMES)[number];
 
@@ -1955,4 +2042,6 @@ export interface Endpoints {
   "topology/overview": { request: TopologyOverviewRequest; response: TopologyOverviewResponse };
   "topology/children": { request: TopologyChildrenRequest; response: TopologyChildrenResponse };
   "topology/edge": { request: TopologyEdgeRequest; response: TopologyEdgeResponse };
+  "topology/files": { request: TopologyFilesRequest; response: TopologyFilesResponse };
+  "topology/references": { request: TopologyReferencesRequest; response: TopologyReferencesResponse };
 }

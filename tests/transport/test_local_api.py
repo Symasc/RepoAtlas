@@ -398,6 +398,22 @@ def test_an_overview_reference_reaches_inspect_with_nothing_before_it(api: Servi
     assert item["text"] in "\n".join(segment["text"] for segment in inspected["segments"])
 
 
+def test_a_found_file_reads_its_references_into_another_repository(api: Serving) -> None:
+    found = post(api, "topology/files", {"context": GLOBAL, "query": "policy.ts"}).result
+    assert "investigation_id" not in found
+    first = found["files"][0]
+    assert (first["repository"], first["path"]) == ("app", "src/policy.ts")
+    lines = post(
+        api,
+        "topology/references",
+        {"context": repository("app"), "path": first["path"], "cross_repository": True},
+    ).result
+    assert "investigation_id" not in lines
+    assert CAN_EDIT in {d["key"] for d in lines["declarations"]}
+    crossing = [r for r in lines["references"] if r["target"]["repository_slug"] == "contracts"]
+    assert crossing and all(r["source"] == CAN_EDIT for r in crossing)
+
+
 # ---------------------------------------------------------------------------
 # Starting, finding and stopping it
 # ---------------------------------------------------------------------------
