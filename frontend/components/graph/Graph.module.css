@@ -81,16 +81,6 @@
   flex: 1;
   min-width: 0;
 
-  /* the library's credit, kept, in the quietest tone that still reads at 4.5:1 */
-  :global(.react-flow__attribution) {
-    background: transparent;
-    font-size: 10px;
-
-    a {
-      color: var(--ra-text-subtle);
-    }
-  }
-
   /* fading is paint only: nothing re-lays out */
   :global(.react-flow__node) {
     transition: filter 200ms var(--ra-ease);
