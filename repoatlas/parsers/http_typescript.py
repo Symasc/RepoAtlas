@@ -40,6 +40,7 @@ Parsed, never executed: tree-sitter reads the syntax tree only (V1_SPEC §17).
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -344,26 +345,31 @@ def binding_counts(source: bytes, root: Node) -> Counter[str]:
     """How many times each name is bound anywhere beneath ``root`` (a file, or a scope)."""
     counts: Counter[str] = Counter()
     for node in walk(root):
-        for index, child in enumerate(node.children):
-            if child.type == "shorthand_property_identifier_pattern":
-                counts[node_text(source, child)] += 1
-                continue
-            if child.type != "identifier":
-                continue
-            name = node.field_name_for_child(index)
-            if node.type == "import_specifier":
-                alias = node.child_by_field_name("alias")
-                binds = name == "alias" or (name == "name" and alias is None)
-            else:
-                binds = (node.type, name) in _BINDING_FIELDS or (
-                    name is None and node.type in _BINDING_PARENTS
-                )
-            if binds:
-                counts[node_text(source, child)] += 1
+        counts.update(bindings(source, node))
     return counts
 
 
-def _plain_object(source: bytes, node: Node) -> dict[str, Node] | None:
+def bindings(source: bytes, node: Node) -> Iterator[str]:
+    """Each name ``node``'s own children bind: a declared name, a parameter, an import."""
+    for index, child in enumerate(node.children):
+        if child.type == "shorthand_property_identifier_pattern":
+            yield node_text(source, child)
+            continue
+        if child.type != "identifier":
+            continue
+        name = node.field_name_for_child(index)
+        if node.type == "import_specifier":
+            alias = node.child_by_field_name("alias")
+            binds = name == "alias" or (name == "name" and alias is None)
+        else:
+            binds = (node.type, name) in _BINDING_FIELDS or (
+                name is None and node.type in _BINDING_PARENTS
+            )
+        if binds:
+            yield node_text(source, child)
+
+
+def plain_object(source: bytes, node: Node) -> dict[str, Node] | None:
     """An object literal's keys, or ``None`` when any key is not provably literal."""
     if node.type != "object":
         return None
@@ -630,7 +636,7 @@ class TypeScriptHttp:
         _, end = line_range(arguments[0])
         method: str | None = "GET"
         if len(arguments) == 2:
-            options = _plain_object(self._source, arguments[1])
+            options = plain_object(self._source, arguments[1])
             method_node = options.get("method") if options is not None else None
             if options is None:
                 method = None
@@ -667,7 +673,7 @@ class TypeScriptHttp:
         if arguments is None or not 1 <= len(arguments) <= config_at + 1:
             return []
         if len(arguments) > config_at:
-            config = _plain_object(self._source, arguments[config_at])
+            config = plain_object(self._source, arguments[config_at])
             if config is None or _AXIOS_REDIRECTING & config.keys():
                 return []
         url = static_string(self._source, arguments[0])

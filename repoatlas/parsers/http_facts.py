@@ -93,6 +93,18 @@ PYTHON_CONSTANTS = "python-constants"
 #: first on the import path of the program it starts.
 PYTHON_SCRIPT = "python-script"
 
+#: A Fastify application, or a plugin function a module declares (the server is its first
+#: parameter): its identity, and the names it is exported under.
+FASTIFY_SCOPE = "fastify-scope"
+#: A route a Fastify plugin declares on its server, or one whose path names an imported
+#: constant: served only where the global pass proves a chain of registrations.
+FASTIFY_ROUTE = "fastify-route"
+#: ``server.register(plugin, { prefix })``: the plugin, where it comes from, and its prefix.
+FASTIFY_REGISTER = "fastify-register"
+#: A TypeScript module's exported string constants that could be part of a path or a URL,
+#: for the routes and requests in other modules that import them.
+TS_CONSTANTS = "ts-constants"
+
 #: ``transport`` values of :data:`HTTP_LOCAL_CALL`.
 TRANSPORT_WRAPPER = "wrapper"
 TRANSPORT_FETCH = "fetch"

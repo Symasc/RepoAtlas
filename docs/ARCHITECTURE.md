@@ -1704,10 +1704,11 @@ Five edge types, every one oriented *repository-owned fact → shared node*:
 | `CALLS_HTTP_ENDPOINT` | calling symbol or file | absolute client calls |
 
 **Sources and their limits.** Parsers extract local facts and the linker interns them, and most sides meet by key
-equality alone. Four kinds of fact need the global pass, because one file cannot prove them
+equality alone. Five kinds of fact need the global pass, because one file cannot prove them
 (`repoatlas/graph/http_claims.py`):
 - a NestJS route, proven only under an application that registers it;
 - a FastAPI or Flask route on a router mounted from another module (`repoatlas/graph/py_routes.py`, below);
+- a Fastify route on a plugin, served under the registrations that reach it (`repoatlas/graph/ts_routes.py`, below);
 - a request through a helper imported from another file, joined across exactly one import;
 - a request whose path is a template, matched against its own repository's served routes (below).
 
@@ -1746,6 +1747,21 @@ Until the pass proves one, it stays a pending claim that records the declaration
 - **Express** is the same rule for `express()`, `express.Router()` and `Router()` imported from `"express"`.
   - A route needs at least two arguments, because one is the settings getter.
   - A path with pattern characters is not an identity.
+- **Fastify** (`repoatlas/parsers/http_fastify.py`). An application is `Fastify()`/`fastify()` from `"fastify"`,
+  a module-level `const` bound once.
+  - A plugin's server is the first parameter of a plugin function, bound once in that function's own scope, so
+    `fastify.register(async (fastify) => …)` shadowing its parent's name is read. Plugins are read only in a file
+    importing `fastify` or `fastify-plugin`.
+  - A route is `x.<verb>(path, [opts,] handler)` or `x.route({ method, url, … })` with literal methods.
+  - A path is literal, or a template or `+` of module-level string constants and names imported from a relative
+    module (one hop, read from that module's exported constants).
+  - An application's literal route is served by its file. Every other route is served by the global pass under each
+    chain of `register(plugin, { prefix })` calls at most 4 deep that reaches an application, with a `/` route under
+    a prefix at the prefix itself.
+  - A registration is readable with no options, or an object literal with no spread whose `prefix` is a rooted
+    literal without a trailing slash. Any other registration, and a `fastify-plugin` plugin given a prefix it
+    ignores, leaves the plugin unserved everywhere. A route is exact only when no prefix applies and its path is
+    literal.
 - **fetch** means the global function, only when the file binds no `fetch` of its own.
   - With no options the method is GET.
   - With options, the method must be a literal in an object literal with no spread, shorthand or computed key.
