@@ -1783,6 +1783,19 @@ Until the pass proves one, it stays a pending claim that records the declaration
   placeholders each fill one whole segment; that reading adds a join claim and no per-file fact.
 - **axios**: the default export's method aliases with absolute URLs only. A relative axios URL is combined with a
   `baseURL` any file may set.
+- **superagent**: `superagent.<verb>(url)` on the default import (or `require`), or on a module-level
+  `superagent.agent()`, each bound once. `del` is DELETE.
+  - A request whose own chain, or whose agent anywhere in the file, calls `.use(plugin)` is not read: a plugin can
+    rewrite the URL.
+  - A literal absolute URL is a fact.
+- **The cross-repository join's request side in TypeScript** is the same `http-client-call` claim the Python parser
+  records, with the same fields:
+  - every `CALLS_HTTP_ENDPOINT` fact a file states (fetch, axios, superagent, a same-file wrapper with a stated base);
+  - a fetch or superagent URL that is a template on a stated base: a literal, a `const` of one, a read-only
+    `const` object's property, or `process.env.X ?? '<url>'` / `|| '<url>'` (its default). Each later
+    substitution must fill one whole segment.
+  - A URL with no scheme names no origin, except under superagent, whose Node client requests it over `http`. Such
+    a claim is marked `scheme_from: superagent`.
 
 Values are literal or nothing. A string literal, a concatenation of literals, and an f-string or template with no
 placeholder are read; anything else is not. **A known suffix of a dynamic URL proves no route**:

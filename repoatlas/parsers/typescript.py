@@ -27,7 +27,7 @@ from repoatlas.models.parsing import (
 from repoatlas.parsers.http_fastify import FastifyDeclarations
 from repoatlas.parsers.http_nestjs import NestDeclarations
 from repoatlas.parsers.http_ts_wrappers import FetchWrappers
-from repoatlas.parsers.http_typescript import TypeScriptHttp
+from repoatlas.parsers.http_typescript import TypeScriptHttp, endpoint_claims
 from repoatlas.parsers.marks import whole_file_span
 from repoatlas.parsers.treesitter import (
     GrammarUnavailable,
@@ -723,7 +723,9 @@ class TypeScriptParser:
     #    table for following them through barrels (repoatlas.parsers.ts_uses).
     # 11: Fastify applications, plugins, routes and registrations, and the file's
     #    exported string constants (repoatlas.parsers.http_fastify).
-    version = "11"
+    # 12: superagent requests, and an http-client-call claim for every request whose
+    #    origin the source states, for the cross-repository join.
+    version = "12"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
@@ -788,6 +790,7 @@ class TypeScriptParser:
             symbols=(module, *walker.symbols),
             references=(
                 *walker.references,
+                *endpoint_claims(walker.references),
                 *nest.references(),
                 *fastify.references(),
                 *wrappers.declarations(),
