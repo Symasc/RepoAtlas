@@ -131,6 +131,7 @@ def test_an_agent_is_read_unless_something_can_rewrite_its_urls() -> None:
         "superagent.get('/x')",
         # a base glued to the next text changes the host itself
         "superagent.get(`${BASE}x/${id}`)",
+        "superagent.get(`${BASE}x/users/${id}`)",
         # a base the file does not state
         "superagent.get(`${base}/x`)",
         "superagent.get(`${EMPTY}/x`)",

@@ -121,6 +121,17 @@ def test_a_shadowing_parameter_is_its_function_s_server_not_the_application() ->
     assert claim.meta["scope"] == "f"
 
 
+def test_only_a_plugin_s_first_parameter_is_its_server() -> None:
+    source = (
+        "import type { FastifyInstance } from 'fastify';\n"
+        "export default async function routes(server: FastifyInstance, cache: Cache) {\n"
+        "  cache.get('/cached', h);\n"
+        "  server.get('/x', h);\n"
+        "}\n"
+    )
+    assert [claim.target_key for claim in _claims(source, FASTIFY_ROUTE)] == ["GET /x"]
+
+
 def test_plugins_are_read_only_in_a_file_that_imports_fastify() -> None:
     plugin = "export default async function routes(server) {\n  server.get('/x', h);\n}\n"
     assert _claims(plugin, FASTIFY_ROUTE) == []

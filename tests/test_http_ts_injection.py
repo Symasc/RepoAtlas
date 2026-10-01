@@ -336,6 +336,7 @@ def test_editing_the_injected_base_moves_every_request_it_reaches(
 CHAINS = {
     "package.json": '{"name": "chains"}\n',
     "src/root.ts": d("""
+        import axios from 'axios';
         import superagent from 'superagent';
         import { hop1 } from './hop1';
         import { ping } from './cycle';
@@ -350,10 +351,15 @@ CHAINS = {
           return fetcher.get(`${base}/unstated`);
         }
 
+        function viaAxios({ fetcher, base }: O) {
+          return fetcher.get(`${base}/axios`);
+        }
+
         local({ fetcher: superagent, base: ACCOUNTS_URL });
         hop1({ http: superagent, url: ACCOUNTS_URL });
         ping({ fetcher: superagent, base: ACCOUNTS_URL });
         unstated({ fetcher: superagent, base: process.env.UNSTATED });
+        viaAxios({ fetcher: axios, base: ACCOUNTS_URL, spare: superagent });
     """),
     **{
         f"src/hop{n}.ts": d(f"""
@@ -399,7 +405,8 @@ def test_options_are_followed_through_three_functions_and_never_around_a_cycle(
     build(workspace, tmp_path, {"chains": CHAINS})
     plan = ReferenceLinker(workspace.knowledge).prepare_global()
     reached = sorted(record.target_key for record in plan.http.injected)
-    # hop4 is a fourth function from its root; `unstated` is given a base no file states.
+    # hop4 is a fourth function from its root; `unstated` is given a base no file states,
+    # and `viaAxios` a transport that is not superagent.
     assert MAX_HOPS == 3
     assert reached == [
         "GET https://accounts.example/api/hop/1",
