@@ -1,0 +1,185 @@
+/* -- the code reader: a file's source, every resolved name a link ------------------ */
+
+.reader {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--ra-border);
+  border-radius: 14px;
+  background-color: var(--ra-code-background);
+  box-shadow: var(--ra-shadow);
+  overflow: hidden;
+  transform-origin: 50% 40%;
+
+  /* arriving from a directory: it settles in; back out of a chain: it eases down onto the name */
+  &[data-arrival="in"] {
+    animation: settle-in 320ms var(--ra-ease) both;
+  }
+
+  &[data-arrival="out"] {
+    animation: settle-out 380ms var(--ra-ease) both;
+  }
+
+  /* going into a chain: the view closes in on the name pressed */
+  &[data-leaving="in"] {
+    transform: scale(1.9);
+    opacity: 0;
+    transition:
+      transform 360ms cubic-bezier(0.11, 0, 0.5, 0),
+      opacity 260ms ease-in 100ms;
+  }
+
+  &[data-leaving="out"],
+  &[data-leaving="across"] {
+    opacity: 0;
+    transition: opacity 180ms ease-in;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+@keyframes settle-in {
+  from {
+    transform: scale(0.97);
+    opacity: 0;
+  }
+}
+
+@keyframes settle-out {
+  from {
+    transform: scale(1.12);
+    opacity: 0;
+  }
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+
+  &:focus-visible {
+    outline: 2px solid var(--ra-focus);
+    outline-offset: -2px;
+  }
+}
+
+.code {
+  margin: 0;
+  padding: 12px 0 28px;
+  font-family: var(--mantine-font-family-monospace);
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--ra-code-foreground);
+  tab-size: 2;
+}
+
+.line {
+  display: flex;
+  min-width: max-content;
+  padding-right: 24px;
+
+  &[data-current] {
+    background-color: color-mix(in oklch, var(--ra-accent) 7%, transparent);
+  }
+
+  &[data-current] .number {
+    color: var(--ra-accent-strong);
+  }
+
+  &[data-hit] {
+    background-color: var(--ra-evidence);
+  }
+}
+
+.number {
+  position: sticky;
+  left: 0;
+  flex-shrink: 0;
+  width: 56px;
+  padding-right: 16px;
+  text-align: right;
+  color: var(--ra-text-subtle);
+  background-color: var(--ra-code-background);
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.text {
+  white-space: pre;
+}
+
+/* a name the index resolved: a quiet underline says it leads somewhere */
+.symbol {
+  display: inline;
+  margin: 0;
+  /* no padding: a name keeps its column, so the code stays aligned */
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-decoration: underline dotted color-mix(in oklch, var(--ra-text-subtle) 70%, transparent);
+  text-underline-offset: 4px;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--ra-hover);
+    box-shadow: 0 0 0 2px var(--ra-hover);
+    text-decoration-color: var(--ra-accent);
+  }
+
+  &[data-current] {
+    background-color: var(--ra-selected);
+    box-shadow:
+      0 0 0 2px var(--ra-selected),
+      0 0 0 3px color-mix(in oklch, var(--ra-accent) 60%, transparent);
+    text-decoration: none;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--ra-focus);
+    outline-offset: 1px;
+  }
+}
+
+.gap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 6px 0;
+  padding: 6px 16px 6px 56px;
+  font-family: var(--mantine-font-family);
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-subtle);
+  background-color: color-mix(in oklch, var(--ra-text-subtle) 6%, transparent);
+}
+
+.gapButton {
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 600;
+  color: var(--ra-accent-strong);
+
+  &:hover {
+    text-decoration: underline;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+  }
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 24px;
+  color: var(--ra-text-muted);
+}

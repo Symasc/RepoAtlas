@@ -33,7 +33,8 @@ import type { Box, Family } from "@/lib/model/graph";
 import { edgeTypes, FAMILY_NOUN, type Emphasis, type GraphEdge } from "./edges";
 import { EntityBadge, LineGlyph, Monogram, PathBadge } from "./glyphs";
 import classes from "./Graph.module.css";
-import { BACKDROP, nodeTypes, type GraphNode } from "./nodes";
+import { BACKDROP, type GraphNode } from "./nodes";
+import { nodeTypes } from "./registry";
 import { easeIn, easeInOut, easeOut, useRegisterExit, type Arrival, type Direction } from "./transition";
 
 interface Props {
@@ -53,6 +54,11 @@ interface Props {
   extent: Box | null;
   /** Changes when the layout re-centres within a level: the view glides to fit it. */
   refit?: string;
+  /**
+   * The smallest zoom a level is fitted at on arrival: past it the view stays
+   * readable from the extent's left edge, and the rest is a pan away.
+   */
+  minFit?: number;
   families: readonly Family[];
   topLeft?: ReactNode;
   topCenter?: ReactNode;
@@ -85,6 +91,17 @@ function boxIn(nodes: readonly GraphNode[], id: string): Box | null {
 }
 
 /** `viewport` scaled by `factor` about the middle of the screen. */
+/** The whole extent in view, or, where that would shrink it under `minFit`, its left part at `minFit`. */
+function fitted(extent: Box, width: number, height: number, minFit: number | undefined): Viewport {
+  const whole = getViewportForBounds(extent, width, height, MIN_ZOOM, FIT_MAX, PADDING);
+  if (minFit === undefined || whole.zoom >= minFit) return whole;
+  return {
+    x: parseFloat(PADDING.left) - extent.x * minFit,
+    y: height / 2 - (extent.y + extent.height / 2) * minFit,
+    zoom: minFit,
+  };
+}
+
 function about(viewport: Viewport, factor: number, width: number, height: number): Viewport {
   return {
     x: width / 2 - (width / 2 - viewport.x) * factor,
@@ -105,6 +122,7 @@ function Canvas({
   arrival,
   extent,
   refit,
+  minFit,
   families,
   topLeft,
   topCenter,
@@ -213,12 +231,18 @@ function Canvas({
     fittedFor.current = { refit, width, height };
     fittedExtent.current = shapeOf(extent);
     moved.current = false;
-    const target = getViewportForBounds(extent, width, height, MIN_ZOOM, FIT_MAX, PADDING);
+    const target = fitted(extent, width, height, minFit);
     let start = target;
+    let duration = arrival.direction === "out" ? 480 : 420;
     if (!reduced && arrival.direction === "in") start = about(target, 0.78, width, height);
     if (!reduced && arrival.direction === "out") {
       const from = arrival.from ? boxIn(nodes, arrival.from) : null;
       start = from ? getViewportForBounds(from, width, height, MIN_ZOOM, MAX_ZOOM, 0.6) : about(target, 1.35, width, height);
+    }
+    const focus = !reduced && arrival.focus ? boxIn(nodes, arrival.focus) : null;
+    if (focus) {
+      start = getViewportForBounds(focus, width, height, MIN_ZOOM, MAX_ZOOM, 0.35);
+      duration = 760;
     }
     void setViewport(start);
     if (pending.current !== null) cancelAnimationFrame(pending.current);
@@ -226,9 +250,9 @@ function Canvas({
       pending.current = null;
       setLeaving(false);
       setShownLevel(level);
-      if (start !== target) void setViewport(target, { duration: arrival.direction === "out" ? 480 : 420, ease: easeOut });
+      if (start !== target) void setViewport(target, { duration, ease: focus ? easeInOut : easeOut });
     });
-  }, [level, nodes, extent, width, height, reduced, arrival, refit, setViewport]);
+  }, [level, nodes, extent, width, height, reduced, arrival, refit, minFit, setViewport]);
   useEffect(() => () => {
     if (pending.current !== null) cancelAnimationFrame(pending.current);
   }, []);
@@ -248,9 +272,9 @@ function Canvas({
     fittedExtent.current = shapeOf(extent);
     if (!recentred && !resized && moved.current) return;
     moved.current = false;
-    const target = getViewportForBounds(extent, width, height, MIN_ZOOM, FIT_MAX, PADDING);
+    const target = fitted(extent, width, height, minFit);
     void setViewport(target, { duration: reduced ? 0 : recentred ? 560 : 320, ease: easeInOut });
-  }, [level, refit, extent, width, height, reduced, setViewport]);
+  }, [level, refit, extent, width, height, reduced, minFit, setViewport]);
 
   // leaving: zoom into what is being opened, or back out, as the view fades
   const register = useRegisterExit();

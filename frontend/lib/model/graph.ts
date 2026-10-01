@@ -60,6 +60,8 @@ export interface LinkData {
   packages: string[];
   /** Up to a few exact edge references, to read the lines behind the link. */
   examples: string[];
+  /** What the line says instead of its count: how a trace's step reads. */
+  label?: string;
 }
 
 /** Examples kept per merged link: enough to show evidence, never a dump. */

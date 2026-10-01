@@ -1,9 +1,10 @@
 "use client";
 
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQueries, useQuery } from "@tanstack/react-query";
+
 
 import { ApiError, call } from "./client";
-import type { CapabilityContext, TopologyChildrenResponse, TopologyEdgeResponse } from "./generated";
+import type { CapabilityContext, ImpactResponse, InspectResponse, TopologyChildrenResponse, TopologyEdgeResponse } from "./generated";
 import { WORKSPACE } from "./queries";
 
 export function inRepository(slug: string): CapabilityContext {
@@ -129,6 +130,85 @@ export function useSource(slug: string, path: string, enabled: boolean) {
         ),
       ),
     enabled,
+    staleTime: 5 * 60_000,
+  });
+}
+
+/** Shorter than this, a file search would match nearly everything. */
+export const FILE_QUERY_MIN = 2;
+
+/** Files across the workspace whose paths hold every term typed. Records nothing. */
+export function useFileSearch(query: string, limit = 12) {
+  const q = query.trim();
+  return useQuery({
+    queryKey: ["topology/files", q, limit],
+    queryFn: ({ signal }) => call("topology/files", { context: WORKSPACE, query: q, limit }, signal),
+    enabled: q.length >= FILE_QUERY_MIN,
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+  });
+}
+
+/** What each line of a file declares and refers to, other repositories included. */
+export function useReferences(slug: string, path: string) {
+  return useQuery({
+    queryKey: ["topology/references", slug, path],
+    queryFn: ({ signal }) =>
+      call("topology/references", { context: inRepository(slug), path, cross_repository: true }, signal),
+    staleTime: 5 * 60_000,
+  });
+}
+
+/** How many things one trace lists at most: impact's own ceiling. */
+export const TRACE_CANDIDATES = 100;
+
+/**
+ * What a change to one thing reaches, and by which indexed steps. One
+ * investigation per trace: the lines read for its steps are recorded with it.
+ */
+export function useImpact(seed: string | null) {
+  return useQuery({
+    queryKey: ["impact", seed ?? ""],
+    queryFn: ({ signal }) =>
+      within<ImpactResponse>(`trace:${seed!}`, (investigation) =>
+        call(
+          "impact",
+          { context: WORKSPACE, seed: seed!, presentation: "full", max_candidates: TRACE_CANDIDATES, investigation_id: investigation },
+          signal,
+        ),
+      ),
+    enabled: seed !== null,
+    staleTime: 5 * 60_000,
+  });
+}
+
+/** A few lines of one indexed file, recorded in the investigation of `subject`. */
+export function useLines(
+  slug: string | null,
+  path: string | null,
+  lines: { start: number; end: number } | null,
+  subject: string,
+  around = 3,
+) {
+  return useQuery({
+    queryKey: ["inspect", slug, path, lines?.start ?? 0, lines?.end ?? 0, around],
+    queryFn: ({ signal }) =>
+      within<InspectResponse>(subject, (investigation) =>
+        call(
+          "inspect",
+          {
+            context: inRepository(slug!),
+            target: { path: path! },
+            line_start: lines!.start,
+            line_end: lines!.end,
+            context_lines: around,
+            presentation: "full",
+            investigation_id: investigation,
+          },
+          signal,
+        ),
+      ),
+    enabled: slug !== null && path !== null && lines !== null,
     staleTime: 5 * 60_000,
   });
 }

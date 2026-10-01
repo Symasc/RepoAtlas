@@ -77,7 +77,10 @@ for (const scheme of ["dark", "light"] as const) {
       for (const url of urls) {
         await page.goto(url);
         await ready(page);
-        await expect(page.locator(".react-flow__node").first()).toBeVisible();
+        // a file opens on its source; every other level on its graph
+        await expect(
+          url.includes("&path=") ? page.getByRole("region", { name: /^Source of / }).locator("pre") : page.locator(".react-flow__node").first(),
+        ).toBeVisible();
         const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze();
         const serious = results.violations
           .filter((v) => v.impact === "serious" || v.impact === "critical")
@@ -152,7 +155,7 @@ test("the location trail climbs out onto the step it came from", async ({ page, 
   expect(problems).toEqual([]);
 });
 
-test("a file shows its neighbourhood, its source and the evidence for a connection", async ({ page, request, problems }, testInfo) => {
+test("a file opens on its source, and Links shows its neighbourhood and the evidence for a connection", async ({ page, request, problems }, testInfo) => {
   const { repositories = [] } = await ask(request, "repositories", { context: WORKSPACE });
   const target = largest(repositories);
   const file = await linkedFile(request, target.slug);
@@ -166,15 +169,17 @@ test("a file shows its neighbourhood, its source and the evidence for a connecti
 
   await page.goto(`/?repo=${encodeURIComponent(target.slug)}&path=${encodeURIComponent(file!)}`);
   await ready(page);
+  const source = page.getByRole("region", { name: `Source of ${name}` });
+  await expect(source.locator("pre")).toBeVisible();
+  await expect(source.locator("pre")).not.toBeEmpty();
   const panel = inspector(page, name);
   await expect(panel).toBeVisible();
-  await expect(page.getByRole("button", { name: `${name}, this file` })).toBeVisible();
-
-  await panel.getByRole("tab", { name: "Code" }).click();
-  await expect(panel).toContainText(/\d+ (of \d+ )?lines/);
   await panel.getByRole("tab", { name: "Details" }).click();
   await expect(panel).toContainText(file!);
+  await page.screenshot({ path: testInfo.outputPath("file-code.png") });
 
+  await page.getByRole("radiogroup", { name: "Show" }).getByText("Links", { exact: true }).click();
+  await expect(page.getByRole("button", { name: `${name}, this file` })).toBeVisible();
   if ((detail.links ?? []).some((l) => l.peer.path !== file)) {
     await panel.getByRole("tab", { name: /^Connections/ }).click();
     await panel.locator("button[aria-pressed]").first().click();
@@ -225,7 +230,7 @@ test("search finds a repository and opens it", async ({ page, request, problems 
   await page.goto("/");
   await ready(page);
   await page.keyboard.press("ControlOrMeta+K");
-  await page.getByRole("textbox", { name: "Search repositories" }).fill(target.name);
+  await page.getByRole("textbox", { name: "Search repositories and files" }).fill(target.name);
   await page.keyboard.press("Enter");
 
   await expect(page).toHaveURL(new RegExp(`\\?repo=${literal(encodeURIComponent(target.slug))}$`));

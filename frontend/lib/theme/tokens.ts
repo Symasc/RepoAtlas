@@ -113,6 +113,40 @@ export function repositoryColor(hue: number, scheme: "light" | "dark"): string {
   return scheme === "dark" ? `oklch(0.76 0.08 ${hue})` : `oklch(0.54 0.1 ${hue})`;
 }
 
+/**
+ * Source colour, read by the code reader's highlighter as `--ra-code-<name>`.
+ * Each tone keeps 4.5:1 on that scheme's code background, comments included:
+ * code is text people read, not decoration.
+ */
+const CODE: Record<"light" | "dark", Record<string, string>> = {
+  dark: {
+    foreground: "#d9e2ef",
+    background: "#0a111c",
+    "token-keyword": "#a597ff",
+    "token-function": "#7cabff",
+    "token-string": "#7fd3a6",
+    "token-string-expression": "#e2b54f",
+    "token-constant": "#f2aa6b",
+    "token-parameter": "#e6edf7",
+    "token-punctuation": "#9aa8bc",
+    "token-comment": "#7d8ba0",
+    "token-link": "#38cfee",
+  },
+  light: {
+    foreground: "#0f1826",
+    background: "#ffffff",
+    "token-keyword": "#6a3fd6",
+    "token-function": "#1f56d6",
+    "token-string": "#12795a",
+    "token-string-expression": "#8f6400",
+    "token-constant": "#a24a08",
+    "token-parameter": "#0f1826",
+    "token-punctuation": "#475467",
+    "token-comment": "#5f6c7e",
+    "token-link": "#0b7285",
+  },
+};
+
 function kebab(name: string): string {
   return name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
 }
@@ -123,5 +157,6 @@ export function cssVariables(tokens: ColorTokens, scheme: "light" | "dark"): Rec
   REPOSITORY_HUES.forEach((hue, index) => {
     variables[`--ra-repo-${index + 1}`] = repositoryColor(hue, scheme);
   });
+  for (const [name, value] of Object.entries(CODE[scheme])) variables[`--ra-code-${name}`] = value;
   return variables;
 }
