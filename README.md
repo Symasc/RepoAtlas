@@ -13,6 +13,20 @@ The agent reads that source, decides what actually needs to change, and lets the
 RepoAtlas is deterministic and local. It parses source and runs no model of its own. Indexing makes no network
 requests, and it never executes the code it reads.
 
+```mermaid
+flowchart LR
+    repos[("Git repositories<br/>on this machine")] -->|"repoatlas init<br/>repoatlas sync"| parse
+    subgraph indexing["Indexing: static, local, never runs the code"]
+        direction TB
+        parse["parse each file<br/>definitions, imports, calls,<br/>env reads, routes, packages"] --> link["link the facts<br/>across files and repositories"]
+    end
+    link --> index[("the index<br/>one SQLite file")]
+    index --> mcp["repoatlas mcp<br/>MCP over stdio"]
+    index --> api["local API<br/>loopback HTTP"]
+    mcp --> agent["your coding agent,<br/>guided by five skills"]
+    api --> explorer["graph explorer<br/>repoatlas ui"]
+```
+
 ## Why
 
 When an agent changes a function, a config key or an API contract, text search finds the obvious call sites.
@@ -65,25 +79,25 @@ reason to look, not a verdict that something will break.
 - **Not a grep replacement.** Text search still has its place. RepoAtlas adds the connections text search cannot
   see.
 
-## Quick start
+## Install
 
-You need Python 3.13 or later (uv will install it) and `git`.
+You need `git` and [uv](https://docs.astral.sh/uv/); the installer offers to install uv, and uv brings Python
+3.13. The graph explorer also needs Node.js 22 or later.
 
 ```bash
 git clone <this repository> RepoAtlas && cd RepoAtlas
-uv sync
-uv run repoatlas init ~/work/repos    # discover and index every Git repository under this root
+./install.sh --root ~/work/repos     # install, then index every Git repository under ~/work/repos
 ```
 
-Then connect your agent. RepoAtlas serves its tools over the Model Context Protocol on stdio:
+The installer puts `repoatlas` on your PATH, installs and builds the explorer, registers the MCP server with
+Claude Code and links the five skills. It skips any step that is already done, so after a `git pull` you can run
+it again to update. What each step does, how to do them by hand and how to connect another agent are in
+[`docs/installation.md`](docs/installation.md).
 
-```bash
-repoatlas mcp
-```
-
-Register that command in your MCP client, using the absolute path to `.venv/bin/repoatlas` with the argument
-`mcp`. Then give the agent the skills in [`skills/`](skills/). The full setup is in
-[`docs/agent-integration.md`](docs/agent-integration.md).
+RepoAtlas serves its tools to an agent over the Model Context Protocol on stdio, with `repoatlas mcp`. The
+installer registers that command for Claude Code; for any other client, register the absolute path to
+`.venv/bin/repoatlas` with the argument `mcp`. [`docs/agent-integration.md`](docs/agent-integration.md) covers
+what the agent gets.
 
 The index does not refresh itself. After you change code, run `repoatlas sync`.
 
@@ -102,9 +116,25 @@ The MCP server exposes ten tools. Five skills teach an agent which tools to use 
 The skills are vendor-neutral and ship inside the installed package. The detailed contract they share is
 [`skills/repoatlas-code-trace/references/contracts.md`](skills/repoatlas-code-trace/references/contracts.md).
 
+## The graph explorer
+
+```bash
+repoatlas ui
+```
+
+This opens a local web app in your browser that draws the index. It shows the repositories and the links between
+them, then directories, files and the names declared in them. A file opens on its code. Select a name to trace
+everything connected to it, or a directory to see what a change there may reach.
+
+`repoatlas ui` starts two things and stops both on Ctrl-C: the local API, on a free loopback port, and the
+explorer's server, at <http://127.0.0.1:7318>. The first run installs the explorer's packages and builds it, and
+later runs rebuild it only when its sources change. Options: `--port`, `--no-open`, `--dev` (hot reload, for
+working on the explorer) and `--rebuild`. The MCP server knows nothing of it: the explorer is for you, and the
+tools are for the agent. See [`frontend/README.md`](frontend/README.md).
+
 ## Command line
 
-The CLI covers indexing and quick lookups:
+The CLI covers indexing, quick lookups and the two ways of serving the index:
 
 ```bash
 repoatlas init ~/work/repos        # index every repository under a root (once)
@@ -112,11 +142,25 @@ repoatlas sync                     # update the index
 repoatlas status                   # how the index stands against the working tree
 repoatlas repos                    # list indexed repositories
 repoatlas locate "Where is SERVICE_HOST configured?"   # ranked file-and-line evidence
+repoatlas ui                       # open the graph explorer
 repoatlas mcp                      # serve the tools to an agent
+repoatlas serve                    # the local HTTP API alone (see docs/local-api.md)
 ```
 
 Inside a repository, `sync` and `status` apply to that repository; at the configured root, they apply to all of
-them. From anywhere else, name the repository: `repoatlas sync service-a`. Every command accepts `--json`.
+them. From anywhere else, name the repository: `repoatlas sync service-a`. The commands that report accept
+`--json`.
+
+On a terminal, `init` and `sync` show how far they have got:
+
+```
+[2/4] lvl             ██████████████████████████░░░░░░  81%  1,234/1,505 files
+Linking               ███████████████████░░░░░░░░░░░░░  60%  linking packages (4/5)
+```
+
+The bar counts the files each repository needs reindexed, then the five stages of the pass that links them. It is
+drawn on stderr and erased when the run ends, so the report and `--json` output are what they would be without it.
+Piped or redirected, nothing is drawn.
 
 Semantic search is optional. `repoatlas sync --embed` downloads a small local embedding model once (about 67 MB)
 and uses it from then on. Until you run it, semantic retrieval is off and nothing else changes.
@@ -144,6 +188,9 @@ it does not, is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
   dependencies, so indexing needs no network. Their licenses are in
   [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 - `repoatlas sync` changes the index only, never your source, and nothing syncs on its own.
+- `repoatlas ui` runs Node.js on RepoAtlas's own explorer, never on repository code. Both of its servers listen
+  on loopback only, the explorer's telemetry is off, and the API's token reaches the explorer through a file only
+  you can read, never through its arguments or environment.
 
 ## Docker
 
@@ -153,22 +200,31 @@ REPOS_DIR=/path/to/your/repos docker compose run --rm repoatlas init /repos
 ```
 
 Repositories are mounted read-only and the index lives on a separate volume. The container runs as a non-root
-user with a read-only root filesystem and all capabilities dropped.
+user with a read-only root filesystem and all capabilities dropped. It carries the CLI and the MCP server, not
+the explorer.
 
 ## Documentation
 
+- [`docs/installation.md`](docs/installation.md): installing, updating, uninstalling and troubleshooting
 - [`docs/agent-integration.md`](docs/agent-integration.md): connecting an agent over MCP
 - [`skills/`](skills/): the agent skills
+- [`frontend/README.md`](frontend/README.md): the graph explorer
+- [`docs/local-api.md`](docs/local-api.md): the loopback HTTP API the explorer reads
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): how RepoAtlas is built
-- [`docs/V1_SPEC.md`](docs/V1_SPEC.md): the original specification
+- [`docs/agent-efficiency.md`](docs/agent-efficiency.md): request changes and their evaluation
+- [`docs/V1_SPEC.md`](docs/V1_SPEC.md): the original specification, kept as the record of V1
 
 ## Development
 
 ```bash
 uv sync --all-groups
-uv run pytest            # the default suite
+uv run pytest -n auto    # the default suite, on every core
 uv run pytest -m slow    # slower tests; downloads the embedding model once
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright
 ```
+
+The explorer has its own checks (`cd frontend && pnpm check`, and `pnpm e2e` against a real API); see
+[`frontend/README.md`](frontend/README.md#checks). For working on it, `repoatlas ui --dev` runs its development
+server against the live index, with hot reload.

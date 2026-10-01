@@ -7,7 +7,64 @@ this API on its browser's behalf. The browser never holds the token and never ta
 It is a second transport beside `repoatlas mcp`, and like that one it only carries requests and responses.
 Every answer comes from the same capability service over the same local index.
 
-## Starting it
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant Next as explorer server<br/>(Next.js, /api/ra)
+    participant File as connection file
+    participant API as repoatlas serve<br/>(loopback)
+    participant Service as capability service
+    participant Index as the index
+    Browser->>Next: POST /api/ra/topology/overview
+    Note over Next: loopback Host, same origin,<br/>JSON, a listed endpoint
+    Next->>File: read url and token
+    Next->>API: POST /v1/topology/overview<br/>Authorization: Bearer token
+    Note over API: Host allowlist, then the token
+    API->>Service: the request model
+    Service->>Index: read
+    Service-->>API: the response model
+    API-->>Next: {"ok": true, "result": ...}
+    Next-->>Browser: the same body
+```
+
+## The usual way: `repoatlas ui`
+
+```
+repoatlas ui [--port 7318] [--no-open] [--dev] [--rebuild] [--prepare] [--frontend DIR]
+```
+
+starts this API and the explorer together, which is the launcher this contract was written to allow:
+
+```mermaid
+flowchart LR
+    ui["repoatlas ui"] -->|"in this process,<br/>on a free port"| api["the local API"]
+    api -->|"writes"| file[("ui-api.json<br/>mode 0600")]
+    ui -->|"child process,<br/>its own process group"| next["the explorer's server<br/>127.0.0.1:7318"]
+    next -->|"REPOATLAS_API_CONNECTION_FILE"| file
+    next -->|"/v1, with the token"| api
+    ui -.->|"opens"| browser["your browser"]
+    browser --> next
+```
+
+- **The API** runs in the `repoatlas ui` process on a free loopback port, exactly as `repoatlas serve` runs it.
+  Its connection file is `ui-api.json` beside the index (or `REPOATLAS_API_CONNECTION_FILE`), so a
+  `repoatlas serve` running at the same time keeps its own `api.json`.
+- **The explorer** runs as a child process: Node, running Next.js from the explorer's own `node_modules`, with
+  `REPOATLAS_API_CONNECTION_FILE` naming that file. The token reaches it through the file only; it is never in an
+  argument or in the child's environment, and `REPOATLAS_API_TOKEN` is removed from that environment if set.
+- **Setup** happens on first use. The explorer's packages are installed (`pnpm install --frozen-lockfile`) when
+  `node_modules` is missing or older than `package.json` and `pnpm-lock.yaml`, and a production build is made into
+  `frontend/.next-ui/` when there is none or a source has changed since. `--prepare` does only this and exits.
+- **Stopping.** Ctrl-C or SIGTERM stops the API and then the explorer's whole process group. If the explorer
+  stops on its own, or never starts listening, the API is stopped too and the command exits 1. A taken port, a
+  Node.js older than 22, or no explorer directory exits 2 before anything starts.
+- **Where the explorer is.** `frontend/` in the checkout RepoAtlas is installed from, or `--frontend`, or
+  `REPOATLAS_FRONTEND_DIR`. A wheel installation carries no explorer.
+
+`--dev` runs the explorer's development server instead, with hot reload, against the same API. Next.js telemetry
+is turned off in both modes.
+
+## Starting it on its own
 
 ```
 repoatlas serve [--host 127.0.0.1] [--port 7317]
@@ -37,8 +94,8 @@ The server writes a connection file:
 - **Removal:** removed when the server stops, unless another server has replaced it since.
 
 **A client locates the API only through `REPOATLAS_API_CONNECTION_FILE`.** It reads `url` and `token` from
-that file, and checks that `contract` is the one it was built for. Discovering the file without that
-variable, for example through a launcher that starts both processes, is deferred.
+that file, and checks that `contract` is the one it was built for. `repoatlas ui` is the launcher that starts
+both processes and sets the variable for its child; a client still never discovers the file any other way.
 
 ## Requests
 

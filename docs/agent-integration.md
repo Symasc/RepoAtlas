@@ -9,6 +9,32 @@ and is not repeated here.
 For request migration notes, source previews, workspace HTTP discovery and the
 completed-answer evaluation plan, see [agent efficiency](agent-efficiency.md).
 
+**The short way.** `./install.sh` from the checkout does every step below for
+Claude Code: it indexes the directory you name, registers the server and links
+the skills. See [installation](installation.md). The rest of this page is what
+it does, and how to do it for any other MCP client.
+
+```mermaid
+sequenceDiagram
+    actor Operator
+    participant CLI as repoatlas CLI
+    participant Index as the index
+    participant Agent
+    participant Server as repoatlas mcp
+    Operator->>CLI: repoatlas init ~/work/repos
+    CLI->>Index: discover, parse and link every repository
+    Agent->>Server: launches it on stdio
+    Agent->>Server: a tool call, no investigation_id
+    Server->>Index: read
+    Server-->>Agent: evidence, and a new investigation_id
+    Agent->>Server: later calls, echoing the investigation_id
+    Server-->>Agent: more evidence in the same investigation
+    Agent->>Server: repoatlas_verify_grounding with the answer
+    Server-->>Agent: which citations resolve to supplied evidence
+    Operator->>CLI: repoatlas sync, after editing code
+    CLI->>Index: reindex what changed, relink
+```
+
 ## 1. Index a workspace
 
 Indexing is an operator action, done once with the existing CLI:
@@ -31,6 +57,17 @@ Configure the client to launch:
 ```bash
 repoatlas mcp
 ```
+
+Use the absolute path, because a client starts the server directly, with no
+shell to expand an alias or `~`. For Claude Code, at user scope so every project
+sees it:
+
+```bash
+claude mcp add --scope user repoatlas -- /path/to/RepoAtlas/.venv/bin/repoatlas mcp
+```
+
+For a client configured with JSON, the server is a stdio command with the
+argument `mcp`; [installation](installation.md#other-agents) has the snippet.
 
 It speaks JSON-RPC over stdin and stdout and runs until the transport ends. There
 is no daemon, no socket, no pidfile and no port. Operational output goes to
@@ -86,6 +123,24 @@ its description says when to load it:
 | `repoatlas-http` | routes, callers and handlers |
 | `repoatlas-index` | what is indexed, freshness and sync |
 
+```mermaid
+flowchart LR
+    q{"What is the<br/>question about?"}
+    q -->|"what a change may affect"| impact["repoatlas-change-impact"]
+    q -->|"where it is defined,<br/>what uses it, how it connects"| trace["repoatlas-code-trace"]
+    q -->|"packages and providers"| deps["repoatlas-dependencies"]
+    q -->|"routes, callers, handlers"| http["repoatlas-http"]
+    q -->|"what is indexed, how current"| idx["repoatlas-index"]
+    impact --> t1["repoatlas_impact,<br/>then repoatlas_inspect"]
+    trace --> t2["repoatlas_search,<br/>repoatlas_relationships,<br/>repoatlas_inspect"]
+    deps --> t3["repoatlas_dependencies"]
+    http --> t4["repoatlas_http_operations"]
+    idx --> t5["repoatlas_repositories,<br/>repoatlas_status,<br/>repoatlas_sync"]
+```
+
+The diagram is a map, not the policy: each skill's own `SKILL.md` says when it
+applies and how to use its tools.
+
 They are vendor-neutral and live at the repository root:
 
 ```
@@ -101,7 +156,8 @@ RepoAtlas carries them too:
 ```
 
 Both are the same files; the wheel maps the root artifacts into the package rather
-than keeping second copies. Install the five side by side, one directory each:
+than keeping second copies. The installer links the five into
+`~/.claude/skills/`. Elsewhere, install them side by side, one directory each:
 they share one contract reference, `repoatlas-code-trace/references/contracts.md`,
 through a relative link. If a client has its own convention for where skills or
 instructions live, point it at these directories rather than transcribing them, so
@@ -119,6 +175,10 @@ repoatlas_verify_grounding                        repoatlas_sync
 
 Nine read. `repoatlas_sync` is the only one that changes anything, and what it
 changes is the index, never repository source.
+
+The graph explorer (`repoatlas ui`) is not among them. It is for the operator,
+reads the index through the local API rather than through this server, and
+nothing in this server knows of it.
 
 Repository source is reachable only through the evidence-producing tools, which
 enforce admission and record what they supply. No file resource is exposed, so
