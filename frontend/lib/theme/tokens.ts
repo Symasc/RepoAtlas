@@ -6,12 +6,19 @@
  * pressed next, and nothing else: no chrome is tinted with it. A line's colour
  * is data: each relationship has its own (imports blue, calls green, uses
  * violet, other code links ink, HTTP teal, package dependencies plum,
- * configuration ochre), and each keeps 4.5:1 on the canvas.
+ * configuration ochre), and each keeps 4.5:1 on the canvas. The canvas is
+ * squared by a faint graticule, and each repository's land is washed in its
+ * own hue (see REPOSITORY_HUES).
  * Light is designed on its own terms, not derived by inverting dark. Every text
  * tone keeps 4.5:1 on every background it sits on, tints included.
  */
 export interface ColorTokens {
   canvas: string;
+  /** The map's grid lines: a texture, never read. */
+  graticule: string;
+  /** What a repository's frame is washed over, and what its cards are. */
+  ground: string;
+  groundRaised: string;
   surface: string;
   surfaceElevated: string;
   border: string;
@@ -45,6 +52,9 @@ export interface ColorTokens {
 
 export const DARK: ColorTokens = {
   canvas: "#131312",
+  graticule: "rgba(236, 233, 226, 0.055)",
+  ground: "#131312",
+  groundRaised: "#1a1a19",
   surface: "#1a1a19",
   surfaceElevated: "#212120",
   border: "#2e2d2b",
@@ -78,6 +88,10 @@ export const LIGHT: ColorTokens = {
   // nothing is paper-white: the brightest surface sits near 86% luminance,
   // so a long read in daylight does not glare
   canvas: "#e3e0d9",
+  graticule: "rgba(28, 26, 23, 0.07)",
+  // land is paper over the darker canvas, so a line across it keeps 4.5:1
+  ground: "#ece9e3",
+  groundRaised: "#f1efea",
   surface: "#ece9e3",
   surfaceElevated: "#f1efea",
   border: "#d2cec5",
@@ -108,15 +122,30 @@ export const LIGHT: ColorTokens = {
 };
 
 /**
- * Repository identity hues, low in chroma so they label without shouting, and
- * never the only signal: a repository is also its frame and its name. Lightness
- * is set per scheme for contrast against that scheme's surfaces.
+ * Repository identity hues, never the only signal: a repository is also its
+ * frame and its name. Each is a swatch beside the name, and the wash over the
+ * land the repository covers. Lightness is set per scheme for contrast against
+ * that scheme's surfaces; chroma is enough that a light wash still reads as a
+ * colour.
  */
 export const REPOSITORY_HUES = [255, 195, 150, 100, 65, 25, 340, 295] as const;
 
+/** At light's lightness, teal, olive and amber hold less chroma inside sRGB than the rest. */
+const LIGHT_CHROMA: Partial<Record<number, number>> = { 195: 0.078, 100: 0.095, 65: 0.104 };
+
 export function repositoryColor(hue: number, scheme: "light" | "dark"): string {
-  return scheme === "dark" ? `oklch(0.76 0.08 ${hue})` : `oklch(0.465 0.1 ${hue})`;
+  return scheme === "dark" ? `oklch(0.75 0.115 ${hue})` : `oklch(0.47 ${LIGHT_CHROMA[hue] ?? 0.12} ${hue})`;
 }
+
+/**
+ * How much of a repository's hue its land takes: the country (its frame, or
+ * its card on the overview) and the land inside it (cards, places, a file).
+ * Each keeps every text tone at 4.5:1, and a line crossing a frame too.
+ */
+const WASH: Record<"light" | "dark", { country: string; land: string }> = {
+  dark: { country: "12%", land: "9%" },
+  light: { country: "7%", land: "8%" },
+};
 
 /**
  * Source colour, read by the code reader's highlighter as `--ra-code-<name>`.
@@ -162,6 +191,8 @@ export function cssVariables(tokens: ColorTokens, scheme: "light" | "dark"): Rec
   REPOSITORY_HUES.forEach((hue, index) => {
     variables[`--ra-repo-${index + 1}`] = repositoryColor(hue, scheme);
   });
+  variables["--ra-wash-country"] = WASH[scheme].country;
+  variables["--ra-wash-land"] = WASH[scheme].land;
   for (const [name, value] of Object.entries(CODE[scheme])) variables[`--ra-code-${name}`] = value;
   return variables;
 }

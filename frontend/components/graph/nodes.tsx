@@ -4,7 +4,7 @@ import { ArrowRightIcon, CaretRightIcon, FileIcon, FolderSimpleIcon, PuzzlePiece
 import { Handle, Position, type Node, type NodeProps, type NodeTypes } from "@xyflow/react";
 import { Fragment, memo, type MouseEvent, type ReactNode } from "react";
 
-import { RepoSwatch } from "@/components/common/RepoSwatch";
+import { RepoSwatch, territory } from "@/components/common/RepoSwatch";
 import type { ChildEntry } from "@/lib/api/generated";
 import { compactCount, formatCount, plural, shortSha } from "@/lib/model/format";
 import type { FreshnessModel } from "@/lib/model/freshness";
@@ -165,7 +165,7 @@ export function languagesOf(repository: RepositoryModel, max = 3): string {
 function RepositoryNode({ id, data }: NodeProps<Node<RepositoryNodeData, "repository">>) {
   const { repository: r, selected = false, actions, partners } = data;
   return (
-    <div className={classes.repository} data-selected={selected || undefined}>
+    <div className={classes.repository} style={territory(r.hue)} data-selected={selected || undefined}>
       <Anchors />
       <Cover id={id} name={r.name} selected={selected} openable actions={actions} />
       <span className={classes.body}>
@@ -447,7 +447,7 @@ function SharedNodeView({ id, data }: NodeProps<Node<SharedNodeData, "shared">>)
 function PeerNodeView({ id, data }: NodeProps<Node<PeerNodeData, "peer">>) {
   const { node, hue, actions, selected = false } = data;
   return (
-    <div className={classes.peer} data-selected={selected || undefined}>
+    <div className={classes.peer} style={territory(hue)} data-selected={selected || undefined}>
       <Anchors />
       <Cover id={id} name={node.repository} selected={selected} openable actions={actions} />
       <RepoSwatch hue={hue} />

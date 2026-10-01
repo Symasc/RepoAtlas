@@ -78,6 +78,7 @@
 
 .flow {
   --xy-background-color: var(--ra-canvas);
+  --xy-background-pattern-color: var(--ra-graticule);
   flex: 1;
   min-width: 0;
 
@@ -96,6 +97,7 @@
 .isFaded {
   --ra-surface: var(--ra-canvas);
   --ra-surface-elevated: var(--ra-canvas);
+  --ra-ground-raised: var(--ra-canvas);
   --ra-text: var(--ra-text-subtle);
   --ra-text-muted: var(--ra-text-subtle);
   --ra-border-strong: var(--ra-border);
@@ -154,6 +156,19 @@
   pointer-events: none;
 }
 
+/* -- territory: a repository's hue over the land it covers ----------------------- */
+
+/*
+ * As a political map colours its countries: an opened repository's frame, and
+ * every card, place and file inside it, is washed in that repository's hue
+ * (`--territory`, set by the view or by the node), and a repository on the
+ * overview is washed in its own. The wash stays light enough that every text
+ * tone keeps 4.5:1 on it. With no territory a surface stays neutral.
+ */
+:is(.frame, .card, .repository, .peer, .place, .fileAnchor) {
+  --land: var(--territory, var(--ra-surface));
+}
+
 /* -- repositories ---------------------------------------------------------------- */
 
 .repository,
@@ -167,15 +182,22 @@
   width: 100%;
   height: 100%;
   padding: 0 14px;
-  background-color: var(--ra-surface);
-  border: 1px solid var(--ra-border-strong);
+  background-color: color-mix(in oklab, var(--land) var(--ra-wash-land), var(--ra-ground-raised));
+  border: 1px solid color-mix(in oklab, var(--land) 35%, var(--ra-border-strong));
   border-radius: var(--ra-radius);
   color: var(--ra-text);
   transition: border-color var(--ra-duration-fast) var(--ra-ease);
 
   &:hover {
-    border-color: var(--ra-text-subtle);
+    border-color: color-mix(in oklab, var(--land) 50%, var(--ra-text-subtle));
   }
+}
+
+/* a repository is its own country: a fuller wash than the cards inside one */
+.repository,
+.peer {
+  background-color: color-mix(in oklab, var(--land) var(--ra-wash-country), var(--ra-ground-raised));
+  border-color: color-mix(in oklab, var(--land) 55%, var(--ra-border-strong));
 }
 
 .body {
@@ -324,7 +346,8 @@
 .frame {
   width: 100%;
   height: 100%;
-  border: 1px solid var(--ra-border-strong);
+  background-color: color-mix(in oklab, var(--land) var(--ra-wash-country), var(--ra-ground));
+  border: 1px solid color-mix(in oklab, var(--land) 60%, var(--ra-border));
   border-radius: var(--ra-radius-l);
   pointer-events: none;
 }
@@ -421,20 +444,25 @@
   color: var(--ra-text-subtle);
 }
 
+/* a directory is a region of the country it lies in */
+.folder {
+  color: var(--territory, var(--ra-text-subtle));
+}
+
 .card {
   position: relative;
   display: flex;
   flex-direction: column;
   width: 100%;
   height: 100%;
-  background-color: var(--ra-surface);
-  border: 1px solid var(--ra-border-strong);
+  background-color: color-mix(in oklab, var(--land) var(--ra-wash-land), var(--ra-ground-raised));
+  border: 1px solid color-mix(in oklab, var(--land) 35%, var(--ra-border-strong));
   border-radius: var(--ra-radius);
   overflow: hidden;
   transition: border-color var(--ra-duration-fast) var(--ra-ease);
 
   &:hover {
-    border-color: var(--ra-text-subtle);
+    border-color: color-mix(in oklab, var(--land) 50%, var(--ra-text-subtle));
   }
 }
 
@@ -623,6 +651,36 @@
   color: var(--ra-text-muted);
 }
 
+/*
+ * A shared thing in the colour of the line that reaches it: modules by imports,
+ * commands by calls, packages, configuration and HTTP by their own families.
+ */
+.shared {
+  --tint: var(--ra-edge-cross);
+  background-color: color-mix(in oklab, var(--tint) 14%, var(--ra-surface));
+  border-color: color-mix(in oklab, var(--tint) 55%, var(--ra-border-strong));
+
+  &[data-entity="module"] {
+    --tint: var(--ra-rel-imports);
+  }
+  &[data-entity="command"] {
+    --tint: var(--ra-rel-calls);
+  }
+  &[data-entity="package"] {
+    --tint: var(--ra-package);
+  }
+  &:is([data-entity="env_var"], [data-entity="config"]) {
+    --tint: var(--ra-config);
+  }
+  &:is([data-entity="http_endpoint"], [data-entity="http_route"], [data-entity="http_deployment"]) {
+    --tint: var(--ra-endpoint);
+  }
+
+  &:hover {
+    border-color: var(--tint);
+  }
+}
+
 /* folded: what is not drawn one by one */
 .moreNode {
   border-style: dashed;
@@ -642,11 +700,10 @@
 .place {
   gap: 8px;
   padding: 0 12px;
-  background-color: var(--ra-canvas);
-  border-color: var(--ra-border-strong);
+  background-color: color-mix(in oklab, var(--land) var(--ra-wash-land), var(--ra-canvas));
 
   &[data-neighbour] {
-    background-color: var(--ra-surface);
+    background-color: color-mix(in oklab, var(--land) var(--ra-wash-land), var(--ra-ground-raised));
   }
 }
 
@@ -655,7 +712,7 @@
 .fileAnchor {
   gap: 12px;
   padding: 0 18px;
-  border: 2px solid var(--ra-text-muted);
+  border: 2px solid color-mix(in oklab, var(--land) 60%, var(--ra-text-muted));
 }
 
 .anchorIcon {
@@ -683,6 +740,10 @@
 /* a line's colour is its relationship; its pattern, below, is its family */
 .link {
   --stroke: var(--ra-edge-cross);
+  /* React Flow strokes its edge paths from these, and its sheet can load after
+     this one: setting them draws our colour whichever rule wins */
+  --xy-edge-stroke: var(--stroke);
+  --xy-edge-stroke-selected: var(--stroke);
   transition: opacity var(--ra-duration) var(--ra-ease);
 
   &[data-relation="imports"] {
@@ -702,6 +763,10 @@
   }
   &[data-relation="config"] {
     --stroke: var(--ra-config);
+  }
+  /* after the relationships: whatever it is, the selected line is the accent */
+  &[data-emphasis="selected"] {
+    --stroke: var(--ra-accent);
   }
 
   &[data-emphasis="rest"] {
@@ -743,6 +808,8 @@
 }
 
 .linkInner {
+  --xy-edge-stroke: var(--ra-canvas);
+  --xy-edge-stroke-selected: var(--ra-canvas);
   stroke: var(--ra-canvas);
   fill: none;
 }
@@ -750,15 +817,6 @@
 .arrow {
   fill: var(--stroke);
   stroke: none;
-}
-
-.link[data-emphasis="selected"] .linkStroke,
-.link[data-emphasis="selected"] .linkOuter {
-  stroke: var(--ra-accent);
-}
-
-.link[data-emphasis="selected"] .arrow {
-  fill: var(--ra-accent);
 }
 
 /* the selected line's casing, as a map draws a route: a wider, paler band beneath */

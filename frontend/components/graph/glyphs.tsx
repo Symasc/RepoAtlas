@@ -82,15 +82,15 @@ export function LineGlyph({
   );
 }
 
-type Tone = "dependency" | "http" | "config" | "code";
+type Tone = "dependency" | "http" | "config" | "imports" | "calls" | "code";
 
-/** What a shared thing is drawn as: its icon, in the ink of the family of link that reaches it. */
+/** What a shared thing is drawn as: its icon, in the colour of the line that reaches it. */
 const ENTITIES: Record<string, { icon: Icon; tone: Tone }> = {
-  module: { icon: CubeIcon, tone: "code" },
+  module: { icon: CubeIcon, tone: "imports" },
   package: { icon: PackageIcon, tone: "dependency" },
   env_var: { icon: CurrencyDollarSimpleIcon, tone: "config" },
   config: { icon: GearSixIcon, tone: "config" },
-  command: { icon: TerminalWindowIcon, tone: "code" },
+  command: { icon: TerminalWindowIcon, tone: "calls" },
   http_endpoint: { icon: GlobeSimpleIcon, tone: "http" },
   http_route: { icon: GlobeSimpleIcon, tone: "http" },
   // where an API is published: HTTP's ink, with a cloud of its own

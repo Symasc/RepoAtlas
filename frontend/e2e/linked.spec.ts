@@ -62,6 +62,33 @@ test("the overview draws one line per link and kind, each in its own stroke", as
   expect(await dash("observed")).toBe("none");
   // every line says which way it runs
   await expect(lines(page, "observed").first().locator("path:not(.react-flow__edge-path):not(.react-flow__edge-interaction)")).toHaveCount(1);
+  // and is painted in its relationship's colour, never the canvas library's own grey
+  const painted = await page.locator(".react-flow__edges g[data-relation][data-emphasis]").evaluateAll((groups) => {
+    const token: Record<string, string> = {
+      imports: "--ra-rel-imports",
+      calls: "--ra-rel-calls",
+      uses: "--ra-rel-uses",
+      other: "--ra-edge-cross",
+      http: "--ra-endpoint",
+      dependency: "--ra-package",
+      config: "--ra-config",
+    };
+    const probe = document.createElement("span");
+    document.body.append(probe);
+    const colour = (name: string) => {
+      probe.style.color = getComputedStyle(document.documentElement).getPropertyValue(name);
+      return getComputedStyle(probe).color;
+    };
+    const wrong = groups.flatMap((g) => {
+      const relation = g.getAttribute("data-relation")!;
+      const stroke = getComputedStyle(g.querySelector("path.react-flow__edge-path")!).stroke;
+      return stroke === colour(token[relation]!) ? [] : [`${relation}: ${stroke}`];
+    });
+    probe.remove();
+    return { lines: groups.length, wrong };
+  });
+  expect(painted.lines).toBeGreaterThan(0);
+  expect(painted.wrong).toEqual([]);
 
   await page.screenshot({ path: testInfo.outputPath("linked-overview.png") });
   expect(problems).toEqual([]);
