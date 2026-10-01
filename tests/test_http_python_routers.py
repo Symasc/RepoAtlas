@@ -234,9 +234,9 @@ SHOP = {
             from . import catalog
 
             app.register_blueprint(catalog.bp)
-            if DEBUG:
-                from .debug import debug_bp
+            from .debug import debug_bp
 
+            if DEBUG:
                 app.register_blueprint(debug_bp)
             register_extras(app)
             return app
@@ -246,6 +246,25 @@ SHOP = {
             from .extras import extras_bp
 
             app.register_blueprint(extras_bp)
+
+
+        def create_admin():
+            app = Flask(__name__)
+            app = wrap(app)
+            from .admin import admin_bp
+
+            app.register_blueprint(admin_bp)
+            return app
+    """),
+    "shop/admin.py": d("""
+        from flask import Blueprint
+
+        admin_bp = Blueprint("admin", __name__)
+
+
+        @admin_bp.route("/admin")
+        def admin():
+            return {}
     """),
     "shop/orders/__init__.py": d("""
         from flask import Blueprint
@@ -444,6 +463,8 @@ def test_what_is_not_served_says_why(indexed: Workspace) -> None:
     # a conditional mount, and a mount on a parameter, are not read
     assert found[("shop/debug.py", "debug", "GET /debug")] == NOT_MOUNTED
     assert found[("shop/extras.py", "extras", "GET /extras")] == NOT_MOUNTED
+    # nor one on a factory's application it rebinds
+    assert found[("shop/admin.py", "admin", "GET /admin")] == NOT_MOUNTED
     # another repository's module of the same path is never resolved to
     assert found[("meters/src/web/readings.py", "elsewhere", "GET /elsewhere")] == NOT_MOUNTED
     assert found[(R, "list_readings", "GET ")] == PROMOTED
