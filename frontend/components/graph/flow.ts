@@ -1,34 +1,39 @@
-import { sidesFor, type Layout } from "@/lib/graph/layout";
 import type { Box, ViewEdge } from "@/lib/model/graph";
 
-import type { GraphEdge } from "./edges";
+import type { GraphEdge, RouteKind } from "./edges";
 import type { GraphNode } from "./nodes";
 
 type Unplaced = Omit<GraphNode, "position" | "width" | "height" | "style">;
 
 /** A node at its computed box: the size is fixed, so nothing waits on measuring. */
-export function place(node: Unplaced, box: Box): GraphNode {
+export function place(node: Unplaced, box: Box, style?: GraphNode["style"]): GraphNode {
   return {
     ...node,
     position: { x: box.x, y: box.y },
     width: box.width,
     height: box.height,
-    style: { width: box.width, height: box.height },
+    style: { width: box.width, height: box.height, ...style },
   } as GraphNode;
 }
 
-/** Gap between two kinds of link drawn between the same two nodes. */
-const PARALLEL = 6;
+/** Gap between two families of link drawn between the same two nodes. */
+const PARALLEL = 7;
 
 /**
- * React Flow edges, each leaving and entering by the sides that face each other.
- * Links of different kinds between the same pair are drawn side by side, never
- * on one curve: a code link and a dependency are two facts.
+ * React Flow edges. Links of different families between the same pair are
+ * drawn side by side, never on one curve: a code link and a dependency are two
+ * facts.
  */
-export function flowEdges(edges: readonly ViewEdge[], layout: Layout, labelled: boolean): GraphEdge[] {
+export function flowEdges(
+  edges: readonly ViewEdge[],
+  how: {
+    route: (edge: ViewEdge) => RouteKind;
+    curve?: (edge: ViewEdge) => number;
+    labelled?: boolean;
+  },
+): GraphEdge[] {
   const pairs = new Map<string, string[]>();
   for (const edge of edges) {
-    if (edge.role !== "link") continue;
     const pair = [edge.source, edge.target].sort().join("|");
     pairs.set(pair, [...(pairs.get(pair) ?? []), edge.id]);
   }
@@ -36,35 +41,26 @@ export function flowEdges(edges: readonly ViewEdge[], layout: Layout, labelled: 
   for (const ids of pairs.values()) {
     ids.forEach((id, i) => offsets.set(id, (i - (ids.length - 1) / 2) * PARALLEL));
   }
-  const result: GraphEdge[] = [];
-  for (const edge of edges) {
-    const source = layout.get(edge.source);
-    const target = layout.get(edge.target);
-    if (!source || !target) continue;
-    const { from, to } = sidesFor(edge, source, target);
-    const base = {
+  return edges.map((edge) => {
+    const route = how.route(edge);
+    // a floating line's offset is measured across its own direction: two lines
+    // running opposite ways between one pair must flip one sign to stay apart
+    const flip = route === "float" && edge.source > edge.target ? -1 : 1;
+    return {
       id: edge.id,
+      type: "link",
       source: edge.source,
       target: edge.target,
-      sourceHandle: `s-${from}`,
-      targetHandle: `t-${to}`,
+      zIndex: 0,
+      data: {
+        link: edge.link,
+        emphasis: "rest",
+        labelled: how.labelled ?? false,
+        offset: (offsets.get(edge.id) ?? 0) * flip,
+        route,
+        curve: how.curve?.(edge) ?? 0,
+        scope: edge.scope ?? null,
+      },
     };
-    if (edge.role === "tree") {
-      result.push({ ...base, type: "tree", data: { emphasis: "rest" }, zIndex: 0 });
-    } else if (edge.link) {
-      result.push({
-        ...base,
-        type: "link",
-        data: {
-          link: edge.link,
-          emphasis: "rest",
-          labelled,
-          offset: offsets.get(edge.id) ?? 0,
-          scope: edge.scope ?? null,
-        },
-        zIndex: 0,
-      });
-    }
-  }
-  return result;
+  });
 }

@@ -2,32 +2,58 @@
 
 import "@xyflow/react/dist/base.css";
 
-import { ActionIcon, Tooltip, useComputedColorScheme } from "@mantine/core";
+import { ActionIcon, Popover, Tooltip, useComputedColorScheme } from "@mantine/core";
 import { useReducedMotion } from "@mantine/hooks";
-import { CornersOutIcon, MinusIcon, PlusIcon } from "@phosphor-icons/react";
+import { CornersOutIcon, MinusIcon, PlusIcon, ShapesIcon } from "@phosphor-icons/react";
 import {
   Background,
   BackgroundVariant,
+  getViewportForBounds,
   Panel,
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
+  useStore,
   useViewport,
+  type Viewport,
 } from "@xyflow/react";
-import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FocusEvent,
+  type ReactNode,
+} from "react";
 
-import { edgeTypes, type Emphasis, type GraphEdge } from "./edges";
+import type { Box, Family } from "@/lib/model/graph";
+
+import { edgeTypes, FAMILY_NOUN, type Emphasis, type GraphEdge } from "./edges";
+import { EntityBadge, LineGlyph, Monogram, PathBadge } from "./glyphs";
 import classes from "./Graph.module.css";
-import { nodeTypes, type GraphNode } from "./nodes";
+import { BACKDROP, nodeTypes, type GraphNode } from "./nodes";
+import { easeIn, easeInOut, easeOut, useRegisterExit, type Arrival, type Direction } from "./transition";
 
 interface Props {
   nodes: GraphNode[];
   edges: GraphEdge[];
-  /** Changes when the view moves to another level: the canvas fits itself once per level. */
+  /** Changes when the view moves to another level. */
   level: string;
   label: string;
-  /** Show the containment line in the legend (an opened repository draws it). */
-  containment: boolean;
+  selected: string | null;
+  /** The connection the inspector is showing: drawn as the selected path. */
+  selectedEdge?: string | null;
+  onSelect: (id: string | null) => void;
+  /** A press on a node, outside any button of its own. */
+  onActivate: (id: string) => void;
+  arrival: Arrival;
+  /** What the finished layout covers: fitted even while nodes are still moving there. */
+  extent: Box | null;
+  /** Changes when the layout re-centres within a level: the view glides to fit it. */
+  refit?: string;
+  families: readonly Family[];
   topLeft?: ReactNode;
   topCenter?: ReactNode;
   topRight?: ReactNode;
@@ -41,93 +67,269 @@ export function Graph(props: Props) {
   );
 }
 
-const FIT = { padding: 0.14, maxZoom: 1 } as const;
+const MIN_ZOOM = 0.12;
+const MAX_ZOOM = 2.5;
+/** Fitting never magnifies past 100%: a small level stays at its own size. */
+const FIT_MAX = 1;
+/** Room for the panels over the canvas: the trail above, zoom and legend below. */
+const PADDING = { top: "76px", bottom: "72px", left: "40px", right: "40px" } as const;
 
-function Canvas({ nodes, edges, level, label, containment, topLeft, topCenter, topRight }: Props) {
+function shapeOf(box: Box): string {
+  return `${Math.round(box.x)},${Math.round(box.y)},${Math.round(box.width)},${Math.round(box.height)}`;
+}
+
+function boxIn(nodes: readonly GraphNode[], id: string): Box | null {
+  const node = nodes.find((n) => n.id === id);
+  if (!node || node.width === undefined || node.height === undefined) return null;
+  return { x: node.position.x, y: node.position.y, width: node.width, height: node.height };
+}
+
+/** `viewport` scaled by `factor` about the middle of the screen. */
+function about(viewport: Viewport, factor: number, width: number, height: number): Viewport {
+  return {
+    x: width / 2 - (width / 2 - viewport.x) * factor,
+    y: height / 2 - (height / 2 - viewport.y) * factor,
+    zoom: viewport.zoom * factor,
+  };
+}
+
+function Canvas({
+  nodes,
+  edges,
+  level,
+  label,
+  selected,
+  selectedEdge = null,
+  onSelect,
+  onActivate,
+  arrival,
+  extent,
+  refit,
+  families,
+  topLeft,
+  topCenter,
+  topRight,
+}: Props) {
   const scheme = useComputedColorScheme("dark", { getInitialValueInEffect: true });
-  const reduced = useReducedMotion();
-  const { fitView } = useReactFlow();
+  const reduced = useReducedMotion() ?? false;
+  const { setViewport, getViewport } = useReactFlow();
+  const width = useStore((s) => s.width);
+  const height = useStore((s) => s.height);
   const [hovered, setHovered] = useState<string | null>(null);
 
-  // Pointing at (or focusing) a node lights its edges and dims the rest; nothing
-  // re-lays out. At rest every edge runs behind the cards; a lit one is lifted
-  // above them. A card's own lines off the grid appear only while it is pointed
-  // at, and the level's totals stand in for them the rest of the time.
-  const shown = useMemo<GraphEdge[]>(
+  // What is selected, else what is pointed at, is in focus: its lines are lit,
+  // the things it touches stay, and everything else fades. Layout never moves
+  // for it. A thing's own lines are drawn only while it is in focus; a level's
+  // totals stand in for them the rest of the time. A selection holds until it
+  // is cleared, so the view never changes under a pointer that merely passes.
+  const focus = selected ?? hovered;
+  const related = useMemo(() => {
+    if (focus === null) return null;
+    const set = new Set([focus]);
+    for (const e of edges) {
+      if (e.source === focus) set.add(e.target);
+      if (e.target === focus) set.add(e.source);
+    }
+    return set;
+  }, [edges, focus]);
+
+  const shownNodes = useMemo<GraphNode[]>(
+    () =>
+      nodes.map((node) => {
+        const isSelected = node.id === selected;
+        // the selection never fades, even while something else is pointed at
+        const faded =
+          related !== null && !BACKDROP.has(node.type ?? "") && node.id !== focus && !related.has(node.id) && !isSelected;
+        const className = faded ? classes.isFaded : undefined;
+        if (!isSelected && className === undefined) return node;
+        return { ...node, className, data: isSelected ? { ...node.data, selected: true } : node.data } as GraphNode;
+      }),
+    [nodes, related, focus, selected],
+  );
+
+  const shownEdges = useMemo<GraphEdge[]>(
     () =>
       edges.map((edge) => {
-        const touching = hovered !== null && (edge.source === hovered || edge.target === hovered);
-        const scope = edge.type === "link" ? edge.data?.scope : null;
-        let emphasis: Emphasis = hovered === null ? "rest" : touching ? "lit" : "dim";
+        const scope = edge.data?.scope ?? null;
+        const touching = focus !== null && (edge.source === focus || edge.target === focus);
+        let emphasis: Emphasis = "rest";
         let hidden = false;
-        if (scope === "detail") {
-          hidden = !touching;
-          emphasis = touching ? "lit" : "rest";
+        if (focus === null) hidden = scope === "detail";
+        else if (scope === "aggregate") hidden = true;
+        else if (touching) emphasis = "lit";
+        else if (scope === "detail") hidden = true;
+        else emphasis = "dim";
+        if (selectedEdge !== null && edge.id === selectedEdge) {
+          emphasis = "selected";
+          hidden = false;
         }
-        const zIndex = emphasis === "lit" && edge.type === "link" ? 1000 : 0;
-        return { ...edge, hidden, zIndex, data: { ...edge.data, emphasis } } as GraphEdge;
+        const raised = emphasis === "lit" || emphasis === "selected";
+        return { ...edge, hidden, zIndex: raised ? 1000 : 0, data: { ...edge.data!, emphasis } };
       }),
-    [edges, hovered],
+    [edges, focus, selectedEdge],
   );
 
   // keyboard focus inside a node counts as pointing at it
   const onFocus = useCallback((event: FocusEvent<HTMLDivElement>) => {
     const node = (event.target as HTMLElement).closest<HTMLElement>(".react-flow__node");
-    setHovered(node?.dataset.id ?? null);
+    const id = node?.dataset.id ?? null;
+    setHovered(id !== null && !node?.classList.contains("react-flow__node-frame") ? id : null);
   }, []);
   const onBlur = useCallback(() => setHovered(null), []);
-
-  // fit once per level, when its nodes first arrive; later changes (a preview
-  // filling a card) leave the viewport where the reader put it
-  const fitted = useRef<string | null>(null);
+  // Escape lets go of the selection wherever focus is (after Back it rests on
+  // the page, not in the canvas), unless a field or an open dialog owns it
   useEffect(() => {
-    if (nodes.length === 0 || fitted.current === level) return;
-    fitted.current = level;
-    const frame = requestAnimationFrame(() => void fitView({ ...FIT, duration: reduced ? 0 : 280 }));
-    return () => cancelAnimationFrame(frame);
-  }, [level, nodes.length, fitView, reduced]);
+    if (selected === null) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')) return;
+      onSelect(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onSelect, selected]);
+
+  // -- moving between levels --------------------------------------------------------
+
+  // hidden until a level's first view is set, shown once it is, and fading
+  // while the canvas leaves for another
+  const [shownLevel, setShownLevel] = useState<string | null>(null);
+  const [leaving, setLeaving] = useState(false);
+  const phase = leaving ? "leaving" : shownLevel === level ? "shown" : "hidden";
+
+  // arriving: start where the reader's eye was (inside what was opened, or on
+  // the child just left) and settle on the whole level
+  const entered = useRef<string | null>(null);
+  const fittedFor = useRef({ refit, width, height });
+  const fittedExtent = useRef<string | null>(null);
+  /** The reader has moved the view (a wheel, a drag) since it was last fitted. */
+  const moved = useRef(false);
+  const pending = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (entered.current === level) return;
+    if (nodes.length === 0 || extent === null || width === 0 || height === 0) return;
+    entered.current = level;
+    fittedFor.current = { refit, width, height };
+    fittedExtent.current = shapeOf(extent);
+    moved.current = false;
+    const target = getViewportForBounds(extent, width, height, MIN_ZOOM, FIT_MAX, PADDING);
+    let start = target;
+    if (!reduced && arrival.direction === "in") start = about(target, 0.78, width, height);
+    if (!reduced && arrival.direction === "out") {
+      const from = arrival.from ? boxIn(nodes, arrival.from) : null;
+      start = from ? getViewportForBounds(from, width, height, MIN_ZOOM, MAX_ZOOM, 0.6) : about(target, 1.35, width, height);
+    }
+    void setViewport(start);
+    if (pending.current !== null) cancelAnimationFrame(pending.current);
+    pending.current = requestAnimationFrame(() => {
+      pending.current = null;
+      setLeaving(false);
+      setShownLevel(level);
+      if (start !== target) void setViewport(target, { duration: arrival.direction === "out" ? 480 : 420, ease: easeOut });
+    });
+  }, [level, nodes, extent, width, height, reduced, arrival, refit, setViewport]);
+  useEffect(() => () => {
+    if (pending.current !== null) cancelAnimationFrame(pending.current);
+  }, []);
+
+  // re-centring within a level (the overview's anchor changed), the canvas
+  // changing size (the inspector opening beside it), or the level growing (a
+  // card's preview arriving): glide to the new fit; growth alone leaves the view
+  // where it is if the reader has moved it themselves
+  useEffect(() => {
+    const last = fittedFor.current;
+    if (entered.current !== level || extent === null || width === 0) return;
+    const recentred = refit !== last.refit;
+    const resized = width !== last.width || height !== last.height;
+    const grown = shapeOf(extent) !== fittedExtent.current;
+    if (!recentred && !resized && !grown) return;
+    fittedFor.current = { refit, width, height };
+    fittedExtent.current = shapeOf(extent);
+    if (!recentred && !resized && moved.current) return;
+    moved.current = false;
+    const target = getViewportForBounds(extent, width, height, MIN_ZOOM, FIT_MAX, PADDING);
+    void setViewport(target, { duration: reduced ? 0 : recentred ? 560 : 320, ease: easeInOut });
+  }, [level, refit, extent, width, height, reduced, setViewport]);
+
+  // leaving: zoom into what is being opened, or back out, as the view fades
+  const register = useRegisterExit();
+  const exit = useCallback(
+    async (direction: Direction, via: string | null) => {
+      if (reduced || direction === "none") return;
+      setLeaving(true);
+      const box = via ? boxIn(nodes, via) : null;
+      if (direction === "in" && box) {
+        await setViewport(getViewportForBounds(box, width, height, MIN_ZOOM, 3, 0.4), { duration: 300, ease: easeIn });
+      } else if (direction === "out") {
+        await setViewport(about(getViewport(), 0.7, width, height), { duration: 260, ease: easeIn });
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+    },
+    [reduced, nodes, setViewport, getViewport, width, height],
+  );
+  useEffect(() => register?.(exit), [register, exit]);
 
   return (
-    <ReactFlow
-      className={classes.flow}
-      aria-label={label}
-      nodes={nodes}
-      edges={shown}
-      nodeTypes={nodeTypes}
-      edgeTypes={edgeTypes}
-      colorMode={scheme}
-      nodesDraggable={false}
-      nodesConnectable={false}
-      elementsSelectable={false}
-      nodesFocusable={false}
-      edgesFocusable={false}
-      onNodeMouseEnter={(_, node) => setHovered(node.id)}
-      onNodeMouseLeave={() => setHovered(null)}
-      onFocus={onFocus}
-      onBlur={onBlur}
-      minZoom={0.15}
-      maxZoom={1.75}
-      onlyRenderVisibleElements
-      proOptions={{ hideAttribution: false }}
-    >
-      <Background variant={BackgroundVariant.Dots} gap={24} size={1.4} />
-      {topLeft && <Panel position="top-left">{topLeft}</Panel>}
-      {topCenter && <Panel position="top-center">{topCenter}</Panel>}
-      {topRight && <Panel position="top-right">{topRight}</Panel>}
-      <Panel position="bottom-left">
-        <ZoomControls reduced={reduced} />
-      </Panel>
-      <Panel position="bottom-center">
-        <Legend containment={containment} />
-      </Panel>
-    </ReactFlow>
+    <div className={classes.stage} data-phase={phase}>
+      <ReactFlow
+        className={classes.flow}
+        aria-label={label}
+        nodes={shownNodes}
+        edges={shownEdges}
+        nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
+        colorMode={scheme}
+        nodesDraggable={false}
+        nodesConnectable={false}
+        elementsSelectable={false}
+        nodesFocusable={false}
+        edgesFocusable={false}
+        zoomOnDoubleClick={false}
+        onNodeMouseEnter={(_, node) => {
+          if (!BACKDROP.has(node.type ?? "")) setHovered(node.id);
+        }}
+        onNodeMouseLeave={() => setHovered(null)}
+        onNodeClick={(_, node) => {
+          if (!BACKDROP.has(node.type ?? "") && node.type !== "anchor") onActivate(node.id);
+        }}
+        onPaneClick={() => onSelect(null)}
+        onMoveStart={(event) => {
+          // a move the reader makes, not one the canvas animates
+          if (event) moved.current = true;
+        }}
+        onFocus={onFocus}
+        onBlur={onBlur}
+        minZoom={MIN_ZOOM}
+        maxZoom={MAX_ZOOM}
+        onlyRenderVisibleElements
+        proOptions={{ hideAttribution: false }}
+      >
+        <Background variant={BackgroundVariant.Dots} gap={24} size={1.4} />
+        {topLeft && <Panel position="top-left">{topLeft}</Panel>}
+        {topCenter && <Panel position="top-center">{topCenter}</Panel>}
+        {topRight && <Panel position="top-right">{topRight}</Panel>}
+        <Panel position="bottom-left">
+          <ZoomControls extent={extent} reduced={reduced} />
+        </Panel>
+        <Panel position="bottom-center">
+          <Legend families={families} />
+        </Panel>
+      </ReactFlow>
+    </div>
   );
 }
 
-function ZoomControls({ reduced }: { reduced: boolean }) {
-  const { zoomIn, zoomOut, fitView } = useReactFlow();
+function ZoomControls({ extent, reduced }: { extent: Box | null; reduced: boolean }) {
+  const { zoomIn, zoomOut, setViewport } = useReactFlow();
   const { zoom } = useViewport();
-  const duration = reduced ? 0 : 160;
+  const width = useStore((s) => s.width);
+  const height = useStore((s) => s.height);
+  const duration = reduced ? 0 : 200;
+  const fit = () => {
+    if (extent) void setViewport(getViewportForBounds(extent, width, height, MIN_ZOOM, FIT_MAX, PADDING), { duration });
+  };
   return (
     <div className={classes.zoom} role="group" aria-label="Zoom">
       <Tooltip label="Zoom out">
@@ -145,7 +347,7 @@ function ZoomControls({ reduced }: { reduced: boolean }) {
       </Tooltip>
       <span className={classes.zoomDivider} aria-hidden />
       <Tooltip label="Fit to screen">
-        <ActionIcon size="md" onClick={() => void fitView({ ...FIT, duration })} aria-label="Fit to screen">
+        <ActionIcon size="md" onClick={fit} aria-label="Fit to screen">
           <CornersOutIcon size={14} />
         </ActionIcon>
       </Tooltip>
@@ -153,31 +355,65 @@ function ZoomControls({ reduced }: { reduced: boolean }) {
   );
 }
 
-/** What each stroke means. Colour is never the only difference: each also has its own pattern. */
-function Legend({ containment }: { containment: boolean }) {
-  const items: { kind: string; label: string }[] = [
-    { kind: "observed", label: "Code" },
-    { kind: "http", label: "HTTP" },
-    { kind: "dependency", label: "Package dependency" },
-    ...(containment ? [{ kind: "tree", label: "Contains" }] : []),
+const LEGEND_LABEL: Record<Family, string> = {
+  code: "Code",
+  http: "HTTP",
+  dependency: "Package dependency",
+  config: "Config & env",
+};
+
+/** What each stroke means. Colour is never the only difference: each has its own pattern. */
+function Legend({ families }: { families: readonly Family[] }) {
+  return (
+    <div className={classes.legendBar}>
+      <ul className={classes.legend} aria-label="Legend">
+        {families.map((family) => (
+          <li key={family} className={classes.legendItem} title={`${FAMILY_NOUN[family]} relationships`}>
+            <LineGlyph family={family} width={28} />
+            {LEGEND_LABEL[family]}
+          </li>
+        ))}
+        <li className={classes.legendItem}>
+          <LineGlyph family="selected" width={28} />
+          Selected
+        </li>
+      </ul>
+      <Shapes />
+    </div>
+  );
+}
+
+/** The node shapes, on demand: the canvas shows them, this names them. */
+function Shapes() {
+  const rows: { mark: ReactNode; label: string }[] = [
+    { mark: <Monogram name="R" hue={1} size={22} />, label: "Repository" },
+    { mark: <PathBadge path="src" size={22} />, label: "Directory" },
+    { mark: <PathBadge path="index.ts" size={22} />, label: "File" },
+    { mark: <EntityBadge entityType="package" size={22} />, label: "Package" },
+    { mark: <EntityBadge entityType="http_route" size={22} />, label: "HTTP route or endpoint" },
+    { mark: <EntityBadge entityType="env_var" size={22} />, label: "Environment variable or config" },
+    { mark: <EntityBadge entityType="module" size={22} />, label: "External module" },
+    { mark: <EntityBadge entityType="command" size={22} />, label: "Command" },
   ];
   return (
-    <ul className={classes.legend} aria-label="Legend">
-      {items.map((item) => (
-        <li key={item.kind} className={classes.legendItem}>
-          <svg width="28" height="10" viewBox="0 0 28 10" aria-hidden className={classes.legendLine} data-kind={item.kind}>
-            {item.kind === "dependency" ? (
-              <>
-                <line x1="1" y1="5" x2="27" y2="5" className={classes.legendOuter} />
-                <line x1="1" y1="5" x2="27" y2="5" className={classes.legendInner} />
-              </>
-            ) : (
-              <line x1="1" y1="5" x2="27" y2="5" className={classes.legendStroke} />
-            )}
-          </svg>
-          {item.label}
-        </li>
-      ))}
-    </ul>
+    <Popover position="top" withArrow shadow="md" trapFocus returnFocus>
+      <Popover.Target>
+        <Tooltip label="Node shapes">
+          <ActionIcon size="md" variant="subtle" aria-label="Node shapes">
+            <ShapesIcon size={15} />
+          </ActionIcon>
+        </Tooltip>
+      </Popover.Target>
+      <Popover.Dropdown>
+        <ul className={classes.shapes} aria-label="Node shapes">
+          {rows.map((row) => (
+            <li key={row.label}>
+              {row.mark}
+              {row.label}
+            </li>
+          ))}
+        </ul>
+      </Popover.Dropdown>
+    </Popover>
   );
 }

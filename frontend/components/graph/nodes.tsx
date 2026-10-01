@@ -1,94 +1,134 @@
 "use client";
 
-import {
-  CaretRightIcon,
-  CubeIcon,
-  FileIcon,
-  FolderSimpleIcon,
-  GearSixIcon,
-  GlobeSimpleIcon,
-  PackageIcon,
-  PuzzlePieceIcon,
-  TerminalWindowIcon,
-  CurrencyDollarSimpleIcon,
-  type Icon,
-} from "@phosphor-icons/react";
+import { ArrowRightIcon, CaretRightIcon, FileIcon, FolderSimpleIcon, PuzzlePieceIcon } from "@phosphor-icons/react";
 import { Handle, Position, type Node, type NodeProps, type NodeTypes } from "@xyflow/react";
-import { memo, type CSSProperties } from "react";
+import Image from "next/image";
+import { memo, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 
+import mark from "@/assets/brand/repoatlas-mark-256.png";
 import type { ChildEntry } from "@/lib/api/generated";
-import { formatCount, plural, shortSha } from "@/lib/model/format";
+import { compactCount, formatCount, plural, shortSha } from "@/lib/model/format";
 import type { FreshnessModel } from "@/lib/model/freshness";
-import type { AwayNode, DirectoryCard, FilesCard, PeerNode, SharedNode } from "@/lib/model/graph";
+import {
+  FAMILIES,
+  FILE_ROWS,
+  type DirectoryCard,
+  type FamilyCounts,
+  type FilesCard,
+  type FrameNode as FrameModel,
+  type MoreNode as MoreModel,
+  type Neighbour,
+  type PeerNode as PeerModel,
+  type PlaceNode as PlaceModel,
+  type SharedNode as SharedModel,
+} from "@/lib/model/graph";
 import type { RepositoryModel } from "@/lib/model/repositories";
 
+import { FAMILY_NOUN } from "./edges";
+import { EntityBadge, LineGlyph, Monogram, PathBadge } from "./glyphs";
 import classes from "./Graph.module.css";
 
-/** What a node can ask the view to do; the view owns navigation. */
-export interface Actions {
-  openRepository: (slug: string) => void;
-  openPath: (path: string) => void;
+/** What a node can ask of the view; the view owns selection and navigation. */
+export interface NodeActions {
+  /** A first press selects; a press on what is selected goes into it. */
+  activate: (id: string) => void;
+  /** Straight to a place: a row inside a card names exactly where it goes. */
+  go: (to: { repository: string; path: string }) => void;
 }
 
-export type RepositoryNodeData = {
+type Common = { actions: NodeActions; selected?: boolean };
+
+export type RepositoryNodeData = Common & { repository: RepositoryModel; partners: number };
+export type HubNodeData = { repositories: number; files: number; note: string | null };
+export type OrbitNodeData = Record<string, never>;
+export type GroupNodeData = { count: number };
+export type FrameNodeData = { frame: FrameModel; repository: RepositoryModel };
+export type DirectoryNodeData = Common & { card: DirectoryCard; repository: string };
+export type FilesNodeData = Common & { card: FilesCard; repository: string };
+export type SharedNodeData = Common & { node: SharedModel };
+export type PeerNodeData = Common & { node: PeerModel; hue: number | null };
+export type PlaceNodeData = Common & { node: PlaceModel; repository: string };
+export type MoreNodeData = Common & { node: MoreModel; noun: string };
+export type AnchorNodeData = Common & {
+  name: string;
+  path: string;
   repository: RepositoryModel;
-  /** At the top of an opened repository, it names where you are. */
-  current: boolean;
-  actions: Actions;
+  language: string | null;
+  declarations: number;
+  lines: number | null;
 };
-export type PathNodeData = { name: string; path: string; files: number | null; current: boolean; actions: Actions };
-export type DirectoryNodeData = { card: DirectoryCard; actions: Actions };
-export type FilesNodeData = { card: FilesCard };
-export type SharedNodeData = { node: SharedNode };
-export type PeerNodeData = { node: PeerNode; hue: number | null; actions: Actions };
-export type AwayNodeData = { node: AwayNode; repository: string; actions: Actions };
+export type NeighbourNodeData = Common & { node: Neighbour };
 
 export type GraphNode =
   | Node<RepositoryNodeData, "repository">
-  | Node<PathNodeData, "path">
+  | Node<HubNodeData, "hub">
+  | Node<OrbitNodeData, "orbit">
+  | Node<GroupNodeData, "group">
+  | Node<FrameNodeData, "frame">
   | Node<DirectoryNodeData, "directory">
   | Node<FilesNodeData, "files">
   | Node<SharedNodeData, "shared">
   | Node<PeerNodeData, "peer">
-  | Node<AwayNodeData, "away">;
+  | Node<PlaceNodeData, "place">
+  | Node<MoreNodeData, "more">
+  | Node<AnchorNodeData, "anchor">
+  | Node<NeighbourNodeData, "neighbour">;
 
-/** Invisible anchors on every side: an edge picks the sides that face its other end. */
+/** Nodes that are backdrop, not things: never faded, never selected. */
+export const BACKDROP: ReadonlySet<string> = new Set(["orbit", "group", "frame", "hub"]);
+
+/** React Flow wants handles to draw edges from; ours compute their own ends, so one hidden pair will do. */
 function Anchors() {
-  const sides = [
-    ["top", Position.Top],
-    ["right", Position.Right],
-    ["bottom", Position.Bottom],
-    ["left", Position.Left],
-  ] as const;
   return (
     <>
-      {sides.map(([side, position]) => (
-        <Handle key={`s-${side}`} id={`s-${side}`} type="source" position={position} className={classes.anchor} isConnectable={false} />
-      ))}
-      {sides.map(([side, position]) => (
-        <Handle key={`t-${side}`} id={`t-${side}`} type="target" position={position} className={classes.anchor} isConnectable={false} />
-      ))}
+      <Handle type="source" position={Position.Right} className={classes.anchor} isConnectable={false} />
+      <Handle type="target" position={Position.Left} className={classes.anchor} isConnectable={false} />
     </>
   );
 }
 
-function hueStyle(hue: number): CSSProperties {
-  return { "--hue": `var(--ra-repo-${hue})` } as CSSProperties;
+function stop(run: () => void) {
+  return (event: MouseEvent) => {
+    event.stopPropagation();
+    run();
+  };
 }
 
 /**
- * Formats, configuration and shell glue say little about what a repository is
- * written in; they are listed only when nothing else is.
+ * The whole node as one real button. Its name says what pressing it does:
+ * select it, or, once selected, open it.
  */
-const NOT_LANGUAGES = new Set([
-  "JSON", "YAML", "TOML", "Markdown", "XML", "INI", "Dockerfile", "Jinja", "Salt", "Bash", "Shell", "Makefile",
-]);
+function Cover({
+  id,
+  name,
+  selected,
+  openable,
+  actions,
+}: {
+  id: string;
+  name: string;
+  selected: boolean;
+  openable: boolean;
+  actions: NodeActions;
+}) {
+  const label = selected ? (openable ? `Open ${name}` : `${name}, selected`) : `Select ${name}`;
+  return (
+    <button
+      type="button"
+      className={`${classes.cover} nodrag`}
+      onClick={stop(() => actions.activate(id))}
+      aria-label={label}
+    />
+  );
+}
 
-function languagesOf(repository: RepositoryModel): string {
-  const code = repository.languages.filter((l) => !NOT_LANGUAGES.has(l));
-  const list = code.length > 0 ? code : repository.languages;
-  const shown = list.slice(0, 3).join(", ");
-  return list.length > 3 ? `${shown} +${list.length - 3}` : shown;
+/** Shown on a selected node that can be opened: says the next press goes in. */
+function OpenHint() {
+  return (
+    <span className={classes.openHint} aria-hidden>
+      Open <ArrowRightIcon size={11} weight="bold" />
+    </span>
+  );
 }
 
 function FreshnessDot({ freshness }: { freshness: FreshnessModel }) {
@@ -99,204 +139,361 @@ function FreshnessDot({ freshness }: { freshness: FreshnessModel }) {
   );
 }
 
-function RepositoryNode({ data }: NodeProps<Node<RepositoryNodeData, "repository">>) {
-  const { repository: r, current, actions } = data;
+/**
+ * Formats, configuration and shell glue say little about what a repository is
+ * written in; they are listed only when nothing else is.
+ */
+const NOT_LANGUAGES = new Set([
+  "JSON", "YAML", "TOML", "Markdown", "XML", "INI", "Dockerfile", "Jinja", "Salt", "Bash", "Shell", "Makefile",
+]);
+
+export function languagesOf(repository: RepositoryModel, max = 3): string {
+  const code = repository.languages.filter((l) => !NOT_LANGUAGES.has(l));
+  const list = code.length > 0 ? code : repository.languages;
+  const shown = list.slice(0, max).join(", ");
+  return list.length > max ? `${shown} +${list.length - max}` : shown;
+}
+
+function hueStyle(hue: number | null): CSSProperties | undefined {
+  return hue ? ({ "--hue": `var(--ra-repo-${hue})` } as CSSProperties) : undefined;
+}
+
+// -- the overview ---------------------------------------------------------------------
+
+function RepositoryNode({ id, data }: NodeProps<Node<RepositoryNodeData, "repository">>) {
+  const { repository: r, selected = false, actions, partners } = data;
   return (
-    <div className={classes.repository} data-current={current || undefined} style={hueStyle(r.hue)}>
+    <div className={classes.repository} data-selected={selected || undefined} style={hueStyle(r.hue)}>
       <Anchors />
-      <button
-        type="button"
-        className={classes.cover}
-        onClick={() => actions.openRepository(r.slug)}
-        aria-label={current ? `${r.name}, repository root` : `Open ${r.name}`}
-      />
-      <span className={classes.badge} aria-hidden>
-        {r.name.slice(0, 1).toUpperCase()}
-      </span>
+      <Cover id={id} name={r.name} selected={selected} openable actions={actions} />
+      <Monogram name={r.name} hue={r.hue} />
       <span className={classes.body}>
         <span className={classes.titleLine}>
           <span className={classes.name}>{r.name}</span>
-          <FreshnessDot freshness={r.freshness} />
+          {selected ? <OpenHint /> : <FreshnessDot freshness={r.freshness} />}
         </span>
-        {current ? (
-          <span className={classes.meta}>
-            {r.branch ?? "detached"}
-            {r.headSha && <span className={classes.sha}>{shortSha(r.headSha)}</span>}
-            <span className={classes.state}>{r.freshness.label}</span>
-          </span>
-        ) : (
-          <>
-            <span className={classes.meta}>{languagesOf(r)}</span>
-            <span className={classes.stats}>
-              <span>{plural(r.files, "file")}</span>
-              <span>{plural(r.symbols, "symbol")}</span>
-            </span>
-          </>
-        )}
+        <span className={classes.meta}>{languagesOf(r) || "No languages recorded"}</span>
+        <span className={classes.stats}>
+          <span>{plural(r.files, "file")}</span>
+          {partners > 0 ? <span>{plural(partners, "partner")}</span> : <span>{plural(r.symbols, "symbol")}</span>}
+        </span>
       </span>
     </div>
   );
 }
 
-function PathNode({ data }: NodeProps<Node<PathNodeData, "path">>) {
+/** The workspace itself, at the centre when no repository is. */
+function HubNode({ data }: NodeProps<Node<HubNodeData, "hub">>) {
   return (
-    <div className={classes.path} data-current={data.current || undefined}>
+    <div className={classes.hub}>
       <Anchors />
+      <Image src={mark} alt="" width={30} height={30} className={classes.hubMark} />
+      <span className={classes.hubTitle}>Workspace</span>
+      <span className={classes.hubMeta}>
+        {plural(data.repositories, "repository", "repositories")} · {plural(data.files, "file")}
+      </span>
+      {data.note && <span className={classes.hubNote}>{data.note}</span>}
+    </div>
+  );
+}
+
+function OrbitNode() {
+  return (
+    <svg className={classes.orbit} width="100%" height="100%" preserveAspectRatio="none" viewBox="0 0 100 100" aria-hidden>
+      <ellipse cx="50" cy="50" rx="49.5" ry="49.5" vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
+function GroupNode({ data }: NodeProps<Node<GroupNodeData, "group">>) {
+  return (
+    <div className={classes.group}>
+      <span className={classes.groupLabel}>
+        No links recorded with the others · {formatCount(data.count)}
+      </span>
+    </div>
+  );
+}
+
+// -- an opened repository ---------------------------------------------------------------
+
+/** The level itself: what it encloses is what is in it. */
+function FrameNode({ data }: NodeProps<Node<FrameNodeData, "frame">>) {
+  const { frame, repository } = data;
+  const parts: string[] = [];
+  if (frame.directories) parts.push(plural(frame.directories, "directory", "directories"));
+  if (frame.leaves) parts.push(plural(frame.leaves, "file"));
+  return (
+    <div className={classes.frame}>
+      <Anchors />
+      <div className={classes.frameHeader}>
+        {frame.path ? (
+          <FolderSimpleIcon size={22} weight="fill" className={classes.folder} aria-hidden />
+        ) : (
+          <Monogram name={repository.name} hue={repository.hue} size={30} />
+        )}
+        <span className={classes.frameTitle}>
+          <span className={classes.frameName}>{frame.name}</span>
+          <span className={classes.frameMeta}>
+            {frame.path ? `${repository.name} / ${frame.path}` : `${repository.branch ?? "detached"} ${shortSha(repository.headSha) ?? ""}`}
+          </span>
+        </span>
+        <span className={classes.frameCount}>
+          {plural(frame.files, "file")}
+          {parts.length > 0 && <span className={classes.frameParts}>{parts.join(" · ")}</span>}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** Per family, how many links touch a card: the card says so without drawing them. */
+function Tally({ summary }: { summary: FamilyCounts }) {
+  const present = FAMILIES.filter((f) => (summary[f] ?? 0) > 0);
+  if (present.length === 0) return null;
+  return (
+    <span className={classes.tally}>
+      {present.map((family) => (
+        <span key={family} className={classes.tallyItem} title={`${formatCount(summary[family]!)} ${FAMILY_NOUN[family]} links`}>
+          <LineGlyph family={family} width={14} />
+          {compactCount(summary[family]!)}
+          <span className={classes.srOnly}> {FAMILY_NOUN[family]} links</span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function EntryRow({ entry, repository, actions }: { entry: ChildEntry; repository: string; actions: NodeActions }) {
+  const directory = entry.kind === "directory";
+  const icon = directory ? (
+    <FolderSimpleIcon size={15} weight="fill" className={classes.folder} aria-hidden />
+  ) : entry.kind === "declaration" ? (
+    <PuzzlePieceIcon size={15} className={classes.fileIcon} aria-hidden />
+  ) : (
+    <FileIcon size={15} className={classes.fileIcon} aria-hidden />
+  );
+  if (entry.kind === "declaration") {
+    return (
+      <li className={classes.row} data-static>
+        {icon}
+        <span className={classes.rowName}>{entry.name}</span>
+      </li>
+    );
+  }
+  return (
+    <li>
       <button
         type="button"
-        className={classes.cover}
-        onClick={() => data.actions.openPath(data.path)}
-        aria-label={data.current ? `${data.name}, current directory` : `Go to ${data.name}`}
-      />
-      <FolderSimpleIcon size={20} weight="fill" className={classes.folder} aria-hidden />
-      <span className={classes.body}>
-        <span className={classes.name}>{data.name}</span>
-        {data.files !== null && <span className={classes.meta}>{plural(data.files, "file")}</span>}
-      </span>
+        className={`${classes.row} nodrag`}
+        onClick={stop(() => actions.go({ repository, path: entry.path }))}
+      >
+        {icon}
+        <span className={classes.rowName}>{entry.name}</span>
+        <CaretRightIcon size={12} className={classes.caret} aria-hidden />
+      </button>
+    </li>
+  );
+}
+
+function CardShell({
+  id,
+  selected,
+  header,
+  children,
+  summary,
+}: {
+  id: string;
+  selected: boolean;
+  header: ReactNode;
+  children: ReactNode;
+  summary: FamilyCounts;
+}) {
+  return (
+    <div className={classes.card} data-selected={selected || undefined} data-id={id}>
+      <Anchors />
+      {header}
+      <ul className={classes.rows}>{children}</ul>
+      <Tally summary={summary} />
     </div>
   );
 }
 
-function EntryRow({ entry, onOpen }: { entry: ChildEntry; onOpen?: (path: string) => void }) {
-  const directory = entry.kind === "directory";
-  const content = (
-    <>
-      {directory ? (
-        <FolderSimpleIcon size={15} weight="fill" className={classes.folder} aria-hidden />
-      ) : entry.kind === "declaration" ? (
-        <PuzzlePieceIcon size={15} className={classes.fileIcon} aria-hidden />
-      ) : (
-        <FileIcon size={15} className={classes.fileIcon} aria-hidden />
-      )}
-      <span className={classes.rowName}>{entry.name}</span>
-      {directory && <CaretRightIcon size={12} className={classes.caret} aria-hidden />}
-    </>
-  );
-  return directory && onOpen ? (
-    <li>
-      <button type="button" className={`${classes.row} nodrag`} onClick={() => onOpen(entry.path)}>
-        {content}
-      </button>
-    </li>
-  ) : (
-    <li className={classes.row} data-static>
-      {content}
-    </li>
-  );
-}
-
-function DirectoryNode({ data }: NodeProps<Node<DirectoryNodeData, "directory">>) {
-  const { card, actions } = data;
+function DirectoryNode({ id, data }: NodeProps<Node<DirectoryNodeData, "directory">>) {
+  const { card, actions, repository, selected = false } = data;
   const more = card.preview ? card.previewTotal - card.preview.length : 0;
   return (
-    <div className={classes.card}>
-      <Anchors />
-      <button type="button" className={`${classes.cardHeader} nodrag`} onClick={() => actions.openPath(card.path)} aria-label={`Open ${card.name}, ${plural(card.files, "file")}`}>
-        <FolderSimpleIcon size={20} weight="fill" className={classes.folder} aria-hidden />
-        <span className={classes.cardTitle}>{card.name}</span>
-        <span className={classes.cardCount}>{formatCount(card.files)}</span>
-      </button>
-      <ul className={classes.rows}>
-        {card.preview === null
-          ? [0, 1, 2].map((i) => <li key={i} className={classes.placeholder} aria-hidden />)
-          : card.preview.map((entry) => <EntryRow key={entry.id} entry={entry} onOpen={actions.openPath} />)}
-        {more > 0 && <li className={classes.more}>{`+${formatCount(more)} more`}</li>}
-      </ul>
-    </div>
+    <CardShell
+      id={id}
+      selected={selected}
+      summary={card.summary}
+      header={
+        <button
+          type="button"
+          className={`${classes.cardHeader} nodrag`}
+          onClick={stop(() => actions.activate(id))}
+          aria-label={selected ? `Open ${card.name}` : `Select ${card.name}, ${plural(card.files, "file")}`}
+        >
+          <FolderSimpleIcon size={20} weight="fill" className={classes.folder} aria-hidden />
+          <span className={classes.cardTitle}>{card.name}</span>
+          {selected ? <OpenHint /> : <span className={classes.cardCount}>{formatCount(card.files)}</span>}
+        </button>
+      }
+    >
+      {card.preview === null
+        ? [0, 1, 2].map((i) => <li key={i} className={classes.placeholder} aria-hidden />)
+        : card.preview.map((entry) => <EntryRow key={entry.id} entry={entry} repository={repository} actions={actions} />)}
+      {more > 0 && (
+        <li>
+          <button type="button" className={`${classes.more} nodrag`} onClick={stop(() => actions.go({ repository, path: card.path }))}>
+            {`+${formatCount(more)} more`}
+          </button>
+        </li>
+      )}
+    </CardShell>
   );
 }
 
-function FilesNode({ data }: NodeProps<Node<FilesNodeData, "files">>) {
-  const { card } = data;
-  const more = card.total - card.entries.length;
+function FilesNode({ id, data }: NodeProps<Node<FilesNodeData, "files">>) {
+  const { card, actions, repository, selected = false } = data;
+  const shown = card.entries.slice(0, FILE_ROWS);
+  const more = card.total - shown.length;
   return (
-    <div className={classes.card}>
-      <Anchors />
-      <div className={classes.cardHeader} data-static>
-        <FileIcon size={18} className={classes.fileIcon} aria-hidden />
-        <span className={classes.cardTitle}>{card.label}</span>
-        <span className={classes.cardCount}>{formatCount(card.total)}</span>
-      </div>
-      <ul className={classes.rows}>
-        {card.entries.map((entry) => (
-          <EntryRow key={entry.id} entry={entry} />
-        ))}
-        {more > 0 && <li className={classes.more}>{`+${formatCount(more)} more`}</li>}
-      </ul>
-    </div>
+    <CardShell
+      id={id}
+      selected={selected}
+      summary={card.summary}
+      header={
+        <button
+          type="button"
+          className={`${classes.cardHeader} nodrag`}
+          onClick={stop(() => actions.activate(id))}
+          aria-label={selected ? "Files here, selected" : `Select the files here, ${plural(card.total, "file")}`}
+        >
+          <FileIcon size={18} className={classes.fileIcon} aria-hidden />
+          <span className={classes.cardTitle}>Files</span>
+          <span className={classes.cardCount}>{formatCount(card.total)}</span>
+        </button>
+      }
+    >
+      {shown.map((entry) => (
+        <EntryRow key={entry.id} entry={entry} repository={repository} actions={actions} />
+      ))}
+      {more > 0 && (
+        <li>
+          <button type="button" className={`${classes.more} nodrag`} onClick={stop(() => actions.activate(id))}>
+            {`+${formatCount(more)} more`}
+          </button>
+        </li>
+      )}
+    </CardShell>
   );
 }
 
-const SHARED_ICONS: Record<string, Icon> = {
-  module: CubeIcon,
-  package: PackageIcon,
-  env_var: CurrencyDollarSimpleIcon,
-  command: TerminalWindowIcon,
-  config: GearSixIcon,
-  http_endpoint: GlobeSimpleIcon,
-  http_route: GlobeSimpleIcon,
-  http_deployment: GlobeSimpleIcon,
-};
-
-function family(entityType: string): string {
-  if (entityType === "package") return "package";
-  if (entityType.startsWith("http_")) return "endpoint";
-  return "external";
-}
-
-function SharedNodeView({ data }: NodeProps<Node<SharedNodeData, "shared">>) {
-  const { node } = data;
-  const Glyph = SHARED_ICONS[node.entityType] ?? CubeIcon;
+/** Things many files share: modules, packages, variables, routes. Never opened, only inspected. */
+function SharedNodeView({ id, data }: NodeProps<Node<SharedNodeData, "shared">>) {
+  const { node, actions, selected = false } = data;
   return (
-    <div className={classes.shared} data-family={family(node.entityType)} title={`${formatCount(node.count)} relationships reach ${node.label.toLowerCase()} shared across the index`}>
+    <div className={classes.shared} data-entity={node.entityType} data-selected={selected || undefined}>
       <Anchors />
-      <Glyph size={16} className={classes.sharedIcon} aria-hidden />
+      <Cover id={id} name={node.label} selected={selected} openable={false} actions={actions} />
+      <EntityBadge entityType={node.entityType} />
       <span className={classes.sharedLabel}>{node.label}</span>
-      <span className={classes.sharedCount}>{formatCount(node.count)}</span>
+      <span className={classes.sharedCount}>{compactCount(node.count)}</span>
     </div>
   );
 }
 
-function PeerNodeView({ data }: NodeProps<Node<PeerNodeData, "peer">>) {
-  const { node, hue, actions } = data;
+function PeerNodeView({ id, data }: NodeProps<Node<PeerNodeData, "peer">>) {
+  const { node, hue, actions, selected = false } = data;
   return (
-    <div className={classes.peer} style={hue ? hueStyle(hue) : undefined}>
+    <div className={classes.peer} style={hueStyle(hue)} data-selected={selected || undefined}>
       <Anchors />
-      <button type="button" className={classes.cover} onClick={() => actions.openRepository(node.repository)} aria-label={`Open ${node.repository}`} />
-      <span className={classes.badge} data-small aria-hidden>
-        {node.repository.slice(0, 1).toUpperCase()}
-      </span>
+      <Cover id={id} name={node.repository} selected={selected} openable actions={actions} />
+      <Monogram name={node.repository} hue={hue} size={28} />
       <span className={classes.body}>
         <span className={classes.name}>{node.repository}</span>
-        <span className={classes.meta}>{node.path ? node.path : "Another repository"}</span>
+        <span className={classes.meta}>Another repository · {compactCount(node.count)}</span>
       </span>
+      {selected && <OpenHint />}
     </div>
   );
 }
 
-/** Elsewhere in this repository: opens the directory that holds it. */
-function AwayNodeView({ data }: NodeProps<Node<AwayNodeData, "away">>) {
-  const { node, repository, actions } = data;
+/** Elsewhere in this repository. */
+function PlaceNodeView({ id, data }: NodeProps<Node<PlaceNodeData, "place">>) {
+  const { node, actions, selected = false } = data;
   const name = node.path.slice(node.path.lastIndexOf("/") + 1);
+  const cut = node.path.lastIndexOf("/");
   return (
-    <div className={classes.peer}>
+    <div className={classes.place} data-selected={selected || undefined}>
+      <Anchors />
+      <Cover id={id} name={node.path} selected={selected} openable actions={actions} />
+      <PathBadge path={node.path} size={26} />
+      <span className={classes.body}>
+        <span className={classes.name}>{name}</span>
+        <span className={classes.meta}>{cut > 0 ? `${node.path.slice(0, cut)}/` : `${data.repository} root`}</span>
+      </span>
+      {selected && <OpenHint />}
+    </div>
+  );
+}
+
+function MoreNodeView({ id, data }: NodeProps<Node<MoreNodeData, "more">>) {
+  const { node, actions, selected = false, noun } = data;
+  const label = `${formatCount(node.nodes)} more ${noun}`;
+  return (
+    <div className={classes.moreNode} data-selected={selected || undefined}>
+      <Anchors />
+      <Cover id={id} name={label} selected={selected} openable={false} actions={actions} />
+      <span className={classes.moreLabel}>+ {label}</span>
+      <span className={classes.sharedCount}>{compactCount(node.count)}</span>
+    </div>
+  );
+}
+
+// -- a file and its neighbourhood -----------------------------------------------------
+
+function AnchorNode({ id, data }: NodeProps<Node<AnchorNodeData, "anchor">>) {
+  const { name, path, repository, language, declarations, lines, actions } = data;
+  const cut = path.lastIndexOf("/");
+  return (
+    <div className={classes.fileAnchor}>
       <Anchors />
       <button
         type="button"
-        className={classes.cover}
-        onClick={() => actions.openPath(node.opens)}
-        aria-label={`Go to ${node.path} in ${repository}`}
+        className={`${classes.cover} nodrag`}
+        onClick={stop(() => actions.activate(id))}
+        aria-label={`${name}, this file`}
       />
-      {/* the index says only "a path": a name with an extension reads as a file */}
-      {/\.[A-Za-z0-9]+$/.test(name) && !name.startsWith(".") ? (
-        <FileIcon size={18} className={classes.fileIcon} aria-hidden />
-      ) : (
-        <FolderSimpleIcon size={18} weight="fill" className={classes.folder} aria-hidden />
-      )}
-      <span className={classes.body}>
-        <span className={classes.name}>{name}</span>
-        <span className={classes.meta}>{node.opens ? `${node.opens}/` : `${repository} root`}</span>
+      <span className={classes.anchorIcon} aria-hidden>
+        <FileIcon size={24} />
       </span>
+      <span className={classes.body}>
+        <span className={classes.anchorName}>{name}</span>
+        <span className={classes.meta}>{cut > 0 ? `${repository.name} / ${path.slice(0, cut)}` : repository.name}</span>
+        <span className={classes.stats}>
+          {language && <span>{language}</span>}
+          <span>{plural(declarations, "declaration")}</span>
+          {lines !== null && <span>{plural(lines, "line")}</span>}
+        </span>
+      </span>
+    </div>
+  );
+}
+
+function NeighbourNode({ id, data }: NodeProps<Node<NeighbourNodeData, "neighbour">>) {
+  const { node, actions, selected = false } = data;
+  return (
+    <div className={classes.place} data-neighbour data-selected={selected || undefined}>
+      <Anchors />
+      <Cover id={id} name={node.detail ? `${node.detail}/${node.label}` : node.label} selected={selected} openable actions={actions} />
+      <PathBadge path={node.target} size={26} />
+      <span className={classes.body}>
+        <span className={classes.name}>{node.label}</span>
+        <span className={classes.meta}>{node.detail ? `${node.detail}/` : "repository root"}</span>
+      </span>
+      {selected ? <OpenHint /> : <span className={classes.sharedCount}>{compactCount(node.count)}</span>}
     </div>
   );
 }
@@ -304,10 +501,16 @@ function AwayNodeView({ data }: NodeProps<Node<AwayNodeData, "away">>) {
 // module scope, so React Flow never sees a new object and remounts every node
 export const nodeTypes: NodeTypes = {
   repository: memo(RepositoryNode),
-  path: memo(PathNode),
+  hub: memo(HubNode),
+  orbit: memo(OrbitNode),
+  group: memo(GroupNode),
+  frame: memo(FrameNode),
   directory: memo(DirectoryNode),
   files: memo(FilesNode),
   shared: memo(SharedNodeView),
   peer: memo(PeerNodeView),
-  away: memo(AwayNodeView),
+  place: memo(PlaceNodeView),
+  more: memo(MoreNodeView),
+  anchor: memo(AnchorNode),
+  neighbour: memo(NeighbourNode),
 };

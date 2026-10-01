@@ -99,6 +99,19 @@
   }
 }
 
+/* the trail, and beneath it what the level says about itself */
+.overlayStack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: min(640px, 60vw);
+
+  .note {
+    text-align: left;
+  }
+}
+
 .trail {
   display: flex;
   align-items: center;
@@ -160,4 +173,32 @@ button.crumb:hover {
   font-weight: 500;
   border: 1px solid var(--ra-border-strong);
   border-radius: var(--mantine-radius-xs);
+}
+
+/* -- the canvas and, beside it (below it on a narrow window), the inspector ------- */
+
+.stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+
+  &[data-inspector] {
+    grid-template-columns: minmax(0, 1fr) clamp(340px, 30vw, 420px);
+  }
+
+  @media (max-width: 1023px) {
+    &[data-inspector] {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr) min(46dvh, 440px);
+    }
+  }
+}
+
+.canvas {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
 }

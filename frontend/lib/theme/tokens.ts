@@ -27,6 +27,8 @@ export interface ColorTokens {
   file: string;
   endpoint: string;
   external: string;
+  config: string;
+  halo: string;
   success: string;
   warning: string;
   danger: string;
@@ -57,6 +59,8 @@ export const DARK: ColorTokens = {
   file: "#9aa8bc",
   endpoint: "#38cfee",
   external: "#7a889c",
+  config: "#e2b54f",
+  halo: "rgba(91, 140, 255, 0.28)",
   success: "#2fd39f",
   warning: "#f2a33a",
   danger: "#f0616d",
@@ -87,6 +91,8 @@ export const LIGHT: ColorTokens = {
   file: "#475467",
   endpoint: "#0b7f9e",
   external: "#5f6c7e",
+  config: "#8f6400",
+  halo: "rgba(47, 99, 240, 0.2)",
   success: "#0b7a57",
   warning: "#9a5a00",
   danger: "#c8313f",

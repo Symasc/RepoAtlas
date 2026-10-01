@@ -1,4 +1,31 @@
-/* -- the canvas ------------------------------------------------------------- */
+/* -- the stage: the canvas fades as it leaves a level and as it arrives ---------- */
+
+.stage {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  transition: opacity 240ms var(--ra-ease);
+
+  &[data-phase="hidden"] {
+    opacity: 0;
+    transition: none;
+  }
+
+  &[data-phase="leaving"] {
+    opacity: 0;
+    transition: opacity 220ms ease-in 80ms;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+
+    &[data-phase="leaving"] {
+      transition: none;
+    }
+  }
+}
 
 .flow {
   --xy-background-color: var(--ra-canvas);
@@ -15,6 +42,27 @@
       color: var(--ra-text-subtle);
     }
   }
+
+  /* fading is paint only: nothing re-lays out */
+  :global(.react-flow__node) {
+    transition: filter 200ms var(--ra-ease);
+  }
+}
+
+/*
+ * What is in focus, what it touches, and everything else. The rest recedes by
+ * colour, not opacity: its fill sinks into the canvas, its hues go grey, and
+ * its text steps down to the quietest tone that still reads at 4.5:1. The
+ * lines carry the hard fade.
+ */
+.isFaded {
+  --ra-surface: var(--ra-canvas);
+  --ra-surface-elevated: var(--ra-canvas);
+  --ra-text: var(--ra-text-subtle);
+  --ra-text-muted: var(--ra-text-subtle);
+  --ra-border-strong: var(--ra-border);
+  --ra-shadow: none;
+  filter: grayscale(1);
 }
 
 .anchor {
@@ -37,7 +85,7 @@
   white-space: nowrap;
 }
 
-/* a whole-card button: the card is the click target, and a real focusable one */
+/* a whole-node button: the node is the click target, and a real focusable one */
 .cover {
   position: absolute;
   inset: 0;
@@ -54,11 +102,37 @@
   }
 }
 
-/* -- repository nodes --------------------------------------------------------- */
+/* the press that follows a selection opens it */
+.openHint {
+  position: relative;
+  z-index: 2;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 600;
+  color: var(--ra-on-accent);
+  background-color: var(--ra-accent);
+  pointer-events: none;
+}
+
+/* the selected thing: an accent ring, a quiet lift */
+:is(.place, .card, .shared, .moreNode)[data-selected] {
+  border-color: var(--ra-accent);
+  box-shadow:
+    0 0 0 3px var(--ra-selected),
+    var(--ra-shadow);
+}
+
+/* -- repositories ---------------------------------------------------------------- */
 
 .repository,
 .peer,
-.path {
+.place,
+.fileAnchor {
   position: relative;
   display: flex;
   align-items: center;
@@ -68,7 +142,7 @@
   padding: 0 14px;
   background-color: var(--ra-surface);
   border: 1px solid var(--ra-border);
-  border-radius: var(--mantine-radius-md);
+  border-radius: 12px;
   color: var(--ra-text);
   transition:
     border-color var(--ra-duration-fast) var(--ra-ease),
@@ -77,30 +151,19 @@
   &:hover {
     border-color: var(--ra-border-strong);
   }
-
-  &[data-current] {
-    border-color: color-mix(in oklch, var(--ra-accent) 70%, transparent);
-    box-shadow: 0 0 0 3px var(--ra-selected);
-  }
 }
 
-.badge {
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-  width: 34px;
-  height: 34px;
-  border-radius: var(--mantine-radius-md);
-  font-weight: 600;
-  font-size: var(--mantine-font-size-lg);
-  color: var(--hue, var(--ra-text-muted));
-  background-color: color-mix(in oklch, var(--hue, var(--ra-text-muted)) 14%, transparent);
-  border: 1px solid color-mix(in oklch, var(--hue, var(--ra-text-muted)) 45%, transparent);
+/* a repository's identity runs down its left edge */
+.repository,
+.peer {
+  box-shadow: inset 3px 0 0 color-mix(in oklch, var(--hue, var(--ra-border-strong)) 70%, transparent);
 
-  &[data-small] {
-    width: 28px;
-    height: 28px;
-    font-size: var(--mantine-font-size-md);
+  &[data-selected] {
+    border-color: var(--ra-accent);
+    box-shadow:
+      inset 3px 0 0 var(--hue, var(--ra-accent)),
+      0 0 0 3px var(--ra-selected),
+      var(--ra-shadow);
   }
 }
 
@@ -139,18 +202,13 @@
   text-overflow: ellipsis;
 }
 
+.meta {
+  display: block;
+}
+
 .stats {
   color: var(--ra-text-subtle);
   font-variant-numeric: tabular-nums;
-}
-
-.sha {
-  font-family: var(--mantine-font-family-monospace);
-  color: var(--ra-text-subtle);
-}
-
-.state {
-  color: var(--ra-text-subtle);
 }
 
 .freshness {
@@ -177,27 +235,149 @@
   }
 }
 
-.peer {
-  opacity: 0.62;
+.peer .name,
+.place .name {
+  font-size: var(--mantine-font-size-md);
+}
 
-  &:hover {
-    opacity: 1;
+/* -- the workspace hub and its orbits ---------------------------------------------- */
+
+.hub {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+  height: 100%;
+  padding: 18px;
+  border-radius: 50%;
+  text-align: center;
+  color: var(--ra-text);
+  background:
+    radial-gradient(circle at 50% 35%, color-mix(in oklch, var(--ra-accent) 14%, transparent), transparent 70%),
+    var(--ra-surface);
+  border: 1px solid color-mix(in oklch, var(--ra-accent) 35%, var(--ra-border));
+  box-shadow: 0 0 0 10px color-mix(in oklch, var(--ra-accent) 5%, transparent);
+}
+
+.hubMark {
+  margin-bottom: 2px;
+}
+
+.hubTitle {
+  font-size: var(--mantine-font-size-lg);
+  font-weight: 650;
+}
+
+.hubMeta {
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.hubNote {
+  max-width: 130px;
+  font-size: var(--mantine-font-size-xs);
+  line-height: 1.35;
+  color: var(--ra-text-subtle);
+}
+
+.orbit {
+  display: block;
+  overflow: visible;
+  pointer-events: none;
+
+  ellipse {
+    fill: none;
+    stroke: var(--ra-border);
+    stroke-width: 1;
+    stroke-dasharray: 2 6;
   }
 }
 
-/* -- directories and files -------------------------------------------------- */
+.group {
+  width: 100%;
+  height: 100%;
+  border: 1px dashed var(--ra-border-strong);
+  border-radius: 16px;
+  background-color: color-mix(in oklch, var(--ra-surface) 35%, transparent);
+  pointer-events: none;
+}
 
-.path {
-  gap: 10px;
+.groupLabel {
+  display: block;
+  padding: 11px 18px 0;
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ra-text-subtle);
+}
+
+/* -- an opened level: the frame and its cards ------------------------------------- */
+
+.frame {
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--ra-border);
+  border-radius: 18px;
+  background-color: color-mix(in oklch, var(--ra-surface) 45%, transparent);
+  pointer-events: none;
+}
+
+.frameHeader {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 64px;
+  padding: 0 22px;
+}
+
+.frameTitle {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.frameName {
+  font-size: var(--mantine-font-size-xl);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--ra-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.frameMeta {
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-subtle);
+  font-family: var(--mantine-font-family-monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.frameCount {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 600;
+  color: var(--ra-text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.frameParts {
+  font-weight: 400;
+  color: var(--ra-text-subtle);
 }
 
 .folder {
   flex-shrink: 0;
-  color: var(--ra-file);
-}
-
-.path .folder,
-.cardHeader .folder {
   color: var(--ra-accent);
 }
 
@@ -214,9 +394,11 @@
   height: 100%;
   background-color: var(--ra-surface);
   border: 1px solid var(--ra-border);
-  border-radius: var(--mantine-radius-md);
+  border-radius: 12px;
   overflow: hidden;
-  transition: border-color var(--ra-duration-fast) var(--ra-ease);
+  transition:
+    border-color var(--ra-duration-fast) var(--ra-ease),
+    box-shadow var(--ra-duration-fast) var(--ra-ease);
 
   &:hover {
     border-color: var(--ra-border-strong);
@@ -228,7 +410,7 @@
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
-  height: 54px;
+  height: 52px;
   padding: 0 14px;
   border: 0;
   border-bottom: 1px solid var(--ra-border);
@@ -238,11 +420,7 @@
   text-align: left;
   cursor: pointer;
 
-  &[data-static] {
-    cursor: default;
-  }
-
-  &:not([data-static]):hover {
+  &:hover {
     background-color: var(--ra-hover);
   }
 
@@ -269,8 +447,9 @@
 }
 
 .rows {
+  flex: 1;
   margin: 0;
-  padding: 4px 6px 6px;
+  padding: 4px 6px 4px;
   list-style: none;
 }
 
@@ -315,6 +494,13 @@
 .caret {
   flex-shrink: 0;
   color: var(--ra-text-subtle);
+  opacity: 0;
+  transition: opacity var(--ra-duration-fast) var(--ra-ease);
+}
+
+.row:hover .caret,
+.row:focus-visible .caret {
+  opacity: 1;
 }
 
 .placeholder {
@@ -325,46 +511,96 @@
 }
 
 .more {
-  height: 26px;
-  padding: 0 8px;
   display: flex;
   align-items: center;
+  width: 100%;
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--mantine-radius-xs);
+  background: transparent;
+  font: inherit;
   font-size: var(--mantine-font-size-sm);
   color: var(--ra-text-subtle);
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--ra-text);
+    background-color: var(--ra-hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--ra-focus);
+    outline-offset: -2px;
+  }
 }
 
-/* -- things many repositories share: packages, modules, endpoints ------------ */
+/* a card's links, counted per family: what it would draw, without drawing it */
+.tally {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 34px;
+  padding: 0 14px;
+  border-top: 1px solid var(--ra-border);
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-muted);
+  font-variant-numeric: tabular-nums;
+}
 
-.shared {
+.tallyItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* -- things shared across the index ----------------------------------------------- */
+
+.shared,
+.moreNode {
   position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
   height: 100%;
-  padding: 0 12px 0 14px;
+  padding: 0 14px 0 10px;
   background-color: var(--ra-surface);
   border: 1px solid var(--ra-border);
-  border-radius: 22px;
+  border-radius: 999px;
   color: var(--ra-text);
+  transition: border-color var(--ra-duration-fast) var(--ra-ease);
 
-  &[data-family="package"] {
-    --family: var(--ra-package);
-  }
-  &[data-family="endpoint"] {
-    --family: var(--ra-endpoint);
-  }
-  &[data-family="external"] {
-    --family: var(--ra-external);
+  &:hover {
+    border-color: var(--ra-border-strong);
   }
 }
 
-.sharedIcon {
-  flex-shrink: 0;
-  color: var(--family);
+/* the border repeats the family's line: dashed HTTP, double packages, dotted config */
+.shared[data-entity^="http_"] {
+  border-style: dashed;
+  border-color: color-mix(in oklch, var(--ra-endpoint) 45%, var(--ra-border));
 }
 
-.sharedLabel {
+.shared[data-entity="package"] {
+  border: 3px double color-mix(in oklch, var(--ra-package) 50%, var(--ra-border));
+}
+
+.shared[data-entity="env_var"],
+.shared[data-entity="config"] {
+  border-style: dotted;
+  border-width: 2px;
+  border-color: color-mix(in oklch, var(--ra-config) 50%, var(--ra-border));
+}
+
+.shared[data-selected],
+.moreNode[data-selected] {
+  border-color: var(--ra-accent);
+}
+
+.sharedLabel,
+.moreLabel {
   flex: 1;
   min-width: 0;
   font-size: var(--mantine-font-size-md);
@@ -374,34 +610,98 @@
   white-space: nowrap;
 }
 
+.moreLabel {
+  padding-left: 6px;
+  color: var(--ra-text-muted);
+}
+
+.moreNode {
+  border-style: dashed;
+  background-color: transparent;
+}
+
 .sharedCount {
+  position: relative;
+  z-index: 2;
   font-size: var(--mantine-font-size-sm);
   color: var(--ra-text-subtle);
   font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
 
-/* -- edges ------------------------------------------------------------------ */
+/* elsewhere in this repository: lighter than what is here */
+.place {
+  gap: 10px;
+  padding: 0 12px;
+  background-color: color-mix(in oklch, var(--ra-surface) 60%, transparent);
+  border-radius: 10px;
+
+  &[data-neighbour] {
+    background-color: var(--ra-surface);
+  }
+}
+
+/* -- a file, at the centre of its neighbourhood -------------------------------------- */
+
+.fileAnchor {
+  gap: 14px;
+  padding: 0 18px;
+  border-color: color-mix(in oklch, var(--ra-accent) 60%, var(--ra-border));
+  box-shadow:
+    0 0 0 4px var(--ra-selected),
+    var(--ra-shadow);
+}
+
+.anchorIcon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  color: var(--ra-accent);
+  background-color: color-mix(in oklch, var(--ra-accent) 14%, transparent);
+}
+
+.anchorName {
+  font-size: var(--mantine-font-size-xl);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* -- lines ----------------------------------------------------------------------------- */
 
 .link {
   --stroke: var(--ra-edge-cross);
   transition: opacity var(--ra-duration) var(--ra-ease);
 
-  &[data-kind="http"] {
+  &[data-family="http"] {
     --stroke: var(--ra-endpoint);
   }
-  &[data-kind="dependency"] {
+  &[data-family="dependency"] {
     --stroke: var(--ra-package);
+  }
+  &[data-family="config"] {
+    --stroke: var(--ra-config);
   }
 
   &[data-emphasis="rest"] {
-    opacity: 0.45;
+    opacity: 0.5;
   }
-  &[data-emphasis="lit"] {
+  &[data-emphasis="lit"],
+  &[data-emphasis="selected"] {
     opacity: 1;
   }
   &[data-emphasis="dim"] {
-    opacity: 0.1;
+    opacity: 0.06;
   }
+}
+
+:global([data-mantine-color-scheme="light"]) .link[data-emphasis="rest"] {
+  opacity: 0.7;
 }
 
 .linkStroke {
@@ -410,9 +710,14 @@
   stroke-linecap: round;
 }
 
-.link[data-kind="http"] .linkStroke {
-  stroke-dasharray: 7 5;
+.link[data-family="http"] .linkStroke {
+  stroke-dasharray: 8 5;
   stroke-linecap: butt;
+}
+
+.link[data-family="config"] .linkStroke {
+  stroke-dasharray: 0.1 5;
+  stroke-linecap: round;
 }
 
 /* a double line: the colour, hollowed out by the canvas */
@@ -426,42 +731,62 @@
   fill: none;
 }
 
+.arrow {
+  fill: var(--stroke);
+  stroke: none;
+}
+
+.link[data-emphasis="selected"] .linkStroke,
+.link[data-emphasis="selected"] .linkOuter {
+  stroke: var(--ra-accent);
+}
+
+.link[data-emphasis="selected"] .arrow {
+  fill: var(--ra-accent);
+}
+
+.halo {
+  fill: none;
+  stroke: var(--ra-halo);
+  stroke-linecap: round;
+}
+
 .edgeLabel {
   position: absolute;
-  padding: 1px 6px;
+  padding: 1px 7px;
   font-size: var(--mantine-font-size-xs);
-  font-weight: 500;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   line-height: 16px;
   color: var(--ra-text);
   background-color: var(--ra-surface-elevated);
-  border: 1px solid var(--ra-border-strong);
+  border: 1px solid color-mix(in oklch, var(--stroke, var(--ra-border-strong)) 55%, var(--ra-border));
   border-radius: 9px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
   pointer-events: none;
-}
 
-.tree {
-  transition: opacity var(--ra-duration) var(--ra-ease);
+  --stroke: var(--ra-edge-cross);
 
-  &[data-emphasis="dim"] {
-    opacity: 0.35;
+  &[data-family="http"] {
+    --stroke: var(--ra-endpoint);
+  }
+  &[data-family="dependency"] {
+    --stroke: var(--ra-package);
+  }
+  &[data-family="config"] {
+    --stroke: var(--ra-config);
+  }
+  &[data-emphasis="selected"] {
+    color: var(--ra-on-accent);
+    background-color: var(--ra-accent);
+    border-color: var(--ra-accent);
   }
 }
 
-.treeStroke {
-  stroke: var(--ra-border-strong);
-  stroke-width: 1.25;
-  fill: none;
-}
-
-.treeDot {
-  fill: var(--ra-border-strong);
-}
-
-/* -- controls ---------------------------------------------------------------- */
+/* -- controls ---------------------------------------------------------------------------- */
 
 .zoom,
-.legend {
+.legendBar {
   display: flex;
   align-items: center;
   background-color: var(--ra-surface);
@@ -490,66 +815,45 @@
   background-color: var(--ra-border);
 }
 
-.legend {
-  gap: 18px;
-  margin: 0;
-  padding: 7px 14px;
-  list-style: none;
-  font-size: var(--mantine-font-size-sm);
-  color: var(--ra-text-muted);
+.legendBar {
+  gap: 6px;
+  padding: 3px 4px 3px 14px;
 
   @media (max-width: $mantine-breakpoint-sm) {
     display: none;
   }
 }
 
+.legend {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-muted);
+}
+
 .legendItem {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   white-space: nowrap;
 }
 
-.legendLine {
-  --stroke: var(--ra-edge-cross);
+.shapes {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 2px;
+  list-style: none;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-muted);
 
-  &[data-kind="http"] {
-    --stroke: var(--ra-endpoint);
+  li {
+    display: flex;
+    align-items: center;
+    gap: 10px;
   }
-  &[data-kind="dependency"] {
-    --stroke: var(--ra-package);
-  }
-  &[data-kind="tree"] {
-    --stroke: var(--ra-border-strong);
-  }
-}
-
-.legendStroke {
-  stroke: var(--stroke);
-  stroke-width: 2;
-  stroke-linecap: round;
-}
-
-.legendLine[data-kind="http"] .legendStroke {
-  stroke-dasharray: 5 3;
-  stroke-linecap: butt;
-}
-
-.legendLine[data-kind="tree"] .legendStroke {
-  stroke-width: 1.25;
-}
-
-.legendOuter {
-  stroke: var(--stroke);
-  stroke-width: 5;
-}
-
-.legendInner {
-  stroke: var(--ra-surface);
-  stroke-width: 1.5;
-}
-
-/* on a light canvas a resting line needs more ink to read at all */
-:global([data-mantine-color-scheme="light"]) .link[data-emphasis="rest"] {
-  opacity: 0.7;
 }
