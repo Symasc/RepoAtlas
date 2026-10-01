@@ -17,14 +17,6 @@
     opacity: 0;
     transition: opacity 220ms ease-in 80ms;
   }
-
-  @media (prefers-reduced-motion: reduce) {
-    transition: none;
-
-    &[data-phase="leaving"] {
-      transition: none;
-    }
-  }
 }
 
 .flow {

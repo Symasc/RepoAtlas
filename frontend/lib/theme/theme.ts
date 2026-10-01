@@ -39,17 +39,18 @@ const dark: MantineColorsTuple = [
   "#070d16",
 ];
 
+/** Mantine's grey scale, on the light scheme's own soft greys. */
 const gray: MantineColorsTuple = [
-  "#f5f7fa",
-  "#eef1f5",
-  "#e2e7ee",
-  "#cbd3de",
-  "#a3aebd",
-  "#7d8898",
-  "#5f6c7e",
-  "#475467",
-  "#2b3646",
-  "#0f1826",
+  "#eff2f5",
+  "#e3e8ee",
+  "#d3d9e2",
+  "#b3bdca",
+  "#8f9aab",
+  "#6b778a",
+  "#4a5668",
+  "#3a4658",
+  "#252f3e",
+  "#101826",
 ];
 
 export const theme = createTheme({
@@ -57,9 +58,10 @@ export const theme = createTheme({
   primaryShade: { light: 7, dark: 5 },
   colors: { atlas, dark, gray },
   white: "#ffffff",
-  black: "#0f1826",
+  black: "#101826",
   autoContrast: true,
-  respectReducedMotion: true,
+  // the reader's choice decides, through `data-motion` on the root (lib/motion.ts)
+  respectReducedMotion: false,
   cursorType: "pointer",
   focusRing: "auto",
   fontFamily: "var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif",

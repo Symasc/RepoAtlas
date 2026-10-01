@@ -1,6 +1,5 @@
 "use client";
 
-import { useReducedMotion } from "@mantine/hooks";
 import { useCallback, useMemo, useState } from "react";
 
 import { Graph } from "@/components/graph/Graph";
@@ -19,6 +18,7 @@ import { bounds, constellation, GROUP_ID, HUB_ID, type Layout } from "@/lib/grap
 import { absoluteTime, formatCount, plural, relativeTime, shortSha } from "@/lib/model/format";
 import { buildOverview, FAMILIES, repositoryId, type Connection, type Family } from "@/lib/model/graph";
 import type { RepositoryModel } from "@/lib/model/repositories";
+import { useAnimationsOff } from "@/lib/useMotion";
 
 import { Metrics } from "./Metrics";
 import type { Navigation } from "./navigation";
@@ -36,7 +36,7 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
   const overview = useTopologyOverview();
   const links = overview.data?.links ?? NO_LINKS;
   const graph = useMemo(() => buildOverview(repositories, links), [repositories, links]);
-  const reduced = useReducedMotion() ?? false;
+  const reduced = useAnimationsOff();
 
   const known = useMemo(() => new Map(repositories.map((r) => [repositoryId(r.slug), r])), [repositories]);
   const selected = nav.selected !== null && known.has(nav.selected) ? nav.selected : null;

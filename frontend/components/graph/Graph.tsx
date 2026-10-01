@@ -3,7 +3,6 @@
 import "@xyflow/react/dist/base.css";
 
 import { ActionIcon, Popover, Tooltip, useComputedColorScheme } from "@mantine/core";
-import { useReducedMotion } from "@mantine/hooks";
 import { CornersOutIcon, MinusIcon, PlusIcon, ShapesIcon } from "@phosphor-icons/react";
 import {
   Background,
@@ -29,6 +28,7 @@ import {
 } from "react";
 
 import type { Box, Family } from "@/lib/model/graph";
+import { useAnimationsOff } from "@/lib/useMotion";
 
 import { edgeTypes, FAMILY_NOUN, type Emphasis, type GraphEdge } from "./edges";
 import { EntityBadge, LineGlyph, Monogram, PathBadge } from "./glyphs";
@@ -129,7 +129,7 @@ function Canvas({
   topRight,
 }: Props) {
   const scheme = useComputedColorScheme("dark", { getInitialValueInEffect: true });
-  const reduced = useReducedMotion() ?? false;
+  const reduced = useAnimationsOff();
   const { setViewport, getViewport } = useReactFlow();
   const width = useStore((s) => s.width);
   const height = useStore((s) => s.height);

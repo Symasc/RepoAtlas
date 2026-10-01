@@ -258,9 +258,37 @@ test("moves without animation when the reader asks for less motion", async ({ pa
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto(`/?sel=${encodeURIComponent(`repo:${target.slug}`)}`);
   await ready(page);
+  await expect(page.locator("html")).toHaveAttribute("data-motion", "reduced");
+  await expect(page.getByRole("button", { name: "Turn animations on" })).toBeVisible();
   await page.getByRole("button", { name: `Open ${target.name}`, exact: true }).first().click();
   await expect(page).toHaveURL(new RegExp(`\\?repo=${literal(encodeURIComponent(target.slug))}$`));
   await expect(page.locator(".react-flow__node-frame")).toBeVisible();
+  expect(problems).toEqual([]);
+});
+
+test("animations can be turned off, and the choice outlasts a reload", async ({ page, problems }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.goto("/");
+  await ready(page);
+  const html = page.locator("html");
+  const node = page.locator(".react-flow__node").first();
+  await expect(html).toHaveAttribute("data-motion", "full");
+  await expect(node).not.toHaveCSS("transition-duration", "0s");
+
+  await page.getByRole("button", { name: "Turn animations off" }).click();
+  await expect(html).toHaveAttribute("data-motion", "reduced");
+  await expect(node).toHaveCSS("transition-duration", "0s");
+  await page.reload();
+  await ready(page);
+  await expect(html).toHaveAttribute("data-motion", "reduced");
+
+  // the reader's choice outranks the system's
+  await page.getByRole("button", { name: "Turn animations on" }).click();
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.reload();
+  await ready(page);
+  await expect(html).toHaveAttribute("data-motion", "full");
+  await expect(page.getByRole("button", { name: "Turn animations off" })).toBeVisible();
   expect(problems).toEqual([]);
 });
 
