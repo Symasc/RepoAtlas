@@ -1,6 +1,6 @@
 .bar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 440px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 600px) minmax(0, 1fr);
   align-items: center;
   gap: var(--mantine-spacing-lg);
   height: 100%;
@@ -40,8 +40,19 @@
 
 .center {
   display: flex;
+  align-items: center;
   justify-content: center;
+  gap: var(--mantine-spacing-md);
   min-width: 0;
+}
+
+/* beside the bar: on a phone the bar is an icon, and the switch is in the search itself */
+.names {
+  flex-shrink: 0;
+
+  @media (max-width: $mantine-breakpoint-sm) {
+    display: none;
+  }
 }
 
 .end {

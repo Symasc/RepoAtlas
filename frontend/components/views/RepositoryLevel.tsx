@@ -34,7 +34,7 @@ import type { RepositoryModel } from "@/lib/model/repositories";
 
 import { FileLevel } from "./FileLevel";
 import type { Navigation } from "./navigation";
-import { Trail } from "./Trail";
+import { Trail, useClimb } from "./Trail";
 import classes from "./Views.module.css";
 
 /** At most this many cards list their contents; the rest still show their counts. */
@@ -166,12 +166,13 @@ function DirectoryLevel({
     [activate, graph, nav],
   );
   const hues = useMemo(() => new Map(repositories.map((r) => [r.slug, r.hue])), [repositories]);
+  const climb = useClimb(repository, nav, false);
 
   const nodes = useMemo<GraphNode[]>(() => {
     if (!graph || !layout) return [];
     const at = (id: string) => layout.get(id)!;
     const out: GraphNode[] = [
-      place({ id: FRAME_ID, type: "frame", data: { frame: graph.frame, repository }, zIndex: -1 }, at(FRAME_ID), {
+      place({ id: FRAME_ID, type: "frame", data: { frame: graph.frame, repository, climb }, zIndex: -1 }, at(FRAME_ID), {
         pointerEvents: "none",
       }),
     ];
@@ -197,7 +198,7 @@ function DirectoryLevel({
       );
     }
     return out;
-  }, [graph, layout, repository, actions, hues]);
+  }, [graph, layout, repository, actions, hues, climb]);
 
   const edges = useMemo(() => {
     if (!graph) return [];

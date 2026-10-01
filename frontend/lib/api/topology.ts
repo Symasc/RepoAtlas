@@ -149,6 +149,21 @@ export function useFileSearch(query: string, limit = 12) {
   });
 }
 
+/**
+ * Names declared across the workspace (variables, functions, classes, methods,
+ * environment variables) that hold every term typed. Records nothing.
+ */
+export function useNameSearch(query: string, limit = 10) {
+  const q = query.trim();
+  return useQuery({
+    queryKey: ["topology/names", q, limit],
+    queryFn: ({ signal }) => call("topology/names", { context: WORKSPACE, query: q, limit }, signal),
+    enabled: q.length >= FILE_QUERY_MIN,
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+  });
+}
+
 /** What each line of a file declares and refers to, other repositories included. */
 export function useReferences(slug: string, path: string) {
   return useQuery({

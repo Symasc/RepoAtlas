@@ -8,7 +8,7 @@ import classes from "./AppHeader.module.css";
 import { FreshnessIndicator, type LiveCheck } from "./FreshnessIndicator";
 import { Logo } from "./Logo";
 import { MotionToggle } from "./MotionToggle";
-import { SearchTrigger } from "./SearchTrigger";
+import { NamesToggle, SearchTrigger } from "./SearchTrigger";
 import { ThemeToggle } from "./ThemeToggle";
 
 interface Props {
@@ -30,6 +30,7 @@ export function AppHeader({ repositories, freshness, offline }: Props) {
 
       <div className={classes.center}>
         <SearchTrigger />
+        <NamesToggle className={classes.names} />
       </div>
 
       <div className={classes.end}>

@@ -13,6 +13,7 @@ import { OverviewLevel } from "@/components/views/OverviewLevel";
 import { RepositoryLevel } from "@/components/views/RepositoryLevel";
 import { TraceLevel } from "@/components/views/TraceLevel";
 import { ApiError } from "@/lib/api/client";
+import type { NameMatch } from "@/lib/api/generated";
 import { useLiveFreshness, useRepositories } from "@/lib/api/queries";
 import { direction, placeKey, search, type Place } from "@/lib/model/location";
 import type { RepositoryModel } from "@/lib/model/repositories";
@@ -113,6 +114,13 @@ export function Explorer() {
   );
   const openRepository = useCallback((next: string) => nav.go({ repository: next, path: "" }), [nav]);
   const openFile = useCallback((next: string, file: string) => nav.go({ repository: next, path: file }), [nav]);
+  // a name opens on its trace, asked from where it is written; a variable of the
+  // environment is written nowhere, so its trace is asked from the workspace
+  const openName = useCallback(
+    (match: NameMatch) =>
+      nav.go({ repository: match.entity.repository_slug ?? null, path: match.entity.path ?? "", trace: match.entity.key }),
+    [nav],
+  );
 
   const error = repositories.error instanceof ApiError ? repositories.error : null;
 
@@ -163,7 +171,7 @@ export function Explorer() {
           />
         </AppShell.Header>
         <AppShell.Main>{body}</AppShell.Main>
-        <WorkspaceSpotlight repositories={merged ?? []} onRepository={openRepository} onFile={openFile} />
+        <WorkspaceSpotlight repositories={merged ?? []} onRepository={openRepository} onFile={openFile} onName={openName} />
       </AppShell>
     </TransitionContext.Provider>
   );
