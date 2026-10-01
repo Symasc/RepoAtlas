@@ -3,7 +3,7 @@
 RepoAtlas serves its capabilities to an agent over the Model Context Protocol on
 stdio. This document covers setup. The behaviour an agent should follow lives in
 the five task skills under [`skills/`](../skills/), starting with
-[`skills/repoatlas-investigation/SKILL.md`](../skills/repoatlas-investigation/SKILL.md),
+[`skills/repoatlas-code-trace/SKILL.md`](../skills/repoatlas-code-trace/SKILL.md),
 and is not repeated here.
 
 For request migration notes, source previews, workspace HTTP discovery and the
@@ -81,7 +81,7 @@ its description says when to load it:
 | Skill | For |
 |---|---|
 | `repoatlas-change-impact` | what a proposed change may affect |
-| `repoatlas-investigation` | where and how existing code works |
+| `repoatlas-code-trace` | where something is defined, what calls or uses it, and how code connects |
 | `repoatlas-dependencies` | package declarations, resolutions and providers |
 | `repoatlas-http` | routes, callers and handlers |
 | `repoatlas-index` | what is indexed, freshness and sync |
@@ -89,7 +89,7 @@ its description says when to load it:
 They are vendor-neutral and live at the repository root:
 
 ```
-skills/repoatlas-investigation/SKILL.md
+skills/repoatlas-code-trace/SKILL.md
 skills/repoatlas-change-impact/SKILL.md   (and the three others beside them)
 ```
 
@@ -102,7 +102,7 @@ RepoAtlas carries them too:
 
 Both are the same files; the wheel maps the root artifacts into the package rather
 than keeping second copies. Install the five side by side, one directory each:
-they share one contract reference, `repoatlas-investigation/references/contracts.md`,
+they share one contract reference, `repoatlas-code-trace/references/contracts.md`,
 through a relative link. If a client has its own convention for where skills or
 instructions live, point it at these directories rather than transcribing them, so
 there is one source of behavioural truth.

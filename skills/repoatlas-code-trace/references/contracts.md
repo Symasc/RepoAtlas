@@ -1,7 +1,7 @@
 
 # RepoAtlas investigation
 
-This is the shared contract behind the five RepoAtlas skills: change impact, investigation, dependencies, HTTP and index. Each skill carries its own workflow; this reference carries the detail they point to.
+This is the shared contract behind the five RepoAtlas skills: change impact, code trace, dependencies, HTTP and index. Each skill carries its own workflow; this reference carries the detail they point to.
 
 RepoAtlas establishes deterministic facts about locally indexed repositories and supplies evidence you can cite. You plan the investigation and reason over that evidence.
 

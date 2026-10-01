@@ -61,7 +61,7 @@ def contains_all(haystack: str, *needles: str) -> bool:
 def test_the_canonical_skill_exists_at_the_vendor_neutral_path() -> None:
     assert SKILL_PATH.is_file(), f"the canonical skill is missing: {SKILL_PATH}"
     parts = SKILL_PATH.relative_to(SKILL_PATH.parent.parent.parent).parts
-    assert parts == ("skills", "repoatlas-investigation", "SKILL.md"), parts
+    assert parts == ("skills", "repoatlas-code-trace", "SKILL.md"), parts
 
 
 def test_no_vendor_directory_holds_a_competing_copy() -> None:
@@ -84,7 +84,7 @@ def test_no_vendor_directory_holds_a_competing_copy() -> None:
 
 def test_the_frontmatter_names_the_skill_and_says_when_to_use_it(skill: str) -> None:
     meta = frontmatter(skill)
-    assert meta["name"] == "repoatlas-investigation"
+    assert meta["name"] == "repoatlas-code-trace"
     description = meta["description"]
     assert isinstance(description, str) and len(description) > 60
     # A description is what a client reads when deciding whether to load this at

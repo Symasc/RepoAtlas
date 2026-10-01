@@ -450,7 +450,7 @@ def test_case_7_the_shipped_skill_does_not_offer_local_reasoning() -> None:
     One that mentioned a local model would be instructing an agent to expect a
     capability RepoAtlas does not have.
     """
-    skill = (ROOT / "skills" / "repoatlas-investigation" / "SKILL.md").read_text(encoding="utf-8")
+    skill = (ROOT / "skills" / "repoatlas-code-trace" / "SKILL.md").read_text(encoding="utf-8")
     for marker in ("ollama", "repoatlas ask", "repoatlas debug", "--no-llm", "local model"):
         assert marker.lower() not in skill.lower(), marker
 

@@ -127,7 +127,7 @@ def test_every_task_skill_is_small() -> None:
 def test_every_skill_links_the_shared_contract_where_it_is_installed() -> None:
     """The sibling link resolves in the repository, and therefore in the wheel and in
     any install that keeps the five skills side by side, as the wheel does."""
-    link = "../repoatlas-investigation/references/contracts.md"
+    link = "../repoatlas-code-trace/references/contracts.md"
     for name, path in skill_paths().items():
         assert link in path.read_text(encoding="utf-8"), name
         assert (path.parent / link).resolve().is_file(), name
@@ -142,7 +142,7 @@ def test_core_guidance_is_small_and_its_optional_reference_exists() -> None:
 
 @requires_uv
 def test_optional_contract_reference_ships_with_the_wheel(built: Path) -> None:
-    path = "repoatlas/skills/repoatlas-investigation/references/contracts.md"
+    path = "repoatlas/skills/repoatlas-code-trace/references/contracts.md"
     with zipfile.ZipFile(next(built.glob("*.whl"))) as archive:
         assert (
             archive.read(path).decode()
