@@ -39,14 +39,22 @@ Parsed, never executed: tree-sitter reads the syntax tree only (V1_SPEC §17).
 
 from __future__ import annotations
 
+import json
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedReference
-from repoatlas.parsers.http_facts import TRANSPORT_FETCH, http_reference, local_call_reference
+from repoatlas.parsers.http_facts import (
+    HTTP_CLIENT_CALL,
+    PENDING_FACT,
+    TRANSPORT_FETCH,
+    http_reference,
+    local_call_reference,
+    pending_reference,
+)
 from repoatlas.parsers.treesitter import line_range, node_text, string_literal, walk
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -738,3 +746,133 @@ def _express_mount(prefix: str | None) -> str | None:
     ):
         return None
     return prefix
+
+
+# -- requests for the cross-repository join -----------------------------------------------
+
+#: How much of one substitution's source text a client claim shows, for display only.
+_MAX_SHOWN = 60
+
+
+@dataclass(frozen=True, slots=True)
+class ClientUrl:
+    """A request's origin and path shape, as far as the source states them."""
+
+    origin: str
+    #: Each path segment's literal text, or ``None`` where one value fills it.
+    segments: tuple[str | None, ...]
+    #: The URL as written, a placeholder shown as ``{expression}``: display only.
+    display: str
+    #: The line of the literal the URL's base came from, when it is not the call's.
+    base_at: int | None = None
+    #: The library that supplied a scheme the source left out, if one did.
+    scheme_from: str | None = None
+
+
+def client_url(
+    head: str,
+    rest: Sequence[Sequence[str]],
+    *,
+    base_at: int | None = None,
+    default_scheme: str | None = None,
+    library: str | None = None,
+) -> ClientUrl | None:
+    """A request URL from its literal head and the template parts after it, or ``None``.
+
+    ``head`` is the URL's leading text -- a base's value and any literal text glued
+    to it -- appended to exactly as the template appends, never resolved against.
+    The origin must lie entirely within it. A head with no scheme is read under
+    ``default_scheme`` when the library supplies one (superagent's Node client
+    requests ``http`` for a URL without a scheme); otherwise it names no origin.
+    Every substitution after the origin must fill one whole path segment
+    (:func:`repoatlas.models.http.route_template`).
+    """
+    supplied: str | None = None
+    if "://" not in head:
+        if default_scheme is None or not head or head.startswith("/"):
+            return None
+        head, supplied = f"{default_scheme}://{head}", library
+    scheme = head.find("://")
+    slash = head.find("/", scheme + 3)
+    if slash < 0:
+        if rest:
+            return None
+        head, slash = head + "/", len(head)
+    origin = http.client_target(head[:slash] + "/")
+    if origin is None or origin.origin is None:
+        return None
+    template = http.route_template([[http.TEMPLATE_LITERAL, head[slash:]], *rest])
+    if isinstance(template, str) or not template.segments:
+        return None
+    expressions = iter(template.expressions)
+    display = "/".join(
+        segment if segment is not None else "{" + next(expressions, "")[:_MAX_SHOWN] + "}"
+        for segment in template.segments
+    )
+    return ClientUrl(
+        origin.origin, template.segments, f"{origin.origin}/{display}", base_at, supplied
+    )
+
+
+def client_claim(
+    read: ClientUrl,
+    method: str,
+    start: int,
+    end: int,
+    *,
+    source: str,
+    source_symbol: str | None,
+) -> ParsedReference:
+    """An :data:`~repoatlas.parsers.http_facts.HTTP_CLIENT_CALL` claim: the join's request
+    side, in exactly the shape the Python parser records it."""
+    meta = {
+        "method": method,
+        "origin": read.origin,
+        "segments": json.dumps(list(read.segments)),
+        "source": source,
+    }
+    if read.base_at is not None:
+        meta["base_at"] = str(read.base_at)
+    if read.scheme_from is not None:
+        meta["scheme_from"] = read.scheme_from
+    return pending_reference(
+        EdgeType.CALLS_HTTP_ENDPOINT,
+        EntityType.HTTP_ENDPOINT,
+        f"{method} {read.display}",
+        start,
+        end,
+        role=HTTP_CLIENT_CALL,
+        source_symbol=source_symbol,
+        **meta,
+    )
+
+
+def endpoint_claims(references: Iterable[ParsedReference]) -> list[ParsedReference]:
+    """A client claim for each absolute request a file's own facts already name.
+
+    Every ``CALLS_HTTP_ENDPOINT`` fact is a literal URL a request is proven to make --
+    fetch, axios, superagent, or a same-file wrapper with a stated base -- so its claim
+    carries the same origin and path, every segment literal.
+    """
+    found: list[ParsedReference] = []
+    for reference in references:
+        if reference.edge_type is not EdgeType.CALLS_HTTP_ENDPOINT:
+            continue
+        if PENDING_FACT in reference.meta:
+            continue
+        method, _, url = reference.target_key.partition(" ")
+        target = http.client_target(url)
+        if target is None or target.url is None or target.origin is None:
+            continue
+        read = ClientUrl(target.origin, tuple(target.path[1:].split("/")), target.url)
+        found.append(
+            client_claim(
+                read,
+                method,
+                reference.line_start,
+                reference.line_end,
+                source=reference.meta.get("source", ""),
+                source_symbol=reference.source_symbol,
+            )
+        )
+    return found

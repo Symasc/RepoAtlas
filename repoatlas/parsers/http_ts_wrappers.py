@@ -93,10 +93,14 @@ from repoatlas.parsers.http_facts import (
     pending_reference,
 )
 from repoatlas.parsers.http_typescript import (
+    ClientUrl,
     alternatives_spec,
     binding_counts,
+    client_claim,
+    client_url,
     decided_path,
     fetch_method,
+    plain_object,
     static_string,
     template_spec,
 )
@@ -106,6 +110,24 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from tree_sitter import Node
 
 SOURCE = "fetch-wrapper"
+SUPERAGENT = "superagent"
+
+#: What a template string's content is made of.
+_TEMPLATE_CONTENT = frozenset({"string_fragment", "escape_sequence", "template_substitution"})
+
+#: superagent's request methods; ``del`` is its alias for DELETE.
+_SUPERAGENT_VERBS = {
+    "get": "GET",
+    "head": "HEAD",
+    "post": "POST",
+    "put": "PUT",
+    "patch": "PATCH",
+    "delete": "DELETE",
+    "del": "DELETE",
+    "options": "OPTIONS",
+}
+#: The scheme superagent's Node client requests a URL without one under.
+_SUPERAGENT_SCHEME = "http"
 
 #: How many wrappers deep a request is followed.
 _MAX_DEPTH = 3
@@ -277,17 +299,27 @@ class FetchWrappers:
         #: Whether each ``const`` object a base is read from is only ever read.
         self._read_only: dict[str, bool] = {}
         self._imports: dict[str, Imported] = {}
+        #: superagent itself, and module-level agents of it no ``.use`` reconfigures.
+        self._superagent: set[str] = set()
+        self._agents: set[str] = set()
         for statement in root.children:
             if statement.type == "import_statement":
                 self._read_import(statement)
+        self._read_superagent(root)
 
     # -- call sites ---------------------------------------------------------------------
 
     def call_references(self, node: Node, source_symbol: str | None) -> list[ParsedReference]:
         """The request a call to a same-file wrapper provably makes."""
         callee = node.child_by_field_name("function")
+        if callee is not None and operand(callee).type == "member_expression":
+            return self._superagent_call(node, operand(callee), source_symbol)
         if callee is None or operand(callee).type != "identifier":
             return []
+        if node_text(self._source, operand(callee)) == "fetch" and isinstance(
+            self.lookup("fetch", node), Global
+        ):
+            return self._fetch_url(node, source_symbol)
         # A call spelled `fetch` is left to the rule that has always read it.
         if node_text(self._source, operand(callee)) != "fetch" and self.fetch_like(callee):
             return self.facts(node, _ALIAS, source_symbol, source="fetch")
@@ -295,6 +327,228 @@ class FetchWrappers:
         if wrapper is None:
             return self.imported_call(node, source_symbol)
         return self.facts(node, wrapper, source_symbol)
+
+    # -- superagent, and requests on a stated base ------------------------------------------
+
+    def _read_superagent(self, root: Node) -> None:
+        """superagent bound once at module level, and agents of it nothing reconfigures.
+
+        ``superagent.agent()`` keeps the client's request methods; of its defaults only
+        ``.use(plugin)`` can rewrite a URL, so an agent with one anywhere in the file is
+        not read.
+        """
+        statements: list[Node] = []
+        for statement in root.children:
+            if statement.type == "export_statement":
+                statement = statement.child_by_field_name("declaration") or statement
+            statements.append(statement)
+        for statement in statements:
+            if statement.type == "import_statement":
+                source_node = statement.child_by_field_name("source")
+                if source_node is None or string_literal(self._source, source_node) != SUPERAGENT:
+                    continue
+                if any(child.type == "type" for child in statement.children):
+                    continue
+                clause = next((c for c in statement.children if c.type == "import_clause"), None)
+                for child in clause.children if clause is not None else ():
+                    name = node_text(self._source, child)
+                    if child.type == "identifier" and self._counts[name] == 1:
+                        self._superagent.add(name)
+        for statement in statements:
+            if statement.type != "lexical_declaration":
+                continue
+            kind = statement.child_by_field_name("kind")
+            if kind is None or node_text(self._source, kind) != "const":
+                continue
+            for declarator in statement.named_children:
+                name_node = declarator.child_by_field_name("name")
+                value = declarator.child_by_field_name("value")
+                if declarator.type != "variable_declarator" or name_node is None or value is None:
+                    continue
+                name = node_text(self._source, name_node)
+                if name_node.type != "identifier" or self._counts[name] != 1:
+                    continue
+                value = operand(value)
+                if value.type != "call_expression":
+                    continue
+                callee = value.child_by_field_name("function")
+                arguments = arguments_of(value) or []
+                if callee is None:
+                    continue
+                if (
+                    callee.type == "identifier"
+                    and node_text(self._source, callee) == "require"
+                    and len(arguments) == 1
+                    and arguments[0].type == "string"
+                    and string_literal(self._source, arguments[0]) == SUPERAGENT
+                ):
+                    self._superagent.add(name)
+                elif callee.type == "member_expression" and not arguments:
+                    owner = callee.child_by_field_name("object")
+                    prop = callee.child_by_field_name("property")
+                    if (
+                        owner is not None
+                        and prop is not None
+                        and owner.type == "identifier"
+                        and node_text(self._source, owner) in self._superagent
+                        and node_text(self._source, prop) == "agent"
+                    ):
+                        self._agents.add(name)
+        for node in walk(root):
+            if node.type != "member_expression" or not self._agents:
+                continue
+            owner = node.child_by_field_name("object")
+            prop = node.child_by_field_name("property")
+            if (
+                owner is not None
+                and prop is not None
+                and owner.type == "identifier"
+                and node_text(self._source, prop) == "use"
+            ):
+                self._agents.discard(node_text(self._source, owner))
+
+    def _module_binding(self, name: str, at: Node) -> bool:
+        """Whether ``name`` at ``at`` is its module-level binding, bound once in the file."""
+        scope = _enclosing_function(at)
+        while scope is not None:
+            if self._scope_counts(scope)[name]:
+                return False
+            scope = _enclosing_function(scope)
+        return self._counts[name] == 1
+
+    def _superagent_call(
+        self, node: Node, callee: Node, source_symbol: str | None
+    ) -> list[ParsedReference]:
+        """``superagent.get(url)``, or the same on an agent: absolute URLs only."""
+        owner = callee.child_by_field_name("object")
+        prop = callee.child_by_field_name("property")
+        if owner is None or prop is None or operand(owner).type != "identifier":
+            return []
+        name = node_text(self._source, operand(owner))
+        verb = node_text(self._source, prop)
+        if verb not in _SUPERAGENT_VERBS or not (name in self._superagent or name in self._agents):
+            return []
+        arguments = arguments_of(node) or []
+        if not 1 <= len(arguments) <= 3 or not self._module_binding(name, node):
+            return []
+        if _reconfigured(self._source, node):
+            return []
+        method = _SUPERAGENT_VERBS[verb]
+        start, _ = line_range(node)
+        _, end = line_range(arguments[0])
+        literal = static_string(self._source, arguments[0])
+        target = http.client_target(literal) if literal is not None else None
+        if target is not None and target.url is not None:
+            return [
+                http_reference(
+                    EdgeType.CALLS_HTTP_ENDPOINT,
+                    EntityType.HTTP_ENDPOINT,
+                    http.endpoint_body(method, target.url),
+                    start,
+                    end,
+                    source=SUPERAGENT,
+                    composed=False,
+                    source_symbol=source_symbol,
+                ),
+                http_reference(
+                    EdgeType.CALLS_HTTP_ROUTE,
+                    EntityType.HTTP_ROUTE,
+                    http.route_body(method, target.path),
+                    start,
+                    end,
+                    source=SUPERAGENT,
+                    composed=False,
+                    source_symbol=source_symbol,
+                ),
+            ]
+        read = self.request_url(arguments[0], default_scheme=_SUPERAGENT_SCHEME)
+        if read is None:
+            return []
+        return [
+            client_claim(read, method, start, end, source=SUPERAGENT, source_symbol=source_symbol)
+        ]
+
+    def _fetch_url(self, node: Node, source_symbol: str | None) -> list[ParsedReference]:
+        """A global ``fetch`` whose URL is on a base this file states.
+
+        A literal URL is the per-file rule's (:mod:`repoatlas.parsers.http_typescript`),
+        whose fact the file's client claims are made from.
+        """
+        arguments = arguments_of(node) or []
+        if not 1 <= len(arguments) <= 2 or static_string(self._source, arguments[0]) is not None:
+            return []
+        read = self.request_url(arguments[0], default_scheme=None)
+        method = self._fetch_method(arguments[1]) if len(arguments) == 2 else GET
+        if read is None or method is None:
+            return []
+        start, _ = line_range(node)
+        _, end = line_range(arguments[0])
+        return [client_claim(read, method, start, end, source="fetch", source_symbol=source_symbol)]
+
+    def _fetch_method(self, node: Node) -> str | None:
+        options = plain_object(self._source, operand(node))
+        if options is None:
+            return None
+        if "method" not in options:
+            return GET
+        raw = static_string(self._source, options["method"])
+        return fetch_method(raw) if raw is not None else None
+
+    def request_url(self, node: Node, *, default_scheme: str | None) -> ClientUrl | None:
+        """A request URL on a base the file states, or ``None``.
+
+        A name whose value is a stated base (:meth:`_literal`), or a template whose
+        first substitution is one, followed by literal text and substitutions that each
+        fill one whole path segment. The base is appended to, as the template appends.
+        """
+        node = operand(node)
+        library = SUPERAGENT if default_scheme is not None else None
+        if node.type == "identifier":
+            base = self._literal_node(node)
+            value = static_string(self._source, base) if base is not None else None
+            if base is None or value is None:
+                return None
+            return client_url(
+                value,
+                [],
+                base_at=line_range(base)[0],
+                default_scheme=default_scheme,
+                library=library,
+            )
+        if node.type != "template_string":
+            return None
+        content = [child for child in node.children if child.type in _TEMPLATE_CONTENT]
+        if any(child.type == "escape_sequence" for child in content):
+            return None
+        head, base_at, rest_at = "", None, 0
+        if content and content[0].type == "template_substitution":
+            inner = next((c for c in content[0].named_children if c.type != "comment"), None)
+            base = self._literal_node(inner) if inner is not None else None
+            value = static_string(self._source, base) if base is not None else None
+            if base is None or value is None:
+                return None
+            following = content[1] if len(content) > 1 else None
+            if not value.endswith("/") and not (
+                following is not None
+                and following.type == "string_fragment"
+                and node_text(self._source, following).startswith("/")
+            ):
+                return None  # glued to the next text: the host itself would change
+            head, base_at, rest_at = value, line_range(base)[0], 1
+        while rest_at < len(content) and content[rest_at].type == "string_fragment":
+            head += node_text(self._source, content[rest_at])
+            rest_at += 1
+        rest: list[list[str]] = []
+        for child in content[rest_at:]:
+            if child.type == "string_fragment":
+                rest.append([http.TEMPLATE_LITERAL, node_text(self._source, child)])
+            else:
+                inner = next((c for c in child.named_children if c.type != "comment"), None)
+                text = node_text(self._source, inner) if inner is not None else ""
+                rest.append([http.TEMPLATE_SUBSTITUTION, text])
+        return client_url(
+            head, rest, base_at=base_at, default_scheme=default_scheme, library=library
+        )
 
     def resolve_callee(self, call: Node) -> Wrapper | None:
         callee = call.child_by_field_name("function")
@@ -1038,16 +1292,24 @@ class FetchWrappers:
         ``process.env.API_URL || "http://localhost:8000/api"`` — is its default: the
         URL this source requests unless its deployment says otherwise.
         """
+        found = self._literal_node(node, depth)
+        return static_string(self._source, found) if found is not None else None
+
+    def _literal_node(self, node: Node, depth: int = 0) -> Node | None:
+        """The literal :meth:`_literal` reads a base from: where its value is written."""
         node = operand(node)
-        value = static_string(self._source, node)
-        if value is not None or depth > _MAX_ALIAS:
-            return value
+        if static_string(self._source, node) is not None:
+            return node
+        if depth > _MAX_ALIAS:
+            return None
         if node.type == "identifier":
             binding = self.lookup(node_text(self._source, node), node)
-            return self._literal(binding.value, depth + 1) if isinstance(binding, Const) else None
+            if not isinstance(binding, Const):
+                return None
+            return self._literal_node(binding.value, depth + 1)
         if node.type == "member_expression":
             value_node = self._const_property(node)
-            return self._literal(value_node, depth + 1) if value_node is not None else None
+            return self._literal_node(value_node, depth + 1) if value_node is not None else None
         if node.type == "binary_expression":
             operator = node.child_by_field_name("operator")
             setting = node.child_by_field_name("left")
@@ -1060,7 +1322,7 @@ class FetchWrappers:
                 or not self._setting(setting)
             ):
                 return None
-            return self._literal(default, depth + 1)
+            return self._literal_node(default, depth + 1)
         return None
 
     def _setting(self, node: Node) -> bool:
@@ -1462,6 +1724,28 @@ def helper_from(meta: object) -> InitHelper | None:
     ):
         return None
     return InitHelper(method, parameter, default, silent=silent)
+
+
+def _reconfigured(source: bytes, call: Node) -> bool:
+    """Whether a request's own chain calls ``.use(plugin)``, which can rewrite its URL."""
+    current = call
+    while True:
+        parent = current.parent
+        if parent is None or parent.type != "member_expression":
+            return False
+        owner = parent.child_by_field_name("object")
+        if owner is None or (owner.start_byte, owner.end_byte) != (
+            current.start_byte,
+            current.end_byte,
+        ):
+            return False
+        prop = parent.child_by_field_name("property")
+        if prop is not None and node_text(source, prop) == "use":
+            return True
+        call_node = parent.parent
+        if call_node is None or call_node.type != "call_expression":
+            return False
+        current = call_node
 
 
 def _enclosing_function(node: Node) -> Node | None:

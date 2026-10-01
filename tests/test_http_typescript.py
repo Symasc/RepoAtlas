@@ -273,8 +273,12 @@ def test_a_fetch_template_is_recorded_as_a_claim_that_is_never_a_route() -> None
 )
 def test_a_fetch_template_that_is_not_a_rooted_path_is_not_recorded(call: str) -> None:
     """A leading substitution composes a base: transport plumbing, not a request."""
-    assert _claims(f"{call};\n") == []
+    claims = _claims(f"{call};\n")
+    assert [c for c in claims if c.meta["pending_fact"] != "http-client-call"] == []
     assert _http(f"{call};\n") == []
+    # Only a literal origin states a request for the cross-repository join.
+    expected = ["GET https://api.example.com/users/{id}"] if call.startswith("fetch(`https") else []
+    assert [c.target_key for c in claims] == expected
 
 
 def test_a_fetch_template_with_only_a_dynamic_query_is_an_ordinary_route() -> None:
