@@ -76,6 +76,23 @@ HTTP_EXPOSED_ENDPOINT = "http-exposed-endpoint"
 #: constant, or an f-string on a literal or constant origin. The other side of the join.
 HTTP_CLIENT_CALL = "http-client-call"
 
+#: A Python application, router or blueprint a module constructs: what it is, its own
+#: prefix, and where the same module mounts it. Routes and mounts elsewhere name it.
+PYTHON_RECEIVER = "python-receiver"
+#: A route on a Python router or blueprint, or one whose path names an imported constant:
+#: served only where the global pass proves a mount, and the constant's value.
+PYTHON_ROUTE = "python-route"
+#: A router or blueprint mounted on an application or router -- imported, or mounted from
+#: inside an application factory -- with the prefix it is mounted at.
+PYTHON_MOUNT = "python-mount"
+#: A module's string constants that could be part of a path or a URL, for the routes and
+#: requests in other modules that import them.
+PYTHON_CONSTANTS = "python-constants"
+
+#: A module that runs as a script (``if __name__ == "__main__":``): its directory is
+#: first on the import path of the program it starts.
+PYTHON_SCRIPT = "python-script"
+
 #: ``transport`` values of :data:`HTTP_LOCAL_CALL`.
 TRANSPORT_WRAPPER = "wrapper"
 TRANSPORT_FETCH = "fetch"
