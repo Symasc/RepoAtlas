@@ -9,7 +9,7 @@ import { formatCount } from "@/lib/model/format";
 import { familyOfRelation } from "@/lib/model/graph";
 import { relationOfRow, SEED_ID, type TraceCard, type TraceSeedView } from "@/lib/model/trace";
 
-import { RepoSwatch } from "@/components/common/RepoSwatch";
+import { RepoSwatch, territory } from "@/components/common/RepoSwatch";
 
 import { EntityBadge, LineGlyph, PathBadge } from "./glyphs";
 import { Anchors, stop, type NodeActions } from "./nodes";
@@ -76,10 +76,10 @@ export function typeNoun(type: string | null | undefined): string {
 }
 
 function TraceSeedNode({ data }: NodeProps<Node<TraceSeedData, "traceSeed">>) {
-  const { seed, snippet, actions, selected = false } = data;
+  const { seed, snippet, actions, hue, selected = false } = data;
   const where = seed.path ? `${seed.path}${seed.lines ? `:${seed.lines[0]}` : ""}` : null;
   return (
-    <div className={classes.seed} data-selected={selected || undefined} data-id={SEED_ID}>
+    <div className={classes.seed} style={territory(hue)} data-selected={selected || undefined} data-id={SEED_ID}>
       <Anchors />
       <button
         type="button"
@@ -122,6 +122,7 @@ function TraceCardNode({ id, data }: NodeProps<Node<TraceCardData, "traceCard">>
   return (
     <div
       className={classes.card}
+      style={territory(data.hue)}
       data-selected={selected || undefined}
       data-test={card.test || undefined}
       data-elsewhere={elsewhere || undefined}
@@ -178,7 +179,7 @@ function TraceCardNode({ id, data }: NodeProps<Node<TraceCardData, "traceCard">>
 
 function TraceFrameNode({ data }: NodeProps<Node<TraceFrameData, "traceFrame">>) {
   return (
-    <div className={classes.frame} data-home={data.home || undefined}>
+    <div className={classes.frame} style={territory(data.hue)} data-home={data.home || undefined}>
       <span className={classes.frameHead}>
         <RepoSwatch hue={data.hue} />
         <span className={classes.frameName}>{data.repository}</span>

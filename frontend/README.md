@@ -122,18 +122,27 @@ and one line of each link carries the link's total. The legend lists what the
 level draws. Where code is summed (a card's tally, a family's heading in the
 inspector) its mark shows blue, green and violet together. Each connection in
 the inspector lists its relationships with their colours.
-Each kind of node carries its own icon, drawn in the colour of the family of
-link that reaches it, so the outline tells kinds apart as well as the colour. A
-repository carries a small square in its own colour, wherever it appears. Each
-view has a toolbar above the canvas, saying where you are and what the level
-holds. Below the canvas, a status bar holds the zoom and the key to the lines;
-its ⓘ button names the marks.
+Each kind of node carries its own icon, drawn in the colour of the line that
+reaches it (modules blue, commands green, packages plum, configuration and
+environment variables ochre, HTTP teal), and a shared node is washed in that
+colour too; the outline tells kinds apart as well as the colour.
 
-The look is deliberately plain. It uses IBM Plex Sans and Plex Mono, served
-from the app itself, and warm neutrals in both themes. The accent marks only
-what is selected, focused or pressed next, and there are three corner radii
-(2, 4 and 6 px). The colour tokens are in `lib/theme/tokens.ts`; every text
-tone keeps 4.5:1 contrast on the backgrounds it sits on.
+The canvas is a map. A faint grid squares it and moves with it. Each repository
+has its own colour, like a country on a political map: a small square beside its
+name wherever it appears, and a light wash over everything that lies in it (its
+card on the overview, the frame of an opened repository and every card, file and
+trace step inside it).
+
+Each view has a toolbar above the canvas, saying where you are and what the
+level holds. Below the canvas, a status bar holds the zoom and the key to the
+lines; its ⓘ button names the marks.
+
+The chrome is deliberately plain, so the colour on the canvas carries meaning.
+It uses IBM Plex Sans and Plex Mono, served from the app itself, and warm
+neutrals in both themes. The accent marks only what is selected, focused or
+pressed next, and there are three corner radii (2, 4 and 6 px). The colour tokens are in `lib/theme/tokens.ts`; every text
+tone keeps 4.5:1 contrast on the backgrounds it sits on, a repository's wash
+included.
 
 HTTP has three kinds of shared node, each in its own group: **HTTP routes**
 (a method and path some code serves or calls), **HTTP endpoints** (a route at a

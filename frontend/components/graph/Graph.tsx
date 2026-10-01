@@ -5,6 +5,8 @@ import "@xyflow/react/dist/base.css";
 import { ActionIcon, Popover, Tooltip, useComputedColorScheme } from "@mantine/core";
 import { CornersOutIcon, InfoIcon, MinusIcon, PlusIcon } from "@phosphor-icons/react";
 import {
+  Background,
+  BackgroundVariant,
   getViewportForBounds,
   ReactFlow,
   ReactFlowProvider,
@@ -27,7 +29,7 @@ import {
 import { CODE_RELATIONS, RELATIONS, type Box, type Family, type Relation } from "@/lib/model/graph";
 import { useAnimationsOff } from "@/lib/useMotion";
 
-import { RepoSwatch } from "@/components/common/RepoSwatch";
+import { RepoSwatch, territory } from "@/components/common/RepoSwatch";
 
 import { edgeTypes, RELATION_LABEL, type Emphasis, type GraphEdge } from "./edges";
 import { EntityBadge, LineGlyph, PathBadge } from "./glyphs";
@@ -65,6 +67,8 @@ interface Props {
   end?: ReactNode;
   /** What is on screen but incomplete, in a line under the toolbar. */
   notice?: ReactNode;
+  /** The repository the whole level lies in: its hue tints the land it covers. */
+  hue?: number | null;
 }
 
 export function Graph(props: Props) {
@@ -75,6 +79,8 @@ export function Graph(props: Props) {
   );
 }
 
+/** The map's grid, in canvas units: wide enough to sit behind the cards, not among them. */
+const GRATICULE = 120;
 const MIN_ZOOM = 0.12;
 const MAX_ZOOM = 2.5;
 /** Fitting never magnifies past 100%: a small level stays at its own size. */
@@ -129,6 +135,7 @@ function Canvas({
   start,
   end,
   notice,
+  hue = null,
 }: Props) {
   const scheme = useComputedColorScheme("dark", { getInitialValueInEffect: true });
   const reduced = useAnimationsOff();
@@ -305,6 +312,7 @@ function Canvas({
       <div className={classes.stage} data-phase={phase}>
         <ReactFlow
           className={classes.flow}
+          style={territory(hue)}
           aria-label={label}
           nodes={shownNodes}
           edges={shownEdges}
@@ -335,7 +343,10 @@ function Canvas({
           maxZoom={MAX_ZOOM}
           onlyRenderVisibleElements
           proOptions={{ hideAttribution: true }}
-        />
+        >
+          {/* a graticule, as an atlas squares its sheets: it moves with the map, so a pan reads as one */}
+          <Background variant={BackgroundVariant.Lines} gap={GRATICULE} lineWidth={1} />
+        </ReactFlow>
       </div>
       <div className={classes.statusBar}>
         <ZoomControls extent={extent} reduced={reduced} />
@@ -459,7 +470,7 @@ function Legend({ families, edges }: { families: readonly Family[]; edges: reado
 /** The marks things carry, on demand: the canvas shows them, this names them. */
 function Marks() {
   const rows: { mark: ReactNode; label: string }[] = [
-    { mark: <RepoSwatch hue={1} />, label: "Repository, in its own colour" },
+    { mark: <RepoSwatch hue={1} />, label: "Repository: its colour tints all that lies in it" },
     { mark: <PathBadge path="src" />, label: "Directory" },
     { mark: <PathBadge path="index.ts" />, label: "File" },
     { mark: <EntityBadge entityType="package" />, label: "Package" },

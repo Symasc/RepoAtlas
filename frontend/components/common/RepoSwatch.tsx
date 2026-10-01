@@ -1,3 +1,5 @@
+import type { CSSProperties } from "react";
+
 import classes from "./RepoSwatch.module.css";
 
 /**
@@ -12,4 +14,13 @@ export function RepoSwatch({ hue, size = 10 }: { hue: number | null; size?: numb
       aria-hidden="true"
     />
   );
+}
+
+/**
+ * A repository's hue as the land it covers, like a country on a political map:
+ * `--territory`, read by every surface drawn inside it. Unknown, it is unset,
+ * and those surfaces stay neutral.
+ */
+export function territory(hue: number | null | undefined): CSSProperties {
+  return hue ? ({ "--territory": `var(--ra-repo-${hue})` } as CSSProperties) : {};
 }

@@ -68,12 +68,18 @@
   stroke-width: 1.5;
 }
 
-/* -- marks: a kind of thing by its icon, in its family's ink, on nothing ---------- */
+/* -- marks: a kind of thing by its icon, in its line's colour, on nothing ------------ */
 
 .mark {
   flex-shrink: 0;
   color: var(--ra-text-muted);
 
+  &[data-tone="imports"] {
+    color: var(--ra-rel-imports);
+  }
+  &[data-tone="calls"] {
+    color: var(--ra-rel-calls);
+  }
   &[data-tone="dependency"] {
     color: var(--ra-package);
   }
