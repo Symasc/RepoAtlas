@@ -1704,11 +1704,12 @@ Five edge types, every one oriented *repository-owned fact → shared node*:
 | `CALLS_HTTP_ENDPOINT` | calling symbol or file | absolute client calls |
 
 **Sources and their limits.** Parsers extract local facts and the linker interns them, and most sides meet by key
-equality alone. Five kinds of fact need the global pass, because one file cannot prove them
+equality alone. Six kinds of fact need the global pass, because one file cannot prove them
 (`repoatlas/graph/http_claims.py`):
 - a NestJS route, proven only under an application that registers it;
 - a FastAPI or Flask route on a router mounted from another module (`repoatlas/graph/py_routes.py`, below);
 - a Fastify route on a plugin, served under the registrations that reach it (`repoatlas/graph/ts_routes.py`, below);
+- an OpenAPI 3 operation an `oas3-tools` application routes to its controllers (`repoatlas/graph/ts_oas3.py`, below);
 - a request through a helper imported from another file, joined across exactly one import;
 - a request whose path is a template, matched against its own repository's served routes (below).
 
@@ -1747,6 +1748,20 @@ Until the pass proves one, it stays a pending claim that records the declaration
 - **Express** is the same rule for `express()`, `express.Router()` and `Router()` imported from `"express"`.
   - A route needs at least two arguments, because one is the settings getter.
   - A path with pattern characters is not an identity.
+- **oas3-tools** (`repoatlas/parsers/http_oas3.py`, semantics read from its 2.2.3 source and
+  express-openapi-validator 4.13.9's). `expressAppConfig(spec, { routing: { controllers } })` serves every operation
+  of an OpenAPI 3 document by the controllers member its `operationId` names: dashes camel-cased as the library does,
+  prefixed `<x-swagger-router-controller>_` when the operation names one.
+  - The specification is read only as `path.join(__dirname, '<literal>', …)` (or `resolve`) on `path`, from the
+    file that states it; the library opens a bare relative path from the process's working directory. It must name
+    exactly one indexed OpenAPI 3 document in the same repository.
+  - The controllers are a handler object, or an object literal of spreads of handler objects, each declared in the
+    file or imported by name from a relative module; a later spread's key wins. A handler object is a module-level
+    `const`, bound once, whose every member is a function. A directory of controllers is not read.
+  - Each operation is served at each root server's base path (the URL's path, one trailing slash dropped; none is
+    the empty base) joined to its own path, by the handler object's `const`: composed, so no span. A server with
+    `variables`, or a base with a placeholder or query, leaves the document unserved by code. The document still
+    serves its own routes, as before.
 - **Fastify** (`repoatlas/parsers/http_fastify.py`). An application is `Fastify()`/`fastify()` from `"fastify"`,
   a module-level `const` bound once.
   - A plugin's server is the first parameter of a plugin function, bound once in that function's own scope, so

@@ -128,7 +128,9 @@ class StructuredParser:
     #    module resolution reads (repoatlas.parsers.module_facts), including a
     #    tsconfig's ``include``, the source root a package link reads to find the
     #    source of an entry that names build output (repoatlas.graph.packages).
-    version = "3"
+    # 4: an OpenAPI 3 document also records its operations by operationId and its
+    #    root servers' base paths, for oas3-tools applications (repoatlas.graph.ts_oas3).
+    version = "4"
     language = "YAML"
 
     def supports(self, path: Path) -> bool:

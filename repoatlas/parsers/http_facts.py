@@ -113,6 +113,15 @@ TS_INJECTION = "ts-injection"
 TS_INJECTED_REQUEST = "ts-injected-request"
 #: A module-level function that owns injection claims, and the names it is exported under.
 TS_FUNCTION = "ts-function"
+#: An OpenAPI 3 document's operations by ``operationId``, and the base paths its root
+#: ``servers`` give them: what an application that routes by operationId serves.
+OPENAPI_OPERATIONS = "openapi-operations"
+#: A module-level ``const`` object literal whose every member is a function: its keys,
+#: and the names it is exported under. A controllers object, if anything uses it so.
+TS_HANDLER_OBJECT = "ts-handler-object"
+#: ``expressAppConfig(spec, { routing: { controllers } })`` from ``oas3-tools``: the
+#: specification it reads, relative to its file, and the objects its controllers are.
+OAS3_APP = "oas3-app"
 
 #: ``transport`` values of :data:`HTTP_LOCAL_CALL`.
 TRANSPORT_WRAPPER = "wrapper"
