@@ -48,7 +48,6 @@ import json
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
 
 from repoatlas.graph.keys import global_key
 from repoatlas.graph.py_modules import PythonModules
@@ -152,12 +151,19 @@ def _meta(claim: UnresolvedRefRecord) -> dict[str, str]:
 
 
 def _parent(path: str) -> str:
-    parent = str(PurePosixPath(path).parent)
-    return "" if parent == "." else parent
+    """The directory of a repository-relative POSIX path, ``""`` at the root."""
+    return path.rpartition("/")[0]
 
 
 def _join(directory: str, name: str) -> str:
     return f"{directory}/{name}" if directory else name
+
+
+@dataclass(frozen=True, slots=True)
+class _Layout:
+    directories: frozenset[str]
+    #: Directories a script runs from, none of them a package.
+    scripts: frozenset[str]
 
 
 class _Imports:
@@ -172,32 +178,37 @@ class _Imports:
     ) -> None:
         self._modules = modules
         self._index = index
-        self._directories: dict[int, set[str]] = defaultdict(set)
-        roots: dict[int, set[str]] = defaultdict(set)
-        for repo_id, files in index.files_by_repo.items():
-            for path in files:
-                parent = _parent(path)
-                while parent and parent not in self._directories[repo_id]:
-                    self._directories[repo_id].add(parent)
-                    parent = _parent(parent)
-                stem = PurePosixPath(path).stem
-                if path.endswith(".py") and not stem.isidentifier():
-                    roots[repo_id].add(_parent(path))
+        self._claimed: dict[int, set[str]] = defaultdict(set)
         for claim in scripts:
             row = by_id.get(claim.file_id)
             if row is not None:
-                roots[row.repo_id].add(_parent(row.rel_path))
-        self._scripts = {
-            repo_id: {
-                directory
-                for directory in directories
-                if not any(
-                    _join(directory, name) in index.files_by_repo.get(repo_id, {})
-                    for name in _PACKAGE_FILES
-                )
-            }
-            for repo_id, directories in roots.items()
-        }
+                self._claimed[row.repo_id].add(_parent(row.rel_path))
+        #: Read on first use: only repositories a claim resolves in pay for a layout.
+        self._layouts: dict[int, _Layout] = {}
+
+    def _layout(self, repo_id: int) -> _Layout:
+        layout = self._layouts.get(repo_id)
+        if layout is None:
+            files = self._index.files_by_repo.get(repo_id, {})
+            directories: set[str] = set()
+            roots = set(self._claimed.get(repo_id, ()))
+            for path in files:
+                parent, _, name = path.rpartition("/")
+                if name.endswith(".py") and not name[:-3].isidentifier():
+                    roots.add(parent)
+                while parent and parent not in directories:
+                    directories.add(parent)
+                    parent = _parent(parent)
+            layout = _Layout(
+                frozenset(directories),
+                frozenset(
+                    directory
+                    for directory in roots
+                    if not any(_join(directory, name) in files for name in _PACKAGE_FILES)
+                ),
+            )
+            self._layouts[repo_id] = layout
+        return layout
 
     def resolve(self, origin: FileRow, module: str) -> FileRow | None:
         if module.startswith("."):
@@ -214,7 +225,7 @@ class _Imports:
 
     def _script_directory(self, origin: FileRow) -> str | None:
         """The nearest directory at or above ``origin`` that holds a script."""
-        scripts = self._scripts.get(origin.repo_id, set())
+        scripts = self._layout(origin.repo_id).scripts
         directory = _parent(origin.rel_path)
         while directory not in scripts:
             if not directory:
@@ -235,7 +246,7 @@ class _Imports:
         while directory and any(_join(directory, name) in files for name in _PACKAGE_FILES):
             outermost = directory
             directory = _parent(directory)
-        if outermost is None or module.split(".")[0] != PurePosixPath(outermost).name:
+        if outermost is None or module.split(".")[0] != outermost.rpartition("/")[2]:
             return None
         return self._under(origin.repo_id, _parent(outermost), module)
 
@@ -245,9 +256,10 @@ class _Imports:
         parts = module.split(".")
         if not all(part.isidentifier() for part in parts):
             return None
+        directories = self._layout(repo_id).directories
         for part in parts[:-1]:
             directory = _join(directory, part)
-            if directory not in self._directories[repo_id]:
+            if directory not in directories:
                 return None
         base = _join(directory, parts[-1])
         # A regular package before a module of the same name, as CPython looks.
