@@ -105,6 +105,10 @@ _FORBIDDEN: dict[str, set[str]] = {
 #: reaches the other: each is an adapter over the capability layer, not over one
 #: another.
 _FORBIDDEN["api"] = (_FORBIDDEN["mcp"] - {"api"}) | {"mcp"}
+#: The explorer launcher (`repoatlas ui`) starts the local API and answers nothing
+#: itself, so it is held to the transports' line and may not reach the capability
+#: layer either: everything it serves, it serves through `api/`.
+_FORBIDDEN["ui"] = _FORBIDDEN["api"] | {"capabilities"}
 
 
 def _modules() -> list[tuple[str, Path]]:
@@ -190,16 +194,31 @@ def test_language_parsers_never_import_the_dependency_layer() -> None:
         assert "repoatlas.dependencies" not in path.read_text(encoding="utf-8"), path.name
 
 
+#: Modules outside `gitstate/` allowed to start a process at all, and why. Named,
+#: not pattern-matched, so a second one is a decision somebody makes in this file.
+_PROCESS_STARTERS = {
+    Path("ui/launcher.py"): "runs Node for the explorer and opens a browser; never git",
+}
+
+
 def test_only_gitstate_invokes_git() -> None:
     """Every git call goes through the hardened wrapper (ARCHITECTURE.md §8)."""
     offenders: list[str] = []
     for _, path in _modules():
         relative = path.relative_to(PACKAGE_ROOT)
-        if relative.parts[0] == "gitstate":
+        if relative.parts[0] == "gitstate" or relative in _PROCESS_STARTERS:
             continue
         if "subprocess" in path.read_text(encoding="utf-8"):
             offenders.append(str(relative))
     assert not offenders, f"subprocess used outside gitstate: {offenders}"
+
+
+def test_a_module_that_starts_processes_never_starts_git() -> None:
+    """The exemption above is for Node and a browser opener, and must stay that."""
+    for relative in _PROCESS_STARTERS:
+        source = (PACKAGE_ROOT / relative).read_text(encoding="utf-8")
+        assert '"git"' not in source and "'git'" not in source, relative
+        assert "gitstate" not in source, relative
 
 
 def test_services_never_import_the_capability_layer() -> None:
@@ -397,15 +416,31 @@ def test_only_the_cli_reaches_the_transport_adapter() -> None:
     service importing the adapter back would make a protocol type reachable from
     the domain, and the next transport would then be a rewrite rather than a
     second adapter. The CLI is the one legitimate importer, because a command has
-    to exist for a launcher to start.
+    to exist for a launcher to start --- and ``ui/``, the launcher one command
+    hands to, which starts the local API beside the explorer. It sits above the
+    transports, beside ``cli/``, and the test below keeps it there.
     """
     offenders: list[str] = []
     for package, path in _modules():
-        if package in _TRANSPORTS or package == "cli":
+        if package in _TRANSPORTS or package in _LAUNCHERS:
             continue
         if _imported_packages(path) & _TRANSPORTS:
             offenders.append(str(path.relative_to(PACKAGE_ROOT.parent)))
     assert not offenders, f"a transport is imported by: {offenders}"
+
+
+#: What may start a transport: the CLI, and the explorer launcher it runs.
+_LAUNCHERS = {"cli", "ui"}
+
+
+def test_only_the_cli_reaches_the_explorer_launcher() -> None:
+    """``ui/`` may import a transport only because nothing but the CLI imports it."""
+    offenders = [
+        str(path.relative_to(PACKAGE_ROOT.parent))
+        for package, path in _modules()
+        if package not in {"cli", "ui"} and "ui" in _imported_packages(path)
+    ]
+    assert not offenders, f"the explorer launcher is imported by: {offenders}"
 
 
 def test_the_transport_adapter_holds_no_repository_intelligence() -> None:

@@ -271,6 +271,66 @@ def serve(
         _fail(exc)
 
 
+@app.command()
+def ui(
+    port: Annotated[
+        int, typer.Option("--port", min=1, max=65535, help="Port for the explorer.")
+    ] = 7318,
+    open_browser: Annotated[
+        bool, typer.Option("--open/--no-open", help="Open the explorer in a browser.")
+    ] = True,
+    dev: Annotated[
+        bool, typer.Option("--dev", help="Run the explorer's development server (hot reload).")
+    ] = False,
+    rebuild: Annotated[
+        bool, typer.Option("--rebuild", help="Rebuild the explorer even if it looks current.")
+    ] = False,
+    prepare: Annotated[
+        bool,
+        typer.Option(
+            "--prepare", help="Install and build the explorer, then exit without starting it."
+        ),
+    ] = False,
+    frontend: Annotated[
+        Path | None,
+        typer.Option(
+            "--frontend",
+            help="The explorer's directory; defaults to the checkout's frontend/.",
+            file_okay=False,
+        ),
+    ] = None,
+) -> None:
+    """Open the graph explorer: the local API and the web app, started together.
+
+    Serves the index over the local API on a free loopback port, runs the
+    explorer against it at http://127.0.0.1:PORT, and opens it in a browser.
+    The first run installs the explorer's packages and builds it, which needs
+    Node.js 22 and pnpm. Ctrl-C stops both. See docs/local-api.md.
+
+    The import is local for the same reason as ``mcp``'s.
+    """
+    from repoatlas.ui import launcher
+
+    def announce(line: str) -> None:
+        typer.echo(line, err=True)
+
+    try:
+        launcher.launch(
+            port=port,
+            dev=dev,
+            rebuild=rebuild,
+            open_in_browser=open_browser,
+            frontend=frontend,
+            prepare_only=prepare,
+            announce=announce,
+        )
+    except RepoAtlasError as exc:
+        _fail(exc)
+    except KeyboardInterrupt:
+        # Ctrl-C while installing or building: the child has already been told.
+        raise typer.Exit(130) from None
+
+
 @contextmanager
 def _progress() -> Iterator[TerminalProgress | None]:
     """A progress line on stderr while a run lasts, when stderr is a terminal.
