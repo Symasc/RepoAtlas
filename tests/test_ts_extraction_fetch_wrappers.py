@@ -300,6 +300,170 @@ def test_a_helper_that_makes_two_requests_forwards_its_path_to_neither() -> None
     assert _calls(source) == {("GET /audit", "request")}
 
 
+# A typed client whose helper retries: the request is made by a closure it calls
+# twice, with an init a second closure builds (the shape of a real Next.js client).
+RETRYING = """\
+export const API_CONFIG = {
+  baseURL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1",
+};
+
+export async function apiRequest<T>(
+  endpoint: string,
+  options: RequestInit & { timeoutMs?: number } = {}
+): Promise<T> {
+  const url = `${API_CONFIG.baseURL}${endpoint}`;
+  const { timeoutMs, ...fetchOptions } = options;
+  const buildConfig = (token: string | null): RequestInit => ({
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...fetchOptions.headers },
+    credentials: "include",
+    ...fetchOptions,
+  });
+  const attemptFetch = async (tokenOverride: string | null) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs ?? 10000);
+    try {
+      const response = await fetch(url, {
+        ...buildConfig(tokenOverride),
+        signal: controller.signal,
+      });
+      return response.json() as Promise<T>;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+  try {
+    return await attemptFetch(getAccessToken());
+  } catch (error) {
+    return await attemptFetch(await refreshAccessToken());
+  }
+}
+
+export const apiClient = {
+  users: {
+    getAll: () => apiRequest<User[]>("/users"),
+    create: (data: User) =>
+      apiRequest<User>("/users", { method: "POST", body: JSON.stringify(data) }),
+    remove: (id: string) => apiRequest<void>(`/users/${id}`, { method: "DELETE" }),
+  },
+};
+"""
+
+
+def test_a_closure_the_wrapper_calls_is_read_as_its_own_body() -> None:
+    # an object literal's members are not declarations: the file makes the request
+    assert _calls(RETRYING) == {("GET /users", None), ("POST /users", None)}
+    # the base is computed (an environment variable first), so nothing is absolute
+    assert {r.target_kind for r in _http(RETRYING)} == {EntityType.HTTP_ROUTE}
+    # the template is the global pass's to decide, as for any wrapper
+    [pending] = _claims(RETRYING)
+    assert pending.meta["transport"] == "wrapper"
+    assert json.loads(pending.meta["path"])["parts"] == [["l", "/users/"], ["s", "id"]]
+
+
+def test_a_function_outside_the_wrapper_is_not_its_body() -> None:
+    source = """\
+    function audit() {
+      return fetch("/audit");
+    }
+    export function request(path: string) {
+      audit();
+      return fetch(path);
+    }
+    export function load() { return request("/v1/me"); }
+    """
+    # `audit` makes its own request, as it always did; `request` still forwards its path
+    assert _calls(source) == {("GET /audit", "audit"), ("GET /v1/me", "load")}
+
+
+def test_an_init_a_closure_builds_reads_as_if_written_in_place() -> None:
+    source = """\
+    export function request(path: string, init: RequestInit = {}) {
+      const json = () => ({ headers: { Accept: "application/json" }, method: "PUT" });
+      return fetch(`${base}${path}`, { ...json() });
+    }
+    export function save() { return request("/v1/prefs"); }
+    """
+    assert _calls(source) == {("PUT /v1/prefs", "save")}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # The closure makes a second request of its own: neither is forwarded.
+        """\
+        export function request(path: string) {
+          const send = () => fetch(path);
+          const audit = () => fetch("/audit");
+          audit();
+          return send();
+        }
+        export function load() { return request("/v1/me"); }
+        """,
+        # A closure that is handed a path of its own, not the wrapper's.
+        """\
+        export function request(path: string) {
+          const send = (p: string) => fetch(`${base}${p}`);
+          return send("/health");
+        }
+        export function load() { return request("/v1/me"); }
+        """,
+        # A closure the wrapper only returns: nothing the wrapper itself calls.
+        """\
+        export function request(path: string) {
+          const send = () => fetch(path);
+          return send;
+        }
+        export function load() { return request("/v1/me"); }
+        """,
+        # A builder declared outside the wrapper cannot see what it forwards.
+        """\
+        const build = (init: RequestInit) => ({ ...init });
+        export function request(path: string, init: RequestInit = {}) {
+          return fetch(path, { ...build(init) });
+        }
+        export function load() { return request("/v1/me", { method: "POST" }); }
+        """,
+        # A builder whose method is its own parameter.
+        """\
+        export function request(path: string, init: RequestInit = {}) {
+          const build = (verb: string) => ({ ...init, method: verb });
+          return fetch(path, { ...build("GET") });
+        }
+        export function load() { return request("/v1/me", { method: "POST" }); }
+        """,
+        # A builder that spreads itself.
+        """\
+        export function request(path: string, init: RequestInit = {}) {
+          const build = (): RequestInit => ({ ...build() });
+          return fetch(path, { ...build() });
+        }
+        export function load() { return request("/v1/me"); }
+        """,
+        # A builder that returns one of two objects.
+        """\
+        export function request(path: string, init: RequestInit = {}) {
+          const build = (write: boolean) => {
+            if (write) return { method: "POST" };
+            return { method: "GET" };
+          };
+          return fetch(path, { ...build(true) });
+        }
+        export function load() { return request("/v1/me"); }
+        """,
+        # A builder that names a method after forwarding the caller's.
+        """\
+        export function request(path: string, init: RequestInit = {}) {
+          const build = () => ({ ...init, method: "GET" });
+          return fetch(path, { ...build() });
+        }
+        export function load() { return request("/v1/me", { method: "POST" }); }
+        """,
+    ],
+)
+def test_a_closure_or_builder_that_is_not_proven_yields_nothing(source: str) -> None:
+    assert [r for r in _http(source) if r.source_symbol == "load"] == []
+
+
 @pytest.mark.parametrize(
     "call",
     [

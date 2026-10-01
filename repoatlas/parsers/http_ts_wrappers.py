@@ -17,7 +17,11 @@ injected value with no such fallback proves nothing.
 
 **What is a wrapper.** A function whose own body — not a nested function — makes
 exactly one call to something fetch-like or to another wrapper, and forwards one of
-its own parameters as the path:
+its own parameters as the path. A closure the function defines and calls is read as
+part of its body, once however often it is called: a helper that retries through
+``const attempt = async () => fetch(url, …)`` makes that one request. Its names
+still resolve where they are written, so the URL and init it hands to ``fetch`` must
+be the function's own:
 
 * the URL is ``P``, ``${B}${P}`` or ``B + P`` for a path parameter ``P``. ``B`` is
   the base. A base the file states as a literal makes the request absolute; any
@@ -26,7 +30,8 @@ its own parameters as the path:
   endpoint is inferred;
 * the init is absent (the method is GET), one of its parameters, or ``{ ...X, … }``
   where ``X`` is that parameter or ``rest`` from ``const { a, ...rest } = init ??
-  {}`` and nothing after the spread names ``method``.
+  {}`` and nothing after the spread names ``method``. ``{ ...build(…), … }`` reads
+  as the one object ``build`` returns, written in place.
 
 A **requester factory** returns an object whose members are wrappers; a call through
 ``const { request } = createRequester(options)`` in the same file is a call to that
@@ -264,6 +269,8 @@ class FetchWrappers:
         self._reading: set[tuple[int, int]] = set()
         self._factories: dict[tuple[int, int], dict[str, Wrapper]] = {}
         self._helpers: dict[tuple[int, int], InitHelper | None] = {}
+        #: Init builders being read, so one that spreads itself is never followed round.
+        self._building: set[tuple[int, int]] = set()
         self._imports: dict[str, Imported] = {}
         for statement in root.children:
             if statement.type == "import_statement":
@@ -912,7 +919,12 @@ class FetchWrappers:
 
     def _read_wrapper(self, function: Node, depth: int) -> Wrapper | None:
         transports: list[tuple[Node, Wrapper | None]] = []
-        for call in _own_calls(function):
+        # closures read as part of this body, each once however often it is called:
+        # a retry makes the same request again, not a second one
+        inlined: set[tuple[int, int]] = set()
+        calls = _own_calls(function)
+        while calls:
+            call = calls.pop()
             callee = call.child_by_field_name("function")
             if callee is None or operand(callee).type != "identifier":
                 continue
@@ -922,11 +934,16 @@ class FetchWrappers:
             inner = self.function_of(self.lookup(node_text(self._source, operand(callee)), call))
             if inner is None:
                 continue
-            if (inner.start_byte, inner.end_byte) in self._reading:
+            key = (inner.start_byte, inner.end_byte)
+            if key in self._reading:
                 raise _Cycle  # a wrapper that reaches itself proves nothing
             nested = self.wrapper(inner, depth + 1)
             if nested is not None:
                 transports.append((call, nested))
+            elif key not in inlined and _enclosing_function(inner) == function:
+                # a closure the wrapper defines and calls is its own body, read in place
+                inlined.add(key)
+                calls.extend(_own_calls(inner))
         if len(transports) != 1:
             return None
         call, nested = transports[0]
@@ -1040,7 +1057,13 @@ class FetchWrappers:
                 if forwarded is not None or method != GET:
                     return None
                 inner = next((c for c in entry.named_children if c.type != "comment"), None)
-                forwarded = self._forwarded(function, inner) if inner is not None else None
+                if inner is None:
+                    return None
+                built = self._built(function, inner)
+                if built is not None:
+                    forwarded, method = built
+                    continue
+                forwarded = self._forwarded(function, inner)
                 if forwarded is None:
                     return None
                 method = None
@@ -1062,6 +1085,29 @@ class FetchWrappers:
             else:
                 return None
         return forwarded, method
+
+    def _built(self, function: Node, node: Node) -> tuple[int | None, str | None] | None:
+        """``builder(…)``'s init, when ``builder`` returns one object: read in place, as
+        if its entries were written here. Its names resolve where it is written, so
+        only a closure of ``function`` can forward what the wrapper was given."""
+        node = operand(node)
+        if node.type != "call_expression":
+            return None
+        callee = node.child_by_field_name("function")
+        if callee is None or operand(callee).type != "identifier":
+            return None
+        builder = self.function_of(self.lookup(node_text(self._source, operand(callee)), node))
+        if builder is None:
+            return None
+        key = (builder.start_byte, builder.end_byte)
+        objects = _returned_objects(builder)
+        if key in self._building or len(objects) != 1:
+            return None
+        self._building.add(key)
+        try:
+            return self._init(function, objects[0])
+        finally:
+            self._building.discard(key)
 
     def _forwarded(self, function: Node, node: Node) -> int | None:
         """The init parameter ``node`` passes on unchanged in its method, if any."""
