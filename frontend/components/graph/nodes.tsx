@@ -27,6 +27,7 @@ import type { RepositoryModel } from "@/lib/model/repositories";
 import { FAMILY_NOUN } from "./edges";
 import { EntityBadge, LineGlyph, Monogram, PathBadge } from "./glyphs";
 import classes from "./Graph.module.css";
+import type { TraceNode } from "./traceNodes";
 
 /** What a node can ask of the view; the view owns selection and navigation. */
 export interface NodeActions {
@@ -72,13 +73,14 @@ export type GraphNode =
   | Node<PlaceNodeData, "place">
   | Node<MoreNodeData, "more">
   | Node<AnchorNodeData, "anchor">
-  | Node<NeighbourNodeData, "neighbour">;
+  | Node<NeighbourNodeData, "neighbour">
+  | TraceNode;
 
 /** Nodes that are backdrop, not things: never faded, never selected. */
-export const BACKDROP: ReadonlySet<string> = new Set(["orbit", "group", "frame", "hub"]);
+export const BACKDROP: ReadonlySet<string> = new Set(["orbit", "group", "frame", "hub", "traceFrame", "traceLabel"]);
 
 /** React Flow wants handles to draw edges from; ours compute their own ends, so one hidden pair will do. */
-function Anchors() {
+export function Anchors() {
   return (
     <>
       <Handle type="source" position={Position.Right} className={classes.anchor} isConnectable={false} />
@@ -87,7 +89,7 @@ function Anchors() {
   );
 }
 
-function stop(run: () => void) {
+export function stop(run: () => void) {
   return (event: MouseEvent) => {
     event.stopPropagation();
     run();

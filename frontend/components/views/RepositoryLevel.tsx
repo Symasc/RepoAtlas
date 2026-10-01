@@ -1,7 +1,7 @@
 "use client";
 
 import { Button, Loader } from "@mantine/core";
-import { ArrowLeftIcon } from "@phosphor-icons/react";
+import { ArrowLeftIcon, FlowArrowIcon } from "@phosphor-icons/react";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 
 import { Graph } from "@/components/graph/Graph";
@@ -29,6 +29,7 @@ import {
   type Family,
   type OpenedGraph,
 } from "@/lib/model/graph";
+import { DIRECTORY_TRACE } from "@/lib/model/location";
 import type { RepositoryModel } from "@/lib/model/repositories";
 
 import { FileLevel } from "./FileLevel";
@@ -393,8 +394,20 @@ function CardInspector({
       subtitle={subtitle}
       onClose={onClose}
       actions={
-        onOpen && (
-          <OpenButton name={title} onOpen={onOpen} />
+        (onOpen || card) && (
+          <>
+            {onOpen && <OpenButton name={title} onOpen={onOpen} />}
+            {card && (
+              <Button
+                size="xs"
+                variant="default"
+                leftSection={<FlowArrowIcon size={14} />}
+                onClick={() => nav.go({ ...nav.place, trace: `${DIRECTORY_TRACE}${card.path}` }, { via: id })}
+              >
+                Trace {card.name}
+              </Button>
+            )}
+          </>
         )
       }
       tab={tab}

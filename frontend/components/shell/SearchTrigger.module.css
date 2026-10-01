@@ -86,3 +86,23 @@
   color: var(--ra-text-muted);
   font-size: var(--mantine-font-size-md);
 }
+
+.group {
+  /* the group's name is drawn by a pseudo-element: keep it quiet and small */
+  &::before {
+    color: var(--ra-text-subtle);
+    font-size: var(--mantine-font-size-xs);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ra-text-muted);
+  font-size: var(--mantine-font-size-sm);
+  border-top: 1px solid var(--ra-border);
+}

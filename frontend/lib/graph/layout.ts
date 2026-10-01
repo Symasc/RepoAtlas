@@ -11,6 +11,7 @@ import {
   type ViewEdge,
 } from "@/lib/model/graph";
 import type { RepositoryModel } from "@/lib/model/repositories";
+import { SEED_ID, type TraceCard, type TraceGraph } from "@/lib/model/trace";
 
 /**
  * Sizes and positions, computed rather than measured: every node's height
@@ -484,6 +485,80 @@ export function layoutFile(graph: FileGraph): Layout {
         ? anchor.x - NEIGHBOUR_GAP - SIZE.neighbour.width
         : anchor.x + anchor.width + NEIGHBOUR_GAP;
     column(nodes, x, SIZE.neighbour.width, 0, layout);
+  }
+  return layout;
+}
+
+// -- a trace: the seed, then a column per step ----------------------------------------
+
+export const TRACE = {
+  seed: { width: 320, height: 168 },
+  card: { width: 300, header: 54, row: 30, more: 28, padding: 10 },
+  frame: { header: 38, padding: 12 },
+  label: { height: 24, above: 40 },
+  gap: { column: 170, card: 14, frame: 26 },
+} as const;
+/** Rows a trace card lists before folding the rest into a count. */
+export const TRACE_ROWS = 6;
+
+export function traceCardHeight(card: TraceCard): number {
+  const shown = Math.min(card.rows.length, TRACE_ROWS);
+  const more = card.rows.length > TRACE_ROWS ? TRACE.card.more : 0;
+  return TRACE.card.header + shown * TRACE.card.row + more + TRACE.card.padding;
+}
+
+export function columnLabelId(distance: number): string {
+  return `col:${distance}`;
+}
+
+export function traceFrameId(distance: number, repository: string): string {
+  return `rf:${distance}:${repository}`;
+}
+
+/**
+ * The seed at the left, each step's column to its right, every column centred
+ * on the seed. When the chain stands in more than one repository, a column's
+ * cards sit in a frame per repository, so where it crosses is where the frames
+ * change; within one repository the frames would only repeat its name.
+ */
+export function layoutTrace(graph: TraceGraph): Layout {
+  const layout: Layout = new Map();
+  const seed = boxAt(0, 0, TRACE.seed);
+  layout.set(SEED_ID, seed);
+  const framed = graph.repositories.length > 1;
+  let x = seed.x + seed.width + TRACE.gap.column;
+  for (const column of graph.columns) {
+    const groups: { repository: string; cards: TraceCard[] }[] = [];
+    for (const card of column.cards) {
+      const key = framed ? (card.repository ?? "") : "";
+      const last = groups[groups.length - 1];
+      if (last && last.repository === key) last.cards.push(card);
+      else groups.push({ repository: key, cards: [card] });
+    }
+    const inner = (cards: TraceCard[]) =>
+      cards.reduce((sum, c) => sum + traceCardHeight(c), 0) + TRACE.gap.card * (cards.length - 1);
+    const pad = framed ? TRACE.frame.header + TRACE.frame.padding : 0;
+    const heights = groups.map((g) => inner(g.cards) + (framed ? pad + TRACE.frame.padding : 0));
+    const total = heights.reduce((a, b) => a + b, 0) + TRACE.gap.frame * (groups.length - 1);
+    let y = -total / 2;
+    const width = TRACE.card.width + (framed ? TRACE.frame.padding * 2 : 0);
+    groups.forEach((group, i) => {
+      if (framed) layout.set(traceFrameId(column.distance, group.repository), { x, y, width, height: heights[i]! });
+      let at = y + pad;
+      for (const card of group.cards) {
+        const height = traceCardHeight(card);
+        layout.set(card.id, { x: x + (framed ? TRACE.frame.padding : 0), y: at, width: TRACE.card.width, height });
+        at += height + TRACE.gap.card;
+      }
+      y += heights[i]! + TRACE.gap.frame;
+    });
+    layout.set(columnLabelId(column.distance), {
+      x,
+      y: -total / 2 - TRACE.label.above,
+      width,
+      height: TRACE.label.height,
+    });
+    x += width + TRACE.gap.column;
   }
   return layout;
 }

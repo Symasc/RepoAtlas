@@ -14,6 +14,11 @@ export interface Arrival {
   direction: Direction;
   /** Node, in the level arrived at, that the reader came out of. */
   from: string | null;
+  /**
+   * Node the arrival starts close on, whichever way the reader came: the level
+   * opens on it and pulls back to show the rest, as a trace opens on its seed.
+   */
+  focus?: string | null;
 }
 
 export type Exit = (direction: Direction, via: string | null) => Promise<void>;

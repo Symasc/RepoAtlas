@@ -113,7 +113,7 @@ function LinkEdge({ id, source, target, data }: EdgeProps<GraphEdge>) {
             data-emphasis={emphasis}
             style={{ transform: `translate(-50%, -50%) translate(${route.label.x}px, ${route.label.y}px)` }}
           >
-            {compactCount(link.count)}
+            {link.label ? (link.count > 1 ? `${link.label} · ${compactCount(link.count)}` : link.label) : compactCount(link.count)}
           </span>
         </EdgeLabelRenderer>
       )}

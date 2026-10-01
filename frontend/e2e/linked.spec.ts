@@ -1,5 +1,7 @@
+import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
 
+import type { ImpactCandidate, ImpactResponse } from "@/lib/api/generated";
 import { ASPECT } from "@/lib/graph/layout";
 
 import { ask, expect, ready, test } from "./fixtures";
@@ -199,3 +201,131 @@ test("evidence for a link between repositories reads the lines that assert it", 
   await expect(page.locator('.react-flow__edges g[data-emphasis="selected"]')).toHaveCount(1);
   expect(problems).toEqual([]);
 });
+
+// -- reading a file's source and tracing a name in it --------------------------------
+
+const POLICY = { repository: "app", path: "src/policy.ts" } as const;
+
+/** A trace row's name, as the canvas reads it out. */
+function rowName(c: ImpactCandidate): string {
+  const line = Array.isArray(c.step.lines) ? c.step.lines[0] : null;
+  return `${c.name}${typeof line === "number" ? `, line ${line}` : ""}, ${c.step.reading}`;
+}
+
+/** Repositories a trace stands in besides the seed's own. */
+function otherRepositories(impact: ImpactResponse): number {
+  const all = [...(impact.candidates ?? []), ...(impact.tests ?? [])].map((c) => c.repository);
+  return new Set(all.filter((r): r is string => !!r && r !== impact.seed.repository)).size;
+}
+
+async function referencedElsewhere(request: Parameters<typeof ask>[0]) {
+  const read = await ask(request, "topology/references", {
+    context: { scope: "repository", repository: POLICY.repository },
+    path: POLICY.path,
+    cross_repository: true,
+  });
+  const use = (read.references ?? []).find((r) => r.target.repository_slug && r.target.repository_slug !== POLICY.repository && r.target.type !== "module");
+  expect(use, "policy.ts uses a declaration from another repository").toBeTruthy();
+  return use!.target;
+}
+
+test("a name in the source traces what a change to it reaches, file by file and across repositories", async ({ page, request, problems }, testInfo) => {
+  const target = await referencedElsewhere(request);
+  const impact = await ask(request, "impact", { context: WORKSPACE, seed: target.key, presentation: "full", max_candidates: 100 });
+  const direct = (impact.candidates ?? []).filter((c) => c.distance === 1);
+  const here = direct.find((c) => c.repository === POLICY.repository && c.path === POLICY.path);
+  expect(here, "the trace comes back through policy.ts").toBeTruthy();
+  const at = (here!.step.lines as number[])[0]!;
+
+  await page.goto(`/?repo=${POLICY.repository}&path=${encodeURIComponent(POLICY.path)}`);
+  await ready(page);
+  const name = page
+    .getByRole("region", { name: "Source of policy.ts" })
+    .getByRole("button", { name: new RegExp(`^${literal(target.name ?? "")}, \\w+ in ${literal(target.repository_slug!)}$`) })
+    .first();
+
+  // a first press selects what the name stands for, a second follows its chain
+  await name.click();
+  await expect(page).toHaveURL(new RegExp(`sel=${literal(encodeURIComponent(target.key))}$`));
+  await expect(page.getByRole("complementary", { name: `${target.name}, inspected` }).getByRole("button", { name: `Trace ${target.name}` })).toBeVisible();
+  await name.click();
+  await expect(page).toHaveURL(new RegExp(`trace=${literal(encodeURIComponent(target.key))}`));
+
+  await expect(page.getByRole("button", { name: `${target.name}, what changes` })).toBeVisible();
+  for (const c of direct) await expect(page.getByRole("button", { name: rowName(c) })).toBeVisible();
+  await expect(page.getByText(new RegExp(`Crosses into ${otherRepositories(impact)} other repositor`))).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("trace.png") });
+
+  // a step reads where it was asserted, and the package it crossed
+  await page.getByRole("button", { name: rowName(here!) }).click();
+  const step = page.getByRole("complementary", { name: `${here!.name}, inspected` });
+  await expect(step).toContainText(`${here!.name} ${here!.step.reading} ${target.name} on line ${at}`);
+  if (here!.step.crossing) await expect(step).toContainText(here!.step.crossing.package);
+  await expect(step.getByRole("group", { name: `${POLICY.path}, lines ${at} to ${at}` })).toBeVisible();
+
+  // a second press opens the file at that line, and Back climbs out the same way
+  await step.getByRole("button", { name: `Open policy.ts at ${at}` }).click();
+  await expect(page).toHaveURL(new RegExp(`path=${literal(encodeURIComponent(POLICY.path))}&sel=line${literal("%3A")}${at}$`));
+  await expect(page.getByRole("region", { name: "Source of policy.ts" })).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`trace=.*&sel=c${literal("%3A")}${here!.id}$`));
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`path=${literal(encodeURIComponent(POLICY.path))}&sel=${literal(encodeURIComponent(target.key))}$`));
+  expect(problems).toEqual([]);
+});
+
+test("search finds a file by name and opens its source", async ({ page, request, problems }) => {
+  const { files = [] } = await ask(request, "topology/files", { context: WORKSPACE, query: "policy" });
+  const file = files[0]!;
+  expect(file).toMatchObject({ repository: POLICY.repository, path: POLICY.path });
+
+  await page.goto("/");
+  await ready(page);
+  await page.keyboard.press("ControlOrMeta+K");
+  await page.getByRole("textbox", { name: "Search repositories and files" }).fill("policy");
+  await expect(page.getByRole("button", { name: new RegExp(`^${literal(file.name)}`) })).toBeVisible();
+  // the files arrive after the last keystroke: Enter still takes the first
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(new RegExp(`\\?repo=${file.repository}&path=${literal(encodeURIComponent(file.path))}$`));
+  await expect(page.getByRole("region", { name: `Source of ${file.name}` }).locator("pre")).toBeVisible();
+  expect(problems).toEqual([]);
+});
+
+test("a directory traces into the repositories that use what it holds", async ({ page, request, problems }) => {
+  const impact = await ask(request, "impact", { context: WORKSPACE, seed: "contracts:src/", presentation: "full", max_candidates: 100 });
+  expect(impact.seed.status).toBe("resolved");
+  expect(otherRepositories(impact)).toBeGreaterThan(1);
+
+  await page.goto("/?repo=contracts");
+  await ready(page);
+  await page.getByRole("button", { name: /^Select src,/ }).click();
+  await page.getByRole("button", { name: "Trace src" }).click();
+  await expect(page).toHaveURL(/\?repo=contracts&trace=dir%3Asrc$/);
+  await expect(page.getByText(new RegExp(`Crosses into ${otherRepositories(impact)} other repositories`))).toBeVisible();
+  for (const c of (impact.candidates ?? []).filter((c) => c.distance === 1).slice(0, 3)) {
+    await expect(page.getByRole("button", { name: rowName(c) }).first()).toBeVisible();
+  }
+  expect(problems).toEqual([]);
+});
+
+for (const scheme of ["dark", "light"] as const) {
+  test.describe(`${scheme} theme`, () => {
+    test.use({ colorScheme: scheme });
+
+    test("the source and a trace have no serious accessibility violations", async ({ page, request, problems }) => {
+      const target = await referencedElsewhere(request);
+      const file = `/?repo=${POLICY.repository}&path=${encodeURIComponent(POLICY.path)}`;
+      for (const url of [file, `${file}&sel=${encodeURIComponent(target.key)}`, `${file}&trace=${encodeURIComponent(target.key)}`, `${file}&trace=${encodeURIComponent(target.key)}&sel=c%3A1`]) {
+        await page.goto(url);
+        await ready(page);
+        await expect(url.includes("trace=") ? page.getByRole("button", { name: `${target.name}, what changes` }) : page.getByRole("region", { name: "Source of policy.ts" })).toBeVisible();
+        const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze();
+        const serious = results.violations
+          .filter((v) => v.impact === "serious" || v.impact === "critical")
+          .map((v) => `${url} ${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`);
+        expect(serious).toEqual([]);
+      }
+      expect(problems).toEqual([]);
+    });
+  });
+}

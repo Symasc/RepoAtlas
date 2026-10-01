@@ -1,10 +1,14 @@
 "use client";
 
 import {
+  BracketsCurlyIcon,
   CubeIcon,
+  CubeTransparentIcon,
   CurrencyDollarSimpleIcon,
   FileIcon,
+  FlaskIcon,
   FolderSimpleIcon,
+  FunctionIcon,
   GearSixIcon,
   GlobeSimpleIcon,
   PackageIcon,
@@ -48,6 +52,14 @@ const ENTITIES: Record<string, { icon: Icon; shape: Shape }> = {
   http_endpoint: { icon: GlobeSimpleIcon, shape: "circle" },
   http_route: { icon: GlobeSimpleIcon, shape: "circle" },
   http_deployment: { icon: GlobeSimpleIcon, shape: "circle" },
+  // what a file declares: the code a trace walks through
+  function: { icon: FunctionIcon, shape: "square" },
+  method: { icon: FunctionIcon, shape: "square" },
+  class: { icon: CubeTransparentIcon, shape: "square" },
+  symbol: { icon: BracketsCurlyIcon, shape: "square" },
+  test: { icon: FlaskIcon, shape: "square" },
+  script: { icon: TerminalWindowIcon, shape: "terminal" },
+  file: { icon: FileIcon, shape: "file" },
 };
 
 type Shape = "square" | "hexagon" | "diamond" | "circle" | "terminal" | "folder" | "file";

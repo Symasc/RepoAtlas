@@ -6,11 +6,12 @@ import { useCallback, useMemo, useRef, useState } from "react";
 
 import { TransitionContext, type Exit, type RegisterExit } from "@/components/graph/transition";
 import { AppHeader } from "@/components/shell/AppHeader";
-import { RepositorySpotlight } from "@/components/shell/SearchTrigger";
+import { WorkspaceSpotlight } from "@/components/shell/SearchTrigger";
 import { ApiState } from "@/components/states/ApiState";
 import type { Navigation } from "@/components/views/navigation";
 import { OverviewLevel } from "@/components/views/OverviewLevel";
 import { RepositoryLevel } from "@/components/views/RepositoryLevel";
+import { TraceLevel } from "@/components/views/TraceLevel";
 import { ApiError } from "@/lib/api/client";
 import { useLiveFreshness, useRepositories } from "@/lib/api/queries";
 import { direction, placeKey, search, type Place } from "@/lib/model/location";
@@ -43,8 +44,12 @@ export function Explorer() {
 
   const slug = params.get("repo");
   const path = params.get("path") ?? "";
+  const trace = params.get("trace");
   const selected = params.get("sel");
-  const here = useMemo<Place>(() => ({ repository: slug, path: slug === null ? "" : path }), [slug, path]);
+  const here = useMemo<Place>(
+    () => ({ repository: slug, path: slug === null ? "" : path, trace }),
+    [slug, path, trace],
+  );
   const current = slug === null ? null : (merged?.find((r) => r.slug === slug) ?? null);
 
   // how the reader got here: deeper, back out, or across, and from where
@@ -107,6 +112,7 @@ export function Explorer() {
     [here, selected, arrival, go, select],
   );
   const openRepository = useCallback((next: string) => nav.go({ repository: next, path: "" }), [nav]);
+  const openFile = useCallback((next: string, file: string) => nav.go({ repository: next, path: file }), [nav]);
 
   const error = repositories.error instanceof ApiError ? repositories.error : null;
 
@@ -132,6 +138,8 @@ export function Explorer() {
         </Button>
       </div>
     );
+  } else if (trace !== null) {
+    body = <TraceLevel key={trace} repository={current} repositories={merged} nav={nav} />;
   } else if (current !== null) {
     body = <RepositoryLevel repository={current} repositories={merged} nav={nav} />;
   } else {
@@ -155,7 +163,7 @@ export function Explorer() {
           />
         </AppShell.Header>
         <AppShell.Main>{body}</AppShell.Main>
-        <RepositorySpotlight repositories={merged ?? []} onSelect={openRepository} />
+        <WorkspaceSpotlight repositories={merged ?? []} onRepository={openRepository} onFile={openFile} />
       </AppShell>
     </TransitionContext.Provider>
   );

@@ -202,3 +202,231 @@ button.crumb:hover {
   min-width: 0;
   min-height: 0;
 }
+
+/* -- a file read as code: the trail and the file's facts above its source ---------- */
+
+.reading {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 16px;
+  background-color: var(--ra-canvas);
+
+  .note {
+    align-self: flex-start;
+    text-align: left;
+  }
+}
+
+.readingBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
+
+.readingInfo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-muted);
+  font-variant-numeric: tabular-nums;
+
+  > span + span::before {
+    content: "·";
+    margin-right: 12px;
+    color: var(--ra-text-subtle);
+  }
+}
+
+.modeSwitch {
+  background-color: var(--ra-surface);
+  border: 1px solid var(--ra-border);
+}
+
+.lineChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.lineChip {
+  padding: 2px 8px;
+  border: 1px solid var(--ra-border);
+  border-radius: 6px;
+  background-color: var(--ra-surface);
+  color: var(--ra-text-muted);
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-sm);
+  cursor: pointer;
+
+  &:hover {
+    color: var(--ra-text);
+    border-color: var(--ra-border-strong);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--ra-focus);
+    outline-offset: 1px;
+  }
+}
+
+.actionRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* -- a trace ---------------------------------------------------------------------- */
+
+.traceTrail {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.traceStep {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid color-mix(in oklch, var(--ra-accent) 55%, var(--ra-border));
+  border-radius: var(--mantine-radius-md);
+  background-color: color-mix(in oklch, var(--ra-accent) 12%, var(--ra-surface));
+  font-size: var(--mantine-font-size-md);
+  font-weight: 600;
+  color: var(--ra-text);
+}
+
+/* a trace that has nothing to draw: said in the middle of where it would be */
+.traceFrame {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  padding: 16px;
+  background-color: var(--ra-canvas);
+}
+
+.traceState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex: 1;
+  max-width: 520px;
+  margin: 0 auto;
+  text-align: center;
+  color: var(--ra-text-muted);
+
+  p {
+    margin: 0;
+  }
+
+  ul {
+    align-self: stretch;
+    text-align: left;
+  }
+}
+
+.stepSentence {
+  margin: 0;
+  font-size: var(--mantine-font-size-lg);
+  line-height: 1.5;
+  color: var(--ra-text-muted);
+
+  strong {
+    color: var(--ra-text);
+    font-weight: 600;
+  }
+}
+
+.chain {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chainStep {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 6px 4px 6px 6px;
+
+  > span:last-child {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  /* the thread the steps hang on */
+  &:not(:last-child)::after {
+    content: "";
+    position: absolute;
+    left: 15px;
+    top: 30px;
+    bottom: -6px;
+    width: 1px;
+    background-color: var(--ra-border-strong);
+  }
+}
+
+.chainButton {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--mantine-radius-xs);
+  background: transparent;
+  color: var(--ra-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--ra-hover);
+  }
+
+  &[data-current] strong {
+    color: var(--ra-accent-strong);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--ra-focus);
+    outline-offset: 1px;
+  }
+}
+
+.summaryRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 6px;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-muted);
+
+  > span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.summaryNote {
+  color: var(--ra-text-subtle);
+  white-space: nowrap;
+}
