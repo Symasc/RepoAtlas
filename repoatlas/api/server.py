@@ -80,8 +80,12 @@ from repoatlas.models.topology import (
     TopologyChildrenResponse,
     TopologyEdgeRequest,
     TopologyEdgeResponse,
+    TopologyFilesRequest,
+    TopologyFilesResponse,
     TopologyOverviewRequest,
     TopologyOverviewResponse,
+    TopologyReferencesRequest,
+    TopologyReferencesResponse,
 )
 
 #: The contract a client checks before it trusts anything else in a response.
@@ -154,6 +158,13 @@ ENDPOINTS: tuple[Endpoint, ...] = (
         "topology_children",
     ),
     Endpoint("topology/edge", TopologyEdgeRequest, TopologyEdgeResponse, "topology_edge"),
+    Endpoint("topology/files", TopologyFilesRequest, TopologyFilesResponse, "topology_files"),
+    Endpoint(
+        "topology/references",
+        TopologyReferencesRequest,
+        TopologyReferencesResponse,
+        "topology_references",
+    ),
 )
 ENDPOINTS_BY_PATH: Mapping[str, Endpoint] = {endpoint.path: endpoint for endpoint in ENDPOINTS}
 

@@ -7,7 +7,10 @@ answers without one call per entity:
 * **children** — what one directory (or one file) holds, and how each child is
   linked to its siblings, the rest of its repository and, when asked, to other
   repositories;
-* **edge** — one exact stored relationship, with the evidence that asserts it.
+* **edge** — one exact stored relationship, with the evidence that asserts it;
+* **files** — which indexed files a name points at, for a map's search box;
+* **references** — what each line of one file declares and refers to, so a
+  reader can follow a name in the source to the entity the index resolved it to.
 
 Links are kept apart by **kind**, because the three kinds are different claims and
 summing them would manufacture a number no fact supports:
@@ -38,7 +41,7 @@ from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
 from repoatlas.models.impact import HttpCrossing, PackageCrossing
 from repoatlas.models.investigation import LedgerSummary
 from repoatlas.models.parsing import EdgeType, EntityType
-from repoatlas.models.relationships import GraphEdge, RelationshipDirection
+from repoatlas.models.relationships import EntityRef, GraphEdge, RelationshipDirection
 
 #: The topology read policy. Named in every response so a caller comparing two
 #: answers can tell a change in the index from a change in the rules.
@@ -55,6 +58,13 @@ MAX_CHILD_LINKS = 300
 #: Children entries per page, by default and at most.
 DEFAULT_CHILDREN_PAGE = 100
 MAX_CHILDREN_PAGE = 500
+#: Files one search answer lists, by default and at most.
+DEFAULT_FILE_MATCHES = 20
+MAX_FILE_MATCHES = 50
+#: The most whitespace-separated terms a file search matches on.
+MAX_QUERY_TERMS = 8
+#: The most references one file's answer lists, in source order.
+MAX_REFERENCES = 2000
 
 
 class LinkKind(enum.StrEnum):
@@ -327,3 +337,118 @@ class TopologyEdgeResponse(BaseModel):
     evidence: tuple[EvidenceItem, ...] = ()
     freshness: IndexFreshness
     ledger: LedgerSummary
+
+
+class TopologyFilesRequest(BaseModel):
+    """Ask which indexed files a name points at.
+
+    Every whitespace-separated term must occur in a file's repository-relative
+    path, ignoring ASCII case. Files whose own name holds the last term rank first:
+    one named exactly that, then one starting with it, then one containing it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    context: CapabilityContext
+    query: str = Field(min_length=1, max_length=200)
+    limit: int = Field(default=DEFAULT_FILE_MATCHES, ge=1, le=MAX_FILE_MATCHES)
+    depth: FreshnessDepth = FreshnessDepth.STORED
+
+    @field_validator("query")
+    @classmethod
+    def _has_a_term(cls, value: str) -> str:
+        if not value.split():
+            raise ValueError("query must name at least one term")
+        if len(value.split()) > MAX_QUERY_TERMS:
+            raise ValueError(f"query may name at most {MAX_QUERY_TERMS} terms")
+        return value
+
+
+class FileMatch(BaseModel):
+    """One indexed file a search found."""
+
+    model_config = ConfigDict(frozen=True)
+
+    repository: str
+    path: str
+    name: str
+    language: str | None = None
+
+
+class TopologyFilesResponse(BaseModel):
+    """The best-ranked files in scope that match, and how many match in all."""
+
+    model_config = ConfigDict(frozen=True)
+
+    context: ContextView
+    query: str
+    files: tuple[FileMatch, ...] = ()
+    #: Every file in scope that matches, listed or not.
+    total: int = 0
+    truncated: bool = False
+    freshness: IndexFreshness
+    policy: str = POLICY
+
+
+class TopologyReferencesRequest(BaseModel):
+    """Ask what each line of one file declares and refers to."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    #: Must name one repository: the file is a file in it.
+    context: CapabilityContext
+    #: Repository-relative path of one indexed file.
+    path: str = Field(min_length=1)
+    #: Whether references resolved into other repositories are listed. Off by
+    #: default, because the scope names one repository.
+    cross_repository: bool = False
+    depth: FreshnessDepth = FreshnessDepth.STORED
+
+    @field_validator("path")
+    @classmethod
+    def _path_is_relative(cls, value: str) -> str:
+        normalized = _normalized_path(value)
+        if not normalized:
+            raise ValueError("path must name a file")
+        return normalized
+
+
+class LineReference(BaseModel):
+    """One stored fact a line of the file asserts: what it refers to, and how."""
+
+    model_config = ConfigDict(frozen=True)
+
+    line_start: int = Field(ge=1)
+    line_end: int = Field(ge=1)
+    type: EdgeType
+    #: The key of what in this file holds the reference: a declaration, or the
+    #: file itself for a statement at module level.
+    source: str
+    #: What the reference resolved to, wherever it is.
+    target: EntityRef
+
+
+class TopologyReferencesResponse(BaseModel):
+    """A file's declarations and its references, both in source order."""
+
+    model_config = ConfigDict(frozen=True)
+
+    context: ContextView
+    repository: str
+    path: str
+    declarations: tuple[ChildEntry, ...] = ()
+    #: Located references, containment left out. Facts recorded more than once
+    #: are listed once.
+    references: tuple[LineReference, ...] = ()
+    #: Every located reference in scope, listed or not.
+    references_total: int = 0
+    #: True when more existed than :data:`MAX_REFERENCES`.
+    truncated: bool = False
+    #: References into other repositories left out because crossing was not
+    #: asked for.
+    other_repositories: int = 0
+    #: False when the edge scan reached its row ceiling; references are then
+    #: omitted rather than listed from an arbitrary subset.
+    complete: bool = True
+    freshness: IndexFreshness
+    policy: str = POLICY

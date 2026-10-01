@@ -683,6 +683,33 @@ class TopologyDeclarationRow(NamedTuple):
     line_end: int | None
 
 
+class FileMatchRow(NamedTuple):
+    """A file a name search matched, and how many matched in all."""
+
+    repo_id: int
+    path: str
+    name: str
+    language: str | None
+    #: Every matching file in scope, the same on each row.
+    total: int
+
+
+class ReferenceRow(NamedTuple):
+    """A located edge leaving an entity in one file, with its far end."""
+
+    line_start: int
+    line_end: int | None
+    type: str
+    source_key: str
+    target_key: str
+    target_type: str
+    target_name: str
+    target_repo_id: int | None
+    target_path: str | None
+    target_line_start: int | None
+    target_line_end: int | None
+
+
 class StoredEdge(BaseModel):
     """One stored edge with every field that identifies it exactly.
 
@@ -748,6 +775,12 @@ class TopologyStore(Protocol):
         exclude: Sequence[EdgeType],
         limit: int,
     ) -> list[LinkEdgeRow]: ...
+    def files_matching(
+        self, repo_ids: Sequence[int], terms: Sequence[str], *, limit: int
+    ) -> list[FileMatchRow]: ...
+    def references_in(
+        self, file_id: int, *, exclude: Sequence[EdgeType], limit: int
+    ) -> list[ReferenceRow]: ...
 
 
 class VectorIndex(Protocol):
