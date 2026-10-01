@@ -22,10 +22,11 @@ export function AppHeader({ repositories, freshness, offline }: Props) {
     <div className={classes.bar}>
       <div className={classes.start}>
         <Link className={classes.brand} href="/" aria-label="RepoAtlas, all repositories">
-          <Logo />
+          <span className={classes.mark}>
+            <Logo />
+          </span>
           <span className={classes.wordmark}>RepoAtlas</span>
         </Link>
-        <span className={classes.title}>Graph Explorer</span>
       </div>
 
       <div className={classes.center}>

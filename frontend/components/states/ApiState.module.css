@@ -3,7 +3,7 @@
   padding: var(--mantine-spacing-xl);
   background-color: var(--ra-surface);
   border: 1px solid var(--ra-border);
-  border-radius: var(--mantine-radius-md);
+  border-radius: var(--ra-radius-l);
   box-shadow: var(--ra-shadow);
 }
 
@@ -35,7 +35,7 @@
   padding: 6px 6px 6px 12px;
   background-color: var(--ra-canvas);
   border: 1px solid var(--ra-border);
-  border-radius: var(--mantine-radius-sm);
+  border-radius: var(--ra-radius);
 
   code {
     font-family: var(--mantine-font-family-monospace);

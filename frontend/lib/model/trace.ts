@@ -204,6 +204,26 @@ export function buildTrace(impact: ImpactResponse): TraceGraph {
   };
 }
 
+/** How far a change reaches, counted the way a reader means it. */
+export interface Reach {
+  /** Things outside what changes that a change reaches: listed, named only as a file, or past the limit. */
+  outside: number;
+  /** Of those, how many the walk reached but did not return, for want of room. */
+  beyond: number;
+  /**
+   * What changes holds itself, which the walk starts from: a file's declarations,
+   * a directory's files. Impact counts them as reached, but never lists them.
+   */
+  within: number;
+}
+
+export function reachOf(impact: ImpactResponse): Reach {
+  const beyond = impact.omitted?.by_reason?.budget ?? 0;
+  const returned = impact.summary.returned ?? (impact.candidates ?? []).length + (impact.tests ?? []).length;
+  const outside = returned + (impact.unresolved ?? []).length + beyond;
+  return { outside, beyond, within: Math.max(0, (impact.summary.reached ?? outside) - outside) };
+}
+
 /**
  * A unit as a reader names it: impact writes `<repository>:<manifest folder>`,
  * with `.` for a repository's root.

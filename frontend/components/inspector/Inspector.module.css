@@ -16,15 +16,18 @@
 
 .header {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 16px 16px 10px 18px;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 12px 10px 18px;
 }
 
+/* the kind of thing inspected, a bare mark on the title's first line */
 .icon {
   display: grid;
   place-items: center;
   flex-shrink: 0;
+  width: 18px;
+  height: 25px;
 }
 
 .heading {
@@ -35,9 +38,8 @@
 .title {
   margin: 0;
   font-size: var(--mantine-font-size-xl);
-  font-weight: 650;
-  letter-spacing: -0.01em;
-  line-height: 1.25;
+  font-weight: 600;
+  line-height: 1.55;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -53,7 +55,6 @@
 }
 
 .close {
-  align-self: flex-start;
   color: var(--ra-text-muted);
 }
 
@@ -105,13 +106,14 @@
 }
 
 .tabCount {
-  margin-left: 6px;
-  padding: 0 6px;
-  border-radius: 9px;
-  font-size: var(--mantine-font-size-xs);
-  color: var(--ra-text-muted);
-  background-color: var(--ra-hover);
+  margin-left: 5px;
+  font-weight: 400;
+  color: var(--ra-text-subtle);
   font-variant-numeric: tabular-nums;
+}
+
+.tab[data-active] .tabCount {
+  color: var(--ra-text-muted);
 }
 
 .panel {
@@ -159,19 +161,18 @@
 
 .sectionTitle {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: baseline;
+  gap: 6px;
   margin: 0;
-  font-size: var(--mantine-font-size-xs);
-  font-weight: 650;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--ra-text-subtle);
+  font-size: var(--mantine-font-size-md);
+  font-weight: 600;
+  color: var(--ra-text);
 }
 
 .sectionCount {
-  font-weight: 500;
-  letter-spacing: 0;
+  font-weight: 400;
+  color: var(--ra-text-subtle);
+  font-variant-numeric: tabular-nums;
 }
 
 .family {
@@ -222,7 +223,7 @@
   min-width: 0;
   padding: 6px 40px 6px 6px;
   border: 1px solid transparent;
-  border-radius: var(--mantine-radius-sm);
+  border-radius: var(--ra-radius);
   background: transparent;
   color: var(--ra-text);
   font: inherit;
@@ -235,7 +236,7 @@
 
   &[data-selected] {
     background-color: var(--ra-selected);
-    border-color: color-mix(in oklch, var(--ra-accent) 45%, transparent);
+    border-color: var(--ra-accent);
   }
 
   &:focus-visible {
@@ -297,11 +298,14 @@
   margin: 4px 0 0 6px;
   padding: 2px 6px;
   border: 0;
-  border-radius: var(--mantine-radius-xs);
+  border-radius: var(--ra-radius-s);
   background: transparent;
   font: inherit;
   font-size: var(--mantine-font-size-sm);
-  color: var(--ra-accent);
+  font-weight: 500;
+  color: var(--ra-text-muted);
+  text-decoration: underline;
+  text-underline-offset: 3px;
   cursor: pointer;
 
   &:hover {
@@ -346,11 +350,14 @@
   color: var(--ra-text-muted);
 }
 
-.typeChip {
-  padding: 1px 8px;
-  border: 1px solid var(--ra-border);
-  border-radius: 999px;
-  font-size: var(--mantine-font-size-xs);
+.typeItem {
+  font-size: var(--mantine-font-size-sm);
+
+  & + &::before {
+    content: "·";
+    margin-right: 6px;
+    color: var(--ra-text-subtle);
+  }
 
   span {
     color: var(--ra-text-subtle);
@@ -358,13 +365,19 @@
   }
 }
 
+/* one example after another, ruled apart: no card around each */
 .examples {
   display: flex;
   flex-direction: column;
-  gap: 10px;
   margin: 0;
   padding: 0;
   list-style: none;
+  border-top: 1px solid var(--ra-border);
+
+  > li {
+    padding: 12px 0;
+    border-bottom: 1px solid var(--ra-border);
+  }
 }
 
 .edgeCard {
@@ -372,10 +385,6 @@
   flex-direction: column;
   align-items: flex-start;
   gap: 6px;
-  padding: 10px 12px;
-  border: 1px solid var(--ra-border);
-  border-radius: var(--mantine-radius-md);
-  background-color: var(--ra-canvas);
 }
 
 .edgeLine {
@@ -396,11 +405,8 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 0 7px;
-  border-radius: 999px;
-  font-size: var(--mantine-font-size-xs);
+  font-size: var(--mantine-font-size-sm);
   color: var(--ra-text-muted);
-  background-color: var(--ra-hover);
 }
 
 .edgeAt {
@@ -424,7 +430,7 @@
   align-self: stretch;
   padding: 6px 0;
   overflow-x: auto;
-  border-radius: var(--mantine-radius-sm);
+  border-radius: var(--ra-radius-s);
   background-color: var(--ra-evidence);
   scrollbar-width: thin;
 }
@@ -482,7 +488,7 @@
 .codeScroll {
   overflow-x: auto;
   border: 1px solid var(--ra-border);
-  border-radius: var(--mantine-radius-md);
+  border-radius: var(--ra-radius);
   background-color: var(--ra-canvas);
   scrollbar-width: thin;
 }
@@ -494,7 +500,6 @@
 
 .codeLine[data-hit] {
   background-color: var(--ra-evidence);
-  box-shadow: inset 3px 0 0 var(--ra-accent);
 }
 
 .codeGap {
@@ -534,12 +539,13 @@
 }
 
 .subhead {
-  margin: 18px 0 8px;
-  font-size: var(--mantine-font-size-xs);
-  font-weight: 650;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--ra-text-subtle);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 20px 0 6px;
+  font-size: var(--mantine-font-size-md);
+  font-weight: 600;
+  color: var(--ra-text);
 }
 
 .entry {
@@ -549,7 +555,7 @@
   width: 100%;
   padding: 6px;
   border: 0;
-  border-radius: var(--mantine-radius-sm);
+  border-radius: var(--ra-radius);
   background: transparent;
   color: var(--ra-text);
   font: inherit;
@@ -581,6 +587,19 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.entryIcon {
+  flex-shrink: 0;
+  color: var(--ra-text-muted);
+}
+
+/* a repository's swatch, centred where an icon would be */
+.markCell {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 16px;
 }
 
 .entryMeta {

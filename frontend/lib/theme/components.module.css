@@ -18,25 +18,54 @@
   font-size: var(--mantine-font-size-sm);
   font-weight: 500;
   padding: 4px 8px;
-  border-radius: var(--mantine-radius-xs);
+  border-radius: var(--ra-radius-s);
 }
 
 .dropdown {
   background-color: var(--ra-surface-elevated);
-  border: 1px solid var(--ra-border);
+  border: 1px solid var(--ra-border-strong);
+  border-radius: var(--ra-radius-l);
   box-shadow: var(--ra-shadow);
   color: var(--ra-text);
 }
 
 .kbd {
-  font-family: var(--mantine-font-family);
+  font-family: var(--mantine-font-family-monospace);
   font-size: var(--mantine-font-size-xs);
   font-weight: 500;
   line-height: 1;
   padding: 3px 5px;
   color: var(--ra-text-muted);
-  background-color: var(--ra-canvas);
-  border: 1px solid var(--ra-border);
+  background-color: transparent;
+  border: 1px solid var(--ra-border-strong);
   border-bottom-width: 1px;
-  border-radius: var(--mantine-radius-xs);
+  border-radius: var(--ra-radius-s);
+}
+
+/* two or three words, one of them chosen: underlined, not floated on a pill */
+.segmented {
+  padding: 0;
+  gap: 2px;
+  background-color: transparent;
+}
+
+.segmentedIndicator {
+  background-color: transparent;
+  box-shadow: inset 0 -2px 0 var(--ra-accent);
+  border-radius: 0;
+}
+
+.segmentedLabel {
+  padding: 3px 8px;
+  font-size: var(--mantine-font-size-md);
+  font-weight: 500;
+  color: var(--ra-text-muted);
+
+  &[data-active] {
+    color: var(--ra-text);
+  }
+
+  @mixin hover {
+    color: var(--ra-text);
+  }
 }

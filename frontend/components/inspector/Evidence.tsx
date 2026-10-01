@@ -44,7 +44,7 @@ export function Evidence({
   return (
     <div className={classes.evidence}>
       <div className={classes.evidenceHead}>
-        <LineGlyph family={link.family} width={22} />
+        <LineGlyph family={link.family} width={20} />
         <span className={classes.evidenceTitle}>
           {direction === "outgoing" ? "Uses" : "Used by"} <strong>{partner.label}</strong>
         </span>
@@ -53,7 +53,7 @@ export function Evidence({
       {link.types.length > 0 && (
         <p className={classes.typeLine}>
           {link.types.map((t) => (
-            <span key={t.type} className={classes.typeChip}>
+            <span key={t.type} className={classes.typeItem}>
               {t.type.toLowerCase().replace(/_/g, " ")} <span>{formatCount(t.count)}</span>
             </span>
           ))}

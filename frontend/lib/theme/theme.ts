@@ -4,6 +4,8 @@ import {
   Kbd,
   Popover,
   rem,
+  SegmentedControl,
+  Switch,
   Tooltip,
   type CSSVariablesResolver,
   type MantineColorsTuple,
@@ -12,65 +14,73 @@ import {
 import classes from "./components.module.css";
 import { cssVariables, DARK, LIGHT, type ColorTokens } from "./tokens";
 
+/** The accent: a vermilion, the red a map draws its route in. Shade 7 carries white text at 6.5:1. */
 const atlas: MantineColorsTuple = [
-  "#eef3ff",
-  "#dce6ff",
-  "#b9cbff",
-  "#93adff",
-  "#7399ff",
-  "#5b8cff",
-  "#4a78f5",
-  "#2f63f0",
-  "#2450cc",
-  "#1c3fa3",
+  "#fdf0eb",
+  "#fadccf",
+  "#f4b8a0",
+  "#ef9573",
+  "#ef7a50",
+  "#e0643a",
+  "#c84d27",
+  "#a8381a",
+  "#8f2d0f",
+  "#6e220a",
 ];
 
-/** Mantine's dark scale, retinted to the canvas's blue-black so its own surfaces agree. */
+/** Mantine's dark scale, on the dark scheme's graphite so its own surfaces agree. */
 const dark: MantineColorsTuple = [
-  "#e6edf7",
-  "#c3cedd",
-  "#9aa8bc",
-  "#7a889c",
-  "#2a3a4f",
-  "#1f2c3d",
-  "#152032",
-  "#111b29",
-  "#0c1420",
-  "#070d16",
+  "#ece9e2",
+  "#d8d4cb",
+  "#b3aea4",
+  "#9c978d",
+  "#45433f",
+  "#363532",
+  "#2a2927",
+  "#212120",
+  "#1a1a19",
+  "#131312",
 ];
 
-/** Mantine's grey scale, on the light scheme's own soft greys. */
+/** Mantine's grey scale, on the light scheme's warm paper greys. */
 const gray: MantineColorsTuple = [
-  "#eff2f5",
-  "#e3e8ee",
-  "#d3d9e2",
-  "#b3bdca",
-  "#8f9aab",
-  "#6b778a",
-  "#4a5668",
-  "#3a4658",
-  "#252f3e",
-  "#101826",
+  "#f1efea",
+  "#e6e3dc",
+  "#d2cec5",
+  "#b4afa4",
+  "#948e83",
+  "#726c62",
+  "#58534a",
+  "#46423b",
+  "#2d2a25",
+  "#1c1a17",
 ];
+
+/**
+ * IBM Plex, self-hosted (app/layout.tsx imports it): a humanist sans for the
+ * interface, and its mono for code, paths and identifiers, so the two agree.
+ */
+const SANS = "'IBM Plex Sans Variable', 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif";
+const MONO = "'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace";
 
 export const theme = createTheme({
   primaryColor: "atlas",
-  primaryShade: { light: 7, dark: 5 },
+  primaryShade: { light: 7, dark: 7 },
   colors: { atlas, dark, gray },
   white: "#ffffff",
-  black: "#101826",
+  black: "#1c1a17",
   autoContrast: true,
   // the reader's choice decides, through `data-motion` on the root (lib/motion.ts)
   respectReducedMotion: false,
   cursorType: "pointer",
   focusRing: "auto",
-  fontFamily: "var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif",
-  fontFamilyMonospace: "var(--font-geist-mono), ui-monospace, SFMono-Regular, monospace",
+  fontFamily: SANS,
+  fontFamilyMonospace: MONO,
   // 11 / 12 / 13 / 14 / 16, with 20 and 28 for headings; 13 is the body size
   fontSizes: { xs: rem(11), sm: rem(12), md: rem(13), lg: rem(14), xl: rem(16) },
   lineHeights: { xs: "1.4", sm: "1.45", md: "1.5", lg: "1.5", xl: "1.45" },
   headings: {
-    fontFamily: "var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif",
+    fontFamily: SANS,
     fontWeight: "600",
     sizes: {
       h1: { fontSize: rem(28), lineHeight: "1.2" },
@@ -81,7 +91,9 @@ export const theme = createTheme({
   },
   // a 4px grid
   spacing: { xs: rem(4), sm: rem(8), md: rem(12), lg: rem(16), xl: rem(24) },
-  radius: { xs: rem(4), sm: rem(6), md: rem(8), lg: rem(12), xl: rem(16) },
+  // three corners and no more: 2 for small marks, 4 for controls and nodes,
+  // 6 for what holds them; nothing is a pill
+  radius: { xs: rem(2), sm: rem(4), md: rem(4), lg: rem(6), xl: rem(6) },
   defaultRadius: "sm",
   breakpoints: { xs: "36em", sm: "48em", md: "64em", lg: "80em", xl: "96em" },
   components: {
@@ -98,6 +110,12 @@ export const theme = createTheme({
       classNames: { dropdown: classes.dropdown },
     }),
     Kbd: Kbd.extend({ classNames: { root: classes.kbd } }),
+    // a plain slot and a square thumb, the theme's own colours
+    Switch: Switch.extend({ defaultProps: { radius: "xs", withThumbIndicator: false } }),
+    SegmentedControl: SegmentedControl.extend({
+      defaultProps: { radius: "xs" },
+      classNames: { root: classes.segmented, indicator: classes.segmentedIndicator, label: classes.segmentedLabel },
+    }),
   },
 });
 
@@ -122,7 +140,10 @@ export const resolver: CSSVariablesResolver = () => ({
     "--ra-duration": "180ms",
     "--ra-duration-slow": "260ms",
     "--ra-ease": "cubic-bezier(0.2, 0.7, 0.2, 1)",
-    "--ra-header-height": rem(52),
+    "--ra-header-height": rem(48),
+    "--ra-radius-s": rem(2),
+    "--ra-radius": rem(4),
+    "--ra-radius-l": rem(6),
     "--ra-inspector-width": rem(400),
   },
   light: { ...cssVariables(LIGHT, "light"), ...mantineVariables(LIGHT) },

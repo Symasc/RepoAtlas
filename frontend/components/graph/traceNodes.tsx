@@ -8,7 +8,9 @@ import { TRACE_ROWS } from "@/lib/graph/layout";
 import { formatCount } from "@/lib/model/format";
 import { SEED_ID, type TraceCard, type TraceSeedView } from "@/lib/model/trace";
 
-import { EntityBadge, Monogram, PathBadge } from "./glyphs";
+import { RepoSwatch } from "@/components/common/RepoSwatch";
+
+import { EntityBadge, PathBadge } from "./glyphs";
 import { Anchors, stop, type NodeActions } from "./nodes";
 import classes from "./Trace.module.css";
 
@@ -86,7 +88,7 @@ function TraceSeedNode({ data }: NodeProps<Node<TraceSeedData, "traceSeed">>) {
       />
       <span className={classes.kicker}>What changes</span>
       <span className={classes.seedHead}>
-        <EntityBadge entityType={seed.type ?? "file"} size={30} />
+        <EntityBadge entityType={seed.type ?? "file"} size={20} />
         <span className={classes.seedText}>
           <span className={classes.seedName}>{seed.name}</span>
           <span className={classes.meta}>
@@ -131,7 +133,7 @@ function TraceCardNode({ id, data }: NodeProps<Node<TraceCardData, "traceCard">>
         onClick={stop(() => actions.activate(id))}
         aria-label={`Select ${card.name}${card.repository ? ` in ${card.repository}` : ""}${dir ? `/${dir}` : ""}`}
       >
-        {card.path ? <PathBadge path={card.path} file size={24} /> : <EntityBadge entityType={card.rows[0]?.candidate.type} size={24} />}
+        {card.path ? <PathBadge path={card.path} file /> : <EntityBadge entityType={card.rows[0]?.candidate.type} />}
         <span className={classes.cardText}>
           <span className={classes.cardName}>{card.name}</span>
           <span className={classes.meta}>{dir ?? (card.repository ? "repository root" : "shared across the index")}</span>
@@ -149,7 +151,7 @@ function TraceCardNode({ id, data }: NodeProps<Node<TraceCardData, "traceCard">>
               aria-label={`${row.candidate.name}${row.line !== null ? `, line ${row.line}` : ""}, ${row.reading}`}
               aria-pressed={row.id === picked}
             >
-              <EntityBadge entityType={row.candidate.type} size={18} />
+              <EntityBadge entityType={row.candidate.type} size={14} />
               <span className={classes.rowName}>{row.candidate.name}</span>
               {row.crossing === "package" && <PackageIcon size={13} className={classes.crossing} aria-hidden />}
               {row.crossing === "http" && <GlobeSimpleIcon size={13} className={classes.crossing} aria-hidden />}
@@ -174,7 +176,7 @@ function TraceFrameNode({ data }: NodeProps<Node<TraceFrameData, "traceFrame">>)
   return (
     <div className={classes.frame} data-home={data.home || undefined}>
       <span className={classes.frameHead}>
-        <Monogram name={data.repository} hue={data.hue} size={20} />
+        <RepoSwatch hue={data.hue} />
         <span className={classes.frameName}>{data.repository}</span>
         {!data.home && <span className={classes.frameNote}>another repository</span>}
       </span>
