@@ -8,11 +8,18 @@ of them together and publishes only what the indexed source establishes.
 shared route node only when an application is proven to serve it:
 
 * a ``NestFactory.create`` root names its root module directly and proves its
-  global prefix (:mod:`repoatlas.parsers.http_nestjs` decides what that takes);
+  global prefix and versioning (:mod:`repoatlas.parsers.http_nestjs` decides what
+  that takes);
 * the controller's registration path is established — the root module reaches the
   declaring module through ``imports`` entries that each resolve to exactly one
   indexed module class, and that module lists the controller;
 * nothing that can change routes is left unread where it could reach them.
+
+Under URI versioning a route is served once per version it has — its handler's
+``@Version``, else its controller's ``version``, else the application's
+``defaultVersion`` — at ``/<prefix>/<v><version>/<controller>/<route>``.
+``VERSION_NEUTRAL`` adds no segment; a route with no version at all is withheld,
+because NestJS serves it at no URI this can name.
 
 An unknown is never read as "no effect", and it blocks only what it can reach:
 
@@ -417,7 +424,7 @@ def plan_http_claims(
             configured_repositories.add(origin.repo_id)
 
     # -- applications -------------------------------------------------------------------
-    served: dict[int, set[str]] = defaultdict(set)
+    served: dict[int, set[tuple[str, str]]] = defaultdict(set)
     withheld: dict[int, str] = {}
     root_outcomes: dict[int, str] = {}
     for claim in grouped[NESTJS_ROOT]:
@@ -440,37 +447,47 @@ def plan_http_claims(
             if origin is not None
             else None
         )
-        prefixes = served.get(controller, set()) if controller is not None else set()
+        mounts = served.get(controller, set()) if controller is not None else set()
         promoted = False
+        # registered, but under URI versioning with no version to serve it at
+        versionless = bool(mounts)
         bodies: list[str] = []
-        for prefix in sorted(prefixes):
-            path = nest_path(prefix, meta.get("controller_path", ""), meta.get("method_path", ""))
-            body = http.route_body(meta.get("method", ""), path) if path is not None else ""
-            if origin is None or not body or http.canonical_route(body) is None:
-                continue
-            # One decorator states the whole route only when nothing else added to it.
-            exact = (
-                not prefix and not meta.get("controller_path") and meta.get("provenance") == EXACT
-            )
-            pending.setdefault(
-                (claim.src_id, body),
-                PendingHttpEdge(
-                    src_id=claim.src_id,
-                    target=EntityRecord(
-                        type=EntityType.HTTP_ROUTE,
-                        key=global_key(EntityType.HTTP_ROUTE, body),
-                        name=body,
-                        qualified_name=body,
+        for prefix, versioning in sorted(mounts):
+            segments = _segments(versioning, meta)
+            versionless = versionless and not segments
+            for segment in segments:
+                path = nest_path(
+                    prefix, segment, meta.get("controller_path", ""), meta.get("method_path", "")
+                )
+                body = http.route_body(meta.get("method", ""), path) if path is not None else ""
+                if origin is None or not body or http.canonical_route(body) is None:
+                    continue
+                # One decorator states the whole route only when nothing else added to it.
+                exact = (
+                    not prefix
+                    and not segment
+                    and not meta.get("controller_path")
+                    and meta.get("provenance") == EXACT
+                )
+                pending.setdefault(
+                    (claim.src_id, body),
+                    PendingHttpEdge(
+                        src_id=claim.src_id,
+                        target=EntityRecord(
+                            type=EntityType.HTTP_ROUTE,
+                            key=global_key(EntityType.HTTP_ROUTE, body),
+                            name=body,
+                            qualified_name=body,
+                        ),
+                        type=EdgeType.SERVES_HTTP_ROUTE,
+                        repo_id=origin.repo_id,
+                        file_id=origin.file_id,
+                        line_start=claim.line_start if exact else None,
+                        line_end=claim.line_end if exact else None,
                     ),
-                    type=EdgeType.SERVES_HTTP_ROUTE,
-                    repo_id=origin.repo_id,
-                    file_id=origin.file_id,
-                    line_start=claim.line_start if exact else None,
-                    line_end=claim.line_end if exact else None,
-                ),
-            )
-            promoted = True
-            bodies.append(body)
+                )
+                promoted = True
+                bodies.append(body)
         if promoted:
             resolved += 1
         else:
@@ -487,6 +504,8 @@ def plan_http_claims(
                 route_outcomes[claim.id] = PROMOTED
             elif controller is None:
                 route_outcomes[claim.id] = "controller not indexed"
+            elif versionless:
+                route_outcomes[claim.id] = "URI versioning names no version for it"
             else:
                 route_outcomes[claim.id] = withheld.get(
                     controller, "not registered by a proven application"
@@ -547,6 +566,32 @@ def plan_http_claims(
         promoted=promoted_routes,
         declared=declared_routes,
     )
+
+
+def _segments(versioning: str, meta: Mapping[str, str]) -> list[str]:
+    """The version segment of each URI a NestJS route is served at; ``""`` adds none.
+
+    An application without versioning ignores the versions its controllers state.
+    Under URI versioning a route has its handler's version, else its controller's
+    (the parser records whichever applies), else the application's default; each
+    is its prefix and the version, and ``VERSION_NEUTRAL`` adds no segment. A route
+    with no version at all is served at no URI this can name.
+    """
+    if not versioning:
+        return [""]
+    try:
+        config = json.loads(versioning)
+        prefix = config["prefix"]
+        versions = json.loads(meta["version"]) if "version" in meta else config["default"]
+    except (ValueError, KeyError, TypeError):
+        return []
+    if not isinstance(prefix, str) or not isinstance(versions, list):
+        return []
+    return [
+        f"{prefix}{version}" if version is not None else ""
+        for version in versions
+        if version is None or isinstance(version, str)
+    ]
 
 
 def _serve(serving: dict[int, dict[str, set[str]]], repo_id: int, body: str) -> None:
@@ -892,7 +937,7 @@ def _application(
     modules: dict[int, _Module],
     routed_packages: set[tuple[int, str]],
     configured_repositories: set[int],
-    served: dict[int, set[str]],
+    served: dict[int, set[tuple[str, str]]],
     withheld: dict[int, str],
 ) -> str:
     """Walk one application's registration and record what it proves.
@@ -953,7 +998,7 @@ def _application(
             else:
                 blocked = blocked or f"import {entry.target_key!r} cannot be read"
 
-    prefix = meta.get("prefix", "")
+    mount = (meta.get("prefix", ""), meta.get("versioning", ""))
     for module_id in reached:
         for entry in modules[module_id].controllers:
             entry_origin = resolver.origin(entry)
@@ -969,7 +1014,7 @@ def _application(
                     controller, "its module is handed to a dynamic module that may re-prefix it"
                 )
             else:
-                served[controller].add(prefix)
+                served[controller].add(mount)
     return blocked or PROVEN
 
 

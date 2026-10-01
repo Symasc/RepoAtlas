@@ -14,16 +14,23 @@ global pass (:mod:`repoatlas.graph.http_claims`) reads them together:
 
 * **routes** — each handler whose HTTP decorator and controller path are static,
   as a pending ``nestjs-route`` claim carrying the method, both path fragments and
-  the controller-local route. Nothing reaches a shared HTTP node from here;
+  the controller-local route, and the version its ``@Version`` or else its
+  controller states, if either does (a string, ``VERSION_NEUTRAL``, or an array of
+  them). Nothing reaches a shared HTTP node from here;
 * **modules** — a ``@Module`` class and every entry of its ``controllers`` and
   ``imports``. An entry that cannot be read is recorded with what is known about
   it, never dropped: an unread entry is not an entry without effect;
 * **roots** — the root module of each ``NestFactory.create``, with the global
   prefix when this file proves it — which includes proving that nothing else done
-  to the application could change a route;
+  to the application could change a route (documenting it with ``SwaggerModule``
+  cannot) — and its URI versioning: the prefix before each version and the default
+  version. Any other versioning type, or an option this cannot read, leaves the
+  prefix unknown;
 * **markers** — an import of ``RouterModule`` or ``ApplicationConfig``, or of
   ``@nestjs/core`` without a named list. Each can change routes that the
-  registration it appears in never mentions.
+  registration it appears in never mentions. A ``require`` or ``import()`` of it
+  destructured by name, ``const { NestFactory } = require("@nestjs/core")``, is a
+  named list.
 
 **Recognition is by import, never by name.** A decorator counts only when it is a
 named import from the NestJS package that defines it, bound once in the file. A
@@ -69,6 +76,10 @@ COMMON = "@nestjs/common"
 CORE = "@nestjs/core"
 MICROSERVICES = "@nestjs/microservices"
 _PACKAGES = frozenset({COMMON, CORE, MICROSERVICES})
+SWAGGER = "@nestjs/swagger"
+#: What ``SwaggerModule`` does with an application it is handed: read its routes into
+#: a document, and serve that document. Neither changes a route of the application.
+_DOCUMENTING = frozenset({"createDocument", "setup"})
 
 #: The method decorators with a method identity in :mod:`repoatlas.models.http`.
 VERBS = {
@@ -100,6 +111,12 @@ GLOBAL_MARKER = "global"
 
 #: A root's prefix is proven, or it is not.
 PROVEN = "proven"
+
+#: The versions a controller or handler states, in order: each a version string, or
+#: ``None`` for ``VERSION_NEUTRAL``. Recorded on a claim as a JSON array.
+Versions = tuple[str | None, ...]
+#: The prefix URI versioning puts before a version when the application names none.
+VERSION_PREFIX = "v"
 
 #: How many names a dynamic module's arguments are searched for.
 _MAX_ARGUMENT_NAMES = 64
@@ -358,7 +375,13 @@ class NestDeclarations:
                 and arguments
                 and string_literal(self._source, arguments[0]) == CORE
             ):
-                found.setdefault(GLOBAL_MARKER, node)
+                names = self._destructured(node)
+                if names is None:
+                    found.setdefault(GLOBAL_MARKER, node)
+                for name in names or ():
+                    kind = self._marker_kind(name)
+                    if kind is not None:
+                        found.setdefault(kind, node)
         for kind in sorted(found):
             start, end = line_range(found[kind])
             self._references.append(
@@ -372,6 +395,44 @@ class NestDeclarations:
                     marker=kind,
                 )
             )
+
+    def _destructured(self, call: Node) -> list[str] | None:
+        """The names ``const { A, B: b } = require(…)`` takes, or ``None`` for any other use.
+
+        Destructured by name, a ``require`` or ``await import()`` takes exactly what an
+        import's named list takes. Anything else — a binding of the whole module, a
+        rest element, a computed key — can reach every export.
+        """
+        node = call
+        while node.parent is not None and node.parent.type in {
+            "await_expression",
+            "parenthesized_expression",
+        }:
+            node = node.parent
+        declarator = node.parent
+        if (
+            declarator is None
+            or declarator.type != "variable_declarator"
+            or declarator.child_by_field_name("value") != node
+        ):
+            return None
+        pattern = declarator.child_by_field_name("name")
+        if pattern is None or pattern.type != "object_pattern":
+            return None
+        names: list[str] = []
+        for child in pattern.named_children:
+            if child.type == "comment":
+                continue
+            if child.type == "shorthand_property_identifier_pattern":
+                names.append(node_text(self._source, child))
+            elif child.type == "pair_pattern":
+                key = child.child_by_field_name("key")
+                if key is None or key.type != "property_identifier":
+                    return None
+                names.append(node_text(self._source, key))
+            else:
+                return None
+        return names
 
     @staticmethod
     def _marker_kind(imported: str) -> str | None:
@@ -412,10 +473,11 @@ class NestDeclarations:
     # -- controllers ------------------------------------------------------------------
 
     def _controller(self, name: str, call: Node, node: Node) -> None:
-        prefix = self._controller_path(call)
+        read = self._controller_path(call)
         body = node.child_by_field_name("body")
-        if prefix is None or body is None:
+        if read is None or body is None:
             return
+        prefix, version = read
         pending: list[Node] = []
         for child in body.children:
             if child.type == "decorator":
@@ -427,37 +489,76 @@ class NestDeclarations:
                 # The TypeScript grammar puts a method's decorators before it in the
                 # class body; the JavaScript grammar puts them inside it.
                 own = [c for c in child.children if c.type == "decorator"]
-                self._handler(name, prefix, child, [*pending, *own])
+                self._handler(name, prefix, version, child, [*pending, *own])
             pending = []
 
-    def _controller_path(self, call: Node) -> str | None:
-        """``@Controller()``, ``@Controller("p")`` or ``@Controller({ path: "p" })``.
+    def _controller_path(self, call: Node) -> tuple[str, Versions | None] | None:
+        """``@Controller()``, ``@Controller("p")`` or ``@Controller({ path, version })``.
 
-        Any other option — ``version``, ``host``, ``scope`` — or any value this cannot
-        read makes every route of the controller unknowable, so the class yields none.
+        ``(path, version)``; the version is ``None`` when the controller states none.
+        Any other option — ``host``, ``scope`` — or any value this cannot read makes
+        every route of the controller unknowable, so the class yields none.
         """
         arguments = _arguments(call)
         if arguments is None or len(arguments) > 1:
             return None
         if not arguments:
-            return ""
+            return "", None
         [argument] = arguments
-        if argument.type == "object":
-            entries = self._entries(argument)
-            if entries is None or set(entries) != {"path"}:
-                return None
-            argument = entries["path"]
-        return static_string(self._source, argument)
+        if argument.type != "object":
+            path = static_string(self._source, argument)
+            return (path, None) if path is not None else None
+        entries = self._entries(argument)
+        if entries is None or not set(entries) <= {"path", "version"}:
+            return None
+        path = static_string(self._source, entries["path"]) if "path" in entries else ""
+        version = self._versions(entries["version"]) if "version" in entries else None
+        if path is None or ("version" in entries and version is None):
+            return None
+        return path, version
 
-    def _handler(self, controller: str, prefix: str, method: Node, decorators: list[Node]) -> None:
+    def _versions(self, node: Node) -> Versions | None:
+        """``"1"``, ``VERSION_NEUTRAL`` or an array of them; ``None`` when unreadable."""
+        node = _unwrap(node)
+        if node.type == "array":
+            items = [child for child in node.named_children if child.type != "comment"]
+            found: list[str | None] = []
+            for item in items:
+                one = self._versions(item) if _unwrap(item).type != "array" else None
+                if one is None:
+                    return None
+                found.extend(v for v in one if v not in found)
+            return tuple(found) if found else None
+        if node.type == "identifier":
+            neutral = self._nest(node_text(self._source, node)) == (COMMON, "VERSION_NEUTRAL")
+            return (None,) if neutral else None
+        value = static_string(self._source, node)
+        return (value,) if value else None
+
+    def _handler(
+        self,
+        controller: str,
+        prefix: str,
+        version: Versions | None,
+        method: Node,
+        decorators: list[Node],
+    ) -> None:
         name_node = method.child_by_field_name("name")
         if name_node is None or name_node.type != "property_identifier":
             return
         if any(child.type in {"static", "get", "set", "*"} for child in method.children):
             return  # accessors, generators and static methods are never handlers
         applied = [(found, d) for d in decorators if (found := self._decorator(d))]
-        if any(nest == (COMMON, "Version") for (nest, _), _ in applied):
-            return  # URI versioning adds a segment this cannot know
+        versions = [call for (nest, call), _ in applied if nest == (COMMON, "Version")]
+        if versions:
+            # A handler's own version replaces its controller's.
+            arguments = _arguments(versions[0])
+            if len(versions) > 1 or arguments is None or len(arguments) != 1:
+                return
+            version = self._versions(arguments[0])
+            if version is None:
+                return
+        stated = {"version": json.dumps(list(version))} if version is not None else {}
         name = node_text(self._source, name_node)
         seen: set[str] = set()
         for (nest, call), decorator in applied:
@@ -489,6 +590,7 @@ class NestDeclarations:
                     controller_path=prefix,
                     method_path=path,
                     limitation=LIMITATION,
+                    **stated,
                 )
             )
 
@@ -699,6 +801,7 @@ class NestDeclarations:
             meta = {"kind": DYNAMIC}
         reason: str | None = None
         prefix = ""
+        versioning: str | None = None
         if not arguments or len(arguments) > 2:
             reason = "arguments"
         elif len(arguments) == 2 and arguments[1].type != "object":
@@ -708,9 +811,11 @@ class NestDeclarations:
             if application is None:
                 reason = "unbound application"
             else:
-                reason, prefix = self._prefix(*application)
+                reason, prefix, versioning = self._prefix(*application)
         if reason is None:
             meta.update(prefix_status=PROVEN, prefix=prefix)
+            if versioning is not None:
+                meta["versioning"] = versioning
         else:
             meta.update(prefix_status=UNKNOWN, reason=reason)
         return _Root(target, meta, start, end)
@@ -744,21 +849,27 @@ class NestDeclarations:
             return None
         return local, name
 
-    def _prefix(self, application: str, binding: Node) -> tuple[str | None, str]:
-        """``(reason, prefix)``: the prefix, or why it is not known.
+    def _prefix(self, application: str, binding: Node) -> tuple[str | None, str, str | None]:
+        """``(reason, prefix, versioning)``: the prefix and URI versioning, or why not known.
 
-        Every use of the application must be a method call on it. Anything else — an
-        argument, a return, a property read, a shorthand — hands it to code that
-        could set a prefix or version routes, so the prefix is unknown.
+        Every use of the application must be a method call on it, or an argument to
+        ``SwaggerModule.createDocument`` or ``SwaggerModule.setup``, which document
+        it. Anything else — an argument, a return, a property read, a shorthand —
+        hands it to code that could set a prefix or version routes, so the prefix is
+        unknown. Versioning is ``None`` when the application enables none, else the
+        JSON of :meth:`_versioning`.
         """
         root = binding
         while root.parent is not None:
             root = root.parent
         prefixes: list[str | None] = []
+        versionings: list[dict[str, object] | None] = []
         for node in walk(root):
             if node.type not in {"identifier", "shorthand_property_identifier"}:
                 continue
             if node_text(self._source, node) != application or node == binding:
+                continue
+            if node.type == "identifier" and self._documented(node):
                 continue
             member = node.parent
             call = member.parent if member is not None else None
@@ -771,20 +882,91 @@ class NestDeclarations:
                 or call.type != "call_expression"
                 or call.child_by_field_name("function") != member
             ):
-                return "application escapes", ""
+                return "application escapes", "", None
             prop = member.child_by_field_name("property")
             method = node_text(self._source, prop) if prop is not None else ""
             if method == "enableVersioning":
-                return "versioning", ""
+                versionings.append(self._versioning(call))
             if method == "setGlobalPrefix":
                 arguments = _arguments(call) or []
                 value = static_string(self._source, arguments[0]) if len(arguments) == 1 else None
                 prefixes.append(value)
+        if len(versionings) > 1 or None in versionings:
+            return "versioning", "", None
+        versioning = json.dumps(versionings[0], sort_keys=True) if versionings else None
         if not prefixes:
-            return None, ""
+            return None, "", versioning
         if len(prefixes) > 1 or prefixes[0] is None:
-            return "global prefix", ""
+            return "global prefix", "", None
         value = prefixes[0]
         if any(char in _PATTERN for char in value):
-            return "global prefix", ""
-        return None, value
+            return "global prefix", "", None
+        return None, value, versioning
+
+    def _documented(self, node: Node) -> bool:
+        """Whether ``node`` is an argument to ``SwaggerModule.createDocument`` or ``.setup``.
+
+        ``SwaggerModule`` must be a named import from ``@nestjs/swagger``, bound once.
+        """
+        arguments = node.parent
+        call = arguments.parent if arguments is not None else None
+        if arguments is None or arguments.type != "arguments" or call is None:
+            return False
+        callee = call.child_by_field_name("function") if call.type == "call_expression" else None
+        if callee is None or callee.type != "member_expression":
+            return False
+        owner = callee.child_by_field_name("object")
+        prop = callee.child_by_field_name("property")
+        if owner is None or prop is None or owner.type != "identifier":
+            return False
+        local = node_text(self._source, owner)
+        binding = self._imports.get(local)
+        return (
+            binding is not None
+            and (binding.specifier, binding.imported) == (SWAGGER, "SwaggerModule")
+            and self._counts[local] == 1
+            and node_text(self._source, prop) in _DOCUMENTING
+        )
+
+    def _versioning(self, call: Node) -> dict[str, object] | None:
+        """``enableVersioning``'s URI versioning, or ``None``.
+
+        ``{"prefix", "default"}``: what goes before each version in the URI, and the
+        versions of a route that states none (``None`` when there are none). Any
+        other type routes by a header, a media type or code, which no path names;
+        that, or an option this cannot read, is ``None``.
+        """
+        arguments = _arguments(call)
+        if arguments is None or len(arguments) > 1:
+            return None
+        if not arguments:
+            return {"prefix": VERSION_PREFIX, "default": None}  # URI is the default type
+        options = _unwrap(arguments[0])
+        entries = self._entries(options) if options.type == "object" else None
+        if entries is None or "type" not in entries:
+            return None
+        if not set(entries) <= {"type", "prefix", "defaultVersion"}:
+            return None
+        kind = _unwrap(entries["type"])
+        owner = kind.child_by_field_name("object") if kind.type == "member_expression" else None
+        prop = kind.child_by_field_name("property") if kind.type == "member_expression" else None
+        if (
+            owner is None
+            or prop is None
+            or owner.type != "identifier"
+            or self._nest(node_text(self._source, owner)) != (COMMON, "VersioningType")
+            or node_text(self._source, prop) != "URI"
+        ):
+            return None
+        prefix: str | None = VERSION_PREFIX
+        if "prefix" in entries:
+            value = _unwrap(entries["prefix"])
+            prefix = "" if value.type == "false" else static_string(self._source, value)
+        default: Versions | None = None
+        if "defaultVersion" in entries:
+            default = self._versions(entries["defaultVersion"])
+            if default is None:
+                return None
+        if prefix is None:
+            return None
+        return {"prefix": prefix, "default": list(default) if default is not None else None}
