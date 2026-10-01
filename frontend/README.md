@@ -35,19 +35,68 @@ shows the command to start it.
 
 ## What it shows
 
-- **All repositories.** Every indexed repository, and the links the index
-  records between them, one line per kind: code (solid), HTTP (dashed) and
-  package dependency (double). Kinds are never merged into one line.
-  Repositories with no links sit in a row of their own.
-- **A repository, opened.** Click one: its directories become cards listing
-  what is in them, its files share a card, and what they link to is drawn
-  around them (other repositories and elsewhere in this one on the left;
-  modules, packages, environment variables, commands and endpoints shared
-  across the index on the right). At rest the level's total per kind is drawn;
-  point at or focus a card to see its own lines. Click a card to go into it.
+The explorer is built to be read, not to show every edge at once. It shows the
+summary first and the detail when you ask for it.
 
-Where you are is in the URL (`?repo=<slug>&path=<dir>`), so Back climbs out
-and a view can be shared.
+- **All repositories.** A constellation. The selected repository, or else the
+  one with the most partners, sits at the centre. Its partners ring it, and
+  theirs ring them. Repositories linked only among themselves form their own
+  small constellations beside it. Repositories with no links sit in their own
+  group. When nothing links at all, the repositories ring the workspace hub,
+  which says so.
+- **A repository, opened.** The directory you are in is a frame around its
+  cards: one per directory, listing what is in it, and one for its files.
+  Each card counts its links per family instead of drawing them. At rest, only
+  the level's totals are drawn: lanes from the frame to other repositories and
+  elsewhere in this one (left), and to modules, packages, environment
+  variables, commands and endpoints shared across the index (right).
+- **A file.** The file is the anchor. What links to it is on the left, and what
+  it links to is on the right. Only the strongest few on each side are shown;
+  "+N more" expands the rest.
+
+Lines are drawn per family and never merged into one line:
+
+| Family | Line |
+|---|---|
+| code (imports, uses, calls…) | solid |
+| HTTP | dashed |
+| package dependency | double |
+| configuration and environment variables | dotted |
+| the connection being explained | thick, in the accent colour |
+
+Every line has an arrowhead for its direction. Its width grows with its count.
+Node families differ by shape, icon and border as well as colour. The legend's
+shapes button names them.
+
+### Pointing, selecting, opening
+
+| Action | Result |
+|---|---|
+| Point at a node (or focus it) | Previews its links; everything else fades. |
+| First press | Selects it: its links stay lit with counts, and the inspector opens. |
+| Second press, "Open", or Enter on the selected node | Goes in, zooming into it. |
+| Location trail, or Back | Climbs out, zooming out onto where you came from. That node arrives selected. |
+| Escape, or a press on empty canvas | Clears the selection. |
+
+The inspector, docked beside the canvas (below it on a narrow window), holds
+the detail:
+
+- **Connections:** every link, by direction and family, strongest first.
+- **Contents** or **Files:** what a directory holds.
+- **Code:** a file's indexed source, with line numbers.
+- **Details:** the facts the index has: size and lines from `inspect`, language,
+  declarations.
+- **Evidence:** for a chosen connection, the exact stored relationships behind
+  it (`topology/edge`) and the lines that assert them. Evidence and source for
+  one inspected thing share one investigation.
+
+Where you are is in the URL (`?repo=<slug>&path=<dir or file>&sel=<node>`), so
+a view can be shared. Selecting replaces the history entry and going somewhere
+adds one, so Back climbs out.
+
+Motion is limited to viewport transforms and opacity, from about 250ms to
+560ms, with no animated backgrounds. With reduced motion, everything moves
+instantly.
 
 ## The `/api/ra` route
 

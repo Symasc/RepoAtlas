@@ -3,91 +3,117 @@
 import {
   BaseEdge,
   EdgeLabelRenderer,
-  getBezierPath,
-  getSmoothStepPath,
-  Position,
+  useInternalNode,
   type Edge,
   type EdgeProps,
   type EdgeTypes,
+  type InternalNode,
 } from "@xyflow/react";
 import { memo } from "react";
 
-import { formatCount } from "@/lib/model/format";
-import type { LinkData } from "@/lib/model/graph";
+import { arrowhead, floating, sideways, type Route } from "@/lib/graph/geometry";
 import { strokeFor } from "@/lib/graph/layout";
+import { compactCount, formatCount } from "@/lib/model/format";
+import type { Box, Family, LinkData } from "@/lib/model/graph";
 
 import classes from "./Graph.module.css";
 
-/** Hover state decides emphasis: lit when touching the hovered node, dim when not. */
-export type Emphasis = "rest" | "lit" | "dim";
+/**
+ * How a line stands at the moment: at rest, lit (it touches what is pointed at
+ * or selected), dim (something else is), or the selected connection itself.
+ */
+export type Emphasis = "rest" | "lit" | "dim" | "selected";
+
+/** `float`: border to border; `side`: side to side; `lane`: side to side, met by a frame as a lane. */
+export type RouteKind = "float" | "side" | "lane";
 
 export type LinkEdgeData = {
   link: LinkData;
   emphasis: Emphasis;
+  /** Show the count even at rest: a small neighbourhood can afford it. */
   labelled: boolean;
-  /** Pixels across the line's direction, to separate parallel kinds. */
+  /** Pixels across the line, to separate families drawn between the same pair. */
   offset: number;
-  /** See ViewEdge.scope: a card's own line, or a level's total. */
+  route: RouteKind;
+  /** For `float`: how far the line bows, as a fraction of its length. */
+  curve: number;
   scope: "detail" | "aggregate" | null;
 };
-export type TreeEdgeData = { emphasis: Emphasis };
 
-export type GraphEdge = Edge<LinkEdgeData, "link"> | Edge<TreeEdgeData, "tree">;
+export type GraphEdge = Edge<LinkEdgeData, "link">;
 
-export const KIND_NOUN: Record<LinkData["kind"], string> = {
-  observed: "code",
+export const FAMILY_NOUN: Record<Family, string> = {
+  code: "code",
   http: "HTTP",
-  dependency: "dependency",
+  dependency: "package dependency",
+  config: "configuration",
 };
 
-function describe(link: LinkData): string {
+export function describeLink(link: LinkData): string {
   const types = link.types.map((t) => `${t.type.toLowerCase().replace(/_/g, " ")} ${formatCount(t.count)}`);
   const packages = link.packages.length > 0 ? `; packages: ${link.packages.slice(0, 5).join(", ")}` : "";
-  return `${formatCount(link.count)} ${KIND_NOUN[link.kind]} relationships${types.length ? ` (${types.join(", ")})` : ""}${packages}`;
+  return `${formatCount(link.count)} ${FAMILY_NOUN[link.family]} ${link.count === 1 ? "relationship" : "relationships"}${types.length ? ` (${types.join(", ")})` : ""}${packages}`;
+}
+
+function boxOf(node: InternalNode): Box {
+  return {
+    x: node.internals.positionAbsolute.x,
+    y: node.internals.positionAbsolute.y,
+    width: node.width ?? node.measured.width ?? 0,
+    height: node.height ?? node.measured.height ?? 0,
+  };
 }
 
 /**
- * One relationship kind, drawn in its own stroke: code solid, HTTP dashed,
- * package dependency as a double line. Width grows with the count, logarithmically.
+ * One family of relationship, in its own stroke: code solid, HTTP dashed, a
+ * package dependency double, configuration dotted. Width grows with the count,
+ * logarithmically; the arrow says which way it runs.
  */
-function LinkEdge(props: EdgeProps<Edge<LinkEdgeData, "link">>) {
-  const { id, data, sourcePosition, targetPosition } = props;
-  const offset = data?.offset ?? 0;
-  const across = (position: Position) => position === Position.Left || position === Position.Right;
-  const sourceX = props.sourceX + (across(sourcePosition) ? 0 : offset);
-  const sourceY = props.sourceY + (across(sourcePosition) ? offset : 0);
-  const targetX = props.targetX + (across(targetPosition) ? 0 : offset);
-  const targetY = props.targetY + (across(targetPosition) ? offset : 0);
-  const [path, labelX, labelY] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
-  if (!data) return null;
-  const { link, emphasis, labelled } = data;
-  const width = strokeFor(link.count);
+function LinkEdge({ id, source, target, data }: EdgeProps<GraphEdge>) {
+  const from = useInternalNode(source);
+  const to = useInternalNode(target);
+  if (!from || !to || !data) return null;
+  const { link, emphasis, labelled, offset } = data;
+  const s = boxOf(from);
+  const t = boxOf(to);
+  let route: Route;
+  if (data.route === "float") {
+    route = floating(s, t, offset, data.curve);
+  } else {
+    const lane = data.route === "lane" ? (from.type === "frame" ? "source" : to.type === "frame" ? "target" : null) : null;
+    route = sideways(s, t, offset, lane);
+  }
+  const width = strokeFor(link.count) + (emphasis === "selected" ? 1 : 0);
+  const head = arrowhead(route.end, route.towards, 5 + width * 1.6);
   return (
     <>
-      <g className={classes.link} data-kind={link.kind} data-emphasis={emphasis}>
-        <title>{describe(link)}</title>
-        {link.kind === "dependency" ? (
+      <g className={classes.link} data-family={link.family} data-kind={link.kind} data-emphasis={emphasis}>
+        <title>{describeLink(link)}</title>
+        {emphasis === "selected" && <path d={route.path} className={classes.halo} style={{ strokeWidth: width + 9 }} />}
+        {link.family === "dependency" ? (
           <>
-            <BaseEdge id={id} path={path} className={classes.linkOuter} style={{ strokeWidth: width + 3 }} />
+            <BaseEdge id={id} path={route.path} className={classes.linkOuter} style={{ strokeWidth: width + 3 }} />
             <BaseEdge
-              path={path}
+              path={route.path}
               className={classes.linkInner}
-              style={{ strokeWidth: Math.max(width - 0.5, 1) }}
+              style={{ strokeWidth: Math.max(width - 0.75, 1) }}
               interactionWidth={0}
             />
           </>
         ) : (
-          <BaseEdge id={id} path={path} className={classes.linkStroke} style={{ strokeWidth: width }} />
+          <BaseEdge id={id} path={route.path} className={classes.linkStroke} style={{ strokeWidth: width }} />
         )}
+        <path d={head} className={classes.arrow} />
       </g>
-      {(labelled || emphasis === "lit") && (
+      {(labelled || emphasis === "lit" || emphasis === "selected") && emphasis !== "dim" && (
         <EdgeLabelRenderer>
           <span
             className={classes.edgeLabel}
-            data-kind={link.kind}
-            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
+            data-family={link.family}
+            data-emphasis={emphasis}
+            style={{ transform: `translate(-50%, -50%) translate(${route.label.x}px, ${route.label.y}px)` }}
           >
-            {formatCount(link.count)}
+            {compactCount(link.count)}
           </span>
         </EdgeLabelRenderer>
       )}
@@ -95,27 +121,6 @@ function LinkEdge(props: EdgeProps<Edge<LinkEdgeData, "link">>) {
   );
 }
 
-/** Containment: where a child sits, never a relationship. */
-function TreeEdge(props: EdgeProps<Edge<TreeEdgeData, "tree">>) {
-  const { id, data, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition } = props;
-  const [path] = getSmoothStepPath({
-    sourceX,
-    sourceY,
-    sourcePosition,
-    targetX,
-    targetY,
-    targetPosition,
-    borderRadius: 10,
-  });
-  return (
-    <g className={classes.tree} data-emphasis={data?.emphasis ?? "rest"}>
-      <BaseEdge id={id} path={path} className={classes.treeStroke} />
-      <circle cx={targetX} cy={targetY} r={2.5} className={classes.treeDot} />
-    </g>
-  );
-}
-
 export const edgeTypes: EdgeTypes = {
   link: memo(LinkEdge),
-  tree: memo(TreeEdge),
 };

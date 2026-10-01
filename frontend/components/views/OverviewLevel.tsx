@@ -1,87 +1,265 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useReducedMotion } from "@mantine/hooks";
+import { useCallback, useMemo, useState } from "react";
 
 import { Graph } from "@/components/graph/Graph";
 import { flowEdges, place } from "@/components/graph/flow";
-import type { Actions, GraphNode } from "@/components/graph/nodes";
-import { useTopologyOverview } from "@/lib/api/topology";
-import { layered } from "@/lib/graph/elk";
-import { belowAll, rowsOf, SIZE, type Layout } from "@/lib/graph/layout";
-import { plural } from "@/lib/model/format";
+import { Monogram } from "@/components/graph/glyphs";
+import { languagesOf, type GraphNode, type NodeActions } from "@/components/graph/nodes";
+import { useTween } from "@/components/graph/useTween";
+import { Connections } from "@/components/inspector/Connections";
+import { Contents } from "@/components/inspector/Entries";
+import { Evidence } from "@/components/inspector/Evidence";
+import { Inspector, OpenButton } from "@/components/inspector/Inspector";
+import inspectorClasses from "@/components/inspector/Inspector.module.css";
 import type { RepositoryLink } from "@/lib/api/generated";
-import { buildOverview, repositoryId } from "@/lib/model/graph";
+import { useTopologyOverview } from "@/lib/api/topology";
+import { bounds, constellation, GROUP_ID, HUB_ID, type Layout } from "@/lib/graph/layout";
+import { absoluteTime, formatCount, plural, relativeTime, shortSha } from "@/lib/model/format";
+import { buildOverview, FAMILIES, repositoryId, type Connection, type Family } from "@/lib/model/graph";
 import type { RepositoryModel } from "@/lib/model/repositories";
 
 import { Metrics } from "./Metrics";
+import type { Navigation } from "./navigation";
 import classes from "./Views.module.css";
 
 const NO_LINKS: readonly RepositoryLink[] = [];
 
 /**
- * Level one: every indexed repository, and the links the index records between
- * them, one line per kind. Unlinked repositories get their own row.
+ * Level one: every indexed repository as a constellation. The selected
+ * repository (else the one with the most partners) is the anchor at the centre;
+ * its partners ring it; repositories with no links stand apart. Selecting one
+ * re-centres the map on it and opens it in the inspector; a second press goes in.
  */
-export function OverviewLevel({
-  repositories,
-  onOpen,
-}: {
-  repositories: RepositoryModel[];
-  onOpen: (slug: string) => void;
-}) {
+export function OverviewLevel({ repositories, nav }: { repositories: RepositoryModel[]; nav: Navigation }) {
   const overview = useTopologyOverview();
   const links = overview.data?.links ?? NO_LINKS;
   const graph = useMemo(() => buildOverview(repositories, links), [repositories, links]);
+  const reduced = useReducedMotion() ?? false;
 
-  const signature = `${graph.linked.map((r) => r.slug).join(",")}|${graph.edges.map((e) => e.id).join(",")}`;
-  const engine = useQuery({
-    queryKey: ["layout", "overview", signature],
-    queryFn: () =>
-      layered(
-        graph.linked.map((r) => ({ id: repositoryId(r.slug), ...SIZE.repository })),
-        graph.edges,
-      ),
-    enabled: graph.linked.length > 0,
-    staleTime: Infinity,
-  });
+  const known = useMemo(() => new Map(repositories.map((r) => [repositoryId(r.slug), r])), [repositories]);
+  const selected = nav.selected !== null && known.has(nav.selected) ? nav.selected : null;
+  const ready = overview.isSuccess || overview.isError;
 
-  const actions = useMemo<Actions>(() => ({ openRepository: onOpen, openPath: () => {} }), [onOpen]);
+  const shape = useMemo(() => constellation(repositories, graph.edges, selected), [repositories, graph.edges, selected]);
+  const target = useMemo(() => {
+    const layout: Layout = new Map(shape.layout);
+    for (const ring of shape.rings) {
+      layout.set(ring.id, { x: -ring.rx, y: -ring.ry, width: ring.rx * 2, height: ring.ry * 2 });
+    }
+    return layout;
+  }, [shape]);
+  const anchorKey = shape.anchor ?? HUB_ID;
+  // glides when the reader re-centres the map, not when the links first arrive
+  // and move the anchor off the hub: the first view is drawn where it settles
+  const layout = useTween(target, selected ?? "", reduced);
+  const extent = useMemo(
+    () => bounds([...shape.layout.entries()].filter(([id]) => id !== GROUP_ID).map(([, box]) => box)),
+    [shape],
+  );
 
-  const { nodes, edges } = useMemo(() => {
-    const ready = overview.isSuccess || overview.isError;
-    if (!ready || (graph.linked.length > 0 && !engine.data)) return { nodes: [], edges: [] };
-    const layout: Layout = new Map(engine.data ?? []);
-    for (const [id, box] of rowsOf(graph.independent, belowAll(layout))) layout.set(id, box);
-    const placed: GraphNode[] = [];
-    for (const repository of [...graph.linked, ...graph.independent]) {
+  const open = useCallback(
+    (id: string) => {
+      const repository = known.get(id);
+      if (repository) nav.go({ repository: repository.slug, path: "" }, { via: id });
+    },
+    [known, nav],
+  );
+  const activate = useCallback(
+    (id: string) => {
+      if (!known.has(id)) return;
+      if (nav.isSelected(id)) open(id);
+      else nav.select(id);
+    },
+    [known, nav, open],
+  );
+  const actions = useMemo<NodeActions>(
+    () => ({ activate, go: (to) => nav.go({ repository: to.repository, path: to.path }) }),
+    [activate, nav],
+  );
+
+  const partners = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const [id, list] of graph.connections) map.set(id, new Set(list.map((c) => c.node)).size);
+    return map;
+  }, [graph.connections]);
+
+  const nodes = useMemo<GraphNode[]>(() => {
+    if (!ready) return [];
+    const out: GraphNode[] = [];
+    for (const ring of shape.rings) {
+      const box = layout.get(ring.id);
+      if (box) out.push(place({ id: ring.id, type: "orbit", data: {}, zIndex: -2, selectable: false }, box, { pointerEvents: "none" }));
+    }
+    if (shape.group) {
+      out.push(
+        place(
+          { id: GROUP_ID, type: "group", data: { count: graph.independent.length }, zIndex: -1 },
+          layout.get(GROUP_ID) ?? shape.group,
+          { pointerEvents: "none" },
+        ),
+      );
+    }
+    const hub = layout.get(HUB_ID);
+    if (shape.anchor === null && hub) {
+      const files = repositories.reduce((sum, r) => sum + r.files, 0);
+      const note = overview.isError
+        ? "Links between them could not be read"
+        : repositories.length > 1
+          ? "No links between them are recorded"
+          : null;
+      out.push(place({ id: HUB_ID, type: "hub", data: { repositories: repositories.length, files, note } }, hub));
+    }
+    for (const repository of repositories) {
       const id = repositoryId(repository.slug);
       const box = layout.get(id);
-      if (box) placed.push(place({ id, type: "repository", data: { repository, current: false, actions } }, box));
+      if (box) {
+        out.push(place({ id, type: "repository", data: { repository, actions, partners: partners.get(id) ?? 0 } }, box));
+      }
     }
-    return { nodes: placed, edges: flowEdges(graph.edges, layout, true) };
-  }, [graph, engine.data, actions, overview.isSuccess, overview.isError]);
+    return out;
+  }, [ready, shape, layout, repositories, graph.independent.length, overview.isError, actions, partners]);
 
-  const crossing = (overview.data?.links ?? []).reduce((sum, link) => sum + link.count, 0);
+  const edges = useMemo(
+    () =>
+      flowEdges(graph.edges, {
+        route: () => "float",
+        // spokes from the anchor run straight; lines between ring neighbours bow outward
+        curve: (e) => (e.source === shape.anchor || e.target === shape.anchor ? 0 : 0.14),
+      }),
+    [graph.edges, shape.anchor],
+  );
+
+  const families = useMemo<Family[]>(() => {
+    const present = new Set(graph.edges.map((e) => e.link.family));
+    return present.size === 0 ? ["code", "http", "dependency"] : FAMILIES.filter((f) => present.has(f));
+  }, [graph.edges]);
+
+  const crossing = links.reduce((sum, link) => sum + link.count, 0);
   const note = overview.isError
     ? "The links between repositories could not be read. Repositories are shown without them."
-    : overview.isSuccess && graph.edges.length === 0 && repositories.length > 1
-      ? "No links between these repositories are recorded in the index. Open one to see how its parts connect."
-      : overview.data?.ambiguous_total
-        ? `${plural(overview.data.ambiguous_total, "package")} with more than one possible publisher ${overview.data.ambiguous_total === 1 ? "is" : "are"} not drawn.`
-        : null;
+    : overview.data?.ambiguous_total
+      ? `${plural(overview.data.ambiguous_total, "package")} with more than one possible publisher ${overview.data.ambiguous_total === 1 ? "is" : "are"} not drawn.`
+      : null;
+
+  const repository = selected ? known.get(selected)! : null;
+  const [connection, setConnection] = useState<{ subject: string | null; id: string | null }>({ subject: null, id: null });
+  const [tab, setTab] = useState<{ subject: string | null; value: string }>({ subject: null, value: "connections" });
+  const rows: Connection[] = selected ? (graph.connections.get(selected) ?? []) : [];
+  const currentTab = tab.subject === selected ? tab.value : "connections";
+  // Evidence opened with nothing chosen explains the strongest connection
+  const explicit = connection.subject === selected ? rows.find((c) => c.id === connection.id) : undefined;
+  const picked: Connection | null = explicit ?? (currentTab === "evidence" ? rows[0] : undefined) ?? null;
+  const choose = (c: Connection) => {
+    setConnection({ subject: selected, id: c.id });
+    setTab({ subject: selected, value: "evidence" });
+  };
+  const hues = useMemo(() => new Map(repositories.map((r) => [r.slug, r.hue])), [repositories]);
 
   return (
     <div className={classes.level}>
       <Metrics repositories={repositories} crossing={overview.isSuccess ? crossing : null} />
-      <Graph
-        nodes={nodes}
-        edges={edges}
-        level="overview"
-        label="Repositories and the links between them"
-        containment={false}
-        topCenter={note && <p className={classes.note}>{note}</p>}
-      />
+      <div className={classes.stage} data-inspector={repository ? true : undefined}>
+        <div className={classes.canvas}>
+          <Graph
+            nodes={nodes}
+            edges={edges}
+            level="overview"
+            label="Repositories and the links between them"
+            selected={selected}
+            selectedEdge={picked?.edge ?? null}
+            onSelect={nav.select}
+            onActivate={activate}
+            arrival={{
+              direction: nav.arrival.direction,
+              from: nav.arrival.previous?.repository ? repositoryId(nav.arrival.previous.repository) : null,
+            }}
+            extent={extent}
+            refit={anchorKey}
+            families={families}
+            topCenter={note && <p className={classes.note}>{note}</p>}
+          />
+        </div>
+        {repository && (
+          <Inspector
+            label={`${repository.name}, inspected`}
+            icon={<Monogram name={repository.name} hue={repository.hue} size={38} />}
+            title={repository.name}
+            subtitle={languagesOf(repository, 4) || "Repository"}
+            onClose={() => nav.select(null)}
+            actions={<OpenButton name={repository.name} onOpen={() => open(selected!)} />}
+            tab={currentTab}
+            onTab={(value) => setTab({ subject: selected, value })}
+            tabs={[
+              {
+                value: "connections",
+                label: "Connections",
+                count: rows.length,
+                panel: (
+                  <Connections
+                    connections={rows}
+                    chosen={picked?.id ?? null}
+                    onChoose={choose}
+                    hues={hues}
+                    onGo={(partner) => partner.repository && nav.select(repositoryId(partner.repository))}
+                  />
+                ),
+              },
+              {
+                value: "contents",
+                label: "Contents",
+                panel: (
+                  <Contents
+                    repository={repository.slug}
+                    path=""
+                    onGo={(path) => nav.go({ repository: repository.slug, path }, { via: selected })}
+                  />
+                ),
+              },
+              { value: "details", label: "Details", panel: <RepositoryDetails repository={repository} /> },
+              {
+                value: "evidence",
+                label: "Evidence",
+                panel: <Evidence connection={picked} subject={`repo:${repository.slug}`} />,
+              },
+            ]}
+          />
+        )}
+      </div>
     </div>
+  );
+}
+
+export function RepositoryDetails({ repository: r }: { repository: RepositoryModel }) {
+  return (
+    <dl className={inspectorClasses.details}>
+      <dt>Branch</dt>
+      <dd>{r.branch ?? "Detached"}</dd>
+      <dt>Commit</dt>
+      <dd className={inspectorClasses.mono}>{shortSha(r.headSha) ?? "Unknown"}</dd>
+      <dt>Freshness</dt>
+      <dd>{r.freshness.label}</dd>
+      {r.lastIndexedAt && (
+        <>
+          <dt>Indexed</dt>
+          <dd title={absoluteTime(r.lastIndexedAt)}>{relativeTime(r.lastIndexedAt)}</dd>
+        </>
+      )}
+      <dt>Files</dt>
+      <dd>{formatCount(r.files)}</dd>
+      <dt>Symbols</dt>
+      <dd>{formatCount(r.symbols)}</dd>
+      <dt>Relationships</dt>
+      <dd>{formatCount(r.relationships)}</dd>
+      <dt>Languages</dt>
+      <dd>{r.languages.join(", ") || "None recorded"}</dd>
+      {r.manifests.length > 0 && (
+        <>
+          <dt>Manifests</dt>
+          <dd className={inspectorClasses.mono}>{r.manifests.slice(0, 12).join(", ")}{r.manifests.length > 12 ? ` +${r.manifests.length - 12}` : ""}</dd>
+        </>
+      )}
+    </dl>
   );
 }

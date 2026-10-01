@@ -1,11 +1,36 @@
 import { describe, expect, it } from "vitest";
 
 import { flowEdges } from "@/components/graph/flow";
+import { blend } from "@/components/graph/useTween";
 import type { ChildEntry, ChildLink, RepositoryLink, TopologyChildrenResponse } from "@/lib/api/generated";
-import { cardHeight, layoutOpened, rowsOf, sidesFor, strokeFor, type Layout } from "@/lib/graph/layout";
-import type { Box } from "@/lib/model/graph";
-import { buildOpened, buildOverview, FILES_ID, repositoryId } from "@/lib/model/graph";
+import { arrowhead, centre, floating, LANE_INSET, sideways } from "@/lib/graph/geometry";
+import {
+  cardHeight,
+  CARD,
+  constellation,
+  evenAngles,
+  GROUP_ID,
+  HUB_ID,
+  layoutFile,
+  layoutOpened,
+  strokeFor,
+  type Layout,
+} from "@/lib/graph/layout";
 import { toFreshness } from "@/lib/model/freshness";
+import {
+  buildFile,
+  buildOpened,
+  buildOverview,
+  childOf,
+  familyOf,
+  FILE_ID,
+  FILES_ID,
+  FRAME_ID,
+  repositoryId,
+  SIDE_LIMIT,
+  type Box,
+} from "@/lib/model/graph";
+import { depth, direction, search } from "@/lib/model/location";
 import type { RepositoryModel } from "@/lib/model/repositories";
 
 function repository(slug: string, hue = 1): RepositoryModel {
@@ -36,7 +61,11 @@ function entry(path: string, kind: ChildEntry["kind"], files?: number): ChildEnt
   return { id: path, kind, name: path.split("/").pop()!, path, files: files ?? null };
 }
 
-function children(entries: ChildEntry[], links: ChildLink[], extra: Partial<TopologyChildrenResponse> = {}): TopologyChildrenResponse {
+function children(
+  entries: ChildEntry[],
+  links: ChildLink[],
+  extra: Partial<TopologyChildrenResponse> = {},
+): TopologyChildrenResponse {
   return {
     context: { scope: "repository", repository: "app" } as never,
     repository: "app",
@@ -51,22 +80,57 @@ function children(entries: ChildEntry[], links: ChildLink[], extra: Partial<Topo
   };
 }
 
-function childLink(child: string, peer: ChildLink["peer"], kind: ChildLink["kind"] = "observed", count = 1, direction: ChildLink["direction"] = "outgoing"): ChildLink {
-  return { kind, child, direction, peer, count, types: [], examples: [] };
+function childLink(
+  child: string,
+  peer: ChildLink["peer"],
+  kind: ChildLink["kind"] = "observed",
+  count = 1,
+  direction: ChildLink["direction"] = "outgoing",
+  types: ChildLink["types"] = [],
+): ChildLink {
+  return { kind, child, direction, peer, count, types, examples: [`ref:${child}:${count}`] };
 }
+
+const local = (path: string): ChildLink["peer"] => ({ kind: "local", repository: "app", path });
+const shared = (entity_type: string): ChildLink["peer"] => ({ kind: "shared", entity_type: entity_type as never });
+const other = (slug: string): ChildLink["peer"] => ({ kind: "repository", repository: slug });
 
 function overlaps(a: Box, b: Box): boolean {
   return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 }
 
-function assertNoOverlap(layout: Layout) {
-  const boxes = [...layout.entries()];
+function contains(outer: Box, inner: Box): boolean {
+  return (
+    inner.x >= outer.x &&
+    inner.y >= outer.y &&
+    inner.x + inner.width <= outer.x + outer.width &&
+    inner.y + inner.height <= outer.y + outer.height
+  );
+}
+
+/** No two things overlap; a frame or a group holds its members, so it is left out. */
+function assertNoOverlap(layout: Layout, skip: (id: string) => boolean = () => false) {
+  const boxes = [...layout.entries()].filter(([id]) => !skip(id));
   for (let i = 0; i < boxes.length; i++) {
     for (let j = i + 1; j < boxes.length; j++) {
       expect(overlaps(boxes[i]![1], boxes[j]![1]), `${boxes[i]![0]} overlaps ${boxes[j]![0]}`).toBe(false);
     }
   }
 }
+
+const distance = (box: Box) => Math.hypot(centre(box).x, centre(box).y);
+
+describe("link families", () => {
+  it("keeps HTTP and dependencies apart, and tells configuration from code", () => {
+    expect(familyOf("http", null)).toBe("http");
+    expect(familyOf("dependency", "package")).toBe("dependency");
+    expect(familyOf("observed", "env_var")).toBe("config");
+    expect(familyOf("observed", "config")).toBe("config");
+    expect(familyOf("observed", null, [{ type: "READS", count: 2 }])).toBe("config");
+    expect(familyOf("observed", null, [{ type: "READS", count: 2 }, { type: "IMPORTS", count: 1 }])).toBe("code");
+    expect(familyOf("observed", "module", [{ type: "IMPORTS", count: 4 }])).toBe("code");
+  });
+});
 
 describe("the overview", () => {
   const repositories = ["api", "web", "lib", "alone"].map((slug) => repository(slug));
@@ -77,12 +141,22 @@ describe("the overview", () => {
       link("dependency", "web", "lib", 2),
       link("http", "web", "api", 1),
     ]);
-    expect(graph.edges.map((e) => [e.id, e.link?.count])).toEqual([
-      ["observed:web->lib", 3],
-      ["dependency:web->lib", 2],
-      ["http:web->api", 1],
+    expect(graph.edges.map((e) => [e.id, e.link.count, e.link.family])).toEqual([
+      ["observed:web->lib", 3, "code"],
+      ["dependency:web->lib", 2, "dependency"],
+      ["http:web->api", 1, "http"],
     ]);
     expect(graph.edges.every((e) => e.source.startsWith("repo:") && e.target.startsWith("repo:"))).toBe(true);
+  });
+
+  it("lists each link at both ends, in that end's direction", () => {
+    const graph = buildOverview(repositories, [link("http", "web", "api", 4)]);
+    const web = graph.connections.get(repositoryId("web"))!;
+    const api = graph.connections.get(repositoryId("api"))!;
+    expect(web.map((c) => [c.direction, c.partner.label, c.node, c.edge])).toEqual([
+      ["outgoing", "api", "repo:api", "http:web->api"],
+    ]);
+    expect(api.map((c) => [c.direction, c.partner.label, c.node])).toEqual([["incoming", "web", "repo:web"]]);
   });
 
   it("sets unlinked repositories apart rather than leaving them out", () => {
@@ -96,11 +170,96 @@ describe("the overview", () => {
     expect(graph.edges).toEqual([]);
     expect(graph.independent).toHaveLength(4);
   });
+});
 
-  it("lays independent repositories out in rows without overlap", () => {
-    const layout = rowsOf(repositories.concat(["e", "f"].map((s) => repository(s))), 0, 4);
-    expect(layout.size).toBe(6);
-    assertNoOverlap(layout);
+describe("the constellation", () => {
+  const many = Array.from({ length: 12 }, (_, i) => repository(`r${String(i).padStart(2, "0")}`));
+  const chain = [
+    link("observed", "r00", "r01", 50),
+    link("observed", "r00", "r02", 40),
+    link("http", "r00", "r03", 5),
+    link("dependency", "r01", "r04", 3),
+    link("observed", "r01", "r05", 2),
+    link("observed", "r02", "r06", 1),
+    link("observed", "r07", "r08", 9), // apart from r00's component
+  ];
+
+  it("rings the workspace hub when no repository has a link: never a straight row", () => {
+    const four = ["a", "b", "c", "d"].map((s) => repository(s));
+    const shape = constellation(four, [], null);
+    expect(shape.anchor).toBeNull();
+    expect(shape.layout.has(HUB_ID)).toBe(true);
+    const ys = four.map((r) => Math.round(centre(shape.layout.get(repositoryId(r.slug))!).y));
+    expect(new Set(ys).size).toBeGreaterThan(1);
+    assertNoOverlap(shape.layout);
+  });
+
+  it("centres the repository with the most partners, its partners on the first ring", () => {
+    const edges = buildOverview(many, chain).edges;
+    const shape = constellation(many, edges, null);
+    expect(shape.anchor).toBe("repo:r00");
+    const at = (slug: string) => distance(shape.layout.get(repositoryId(slug))!);
+    expect(at("r00")).toBe(0);
+    for (const near of ["r01", "r02", "r03"]) {
+      for (const far of ["r04", "r05", "r06"]) expect(at(near)).toBeLessThan(at(far));
+    }
+  });
+
+  it("re-centres on the selected repository", () => {
+    const edges = buildOverview(many, chain).edges;
+    const shape = constellation(many, edges, "repo:r04");
+    expect(shape.anchor).toBe("repo:r04");
+    expect(distance(shape.layout.get("repo:r04")!)).toBe(0);
+    expect(distance(shape.layout.get("repo:r01")!)).toBeLessThan(distance(shape.layout.get("repo:r00")!));
+  });
+
+  it("places every repository once, overlapping nothing, the unlinked in their own group beneath", () => {
+    const edges = buildOverview(many, chain).edges;
+    const shape = constellation(many, edges, null);
+    for (const r of many) expect(shape.layout.has(repositoryId(r.slug)), r.slug).toBe(true);
+    assertNoOverlap(shape.layout, (id) => id === GROUP_ID);
+    const group = shape.group!;
+    const linkedBottom = Math.max(
+      ...["r00", "r01", "r02", "r03", "r04", "r05", "r06", "r07", "r08"].map((s) => {
+        const b = shape.layout.get(repositoryId(s))!;
+        return b.y + b.height;
+      }),
+    );
+    expect(group.y).toBeGreaterThan(linkedBottom);
+    for (const s of ["r09", "r10", "r11"]) expect(contains(group, shape.layout.get(repositoryId(s))!)).toBe(true);
+  });
+
+  it("gives a component linked only among itself its own small constellation, beside the main one", () => {
+    const edges = buildOverview(many, chain).edges;
+    const shape = constellation(many, edges, null);
+    const main = ["r00", "r01", "r02", "r03", "r04", "r05", "r06"].map((s) => shape.layout.get(repositoryId(s))!);
+    const right = Math.max(...main.map((b) => b.x + b.width));
+    const [a, b] = ["r07", "r08"].map((s) => shape.layout.get(repositoryId(s))!);
+    expect(a!.x).toBeGreaterThan(right);
+    expect(b!.x).toBeGreaterThan(right);
+    // a pair sits side by side, near each other
+    expect(Math.abs(centre(a!).y - centre(b!).y)).toBeLessThan(1);
+  });
+
+  it("rings an unlinked repository chosen as the anchor with all the rest", () => {
+    const edges = buildOverview(many, chain).edges;
+    const shape = constellation(many, edges, "repo:r10");
+    expect(distance(shape.layout.get("repo:r10")!)).toBe(0);
+    expect(shape.group).toBeNull();
+    assertNoOverlap(shape.layout);
+  });
+
+  it("scales to dozens of repositories without overlap", () => {
+    const lots = Array.from({ length: 40 }, (_, i) => repository(`x${String(i).padStart(2, "0")}`));
+    const links = lots.slice(1, 25).map((r, i) => link("observed", i % 3 === 0 ? "x00" : `x${String(i).padStart(2, "0")}`, r.slug));
+    const shape = constellation(lots, buildOverview(lots, links).edges, null);
+    expect([...shape.layout.keys()].filter((k) => k.startsWith("repo:"))).toHaveLength(40);
+    assertNoOverlap(shape.layout, (id) => id === GROUP_ID);
+  });
+
+  it("puts four evenly spaced things on the diagonals", () => {
+    const degrees = evenAngles(4).map((a) => Math.round((a * 180) / Math.PI) % 360);
+    expect(degrees).toEqual([225, 315, 45, 135]);
   });
 });
 
@@ -114,200 +273,244 @@ describe("an opened repository", () => {
     entry("README.md", "file"),
   ];
 
-  it("gives each directory a card and gathers the files on one", () => {
+  it("gives each directory a card and gathers the files on one, hidden directories last", () => {
     const graph = buildOpened({ repository: app, path: "", children: children(entries, []), previews: new Map() });
-    // hidden directories after the rest
     expect(graph.directories.map((d) => d.name)).toEqual(["docs", "src", ".github"]);
     expect(graph.files?.entries.map((e) => e.name)).toEqual(["package.json", "README.md"]);
-    expect(graph.chain.map((c) => c.name)).toEqual(["app"]);
+    expect(graph.frame).toMatchObject({ id: FRAME_ID, files: 19, directories: 3, leaves: 2 });
   });
 
-  it("draws a link to a sibling between the two cards, and from the files card", () => {
+  it("draws a link between two cards only on demand, and counts it on both", () => {
+    const graph = buildOpened({
+      repository: app,
+      path: "",
+      children: children(entries, [childLink("src", local("docs/guide.md"), "observed", 7)]),
+      previews: new Map(),
+    });
+    expect(graph.edges.map((e) => [e.id, e.scope, e.link.count])).toEqual([["code:dir:src->dir:docs", "detail", 7]]);
+    expect(graph.directories.find((d) => d.name === "src")!.summary).toEqual({ code: 7 });
+    expect(graph.directories.find((d) => d.name === "docs")!.summary).toEqual({ code: 7 });
+    expect(graph.connections.get("dir:docs")!.map((c) => [c.direction, c.partner.label])).toEqual([["incoming", "src"]]);
+  });
+
+  it("totals what leaves the level per family at rest, a card's own line on demand", () => {
     const graph = buildOpened({
       repository: app,
       path: "",
       children: children(entries, [
-        childLink("src", { kind: "local", repository: "app", path: "docs" }, "observed", 5),
-        childLink("src", { kind: "local", repository: "app", path: "package.json" }, "observed", 2),
-        childLink("package.json", { kind: "local", repository: "app", path: "README.md" }),
+        childLink("src", shared("module"), "observed", 20),
+        childLink("docs", shared("module"), "observed", 5),
+        childLink("src", shared("env_var"), "observed", 3),
+        childLink("package.json", shared("package"), "dependency", 4),
       ]),
       previews: new Map(),
     });
-    const links = graph.edges.filter((e) => e.role === "link");
-    expect(links.map((e) => [e.source, e.target, e.link?.count])).toEqual([
-      ["dir:src", "dir:docs", 5],
-      ["dir:src", FILES_ID, 2],
-    ]);
-  });
-
-  it("points an incoming link at the child it reaches", () => {
-    const graph = buildOpened({
-      repository: app,
-      path: "",
-      children: children(entries, [
-        childLink("src", { kind: "repository", repository: "web", path: "client" }, "observed", 1, "incoming"),
-      ]),
-      previews: new Map(),
-    });
-    const links = graph.edges.filter((e) => e.role === "link");
-    expect(links.map((e) => [e.scope, e.source, e.target])).toEqual([
-      ["detail", "peer:web", "dir:src"],
-      ["aggregate", "peer:web", "chain:"],
-    ]);
-    expect(graph.peers).toEqual([{ id: "peer:web", repository: "web", path: "client" }]);
-  });
-
-  it("gathers shared things by type, keeping kinds apart, with the level's totals", () => {
-    const graph = buildOpened({
-      repository: app,
-      path: "",
-      children: children(entries, [
-        childLink("src", { kind: "shared", entity_type: "package" }, "dependency", 7),
-        childLink("docs", { kind: "shared", entity_type: "package" }, "dependency", 3),
-        childLink("src", { kind: "shared", entity_type: "http_endpoint" }, "http", 2),
-      ]),
-      previews: new Map(),
-    });
+    const by = (id: string) => graph.edges.find((e) => e.id === id);
+    expect(by("code:frame=>shared:module")).toMatchObject({ scope: "aggregate", link: { count: 25 } });
+    expect(by("code:dir:src->shared:module")).toMatchObject({ scope: "detail", link: { count: 20 } });
+    expect(by("config:frame=>shared:env_var")).toMatchObject({ scope: "aggregate", link: { count: 3, family: "config" } });
+    expect(by("dependency:files->shared:package")).toMatchObject({ scope: "detail" });
     expect(graph.shared.map((s) => [s.label, s.count])).toEqual([
-      ["Packages", 10],
-      ["HTTP endpoints", 2],
-    ]);
-    const links = graph.edges.filter((e) => e.role === "link");
-    // each card's own line, drawn on demand
-    expect(links.filter((e) => e.scope === "detail").map((e) => [e.id, e.link?.count])).toEqual([
-      ["dependency:dir:src->shared:package", 7],
-      ["dependency:dir:docs->shared:package", 3],
-      ["http:dir:src->shared:http_endpoint", 2],
-    ]);
-    // and the level's total per kind, drawn at rest: summed within a kind, never across
-    expect(links.filter((e) => e.scope === "aggregate").map((e) => [e.id, e.link?.count])).toEqual([
-      ["dependency:chain:=>shared:package", 10],
-      ["http:chain:=>shared:http_endpoint", 2],
+      ["External modules", 25],
+      ["Packages", 4],
+      ["Environment variables", 3],
     ]);
   });
 
-  it("lands a link inside a card on that card", () => {
+  it("draws an incoming link from the other end", () => {
     const graph = buildOpened({
       repository: app,
       path: "",
-      children: children(entries, [childLink("src", { kind: "local", repository: "app", path: "docs/guide/x.md" })]),
+      children: children(entries, [childLink("src", other("web"), "http", 2, "incoming")]),
       previews: new Map(),
     });
-    expect(graph.edges.filter((e) => e.role === "link").map((e) => [e.source, e.target])).toEqual([
-      ["dir:src", "dir:docs"],
-    ]);
+    expect(graph.edges.map((e) => e.id).sort()).toEqual(["http:peer:web->dir:src", "http:peer:web=>frame"]);
+    expect(graph.peers).toEqual([{ id: "peer:web", repository: "web", count: 2 }]);
   });
 
-  it("gives somewhere else in the repository a node that opens where it is", () => {
-    const graph = buildOpened({
-      repository: app,
-      path: "src",
-      children: children(
-        [entry("src/a", "directory", 1)],
-        [
-          childLink("src/a", { kind: "local", repository: "app", path: "packages/shared" }),
-          childLink("src/a", { kind: "local", repository: "app", path: "turbo.json" }),
-        ],
-      ),
-      previews: new Map(),
-    });
-    expect(graph.away).toEqual([
-      { id: "away:packages/shared", path: "packages/shared", opens: "packages" },
-      { id: "away:turbo.json", path: "turbo.json", opens: "" },
-    ]);
-    expect(graph.undrawn).toBe(0);
+  it("names places elsewhere, and folds what does not fit into one node it can list", () => {
+    const opened = [entry("apps", "directory", 3)];
+    const links = Array.from({ length: SIDE_LIMIT + 3 }, (_, i) =>
+      childLink("apps", local(`packages/p${String(i).padStart(2, "0")}`), "observed", 100 - i),
+    );
+    const graph = buildOpened({ repository: app, path: "apps", children: children(opened, links, { path: "apps" }), previews: new Map() });
+    expect(graph.places).toHaveLength(SIDE_LIMIT - 1);
+    expect(graph.places[0]).toMatchObject({ id: "place:packages/p00", count: 100 });
+    expect(graph.more).toEqual([{ id: "more:left", side: "left", nodes: 4, count: 92 + 91 + 90 + 89 }]);
+    expect(graph.edges.find((e) => e.id === "code:dir:apps->more:left")?.link.count).toBe(92 + 91 + 90 + 89);
+    expect(graph.connections.get("more:left")!.map((c) => c.partner.label)).toEqual(["p08", "p09", "p10", "p11"]);
   });
 
-  it("counts, rather than hides, a link it cannot place", () => {
+  it("ignores links within one card, and counts the ones it cannot place", () => {
     const graph = buildOpened({
       repository: app,
       path: "",
       children: children(entries, [
-        childLink("not-a-child", { kind: "shared", entity_type: "module" }),
-        childLink("src", { kind: "repository", repository: null }),
+        childLink("src", local("src/a.ts")),
+        childLink("missing", local("docs")),
+        childLink("src", { kind: "repository" }),
       ]),
       previews: new Map(),
     });
+    expect(graph.edges).toEqual([]);
     expect(graph.undrawn).toBe(2);
   });
 
-  it("draws the chain down to the path, and containment from its last step", () => {
+  it("lays the cards inside the frame and the side columns outside it, overlapping nothing", () => {
     const graph = buildOpened({
       repository: app,
-      path: "src/lib",
-      children: children([entry("src/lib/a", "directory", 1)], []),
+      path: "",
+      children: children(entries, [
+        childLink("src", shared("module"), "observed", 20),
+        childLink("src", other("web"), "http", 2),
+        childLink("docs", local("../elsewhere/x.md"), "observed", 1),
+      ]),
       previews: new Map(),
     });
-    expect(graph.chain.map((c) => c.path)).toEqual(["", "src", "src/lib"]);
-    expect(graph.edges.filter((e) => e.role === "tree").map((e) => e.id)).toEqual([
-      "tree:chain:->chain:src",
-      "tree:chain:src->chain:src/lib",
-      "tree:chain:src/lib->dir:src/lib/a",
-    ]);
+    const layout = layoutOpened(graph);
+    const frame = layout.get(FRAME_ID)!;
+    for (const id of ["dir:src", "dir:docs", "dir:.github", FILES_ID]) expect(contains(frame, layout.get(id)!), id).toBe(true);
+    for (const id of ["shared:module", "peer:web"]) expect(overlaps(frame, layout.get(id)!), id).toBe(false);
+    expect(layout.get("peer:web")!.x).toBeLessThan(frame.x);
+    expect(layout.get("shared:module")!.x).toBeGreaterThan(frame.x + frame.width);
+    assertNoOverlap(layout, (id) => id === FRAME_ID);
   });
 
-  it("is laid out without overlaps, previews loaded or not", () => {
-    const many = Array.from({ length: 12 }, (_, i) => entry(`d${i}`, "directory", i + 1)).concat(entries);
-    const links = [
-      childLink("d0", { kind: "shared", entity_type: "module" }),
-      childLink("d1", { kind: "shared", entity_type: "package" }, "dependency"),
-      childLink("d2", { kind: "repository", repository: "web", path: null }),
-      childLink("d3", { kind: "repository", repository: "api", path: null }),
-      childLink("d4", { kind: "local", repository: "app", path: "elsewhere/one" }),
-    ];
-    const previews = new Map(
-      many
-        .filter((e) => e.kind === "directory")
-        .map((e) => [e.path, children([entry(`${e.path}/x`, "file"), entry(`${e.path}/y`, "file")], [], { entries_total: 9 })]),
-    );
-    for (const loaded of [new Map(), previews]) {
-      const graph = buildOpened({ repository: app, path: "", children: children(many, links), previews: loaded });
-      const layout = layoutOpened(graph);
-      expect(layout.size).toBe(
-        1 + graph.directories.length + 1 + graph.shared.length + graph.peers.length + graph.away.length,
-      );
-      assertNoOverlap(layout);
-    }
-  });
-
-  it("sizes a card by what it lists", () => {
-    expect(cardHeight(5, true)).toBeGreaterThan(cardHeight(5, false));
-    expect(cardHeight(1, false)).toBeLessThan(cardHeight(5, false));
+  it("makes room for a card's link counts", () => {
+    expect(cardHeight(5, true, true) - cardHeight(5, true, false)).toBe(CARD.footer);
   });
 });
 
-describe("edges on the canvas", () => {
-  it("leave and enter by the sides that face each other", () => {
-    const left = { x: 0, y: 0, width: 100, height: 50 };
-    const right = { x: 300, y: 0, width: 100, height: 50 };
-    const below = { x: 20, y: 200, width: 100, height: 50 };
-    const linkEdge = { id: "e", source: "a", target: "b", role: "link" as const };
-    expect(sidesFor(linkEdge, left, right)).toEqual({ from: "right", to: "left" });
-    expect(sidesFor(linkEdge, right, left)).toEqual({ from: "left", to: "right" });
-    expect(sidesFor(linkEdge, left, below)).toEqual({ from: "bottom", to: "top" });
-    expect(sidesFor({ ...linkEdge, role: "tree" }, right, left)).toEqual({ from: "bottom", to: "top" });
-  });
+describe("a file", () => {
+  const app = repository("app");
+  const declarations: ChildEntry[] = [
+    { id: "d1", key: "sym:a", kind: "declaration", name: "load", path: "src/a.ts", line_start: 3 },
+    { id: "d2", key: "sym:b", kind: "declaration", name: "save", path: "src/a.ts", line_start: 9 },
+  ];
+  const file = (links: ChildLink[]) =>
+    children(declarations, links, { path: "src/a.ts", target: "file", entries_total: 2 });
 
-  it("separate two kinds between the same pair, and leave a lone link centred", () => {
-    const repositories = ["web", "lib", "api"].map((slug) => repository(slug));
-    const graph = buildOverview(repositories, [
-      link("observed", "web", "lib"),
-      link("dependency", "lib", "web"),
-      link("http", "web", "api"),
+  it("puts what links to it on the left and what it links to on the right", () => {
+    const graph = buildFile({
+      repository: app,
+      path: "src/a.ts",
+      children: file([
+        childLink("sym:a", local("src/b.ts"), "observed", 4),
+        childLink("sym:b", local("src/b.ts"), "observed", 2),
+        childLink("src/a.ts", local("src/main.ts"), "observed", 3, "incoming"),
+        childLink("sym:a", shared("env_var"), "observed", 1),
+        childLink("sym:a", { kind: "local", repository: "app", path: "src/a.ts", key: "sym:b" }),
+      ]),
+    });
+    expect(graph.right.map((n) => [n.id, n.count])).toEqual([
+      ["file:src/b.ts", 6],
+      ["shared:env_var", 1],
     ]);
-    const layout: Layout = new Map(
-      repositories.map((r, i) => [repositoryId(r.slug), { x: i * 400, y: 0, width: 200, height: 80 }]),
-    );
-    const edges = flowEdges(graph.edges, layout, true);
-    const offsets = Object.fromEntries(edges.map((e) => [e.id, e.type === "link" ? e.data?.offset : null]));
-    expect(offsets["observed:web->lib"]).toBe(-(offsets["dependency:lib->web"] as number));
-    expect(offsets["observed:web->lib"]).not.toBe(0);
-    expect(offsets["http:web->api"]).toBe(0);
+    expect(graph.left.map((n) => n.id)).toEqual(["file:src/main.ts"]);
+    expect(graph.within).toBe(1);
+    // one row per neighbour, family and direction, whichever declarations hold it
+    const b = graph.connections.find((c) => c.node === "file:src/b.ts")!;
+    expect(b).toMatchObject({ direction: "outgoing", via: "several declarations", link: { count: 6 } });
+    expect(graph.edges.find((e) => e.id === "config:file->shared:env_var")).toBeDefined();
   });
 
-  it("grow in width with the count, within bounds", () => {
-    expect(strokeFor(1)).toBe(1);
-    expect(strokeFor(100)).toBeGreaterThan(strokeFor(10));
-    expect(strokeFor(1_000_000)).toBe(3.5);
+  it("shows the strongest neighbours and folds the rest, which the inspector still lists", () => {
+    const links = Array.from({ length: 12 }, (_, i) => childLink("sym:a", local(`lib/f${i}.ts`), "observed", 20 - i));
+    const graph = buildFile({ repository: app, path: "src/a.ts", children: file(links), limit: { left: 7, right: 7 } });
+    expect(graph.right).toHaveLength(6);
+    expect(graph.more).toEqual([{ id: "more:right", side: "right", nodes: 6, count: 14 + 13 + 12 + 11 + 10 + 9 }]);
+    expect(graph.connections).toHaveLength(12);
+    const layout = layoutFile(graph);
+    const anchor = layout.get(FILE_ID)!;
+    for (const n of graph.right) expect(layout.get(n.id)!.x).toBeGreaterThan(anchor.x + anchor.width);
+    assertNoOverlap(layout);
+  });
+});
+
+describe("line geometry", () => {
+  const a: Box = { x: 0, y: 0, width: 100, height: 40 };
+  const b: Box = { x: 300, y: 200, width: 100, height: 40 };
+
+  it("runs a floating line from border to border", () => {
+    const route = floating(a, b);
+    const [, sx, sy] = /^M (\S+) (\S+)/.exec(route.path)!.map(Number);
+    // leaves through a's border, arrives just short of b's
+    expect(sx === 100 || sy === 40).toBe(true);
+    const onTop = Math.abs(route.end.y - (b.y - 3)) < 0.01 && route.end.x >= b.x && route.end.x <= b.x + b.width;
+    const onLeft = Math.abs(route.end.x - (b.x - 3)) < 0.01 && route.end.y >= b.y && route.end.y <= b.y + b.height;
+    expect(onTop || onLeft).toBe(true);
+  });
+
+  it("bows a curved line away from the centre", () => {
+    const left: Box = { x: -250, y: -120, width: 100, height: 40 };
+    const right: Box = { x: 150, y: -120, width: 100, height: 40 };
+    const route = floating(left, right, 0, 0.2);
+    expect(route.label.y).toBeLessThan(-100);
+  });
+
+  it("meets a frame as a lane at the other end's height", () => {
+    const frame: Box = { x: 0, y: 0, width: 600, height: 500 };
+    const side: Box = { x: 800, y: 200, width: 200, height: 40 };
+    const route = sideways(frame, side, 0, "source");
+    expect(route.path.startsWith("M 600 220 ")).toBe(true);
+    const high: Box = { x: 800, y: -300, width: 200, height: 40 };
+    expect(sideways(frame, high, 0, "source").path.startsWith(`M 600 ${LANE_INSET.top} `)).toBe(true);
+  });
+
+  it("points the arrowhead at the end", () => {
+    expect(arrowhead({ x: 10, y: 0 }, { x: 0, y: 0 }, 4).startsWith("M 10 0 L 6 ")).toBe(true);
+  });
+
+  it("separates families drawn between one pair, whichever way each runs", () => {
+    const edges = flowEdges(
+      [
+        { id: "code:a->b", source: "a", target: "b", link: { kind: "observed", family: "code", count: 1, types: [], packages: [], examples: [] } },
+        { id: "http:b->a", source: "b", target: "a", link: { kind: "http", family: "http", count: 1, types: [], packages: [], examples: [] } },
+      ],
+      { route: () => "float" },
+    );
+    const [one, two] = edges.map((e) => e.data!.offset);
+    // opposite directions: equal signs here put them on opposite sides
+    expect(one).toBe(two);
+    expect(one).not.toBe(0);
+  });
+
+  it("thickens with the count, within bounds", () => {
+    expect(strokeFor(1)).toBeLessThan(strokeFor(100));
+    expect(strokeFor(1e9)).toBe(3.5);
+  });
+});
+
+describe("moving between places", () => {
+  it("knows deeper from back out", () => {
+    const overview = { repository: null, path: "" };
+    const root = { repository: "app", path: "" };
+    const deep = { repository: "app", path: "src/a.ts" };
+    expect([depth(overview), depth(root), depth(deep)]).toEqual([0, 1, 3]);
+    expect(direction(overview, root)).toBe("in");
+    expect(direction(deep, root)).toBe("out");
+    expect(direction(deep, { repository: "app", path: "src/b.ts" })).toBe("across");
+    expect(direction(root, root)).toBe("none");
+    expect(search(deep, "file:x")).toBe("?repo=app&path=src%2Fa.ts&sel=file%3Ax");
+    expect(search(overview)).toBe("");
+  });
+
+  it("finds the child a deeper place sits in", () => {
+    expect(childOf("", "src/a/b.ts")).toBe("src");
+    expect(childOf("src", "src/a/b.ts")).toBe("src/a");
+    expect(childOf("src", "lib/a.ts")).toBeNull();
+    expect(childOf("src", "src")).toBeNull();
+  });
+
+  it("glides each box part of the way", () => {
+    const from: Layout = new Map([["n", { x: 0, y: 0, width: 10, height: 10 }]]);
+    const to: Layout = new Map([
+      ["n", { x: 100, y: 50, width: 10, height: 10 }],
+      ["new", { x: 5, y: 5, width: 1, height: 1 }],
+    ]);
+    const half = blend(from, to, 0.5);
+    expect(half.get("n")).toEqual({ x: 50, y: 25, width: 10, height: 10 });
+    expect(half.get("new")).toEqual({ x: 5, y: 5, width: 1, height: 1 });
+    expect(blend(from, to, 1)).toBe(to);
   });
 });
