@@ -24,11 +24,23 @@ body {
   background-color: var(--ra-selected);
 }
 
-/* Motion is state, never decoration: with reduced motion there is none. */
-@media (prefers-reduced-motion: reduce) {
-  :root:root {
-    --ra-duration-fast: 0ms;
-    --ra-duration: 0ms;
-    --ra-duration-slow: 0ms;
-  }
+/*
+ * Motion is state, never decoration: with animations off there is none. The
+ * root's data-motion is the reader's choice, else the system's (lib/motion.ts);
+ * it outranks inline transitions too, Mantine's included.
+ */
+:root[data-motion="reduced"] {
+  --ra-duration-fast: 0ms;
+  --ra-duration: 0ms;
+  --ra-duration-slow: 0ms;
+}
+
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
+  animation-duration: 0s !important;
+  animation-delay: 0s !important;
+  transition-duration: 0s !important;
+  transition-delay: 0s !important;
+  scroll-behavior: auto !important;
 }

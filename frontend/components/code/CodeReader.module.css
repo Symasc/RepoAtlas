@@ -36,11 +36,6 @@
     opacity: 0;
     transition: opacity 180ms ease-in;
   }
-
-  @media (prefers-reduced-motion: reduce) {
-    animation: none !important;
-    transition: none !important;
-  }
 }
 
 @keyframes settle-in {

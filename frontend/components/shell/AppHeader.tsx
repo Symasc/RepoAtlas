@@ -7,6 +7,7 @@ import type { RepositoryModel } from "@/lib/model/repositories";
 import classes from "./AppHeader.module.css";
 import { FreshnessIndicator, type LiveCheck } from "./FreshnessIndicator";
 import { Logo } from "./Logo";
+import { MotionToggle } from "./MotionToggle";
 import { SearchTrigger } from "./SearchTrigger";
 import { ThemeToggle } from "./ThemeToggle";
 
@@ -33,6 +34,7 @@ export function AppHeader({ repositories, freshness, offline }: Props) {
 
       <div className={classes.end}>
         <FreshnessIndicator repositories={repositories} check={freshness} offline={offline} />
+        <MotionToggle />
         <ThemeToggle />
       </div>
     </div>

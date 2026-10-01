@@ -3,8 +3,9 @@
  *
  * Colour carries meaning: neutral inside a repository, the accent across one;
  * a family (package, endpoint) by its own hue; freshness by tone. Light is
- * designed on its own terms (white surfaces on a cool grey canvas, a highlighter
- * for evidence), not derived by inverting dark.
+ * designed on its own terms (soft grey surfaces a step above a cool grey canvas,
+ * a highlighter for evidence), not derived by inverting dark. Every text tone
+ * keeps 4.5:1 on every background it sits on, tints included.
  */
 export interface ColorTokens {
   canvas: string;
@@ -71,35 +72,37 @@ export const DARK: ColorTokens = {
 };
 
 export const LIGHT: ColorTokens = {
-  canvas: "#f5f7fa",
-  gridDot: "rgba(15, 24, 38, 0.16)",
-  surface: "#ffffff",
-  surfaceElevated: "#ffffff",
-  border: "#e2e7ee",
-  borderStrong: "#cbd3de",
-  text: "#0f1826",
-  textMuted: "#475467",
-  textSubtle: "#5f6c7e",
-  accent: "#2f63f0",
-  accentStrong: "#1f4fd6",
+  // nothing is paper-white: the brightest surface sits near 88% luminance,
+  // so a long read in daylight does not glare
+  canvas: "#dde2e9",
+  gridDot: "rgba(16, 24, 38, 0.18)",
+  surface: "#e8ecf1",
+  surfaceElevated: "#eff2f5",
+  border: "#cdd4de",
+  borderStrong: "#b3bdca",
+  text: "#101826",
+  textMuted: "#3a4658",
+  textSubtle: "#4a5668",
+  accent: "#2150cc",
+  accentStrong: "#1a44b8",
   onAccent: "#ffffff",
-  selected: "rgba(47, 99, 240, 0.1)",
-  hover: "rgba(15, 24, 38, 0.05)",
-  focus: "#2f63f0",
-  repository: "#334155",
-  package: "#6d4fe0",
-  file: "#475467",
-  endpoint: "#0b7f9e",
-  external: "#5f6c7e",
-  config: "#8f6400",
-  halo: "rgba(47, 99, 240, 0.2)",
-  success: "#0b7a57",
-  warning: "#9a5a00",
-  danger: "#c8313f",
-  evidence: "#fff1a8",
-  edge: "#cbd3de",
-  edgeCross: "#2f63f0",
-  shadow: "0 1px 2px rgba(15, 24, 38, 0.06), 0 12px 32px rgba(15, 24, 38, 0.1)",
+  selected: "rgba(37, 86, 216, 0.12)",
+  hover: "rgba(16, 24, 38, 0.06)",
+  focus: "#2150cc",
+  repository: "#2c394b",
+  package: "#5b3fcf",
+  file: "#3a4658",
+  endpoint: "#08657f",
+  external: "#4a5668",
+  config: "#765200",
+  halo: "rgba(33, 80, 204, 0.22)",
+  success: "#08664a",
+  warning: "#7f4a00",
+  danger: "#ad2633",
+  evidence: "#f3e39a",
+  edge: "#b3bdca",
+  edgeCross: "#2150cc",
+  shadow: "0 1px 2px rgba(16, 24, 38, 0.08), 0 10px 28px rgba(16, 24, 38, 0.1)",
 };
 
 /**
@@ -110,7 +113,7 @@ export const LIGHT: ColorTokens = {
 export const REPOSITORY_HUES = [255, 195, 150, 100, 65, 25, 340, 295] as const;
 
 export function repositoryColor(hue: number, scheme: "light" | "dark"): string {
-  return scheme === "dark" ? `oklch(0.76 0.08 ${hue})` : `oklch(0.54 0.1 ${hue})`;
+  return scheme === "dark" ? `oklch(0.76 0.08 ${hue})` : `oklch(0.465 0.1 ${hue})`;
 }
 
 /**
@@ -133,17 +136,17 @@ const CODE: Record<"light" | "dark", Record<string, string>> = {
     "token-link": "#38cfee",
   },
   light: {
-    foreground: "#0f1826",
-    background: "#ffffff",
-    "token-keyword": "#6a3fd6",
-    "token-function": "#1f56d6",
-    "token-string": "#12795a",
-    "token-string-expression": "#8f6400",
-    "token-constant": "#a24a08",
-    "token-parameter": "#0f1826",
-    "token-punctuation": "#475467",
-    "token-comment": "#5f6c7e",
-    "token-link": "#0b7285",
+    foreground: "#101826",
+    background: "#ecf0f4",
+    "token-keyword": "#5a2fc4",
+    "token-function": "#1a49b8",
+    "token-string": "#0d664b",
+    "token-string-expression": "#765200",
+    "token-constant": "#8c3e05",
+    "token-parameter": "#101826",
+    "token-punctuation": "#3a4658",
+    "token-comment": "#4f5b6c",
+    "token-link": "#08617a",
   },
 };
 

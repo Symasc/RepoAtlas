@@ -9,6 +9,7 @@ import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 
 import mark from "@/assets/brand/repoatlas-mark-256.png";
+import { MOTION_SCRIPT } from "@/lib/motion";
 
 import { Providers } from "./providers";
 
@@ -21,7 +22,7 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   themeColor: [
     { media: "(prefers-color-scheme: dark)", color: "#0c1420" },
-    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
+    { media: "(prefers-color-scheme: light)", color: "#eff2f5" },
   ],
 };
 
@@ -34,6 +35,8 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     >
       <head>
         <ColorSchemeScript defaultColorScheme="auto" />
+        {/* the reader's motion choice, applied before anything can move */}
+        <script dangerouslySetInnerHTML={{ __html: MOTION_SCRIPT }} />
       </head>
       <body>
         <Providers>{children}</Providers>

@@ -1,7 +1,6 @@
 "use client";
 
 import { Loader, UnstyledButton } from "@mantine/core";
-import { useReducedMotion } from "@mantine/hooks";
 import { useQueries, type UseQueryResult } from "@tanstack/react-query";
 import {
   memo,
@@ -25,6 +24,7 @@ import { grammarFor, type CodeToken } from "@/lib/code/highlight";
 import { useTokens, type CodeBlock } from "@/lib/code/useTokens";
 import { formatCount } from "@/lib/model/format";
 import { spansFor, type SymbolIndex, type SymbolSpan, type SymbolTarget } from "@/lib/model/symbols";
+import { useAnimationsOff } from "@/lib/useMotion";
 
 import classes from "./CodeReader.module.css";
 
@@ -228,7 +228,7 @@ export function CodeReader({
   }, [line, pieces]);
 
   // leaving into a chain: the view closes in on the name pressed, then goes
-  const reduced = useReducedMotion() ?? false;
+  const reduced = useAnimationsOff();
   const stage = useRef<HTMLDivElement>(null);
   const [leaving, setLeaving] = useState<{ origin: string; direction: Direction } | null>(null);
   const register = useRegisterExit();
