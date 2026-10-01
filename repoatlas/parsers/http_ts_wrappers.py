@@ -24,10 +24,13 @@ still resolve where they are written, so the URL and init it hands to ``fetch`` 
 be the function's own:
 
 * the URL is ``P``, ``${B}${P}`` or ``B + P`` for a path parameter ``P``. ``B`` is
-  the base. A base the file states as a literal makes the request absolute; any
-  other base is injected or computed, so the route is recorded relative to it —
-  the same meaning a route has under an OpenAPI server — and no deployment or
-  endpoint is inferred;
+  the base. A base the file states as a literal makes the request absolute — a
+  literal, a ``const`` of one, or a property of a ``const`` object the file only
+  reads. So does a deployment setting with a literal default,
+  ``process.env.API_URL || "http://localhost:8000/api"``: the source requests its
+  default unless the deployment says otherwise. Any other base is injected or
+  computed, so the route is recorded relative to it — the same meaning a route has
+  under an OpenAPI server — and no deployment or endpoint is inferred;
 * the init is absent (the method is GET), one of its parameters, or ``{ ...X, … }``
   where ``X`` is that parameter or ``rest`` from ``const { a, ...rest } = init ??
   {}`` and nothing after the spread names ``method``. ``{ ...build(…), … }`` reads
@@ -271,6 +274,8 @@ class FetchWrappers:
         self._helpers: dict[tuple[int, int], InitHelper | None] = {}
         #: Init builders being read, so one that spreads itself is never followed round.
         self._building: set[tuple[int, int]] = set()
+        #: Whether each ``const`` object a base is read from is only ever read.
+        self._read_only: dict[str, bool] = {}
         self._imports: dict[str, Imported] = {}
         for statement in root.children:
             if statement.type == "import_statement":
@@ -1025,14 +1030,143 @@ class FetchWrappers:
             return None
         return index, self._literal(base), False
 
-    def _literal(self, node: Node) -> str | None:
-        """A base the file states as a literal, or ``None`` for any other base."""
-        value = static_string(self._source, operand(node))
-        if value is None and operand(node).type == "identifier":
-            binding = self.lookup(node_text(self._source, operand(node)), node)
-            if isinstance(binding, Const):
-                value = static_string(self._source, operand(binding.value))
-        return value
+    def _literal(self, node: Node, depth: int = 0) -> str | None:
+        """A base the file states as a literal, or ``None`` for any other base.
+
+        A literal, a ``const`` bound to one, or a property of a ``const`` object that
+        the file only ever reads. A deployment setting with a literal default —
+        ``process.env.API_URL || "http://localhost:8000/api"`` — is its default: the
+        URL this source requests unless its deployment says otherwise.
+        """
+        node = operand(node)
+        value = static_string(self._source, node)
+        if value is not None or depth > _MAX_ALIAS:
+            return value
+        if node.type == "identifier":
+            binding = self.lookup(node_text(self._source, node), node)
+            return self._literal(binding.value, depth + 1) if isinstance(binding, Const) else None
+        if node.type == "member_expression":
+            value_node = self._const_property(node)
+            return self._literal(value_node, depth + 1) if value_node is not None else None
+        if node.type == "binary_expression":
+            operator = node.child_by_field_name("operator")
+            setting = node.child_by_field_name("left")
+            default = node.child_by_field_name("right")
+            if (
+                operator is None
+                or node_text(self._source, operator) not in {"||", "??"}
+                or setting is None
+                or default is None
+                or not self._setting(setting)
+            ):
+                return None
+            return self._literal(default, depth + 1)
+        return None
+
+    def _setting(self, node: Node) -> bool:
+        """``process.env.NAME``, ``process.env["NAME"]`` or ``import.meta.env.NAME``."""
+        node = operand(node)
+        if node.type not in {"member_expression", "subscript_expression"}:
+            return False
+        if node.type == "subscript_expression":
+            index = node.child_by_field_name("index")
+            if index is None or static_string(self._source, operand(index)) is None:
+                return False
+        env = node.child_by_field_name("object")
+        if env is None or operand(env).type != "member_expression":
+            return False
+        holder = operand(env).child_by_field_name("object")
+        prop = operand(env).child_by_field_name("property")
+        if holder is None or prop is None or node_text(self._source, prop) != "env":
+            return False
+        holder = operand(holder)
+        if holder.type == "meta_property":
+            return node_text(self._source, holder) == "import.meta"
+        return (
+            holder.type == "identifier"
+            and node_text(self._source, holder) == "process"
+            and isinstance(self.lookup("process", holder), Global)
+        )
+
+    def _const_property(self, node: Node) -> Node | None:
+        """``A.b``'s value, for ``const A = { b: … }`` read and never written in this file."""
+        owner = node.child_by_field_name("object")
+        prop = node.child_by_field_name("property")
+        if (
+            owner is None
+            or prop is None
+            or operand(owner).type != "identifier"
+            or prop.type != "property_identifier"
+        ):
+            return None
+        name = node_text(self._source, operand(owner))
+        binding = self.lookup(name, node)
+        if not isinstance(binding, Const) or operand(binding.value).type != "object":
+            return None
+        key = node_text(self._source, prop)
+        found: Node | None = None
+        for entry in operand(binding.value).named_children:
+            if entry.type == "comment":
+                continue
+            if entry.type == "spread_element":
+                return None  # a spread can set any key
+            if entry.type == "pair":
+                entry_key = self.key(entry)
+                if entry_key is None:
+                    return None  # a computed key can be any key
+                if entry_key == key:
+                    if found is not None:
+                        return None
+                    found = entry.child_by_field_name("value")
+            elif node_text(self._source, entry.child_by_field_name("name") or entry) == key:
+                return None  # a shorthand or a method under that name
+        if found is None or not self._only_read(name):
+            return None
+        return found
+
+    def _only_read(self, name: str) -> bool:
+        """Whether every use of ``name`` in the file reads a property of it.
+
+        Anything else — an assignment to a property, an argument, an export by name —
+        hands the object to code that could change it.
+        """
+        cached = self._read_only.get(name)
+        if cached is not None:
+            return cached
+        read = True
+        for node in walk(self._root):
+            if node.type not in {"identifier", "shorthand_property_identifier"}:
+                continue
+            if node_text(self._source, node) != name:
+                continue
+            parent = node.parent
+            if (
+                parent is not None
+                and parent.type == "variable_declarator"
+                and parent.child_by_field_name("name") == node
+            ):
+                continue  # the declaration itself
+            member = parent
+            while member is not None and member.type in _TRANSPARENT:
+                member = member.parent
+            target = member.parent if member is not None else None
+            if (
+                node.type != "identifier"
+                or member is None
+                or member.type not in {"member_expression", "subscript_expression"}
+                or operand(member.child_by_field_name("object") or member) != node
+                or target is None
+                or target.type == "update_expression"
+                or (target.type == "unary_expression" and target.children[0].type == "delete")
+                or (
+                    target.type in {"assignment_expression", "augmented_assignment_expression"}
+                    and target.child_by_field_name("left") == member
+                )
+            ):
+                read = False
+                break
+        self._read_only[name] = read
+        return read
 
     def _mentions_parameter(self, node: Node, function: Node) -> bool:
         return any(
