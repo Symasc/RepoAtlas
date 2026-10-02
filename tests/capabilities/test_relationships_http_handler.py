@@ -18,6 +18,8 @@ from repoatlas.graph.traversal import (
     RELATIONSHIP_CROSSING_EDGES,
     RELATIONSHIP_DEFAULT_EDGES,
     RELATIONSHIP_EDGES,
+    expand_from_seeds,
+    walk,
 )
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.parsing import EdgeType
@@ -128,3 +130,50 @@ def test_search_and_impact_keep_their_own_edge_sets() -> None:
     assert HANDLER in RELATIONSHIP_EDGES
     assert CROSS_REPOSITORY_EDGES | {HANDLER} == RELATIONSHIP_CROSSING_EDGES
     assert set(RELATIONSHIP_DEFAULT_EDGES) >= RELATIONSHIP_CROSSING_EDGES
+
+
+def _id(workspace: Workspace, repository: str, name: str) -> int:
+    row = workspace.database.execute(
+        """
+        SELECT e.id FROM entities e JOIN repositories r ON r.id = e.repo_id
+        WHERE r.slug = ? AND e.qualified_name = ?
+        """,
+        (repository, name),
+    ).fetchone()
+    return int(row["id"])
+
+
+@pytest.mark.parametrize("confined", [False, True])
+def test_search_expands_from_a_linked_caller_exactly_as_before_links(
+    joined: Workspace, confined: bool
+) -> None:
+    """Search's expansion is the walk over the expansion set and impact's crossing rule,
+    whatever links exist: the handler a relationships walk reaches in one hop is not
+    reached through the link, in either scope."""
+    caller = _id(joined, "portal", "load_user")
+    handler = _id(joined, "accounts", "get_user")
+    portal = joined.repositories.get_by_slug("portal")
+    assert portal is not None
+    home = portal.id if confined else None
+    bounds = {"hops": 2, "fanout": 50, "seed_limit": 10}
+    linked = walk(
+        joined.knowledge,
+        [caller],
+        **bounds,
+        edge_types=RELATIONSHIP_DEFAULT_EDGES,
+        crossing_edges=RELATIONSHIP_CROSSING_EDGES,
+    )
+    assert any(step.edge.type is HANDLER and step.hop == 1 for step in linked.steps)
+    assert linked.reasons[handler] == f"{HANDLER.value.lower()} (hop 1)"
+
+    expanded = expand_from_seeds(joined.knowledge, [caller], **bounds, home_repo_id=home)
+    before = walk(
+        joined.knowledge,
+        [caller],
+        **bounds,
+        edge_types=EXPANSION_EDGES,
+        crossing_edges=CROSS_REPOSITORY_EDGES,
+        home_repo_id=home,
+    )
+    assert (expanded.reached, expanded.reasons) == (before.reached, before.reasons)
+    assert not any(HANDLER.value.lower() in reason for reason in expanded.reasons.values())
