@@ -132,6 +132,16 @@ COMPOSE_SERVICE = "compose-service"
 #: A Dockerfile's final stage: its working directory, what it copies from the build
 #: context and where, and the command and entrypoint the image runs.
 DOCKERFILE_COMMAND = "dockerfile-command"
+#: A Helm chart's ``Chart.yaml``: its name, for the chart directory.
+HELM_CHART = "helm-chart"
+#: A Helm chart's ``values.yaml``: its literal scalar leaves.
+HELM_VALUES = "helm-values"
+#: A chart template's ``kind: Service``: its name and ports as written.
+HELM_SERVICE = "helm-service"
+#: A chart's ``<x>.name`` or ``<x>.fullname`` helper, defined exactly as ``helm create`` does.
+HELM_HELPER = "helm-helper"
+#: A release of a chart that a deployment file binds by a literal name (a Tiltfile ``helm()``).
+HELM_RELEASE = "helm-release"
 
 #: ``transport`` values of :data:`HTTP_LOCAL_CALL`.
 TRANSPORT_WRAPPER = "wrapper"

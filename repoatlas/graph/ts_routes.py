@@ -152,8 +152,10 @@ def plan_fastify_routes(
                         body=body,
                         repo_id=origin.repo_id,
                         file_id=origin.file_id,
-                        line_start=claim.line_start if exact[body] else None,
-                        line_end=claim.line_end if exact[body] else None,
+                        line_start=claim.line_start if exact[body][0] else None,
+                        line_end=claim.line_end if exact[body][0] else None,
+                        roots=exact[body][1],
+                        declared_at=claim.line_start,
                     )
                 )
             if claim.id is not None:
@@ -223,21 +225,21 @@ class _Chains:
     def blocked(self, key: Key) -> bool:
         return key in self._blocked
 
-    def prefixes(self, key: Key, depth: int = 0) -> list[tuple[str, bool]]:
-        """``(prefix, exact)`` such that a route path ``p`` in scope ``key`` is served at
-        ``prefix + p``: an application serves at its root."""
+    def prefixes(self, key: Key, depth: int = 0) -> list[tuple[str, bool, int]]:
+        """``(prefix, exact, root)`` such that a route path ``p`` in scope ``key`` is served at
+        ``prefix + p`` by the application module ``root``: an application serves at its root."""
         scope = self._scopes.get(key)
         if scope is None:
             return []
         if scope.kind == APP:
-            return [("", True)]
+            return [("", True, key[0])]
         if depth > MAX_DEPTH or key in self._blocked:
             return []
-        found: list[tuple[str, bool]] = []
+        found: list[tuple[str, bool, int]] = []
         for registration in self._registrations.get(key, ()):
             prefix = registration.prefix or ""
-            for base, exact in self.prefixes(registration.owner, depth + 1):
-                found.append((f"{base}{prefix}", exact and not prefix))
+            for base, exact, root in self.prefixes(registration.owner, depth + 1):
+                found.append((f"{base}{prefix}", exact and not prefix, root))
         return found
 
 
@@ -248,7 +250,7 @@ def _route(
     constants: Mapping[int, Mapping[str, str]],
     chains: _Chains,
     by_id: Mapping[int, FileRow],
-) -> tuple[str, list[str], dict[str, bool]]:
+) -> tuple[str, list[str], dict[str, tuple[bool, frozenset[int]]]]:
     meta = _meta(claim)
     origin = by_id.get(claim.file_id)
     key = (claim.file_id, meta.get("scope", ""))
@@ -267,14 +269,15 @@ def _route(
     if chains.blocked(key):
         return UNREADABLE_REGISTRATION, [], {}
     literal = meta.get("provenance") == EXACT
-    bodies: dict[str, bool] = {}
-    for base, exact in chains.prefixes(key):
+    bodies: dict[str, tuple[bool, frozenset[int]]] = {}
+    for base, exact, root in chains.prefixes(key):
         full = base if path == "/" and base else f"{base}{path}"
         route = http.route_path(full) if full else None
         body = http.route_body(meta.get("method", ""), route) if route is not None else ""
         if not body or http.canonical_route(body) is None:
             continue
-        bodies[body] = bodies.get(body, False) or (exact and literal)
+        was_exact, roots = bodies.get(body, (False, frozenset()))
+        bodies[body] = (was_exact or (exact and literal), roots | {root})
     if bodies:
         return PROMOTED, sorted(bodies), bodies
     return NOT_REGISTERED, [], {}

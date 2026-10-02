@@ -28,6 +28,11 @@ from repoatlas.models.parsing import (
     Severity,
 )
 from repoatlas.parsers.deploy_compose import compose_references, is_compose_file
+from repoatlas.parsers.deploy_helm import (
+    chart_references,
+    service_references,
+    values_references,
+)
 from repoatlas.parsers.http_openapi import MAX_OPERATIONS, specification_references
 from repoatlas.parsers.marks import diagnostic_line, node_span
 from repoatlas.parsers.module_facts import module_facts
@@ -133,7 +138,9 @@ class StructuredParser:
     #    root servers' base paths, for oas3-tools applications (repoatlas.graph.ts_oas3).
     # 5: a docker-compose file also records each service's names, container ports, build
     #    and command, for deployment identities (repoatlas.parsers.deploy_compose).
-    version = "5"
+    # 6: a Helm chart's Chart.yaml, values.yaml and Service templates record what Service
+    #    names and ports they state (repoatlas.parsers.deploy_helm).
+    version = "6"
     language = "YAML"
 
     def supports(self, path: Path) -> bool:
@@ -145,8 +152,11 @@ class StructuredParser:
         if path.name in _LOCKFILES:
             return ParsedFile(language=language, parser=self.name, parser_version=self.version)
 
-        # Read on their own terms, before YAML is asked: a tsconfig may carry comments.
+        # Read on their own terms, before YAML is asked: a tsconfig may carry comments,
+        # and a chart template is not YAML until Helm renders it.
         resolution = module_facts(path.name, content)
+        posix = PurePosixPath(path.as_posix())
+        resolution = [*resolution, *service_references(posix, content)]
 
         text = content
         if language == "JSON":
@@ -177,11 +187,12 @@ class StructuredParser:
                 ),
             )
 
-        compose = (
-            compose_references(PurePosixPath(path.as_posix()), documents)
-            if is_compose_file(PurePosixPath(path.as_posix()))
-            else []
-        )
+        compose = compose_references(posix, documents) if is_compose_file(posix) else []
+        compose = [
+            *compose,
+            *chart_references(posix, documents),
+            *values_references(posix, documents),
+        ]
 
         # ``splitlines()`` deliberately: this array is indexed by PyYAML marks and
         # must use PyYAML's line-break set rather than the source-grammar splitter

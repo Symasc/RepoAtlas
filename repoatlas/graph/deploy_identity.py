@@ -50,12 +50,18 @@ from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.parsers.http_facts import (
     COMPOSE_SERVICE,
     DOCKERFILE_COMMAND,
+    HELM_CHART,
+    HELM_HELPER,
+    HELM_RELEASE,
+    HELM_SERVICE,
+    HELM_VALUES,
     HTTP_EXPOSED_ENDPOINT,
     PENDING_FACT,
 )
 from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
 
 COMPOSE = "docker-compose-service"
+KUBERNETES = "kubernetes-service"
 
 TIED = "tied"
 NO_BUILD = "the service builds no image here"
@@ -64,6 +70,10 @@ COMMAND_UNREAD = "the command its container runs is not read"
 NOT_IN_IMAGE = "the module the command runs is not copied from this repository"
 NO_ROUTES = "the module the command runs serves no route"
 NO_PORT = "it declares no literal container port"
+CONTROLLED = "its template renders it only under a condition or loop"
+RELEASE_UNBOUND = "no release of its chart is bound by a literal name"
+NAME_UNREAD = "its name is not read"
+NOT_ONE_APPLICATION = "its repository's code is not one traced application"
 
 _PYTHON = re.compile(r"python(\d+(\.\d+)?)?")
 _PYTHON_FLAGS = frozenset({"-u", "-O", "-OO", "-B", "-E", "-s", "-S", "-I"})
@@ -304,7 +314,8 @@ def plan_deployment_exposures(
     """Every route a declared service identity reaches, as exposure claims. Writes nothing."""
     plan = DeploymentPlan()
     services = grouped.get(COMPOSE_SERVICE, ())
-    if not services:
+    kubernetes = grouped.get(HELM_SERVICE, ())
+    if not services and not kubernetes:
         return plan
     files: dict[int, dict[str, int]] = defaultdict(dict)
     for row in by_id.values():
@@ -322,6 +333,15 @@ def plan_deployment_exposures(
         outcome = _tie(service, origin, files[origin.repo_id], commands, by_root, by_id, plan)
         if service.id is not None:
             plan.outcomes[service.id] = outcome
+    if kubernetes:
+        charts = _Charts(grouped, by_id, routes)
+        for service in kubernetes:
+            origin = by_id.get(service.file_id)
+            if origin is None:
+                continue
+            outcome = charts.tie(service, origin, plan)
+            if service.id is not None:
+                plan.outcomes[service.id] = outcome
     return plan
 
 
@@ -363,6 +383,211 @@ def _tie(
         return NO_PORT
     identity_in = f"{origin.rel_path}:{service.line_start}"
     bound_in = identity_in if read[1] else f"{by_id[dockerfile_id].rel_path}:{command.line_start}"
+    _expose(
+        plan,
+        served,
+        origins,
+        source=COMPOSE,
+        identity_in=identity_in,
+        bound_in=bound_in,
+        kind="docker-compose",
+    )
+    return TIED
+
+
+# -- Kubernetes Services from Helm charts -------------------------------------------------
+
+_DNS_LABEL = re.compile(r"[a-z]([-a-z0-9]*[a-z0-9])?")
+_PORT = re.compile(r"[1-9]\d{0,4}")
+_TEMPLATE = re.compile(r"\{\{-?\s*(.*?)\s*-?\}\}")
+_VALUE_PATH = re.compile(r"\.Values((?:\.[A-Za-z_][\w-]*)+)")
+_INCLUDE = re.compile(r'include "([\w.-]+)\.(name|fullname)" \.')
+_SETTING = re.compile(r"([A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*)*)=([^,\\{}\[\]]*)")
+_FALSY = frozenset({"", "false", "False", "FALSE", "null", "Null", "NULL", "~", "0"})
+
+
+def _trimmed(text: str) -> str:
+    """Helm's ``trunc 63 | trimSuffix "-"``: at most 63 characters, one trailing dash dropped."""
+    return text[:63].removesuffix("-")
+
+
+def helm_name(chart: str, values: Mapping[str, str]) -> str:
+    """The scaffold ``<x>.name``: ``nameOverride`` when set, else the chart's name."""
+    override = values.get("nameOverride", "")
+    return _trimmed(override if override not in _FALSY else chart)
+
+
+def helm_fullname(chart: str, release: str, values: Mapping[str, str]) -> str:
+    """The scaffold ``<x>.fullname``: ``fullnameOverride`` when set; else the release name
+    when it contains the chart's (or ``nameOverride``'s) name; else ``<release>-<name>``."""
+    override = values.get("fullnameOverride", "")
+    if override not in _FALSY:
+        return _trimmed(override)
+    name = values.get("nameOverride", "")
+    name = name if name not in _FALSY else chart
+    return _trimmed(release if name in release else f"{release}-{name}")
+
+
+@dataclass(frozen=True, slots=True)
+class _Chart:
+    name: str
+    values: dict[str, str]
+    #: Whether the values file was cut short: a key it lacks may be one it left out.
+    truncated: bool
+    helpers: frozenset[str]
+
+
+class _Charts:
+    """The charts of every repository, their releases, and each repository's applications."""
+
+    def __init__(
+        self,
+        grouped: Mapping[str, Sequence[UnresolvedRefRecord]],
+        by_id: Mapping[int, FileRow],
+        routes: Sequence[ServedRoute],
+    ) -> None:
+        self._by_id = by_id
+        names: dict[tuple[int, str], str] = {}
+        for claim in grouped.get(HELM_CHART, ()):
+            names[(claim.repo_id, _meta(claim).get("chart", ""))] = claim.target_key
+        values: dict[tuple[int, str], tuple[dict[str, str], bool]] = {}
+        for claim in grouped.get(HELM_VALUES, ()):
+            meta = _meta(claim)
+            values[(claim.repo_id, meta.get("chart", ""))] = (
+                {str(k): str(v) for k, v in json.loads(meta.get("values", "{}")).items()},
+                meta.get("truncated") == "true",
+            )
+        helpers: dict[tuple[int, str], set[str]] = defaultdict(set)
+        for claim in grouped.get(HELM_HELPER, ()):
+            helpers[(claim.repo_id, _meta(claim).get("chart", ""))].add(claim.target_key)
+        self._charts = {
+            key: _Chart(
+                name=name,
+                values=values.get(key, ({}, False))[0],
+                truncated=values.get(key, ({}, False))[1],
+                helpers=frozenset(helpers.get(key, set())),
+            )
+            for key, name in names.items()
+        }
+        self._releases: dict[tuple[int, str], list[UnresolvedRefRecord]] = defaultdict(list)
+        for claim in grouped.get(HELM_RELEASE, ()):
+            self._releases[(claim.repo_id, _meta(claim).get("chart", ""))].append(claim)
+        self._routes: dict[int, list[ServedRoute]] = defaultdict(list)
+        self._roots: dict[int, set[int]] = defaultdict(set)
+        self._untraced: set[int] = set()
+        for route in routes:
+            self._routes[route.repo_id].append(route)
+            self._roots[route.repo_id].update(route.roots)
+            if not route.roots:
+                self._untraced.add(route.repo_id)
+
+    def tie(self, service: UnresolvedRefRecord, origin: FileRow, plan: DeploymentPlan) -> str:
+        meta = _meta(service)
+        if meta.get("controlled") == "true":
+            return CONTROLLED
+        key = (origin.repo_id, meta.get("chart", ""))
+        chart = self._charts.get(key)
+        releases = self._releases.get(key, [])
+        if chart is None or not releases:
+            return RELEASE_UNBOUND
+        served = self._routes[origin.repo_id]
+        if not served:
+            return NO_ROUTES
+        if origin.repo_id in self._untraced or len(self._roots[origin.repo_id]) != 1:
+            return NOT_ONE_APPLICATION
+        outcome = NAME_UNREAD
+        for release in releases:
+            values = self._values(chart, _meta(release))
+            if values is None:
+                continue
+            name = self._render(meta.get("name", ""), chart, release.target_key, values)
+            if name is None or not _DNS_LABEL.fullmatch(name) or len(name) > 63:
+                continue
+            ports = [
+                self._render(str(text), chart, release.target_key, values)
+                for text, _ in json.loads(meta.get("ports", "[]"))
+            ]
+            readable = [port for port in ports if port is not None and _PORT.fullmatch(port)]
+            origins = _origins([name], readable)
+            if not origins:
+                outcome = NO_PORT
+                continue
+            releaser = self._by_id.get(release.file_id)
+            bound_in = f"{releaser.rel_path}:{release.line_start}" if releaser else ""
+            _expose(
+                plan,
+                served,
+                origins,
+                source=KUBERNETES,
+                identity_in=f"{origin.rel_path}:{service.line_start}",
+                bound_in=bound_in,
+                kind="kubernetes",
+            )
+            outcome = TIED
+        return outcome
+
+    @staticmethod
+    def _values(chart: _Chart, release: Mapping[str, str]) -> dict[str, str] | None:
+        """The chart's values with a release's literal ``set`` applied; ``None`` when the
+        release also names values files, or a setting this does not read."""
+        if release.get("values_files") == "true":
+            return None
+        values = dict(chart.values)
+        settings = json.loads(release.get("set", "[]"))
+        if settings is None:
+            return None
+        for setting in settings:
+            match = _SETTING.fullmatch(str(setting))
+            if match is None:
+                return None
+            values[match.group(1)] = match.group(2)
+        return values
+
+    def _render(
+        self, text: str, chart: _Chart, release: str, values: Mapping[str, str]
+    ) -> str | None:
+        """A name or port as written, every action one this reads; ``None`` otherwise."""
+        rendered = ""
+        cursor = 0
+        for match in _TEMPLATE.finditer(text):
+            rendered += text[cursor : match.start()]
+            cursor = match.end()
+            action = match.group(1)
+            value: str | None = None
+            path = _VALUE_PATH.fullmatch(action)
+            included = _INCLUDE.fullmatch(action)
+            if action == ".Chart.Name":
+                value = chart.name
+            elif path is not None:
+                value = values.get(path.group(1)[1:])
+                if value is None and chart.truncated:
+                    return None
+            elif included is not None and f"{included.group(1)}.{included.group(2)}" in (
+                chart.helpers
+            ):
+                value = (
+                    helm_fullname(chart.name, release, values)
+                    if included.group(2) == "fullname"
+                    else helm_name(chart.name, values)
+                )
+            if value is None:
+                return None
+            rendered += value
+        rendered += text[cursor:]
+        return None if "{{" in rendered or "}}" in rendered else rendered
+
+
+def _expose(
+    plan: DeploymentPlan,
+    served: Sequence[ServedRoute],
+    origins: Sequence[str],
+    *,
+    source: str,
+    identity_in: str,
+    bound_in: str,
+    kind: str,
+) -> None:
+    """One exposure claim per route and origin."""
     for route in served:
         method, _, path = route.body.partition(" ")
         line = route.line_start if route.line_start is not None else route.declared_at
@@ -377,10 +602,10 @@ def _tie(
                 "method": method,
                 "route": path,
                 "deployment": deployment,
-                "identity_source": COMPOSE,
+                "identity_source": source,
                 "identity_in": identity_in,
                 "bound_in": bound_in,
-                "source": "docker-compose",
+                "source": kind,
             }
             plan.exposures.append(
                 UnresolvedRefRecord(
@@ -395,4 +620,3 @@ def _tie(
                     meta_json=json.dumps(claim_meta, sort_keys=True),
                 )
             )
-    return TIED
