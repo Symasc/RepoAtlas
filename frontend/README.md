@@ -102,19 +102,54 @@ letters; Enter takes the first result. With **Include variables** on, it also
 finds the names code declares: functions, classes, methods, variables and the
 environment variables code reads. The switch is remembered, and off at first.
 
-Lines are drawn per family and never merged into one line:
+Lines are drawn as a transit map draws them: straight runs joined by 45°
+bends, in bold saturated colours, at full strength. A line's pattern is its
+family and its colour is its relationship. Families are never merged into one
+line, and a code link is drawn as one line per relationship it carries, side by
+side, keeping one gap through every bend:
 
-| Family | Line |
-|---|---|
-| code (imports, uses, calls…) | solid |
-| HTTP | dashed |
-| package dependency | double |
-| configuration and environment variables | dotted |
-| the connection being explained | thick, in the accent colour |
+| Family | Relationship | Line |
+|---|---|---|
+| code | imports (imports, exports, requires, includes, sources) | solid, blue |
+| code | calls (calls, executes) | solid, green |
+| code | uses (uses, references) | solid, violet |
+| code | other (defines, contains…) | solid, grey |
+| HTTP | serves or calls a route or endpoint | dashed, teal |
+| package dependency | depends on | double, magenta |
+| configuration and environment variables | reads, configures | dotted, amber |
+| the connection being explained | any | thick, in the accent (vermilion) |
 
-Every line has an arrowhead for its direction. Its width grows with its count.
-Node families differ by shape, icon and border as well as colour. The legend's
-shapes button names them.
+A dot marks where a line leaves and an arrowhead where it arrives. It has one
+of three weights by its count (a few, hundreds, thousands), a band of canvas
+beneath it so crossings stay legible. At rest it runs under the cards; when it
+is lit or selected it comes in front of them. One line of each link carries the link's total, on a tag filled in its
+colour. The legend lists what the
+level draws. Where code is summed (a card's tally, a family's heading in the
+inspector) its mark shows blue, green and violet together. Each connection in
+the inspector lists its relationships with their colours.
+
+Everything a line joins is one quiet card, as a transit map draws one station
+for every stop: a solid fill a step lighter than the canvas, with a clear
+outline. Kinds are told apart by their icon and title, not by fill; a shared
+thing's icon is drawn in the colour of the line that reaches it (modules blue,
+commands green, packages magenta, configuration and environment variables
+amber, HTTP teal). An opened directory is a district: a plain region a half
+step above the canvas, its name set large like a place on a map. Each
+repository has its own colour, shown as a solid square beside its name wherever
+it appears. A faint grid squares the canvas and moves with it.
+
+Each view has a toolbar above the canvas, saying where you are and what the
+level holds. Below the canvas, a status bar holds the zoom and the key to the
+lines; its ⓘ button names the marks.
+
+The chrome is deliberately plain, so the colour on the canvas carries meaning.
+It uses IBM Plex Sans and Plex Mono, served from the app itself, and warm
+neutrals in both themes. The type steps are wide on purpose (11, 12, 13, 15 and
+18 px, with 16, 20 and 28 for headings): where you are, a card's title and the
+inspector's title are plainly headings, not body text. The accent marks only what is selected, focused or
+pressed next, and there are three corner radii (2, 4 and 6 px). The colour
+tokens are in `lib/theme/tokens.ts`; every text tone keeps 4.5:1 contrast on
+the backgrounds it sits on.
 
 HTTP has three kinds of shared node, each in its own group: **HTTP routes**
 (a method and path some code serves or calls), **HTTP endpoints** (a route at a

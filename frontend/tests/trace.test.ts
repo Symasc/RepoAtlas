@@ -11,6 +11,8 @@ import {
   buildTrace,
   chainOf,
   nameFromKey,
+  reachOf,
+  relationOfRow,
   rowId,
   SEED_ID,
   splitAt,
@@ -275,6 +277,10 @@ describe("a trace", () => {
     ]);
     const seedToAliases = graph.edges.find((e) => e.source === SEED_ID && e.target === graph.cardOf.get(rowId(2)))!;
     expect([seedToAliases.link.count, seedToAliases.link.label]).toEqual([2, "uses"]);
+    // the line is the relationship's, and counts every step it carries by type
+    expect(seedToAliases.id.endsWith(":uses")).toBe(true);
+    expect(seedToAliases.link.types).toEqual([{ type: "USES", count: 2 }]);
+    expect(relationOfRow(graph.rows.get(rowId(5))!)).toBe("calls");
   });
 
   it("follows a step back to the seed", () => {
@@ -296,6 +302,20 @@ describe("a trace", () => {
     expect(nameFromKey(ROLE)).toBe("CourseRole");
     expect(nameFromKey("file:app:src/policy.ts")).toBe("policy.ts");
     expect(nameFromKey("contracts:src/legacy/")).toBe("legacy");
+  });
+
+  it("never counts what changes as something a change reaches", () => {
+    // a file whose six declarations nothing else uses: impact reaches the six, lists none
+    const alone = { ...impact([]), summary: { policy: "p", reached: 6, returned: 0 }, omitted: { by_reason: {}, by_unit: {} } } as ImpactResponse;
+    expect(reachOf(alone)).toEqual({ outside: 0, beyond: 0, within: 6 });
+    // seven listed, two named only as a file, three past the limit, four of its own
+    const cut = {
+      ...CHAIN,
+      unresolved: [{ entity: "file:app:a.ts" }, { entity: "file:app:b.ts" }],
+      omitted: { by_reason: { budget: 3 }, by_unit: {} },
+      summary: { policy: "p", reached: 16, returned: 7 },
+    } as unknown as ImpactResponse;
+    expect(reachOf(cut)).toEqual({ outside: 12, beyond: 3, within: 4 });
   });
 });
 

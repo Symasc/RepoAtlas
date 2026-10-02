@@ -5,7 +5,7 @@ import { ArrowSquareOutIcon, FlowArrowIcon } from "@phosphor-icons/react";
 import { useCallback, useMemo, useState } from "react";
 
 import { CodeReader } from "@/components/code/CodeReader";
-import { Graph } from "@/components/graph/Graph";
+import { Graph, Notice, Toolbar } from "@/components/graph/Graph";
 import { flowEdges, place } from "@/components/graph/flow";
 import { EntityBadge, PathBadge } from "@/components/graph/glyphs";
 import type { GraphNode, NodeActions } from "@/components/graph/nodes";
@@ -287,11 +287,12 @@ export function FileLevel({
         <dt>Freshness</dt>
         <dd>{repository.freshness.label} (the repository&apos;s)</dd>
       </dl>
-      <h3 className={inspectorClasses.subhead}>Declarations · {formatCount(declarations.length)}</h3>
+      <h3 className={inspectorClasses.subhead}>
+        Declarations <span className={inspectorClasses.sectionCount}>{formatCount(declarations.length)}</span>
+      </h3>
       <EntryList
         entries={declarations}
         total={data.entries_total}
-        onGo={() => {}}
         onLine={(line) => {
           setMode("code");
           nav.select(`${LINE}${line}`);
@@ -358,7 +359,7 @@ export function FileLevel({
     inspector = (
       <Inspector
         label={`${symbol.name}, inspected`}
-        icon={<EntityBadge entityType={symbol.type} size={38} />}
+        icon={<EntityBadge entityType={symbol.type} size={18} />}
         title={symbol.name}
         subtitle={`${typeNoun(symbol.type)} · ${symbol.here ? graph.anchor.name : (symbol.repository ?? "shared")}`}
         onClose={() => nav.select(null)}
@@ -383,7 +384,7 @@ export function FileLevel({
     inspector = (
       <Inspector
         label={`${graph.anchor.name}, inspected`}
-        icon={<PathBadge path={path} file size={38} />}
+        icon={<PathBadge path={path} file size={18} />}
         title={graph.anchor.name}
         subtitle={`${repository.name} / ${dirname(path) || "root"}`}
         actions={
@@ -405,7 +406,7 @@ export function FileLevel({
     inspector = (
       <Inspector
         label={`${graph.anchor.name}, inspected`}
-        icon={<PathBadge path={path} file size={38} />}
+        icon={<PathBadge path={path} file size={18} />}
         title={graph.anchor.name}
         subtitle={`${repository.name} / ${dirname(path) || "root"}`}
         tab={view.tab || "connections"}
@@ -457,20 +458,24 @@ export function FileLevel({
         <div className={classes.canvas}>
           {mode === "code" ? (
             <div className={classes.reading}>
-              <div className={classes.readingBar}>
-                <Trail repository={repository} nav={nav} file />
-                <div className={classes.readingInfo}>
-                  {entry?.language && <span>{entry.language}</span>}
-                  {lines !== null && <span>{plural(lines, "line")}</span>}
-                  {!references.isPending && !unavailable && <span>{plural(index.targets.size, "name")} to follow</span>}
-                  <ModeSwitch mode={mode} onMode={setMode} />
-                </div>
-              </div>
+              <Toolbar
+                start={<Trail repository={repository} nav={nav} file />}
+                end={
+                  <>
+                    <div className={classes.levelInfo}>
+                      {entry?.language && <span>{entry.language}</span>}
+                      {lines !== null && <span>{plural(lines, "line")}</span>}
+                      {!references.isPending && !unavailable && <span>{plural(index.targets.size, "name")} to follow</span>}
+                    </div>
+                    <ModeSwitch mode={mode} onMode={setMode} />
+                  </>
+                }
+              />
               {unavailable && (
-                <p className={classes.note} role="status">
+                <Notice role="status">
                   Names here cannot be followed yet: the RepoAtlas server answering this app does not know
                   topology/references. Restart <code>repoatlas serve</code> to update it.
-                </p>
+                </Notice>
               )}
               <CodeReader
                 repository={repository.slug}
@@ -496,18 +501,16 @@ export function FileLevel({
               extent={extent}
               refit={`${expanded.left}:${expanded.right}`}
               families={families.length > 0 ? families : ["code"]}
-              topLeft={
-                <div className={classes.overlayStack}>
-                  <Trail repository={repository} nav={nav} file />
-                  {notes.length > 0 && <p className={classes.note}>{notes.join(" ")}</p>}
-                </div>
-              }
-              topRight={
-                <div className={classes.levelInfo}>
-                  <span>{plural(graph.left.length + graph.right.length + graph.more.reduce((s, m) => s + m.nodes, 0), "neighbour")}</span>
+              start={<Trail repository={repository} nav={nav} file />}
+              end={
+                <>
+                  <div className={classes.levelInfo}>
+                    <span>{plural(graph.left.length + graph.right.length + graph.more.reduce((s, m) => s + m.nodes, 0), "neighbour")}</span>
+                  </div>
                   <ModeSwitch mode={mode} onMode={setMode} />
-                </div>
+                </>
               }
+              notice={notes.length > 0 && <p>{notes.join(" ")}</p>}
             />
           )}
         </div>

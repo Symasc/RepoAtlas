@@ -6,7 +6,8 @@ import { useCallback, useMemo, useState, type ReactNode } from "react";
 
 import { Graph } from "@/components/graph/Graph";
 import { flowEdges, place } from "@/components/graph/flow";
-import { EntityBadge, Monogram, PathBadge } from "@/components/graph/glyphs";
+import { RepoSwatch } from "@/components/common/RepoSwatch";
+import { EntityBadge, PathBadge } from "@/components/graph/glyphs";
 import type { GraphNode, NodeActions } from "@/components/graph/nodes";
 import { Connections } from "@/components/inspector/Connections";
 import { Contents, EntryList } from "@/components/inspector/Entries";
@@ -205,7 +206,6 @@ function DirectoryLevel({
     const cards = new Set([...graph.directories.map((d) => d.id), FILES_ID]);
     return flowEdges(graph.edges, {
       route: (e) => (e.scope === "aggregate" ? "lane" : cards.has(e.source) && cards.has(e.target) ? "float" : "side"),
-      curve: () => 0.12,
     });
   }, [graph]);
   const extent = useMemo(() => (layout ? bounds(layout.values()) : null), [layout]);
@@ -245,36 +245,34 @@ function DirectoryLevel({
             arrival={{ direction: nav.arrival.direction, from }}
             extent={extent}
             families={families}
-            topLeft={
-              <div className={classes.overlayStack}>
-                <Trail repository={repository} nav={nav} file={false} />
-                {error ? (
-                  <div className={classes.problem} role="alert">
-                    <p>{error.message}</p>
-                    <Button
-                      size="xs"
-                      variant="default"
-                      leftSection={<ArrowLeftIcon size={13} />}
-                      onClick={() => nav.go({ repository: repository.slug, path: "" })}
-                    >
-                      Back to {repository.name}
-                    </Button>
-                  </div>
-                ) : pending ? (
-                  <p className={classes.note}>
-                    <Loader size={12} type="dots" /> Reading {path || repository.name}
-                  </p>
-                ) : (
-                  graph && data && <Caveats graph={graph} data={data} />
-                )}
-              </div>
-            }
-            topRight={
+            start={<Trail repository={repository} nav={nav} file={false} />}
+            end={
               data && (
                 <div className={classes.levelInfo}>
                   <span className={classes.depth}>Depth {depth}</span>
                   <span>{plural(data.entries_total ?? 0, "entry", "entries")}</span>
                 </div>
+              )
+            }
+            notice={
+              error ? (
+                <div className={classes.problem} role="alert">
+                  <p>{error.message}</p>
+                  <Button
+                    size="compact-xs"
+                    variant="default"
+                    leftSection={<ArrowLeftIcon size={13} />}
+                    onClick={() => nav.go({ repository: repository.slug, path: "" })}
+                  >
+                    Back to {repository.name}
+                  </Button>
+                </div>
+              ) : pending ? (
+                <p className={classes.loading}>
+                  <Loader size={12} type="dots" /> Reading {path || repository.name}
+                </p>
+              ) : (
+                graph && data && caveats(graph, data)
               )
             }
           />
@@ -332,7 +330,7 @@ function CardInspector({
   const rows = graph.connections.get(id) ?? [];
   const go = (path: string) => nav.go({ repository: repository.slug, path }, { via: id });
 
-  let icon: ReactNode = <PathBadge path="" file={false} size={34} />;
+  let icon: ReactNode = <PathBadge path="" file={false} size={18} />;
   let title = id;
   let subtitle: string | null = null;
   const tabs: InspectorTab[] = [];
@@ -346,7 +344,7 @@ function CardInspector({
     subtitle = `${plural(card.files, "file")} · ${repository.name}/${card.path}`;
     tabs.push({ value: "contents", label: "Contents", panel: <Contents repository={repository.slug} path={card.path} onGo={go} /> });
   } else if (id === FILES_ID && graph.files) {
-    icon = <PathBadge path="file" file size={34} />;
+    icon = <PathBadge path="file" file size={18} />;
     title = "Files here";
     subtitle = plural(graph.files.total, "file");
     tabs.push({
@@ -356,15 +354,15 @@ function CardInspector({
       panel: <EntryList entries={graph.files.entries} total={data.entries_total} onGo={go} />,
     });
   } else if (shared) {
-    icon = <EntityBadge entityType={shared.entityType} size={34} />;
+    icon = <EntityBadge entityType={shared.entityType} size={18} />;
     title = shared.label;
     subtitle = `Shared across the index · ${plural(shared.count, "relationship")} from here`;
   } else if (peer) {
-    icon = <Monogram name={peer.repository} hue={hues.get(peer.repository) ?? null} size={34} />;
+    icon = <RepoSwatch hue={hues.get(peer.repository) ?? null} size={12} />;
     title = peer.repository;
     subtitle = `Another repository · ${plural(peer.count, "relationship")}`;
   } else if (placeNode) {
-    icon = <PathBadge path={placeNode.path} size={34} />;
+    icon = <PathBadge path={placeNode.path} size={18} />;
     title = placeNode.path.slice(placeNode.path.lastIndexOf("/") + 1);
     subtitle = `Elsewhere in ${repository.name} · ${placeNode.path}`;
   } else if (more) {
@@ -418,13 +416,13 @@ function CardInspector({
   );
 }
 
-/** What is on screen but incomplete, said plainly rather than left out. */
-function Caveats({ graph, data }: { graph: OpenedGraph; data: TopologyChildrenResponse }) {
+/** What is on screen but incomplete, said plainly rather than left out; `null` when nothing is. */
+function caveats(graph: OpenedGraph, data: TopologyChildrenResponse): ReactNode {
   const notes: string[] = [];
   if (data.has_more) notes.push(`Showing the first ${formatCount(data.entries?.length ?? 0)} of ${formatCount(data.entries_total ?? 0)} entries.`);
   if (data.truncated) notes.push(`Showing the strongest ${formatCount(data.links?.length ?? 0)} of ${formatCount(data.links_total ?? 0)} link groups.`);
   if (data.complete === false) notes.push("Some links were not read: this level has more than can be counted at once.");
   if (graph.undrawn > 0) notes.push(`${plural(graph.undrawn, "link group")} reach${graph.undrawn === 1 ? "es" : ""} somewhere not on screen.`);
   if (notes.length === 0) return null;
-  return <p className={classes.note}>{notes.join(" ")}</p>;
+  return <p>{notes.join(" ")}</p>;
 }

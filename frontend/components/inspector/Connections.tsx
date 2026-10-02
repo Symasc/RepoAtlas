@@ -4,9 +4,10 @@ import { ActionIcon, Tooltip } from "@mantine/core";
 import { ArrowRightIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 
-import { EntityBadge, LineGlyph, Monogram, PathBadge } from "@/components/graph/glyphs";
+import { RepoSwatch } from "@/components/common/RepoSwatch";
+import { EntityBadge, LineGlyph, PathBadge } from "@/components/graph/glyphs";
 import { compactCount, formatCount } from "@/lib/model/format";
-import { FAMILIES, type Connection, type Family, type Partner } from "@/lib/model/graph";
+import { FAMILIES, relationOf, type Connection, type Family, type Partner } from "@/lib/model/graph";
 
 import { Quiet } from "./Inspector";
 import classes from "./Inspector.module.css";
@@ -24,25 +25,37 @@ const SHOWN = 12;
 export function PartnerIcon({ partner, hue = null }: { partner: Partner; hue?: number | null }) {
   switch (partner.kind) {
     case "repository":
-      return <Monogram name={partner.label} hue={hue} size={24} />;
+      return (
+        <span className={classes.markCell}>
+          <RepoSwatch hue={hue} />
+        </span>
+      );
     case "shared":
-      return <EntityBadge entityType={partner.entityType} size={24} />;
+      return <EntityBadge entityType={partner.entityType} />;
     case "directory":
-      return <PathBadge path={partner.path ?? partner.label} file={false} size={24} />;
+      return <PathBadge path={partner.path ?? partner.label} file={false} />;
     case "file":
-      return <PathBadge path={partner.path ?? partner.label} file size={24} />;
+      return <PathBadge path={partner.path ?? partner.label} file />;
     case "place":
-      return <PathBadge path={partner.path ?? partner.label} size={24} />;
+      return <PathBadge path={partner.path ?? partner.label} />;
     default:
-      return <PathBadge path={partner.label} size={24} />;
+      return <PathBadge path={partner.label} />;
   }
 }
 
-function types(connection: Connection): string {
-  return connection.link.types
-    .slice(0, 3)
-    .map((t) => t.type.toLowerCase().replace(/_/g, " "))
-    .join(" · ");
+/** The relationships a connection carries, strongest first, each beside its line's colour. */
+function Kinds({ connection }: { connection: Connection }) {
+  const { family, types } = connection.link;
+  return (
+    <>
+      {types.slice(0, 3).map((t) => (
+        <span key={t.type} className={classes.kind}>
+          <LineGlyph family={family} relation={relationOf(family, t.type)} width={10} />
+          {t.type.toLowerCase().replace(/_/g, " ")}
+        </span>
+      ))}
+    </>
+  );
 }
 
 /**
@@ -119,7 +132,7 @@ function FamilyGroup({
   return (
     <div className={classes.family}>
       <div className={classes.familyTitle}>
-        <LineGlyph family={family} width={22} />
+        <LineGlyph family={family} width={20} />
         <span>{FAMILY_LABEL[family]}</span>
         <span className={classes.familyCount}>{formatCount(total)}</span>
       </div>
@@ -139,7 +152,9 @@ function FamilyGroup({
                 <span className={classes.rowText}>
                   <span className={classes.rowLabel}>{c.partner.label}</span>
                   <span className={classes.rowDetail}>
-                    {[c.partner.detail, c.via && `via ${c.via}`, types(c)].filter(Boolean).join(" · ")}
+                    {[c.partner.detail, c.via && `via ${c.via}`].filter(Boolean).join(" · ")}
+                    {(c.partner.detail || c.via) && c.link.types.length > 0 && " · "}
+                    <Kinds connection={c} />
                   </span>
                 </span>
                 <span className={classes.rowCount} title={formatCount(c.link.count)}>

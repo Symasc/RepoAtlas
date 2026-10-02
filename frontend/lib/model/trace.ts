@@ -1,6 +1,6 @@
 import type { ImpactCandidate, ImpactResponse } from "@/lib/api/generated";
 
-import type { Family, LinkData, ViewEdge } from "./graph";
+import { relationOf, type Family, type LinkData, type Relation, type ViewEdge } from "./graph";
 
 /**
  * A trace: the chain of what a change to one thing reaches, as impact walked it.
@@ -107,6 +107,16 @@ function familyOfStep(row: TraceRow): Family {
   return "code";
 }
 
+/** The relationship a step is: what colours its line and its row's mark. */
+export function relationOfRow(row: TraceRow): Relation {
+  return relationOf(familyOfStep(row), row.candidate.step.edge);
+}
+
+/** The line a step is drawn on: from the card before it to its own, in its relationship. */
+export function traceEdgeId(from: string, to: string, relation: Relation): string {
+  return `${from}=>${to}:${relation}`;
+}
+
 function byLine(a: TraceRow, b: TraceRow): number {
   return (a.line ?? 0) - (b.line ?? 0) || a.candidate.name.localeCompare(b.candidate.name);
 }
@@ -151,7 +161,7 @@ export function buildTrace(impact: ImpactResponse): TraceGraph {
   }
   for (const card of cards.values()) card.rows.sort(byLine);
 
-  // one line per (from card, to card, family), counting the steps it carries
+  // one line per (from card, to card, relationship), counting the steps it carries
   const lines = new Map<string, ViewEdge & { readings: Set<string> }>();
   for (const { c } of everyone) {
     const to = cardOf.get(rowId(c.id))!;
@@ -160,11 +170,17 @@ export function buildTrace(impact: ImpactResponse): TraceGraph {
     if (!from || from === to) continue;
     const row = rows.get(rowId(c.id))!;
     const family = familyOfStep(row);
-    const id = `${from}=>${to}:${family}`;
+    const id = traceEdgeId(from, to, relationOfRow(row));
     const existing = lines.get(id);
     if (existing) {
       existing.link.count += 1;
       existing.readings.add(row.reading);
+      const type = c.step.edge;
+      if (type) {
+        const same = existing.link.types.find((t) => t.type === type);
+        if (same) same.count += 1;
+        else existing.link.types.push({ type, count: 1 });
+      }
       continue;
     }
     const link: LinkData = {
@@ -202,6 +218,26 @@ export function buildTrace(impact: ImpactResponse): TraceGraph {
     rows,
     listed: everyone.length,
   };
+}
+
+/** How far a change reaches, counted the way a reader means it. */
+export interface Reach {
+  /** Things outside what changes that a change reaches: listed, named only as a file, or past the limit. */
+  outside: number;
+  /** Of those, how many the walk reached but did not return, for want of room. */
+  beyond: number;
+  /**
+   * What changes holds itself, which the walk starts from: a file's declarations,
+   * a directory's files. Impact counts them as reached, but never lists them.
+   */
+  within: number;
+}
+
+export function reachOf(impact: ImpactResponse): Reach {
+  const beyond = impact.omitted?.by_reason?.budget ?? 0;
+  const returned = impact.summary.returned ?? (impact.candidates ?? []).length + (impact.tests ?? []).length;
+  const outside = returned + (impact.unresolved ?? []).length + beyond;
+  return { outside, beyond, within: Math.max(0, (impact.summary.reached ?? outside) - outside) };
 }
 
 /**

@@ -21,7 +21,7 @@
   gap: 10px;
   height: 32px;
   padding: 0 10px;
-  border-radius: var(--mantine-radius-sm);
+  border-radius: var(--ra-radius);
   color: var(--ra-text-muted);
   transition: background-color var(--ra-duration-fast) var(--ra-ease);
 
@@ -47,12 +47,12 @@
 
     .segment {
       min-width: 1px;
-      border-radius: 1px;
+      border-radius: 0;
     }
   }
 
   &[data-loading] {
-    border-radius: 2px;
+    border-radius: var(--ra-radius-s);
     background-color: var(--ra-border);
   }
 }
@@ -60,7 +60,7 @@
 .segment {
   min-width: 4px;
   flex-basis: 0;
-  border-radius: 2px;
+  border-radius: var(--ra-radius-s);
   background-color: var(--tone);
   transition: background-color var(--ra-duration-slow) var(--ra-ease);
 }
@@ -149,6 +149,21 @@
   color: var(--ra-text-muted);
 }
 
+.when {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 8px;
+  margin: 2px 0 0;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-subtle);
+  font-variant-numeric: tabular-nums;
+
+  > * + *::before {
+    content: "·";
+    margin-right: 8px;
+  }
+}
+
 .state {
   display: inline-flex;
   align-items: center;
@@ -162,6 +177,6 @@
 .dot {
   width: 7px;
   height: 7px;
-  border-radius: 50%;
+  border-radius: var(--ra-radius-s);
   background-color: var(--tone);
 }

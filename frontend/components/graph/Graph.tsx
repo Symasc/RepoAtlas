@@ -3,12 +3,11 @@
 import "@xyflow/react/dist/base.css";
 
 import { ActionIcon, Popover, Tooltip, useComputedColorScheme } from "@mantine/core";
-import { CornersOutIcon, MinusIcon, PlusIcon, ShapesIcon } from "@phosphor-icons/react";
+import { CornersOutIcon, InfoIcon, MinusIcon, PlusIcon } from "@phosphor-icons/react";
 import {
   Background,
   BackgroundVariant,
   getViewportForBounds,
-  Panel,
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
@@ -27,11 +26,13 @@ import {
   type ReactNode,
 } from "react";
 
-import type { Box, Family } from "@/lib/model/graph";
+import { CODE_RELATIONS, RELATIONS, type Box, type Family, type Relation } from "@/lib/model/graph";
 import { useAnimationsOff } from "@/lib/useMotion";
 
-import { edgeTypes, FAMILY_NOUN, type Emphasis, type GraphEdge } from "./edges";
-import { EntityBadge, LineGlyph, Monogram, PathBadge } from "./glyphs";
+import { RepoSwatch } from "@/components/common/RepoSwatch";
+
+import { edgeTypes, RELATION_LABEL, type Emphasis, type GraphEdge } from "./edges";
+import { EntityBadge, LineGlyph, PathBadge } from "./glyphs";
 import classes from "./Graph.module.css";
 import { BACKDROP, type GraphNode } from "./nodes";
 import { nodeTypes } from "./registry";
@@ -60,9 +61,12 @@ interface Props {
    */
   minFit?: number;
   families: readonly Family[];
-  topLeft?: ReactNode;
-  topCenter?: ReactNode;
-  topRight?: ReactNode;
+  /** The toolbar's start: where the reader is. */
+  start?: ReactNode;
+  /** The toolbar's end: what the level holds, and its switches. */
+  end?: ReactNode;
+  /** What is on screen but incomplete, in a line under the toolbar. */
+  notice?: ReactNode;
 }
 
 export function Graph(props: Props) {
@@ -73,12 +77,17 @@ export function Graph(props: Props) {
   );
 }
 
+/** Drawing order among the lines: the later, the more on top. */
+const RAISE: Record<Emphasis, number> = { dim: 0, rest: 1, lit: 2, selected: 3 };
+
+/** The map's grid, in canvas units: wide enough to sit behind the cards, not among them. */
+const GRATICULE = 120;
 const MIN_ZOOM = 0.12;
 const MAX_ZOOM = 2.5;
 /** Fitting never magnifies past 100%: a small level stays at its own size. */
 const FIT_MAX = 1;
-/** Room for the panels over the canvas: the trail above, zoom and legend below. */
-const PADDING = { top: "76px", bottom: "72px", left: "40px", right: "40px" } as const;
+/** A margin round what is fitted: the toolbar and status bar sit outside the canvas. */
+const PADDING = { top: "36px", bottom: "36px", left: "40px", right: "40px" } as const;
 
 function shapeOf(box: Box): string {
   return `${Math.round(box.x)},${Math.round(box.y)},${Math.round(box.width)},${Math.round(box.height)}`;
@@ -124,9 +133,9 @@ function Canvas({
   refit,
   minFit,
   families,
-  topLeft,
-  topCenter,
-  topRight,
+  start,
+  end,
+  notice,
 }: Props) {
   const scheme = useComputedColorScheme("dark", { getInitialValueInEffect: true });
   const reduced = useAnimationsOff();
@@ -165,25 +174,31 @@ function Canvas({
     [nodes, related, focus, selected],
   );
 
+  // a line at rest runs under the cards; what is lit or selected comes in
+  // front of them, its casing cutting it clean across what it passes over, and
+  // is drawn last, so it crosses the rest
   const shownEdges = useMemo<GraphEdge[]>(
     () =>
-      edges.map((edge) => {
-        const scope = edge.data?.scope ?? null;
-        const touching = focus !== null && (edge.source === focus || edge.target === focus);
-        let emphasis: Emphasis = "rest";
-        let hidden = false;
-        if (focus === null) hidden = scope === "detail";
-        else if (scope === "aggregate") hidden = true;
-        else if (touching) emphasis = "lit";
-        else if (scope === "detail") hidden = true;
-        else emphasis = "dim";
-        if (selectedEdge !== null && edge.id === selectedEdge) {
-          emphasis = "selected";
-          hidden = false;
-        }
-        const raised = emphasis === "lit" || emphasis === "selected";
-        return { ...edge, hidden, zIndex: raised ? 1000 : 0, data: { ...edge.data!, emphasis } };
-      }),
+      edges
+        .map((edge) => {
+          const scope = edge.data?.scope ?? null;
+          const touching = focus !== null && (edge.source === focus || edge.target === focus);
+          let emphasis: Emphasis = "rest";
+          let hidden = false;
+          if (focus === null) hidden = scope === "detail";
+          else if (scope === "aggregate") hidden = true;
+          else if (touching) emphasis = "lit";
+          else if (scope === "detail") hidden = true;
+          else emphasis = "dim";
+          // every line of the connection being explained, one per relationship it carries
+          if (selectedEdge !== null && edge.data?.base === selectedEdge) {
+            emphasis = "selected";
+            hidden = false;
+          }
+          const raised = emphasis === "lit" || emphasis === "selected";
+          return { ...edge, hidden, zIndex: raised ? 1000 : 0, data: { ...edge.data!, emphasis } };
+        })
+        .sort((a, b) => RAISE[a.data!.emphasis] - RAISE[b.data!.emphasis]),
     [edges, focus, selectedEdge],
   );
 
@@ -296,51 +311,70 @@ function Canvas({
   useEffect(() => register?.(exit), [register, exit]);
 
   return (
-    <div className={classes.stage} data-phase={phase}>
-      <ReactFlow
-        className={classes.flow}
-        aria-label={label}
-        nodes={shownNodes}
-        edges={shownEdges}
-        nodeTypes={nodeTypes}
-        edgeTypes={edgeTypes}
-        colorMode={scheme}
-        nodesDraggable={false}
-        nodesConnectable={false}
-        elementsSelectable={false}
-        nodesFocusable={false}
-        edgesFocusable={false}
-        zoomOnDoubleClick={false}
-        onNodeMouseEnter={(_, node) => {
-          if (!BACKDROP.has(node.type ?? "")) setHovered(node.id);
-        }}
-        onNodeMouseLeave={() => setHovered(null)}
-        onNodeClick={(_, node) => {
-          if (!BACKDROP.has(node.type ?? "") && node.type !== "anchor") onActivate(node.id);
-        }}
-        onPaneClick={() => onSelect(null)}
-        onMoveStart={(event) => {
-          // a move the reader makes, not one the canvas animates
-          if (event) moved.current = true;
-        }}
-        onFocus={onFocus}
-        onBlur={onBlur}
-        minZoom={MIN_ZOOM}
-        maxZoom={MAX_ZOOM}
-        onlyRenderVisibleElements
-        proOptions={{ hideAttribution: false }}
-      >
-        <Background variant={BackgroundVariant.Dots} gap={24} size={1.4} />
-        {topLeft && <Panel position="top-left">{topLeft}</Panel>}
-        {topCenter && <Panel position="top-center">{topCenter}</Panel>}
-        {topRight && <Panel position="top-right">{topRight}</Panel>}
-        <Panel position="bottom-left">
-          <ZoomControls extent={extent} reduced={reduced} />
-        </Panel>
-        <Panel position="bottom-center">
-          <Legend families={families} />
-        </Panel>
-      </ReactFlow>
+    <div className={classes.view}>
+      {(start || end) && <Toolbar start={start} end={end} />}
+      {notice && <Notice>{notice}</Notice>}
+      <div className={classes.stage} data-phase={phase}>
+        <ReactFlow
+          className={classes.flow}
+          aria-label={label}
+          nodes={shownNodes}
+          edges={shownEdges}
+          nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
+          colorMode={scheme}
+          nodesDraggable={false}
+          nodesConnectable={false}
+          elementsSelectable={false}
+          nodesFocusable={false}
+          edgesFocusable={false}
+          zoomOnDoubleClick={false}
+          onNodeMouseEnter={(_, node) => {
+            if (!BACKDROP.has(node.type ?? "")) setHovered(node.id);
+          }}
+          onNodeMouseLeave={() => setHovered(null)}
+          onNodeClick={(_, node) => {
+            if (!BACKDROP.has(node.type ?? "") && node.type !== "anchor") onActivate(node.id);
+          }}
+          onPaneClick={() => onSelect(null)}
+          onMoveStart={(event) => {
+            // a move the reader makes, not one the canvas animates
+            if (event) moved.current = true;
+          }}
+          onFocus={onFocus}
+          onBlur={onBlur}
+          minZoom={MIN_ZOOM}
+          maxZoom={MAX_ZOOM}
+          onlyRenderVisibleElements
+          proOptions={{ hideAttribution: true }}
+        >
+          {/* a graticule, as an atlas squares its sheets: it moves with the map, so a pan reads as one */}
+          <Background variant={BackgroundVariant.Lines} gap={GRATICULE} lineWidth={1} />
+        </ReactFlow>
+      </div>
+      <div className={classes.statusBar}>
+        <ZoomControls extent={extent} reduced={reduced} />
+        <Legend families={families} edges={edges} />
+      </div>
+    </div>
+  );
+}
+
+/** What is on screen but incomplete, said plainly in a line under the toolbar. */
+export function Notice({ children, role }: { children: ReactNode; role?: "status" }) {
+  return (
+    <div className={classes.notice} role={role}>
+      {children}
+    </div>
+  );
+}
+
+/** The bar above a view: where the reader is at the start, what the level holds at the end. */
+export function Toolbar({ start, end }: { start?: ReactNode; end?: ReactNode }) {
+  return (
+    <div className={classes.toolbar}>
+      <div className={classes.toolbarStart}>{start}</div>
+      {end && <div className={classes.toolbarEnd}>{end}</div>}
     </div>
   );
 }
@@ -357,83 +391,114 @@ function ZoomControls({ extent, reduced }: { extent: Box | null; reduced: boolea
   return (
     <div className={classes.zoom} role="group" aria-label="Zoom">
       <Tooltip label="Zoom out">
-        <ActionIcon size="md" onClick={() => void zoomOut({ duration })} aria-label="Zoom out">
-          <MinusIcon size={14} />
+        <ActionIcon size="sm" onClick={() => void zoomOut({ duration })} aria-label="Zoom out">
+          <MinusIcon size={13} />
         </ActionIcon>
       </Tooltip>
       <span className={classes.zoomValue} aria-label="Zoom level">
         {Math.round(zoom * 100)}%
       </span>
       <Tooltip label="Zoom in">
-        <ActionIcon size="md" onClick={() => void zoomIn({ duration })} aria-label="Zoom in">
-          <PlusIcon size={14} />
+        <ActionIcon size="sm" onClick={() => void zoomIn({ duration })} aria-label="Zoom in">
+          <PlusIcon size={13} />
         </ActionIcon>
       </Tooltip>
-      <span className={classes.zoomDivider} aria-hidden />
       <Tooltip label="Fit to screen">
-        <ActionIcon size="md" onClick={fit} aria-label="Fit to screen">
-          <CornersOutIcon size={14} />
+        <ActionIcon size="sm" onClick={fit} aria-label="Fit to screen">
+          <CornersOutIcon size={13} />
         </ActionIcon>
       </Tooltip>
     </div>
   );
 }
 
-const LEGEND_LABEL: Record<Family, string> = {
-  code: "Code",
-  http: "HTTP",
-  dependency: "Package dependency",
-  config: "Config & env",
+/** Under the legend's "Code", its relationships go by their own short names. */
+const CODE_LEGEND: Record<(typeof CODE_RELATIONS)[number], string> = {
+  imports: "Imports",
+  calls: "Calls",
+  uses: "Uses",
+  other: "Other",
 };
 
-/** What each stroke means. Colour is never the only difference: each has its own pattern. */
-function Legend({ families }: { families: readonly Family[] }) {
+function isCode(relation: Relation): relation is (typeof CODE_RELATIONS)[number] {
+  return (CODE_RELATIONS as readonly Relation[]).includes(relation);
+}
+
+/**
+ * What each line means. Its pattern is its family (code solid, HTTP dashed, a
+ * package dependency double, configuration dotted); its colour is its
+ * relationship, so colour is never the only difference between families. The
+ * key lists what the level draws; a level with nothing drawn yet lists what its
+ * families usually carry.
+ */
+function Legend({ families, edges }: { families: readonly Family[]; edges: readonly GraphEdge[] }) {
+  const drawn = new Set(edges.map((e) => e.data?.relation));
+  let relations = RELATIONS.filter((r) => drawn.has(r));
+  if (relations.length === 0) {
+    relations = families.flatMap((f): Relation[] => (f === "code" ? ["imports", "calls", "uses"] : [f]));
+  }
+  const code = relations.filter(isCode);
+  const rest = relations.filter((r) => !isCode(r));
   return (
     <div className={classes.legendBar}>
       <ul className={classes.legend} aria-label="Legend">
-        {families.map((family) => (
-          <li key={family} className={classes.legendItem} title={`${FAMILY_NOUN[family]} relationships`}>
-            <LineGlyph family={family} width={28} />
-            {LEGEND_LABEL[family]}
+        {code.length > 0 && (
+          <li className={classes.legendGroup}>
+            <span className={classes.legendGroupName}>Code</span>
+            <ul aria-label="Code relationships">
+              {code.map((relation) => (
+                <li key={relation} className={classes.legendItem}>
+                  <LineGlyph family="code" relation={relation} width={22} />
+                  {CODE_LEGEND[relation]}
+                </li>
+              ))}
+            </ul>
+          </li>
+        )}
+        {rest.map((relation) => (
+          <li key={relation} className={classes.legendItem}>
+            <LineGlyph family={relation as Family} width={22} />
+            {RELATION_LABEL[relation]}
           </li>
         ))}
         <li className={classes.legendItem}>
-          <LineGlyph family="selected" width={28} />
+          <LineGlyph family="selected" width={22} />
           Selected
         </li>
       </ul>
-      <Shapes />
+      <Marks />
     </div>
   );
 }
 
-/** The node shapes, on demand: the canvas shows them, this names them. */
-function Shapes() {
+/** The marks things carry, on demand: the canvas shows them, this names them. */
+function Marks() {
   const rows: { mark: ReactNode; label: string }[] = [
-    { mark: <Monogram name="R" hue={1} size={22} />, label: "Repository" },
-    { mark: <PathBadge path="src" size={22} />, label: "Directory" },
-    { mark: <PathBadge path="index.ts" size={22} />, label: "File" },
-    { mark: <EntityBadge entityType="package" size={22} />, label: "Package" },
-    { mark: <EntityBadge entityType="http_route" size={22} />, label: "HTTP route or endpoint" },
-    { mark: <EntityBadge entityType="http_deployment" size={22} />, label: "Deployment" },
-    { mark: <EntityBadge entityType="env_var" size={22} />, label: "Environment variable or config" },
-    { mark: <EntityBadge entityType="module" size={22} />, label: "External module" },
-    { mark: <EntityBadge entityType="command" size={22} />, label: "Command" },
+    { mark: <RepoSwatch hue={1} />, label: "Repository, in its own colour" },
+    { mark: <PathBadge path="src" />, label: "Directory" },
+    { mark: <PathBadge path="index.ts" />, label: "File" },
+    { mark: <EntityBadge entityType="package" />, label: "Package" },
+    { mark: <EntityBadge entityType="http_route" />, label: "HTTP route or endpoint" },
+    { mark: <EntityBadge entityType="http_deployment" />, label: "Deployment" },
+    { mark: <EntityBadge entityType="env_var" />, label: "Environment variable" },
+    { mark: <EntityBadge entityType="config" />, label: "Configuration key" },
+    { mark: <EntityBadge entityType="module" />, label: "External module" },
+    { mark: <EntityBadge entityType="command" />, label: "Command" },
   ];
   return (
-    <Popover position="top" withArrow shadow="md" trapFocus returnFocus>
+    <Popover position="top-end" shadow="md" trapFocus returnFocus>
       <Popover.Target>
-        <Tooltip label="Node shapes">
-          <ActionIcon size="md" variant="subtle" aria-label="Node shapes">
-            <ShapesIcon size={15} />
+        <Tooltip label="What the marks mean">
+          <ActionIcon size="sm" variant="subtle" aria-label="What the marks mean">
+            <InfoIcon size={15} />
           </ActionIcon>
         </Tooltip>
       </Popover.Target>
       <Popover.Dropdown>
-        <ul className={classes.shapes} aria-label="Node shapes">
+        <ul className={classes.marks} aria-label="What the marks mean">
           {rows.map((row) => (
             <li key={row.label}>
-              {row.mark}
+              <span className={classes.markCell}>{row.mark}</span>
               {row.label}
             </li>
           ))}

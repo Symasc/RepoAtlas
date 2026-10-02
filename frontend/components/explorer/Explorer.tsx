@@ -156,7 +156,7 @@ export function Explorer() {
 
   return (
     <TransitionContext.Provider value={register}>
-      <AppShell header={{ height: 52 }} padding={0} classNames={{ header: classes.header, main: classes.main }}>
+      <AppShell header={{ height: 48 }} padding={0} classNames={{ header: classes.header, main: classes.main }}>
         <AppShell.Header>
           <AppHeader
             repositories={merged}

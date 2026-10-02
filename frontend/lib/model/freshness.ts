@@ -72,6 +72,10 @@ export interface FreshnessModel extends StateCopy {
   depth: FreshnessDepth;
   /** The backend's own words, e.g. "stale (HEAD changed)". */
   detail: string;
+  /** When this repository was last indexed, as the check that read it says. */
+  indexedAt: string | null;
+  /** Files an earlier RepoAtlas build indexed, which the next sync rewrites. */
+  outdatedFiles: number;
 }
 
 export function toFreshness(freshness: RepositoryFreshness): FreshnessModel {
@@ -80,6 +84,8 @@ export function toFreshness(freshness: RepositoryFreshness): FreshnessModel {
     state: freshness.state,
     depth: freshness.depth,
     detail: freshness.detail ?? "",
+    indexedAt: freshness.last_indexed_at ?? null,
+    outdatedFiles: freshness.outdated_files ?? 0,
   };
 }
 

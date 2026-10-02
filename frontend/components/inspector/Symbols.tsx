@@ -70,7 +70,7 @@ export function SymbolList({
         aria-pressed={target.key === selected}
         onClick={() => onPick(target.key)}
       >
-        <EntityBadge entityType={target.type} size={22} />
+        <EntityBadge entityType={target.type} />
         <span className={classes.rowText}>
           <span className={classes.rowLabel}>{target.name}</span>
           <span className={classes.rowDetail}>

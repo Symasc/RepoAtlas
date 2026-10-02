@@ -174,7 +174,10 @@ export function WorkspaceSpotlight({
       query={query}
       onQueryChange={setQuery}
       shortcut="/"
-      radius="md"
+      radius="lg"
+      shadow="md"
+      // a plain dim behind the search, no frosted glass
+      overlayProps={{ backgroundOpacity: 0.45, blur: 0 }}
       scrollable
       maxHeight="min(560px, 70vh)"
       classNames={{
@@ -225,7 +228,7 @@ export function WorkspaceSpotlight({
                   key={`${f.repository}/${f.path}`}
                   label={f.name}
                   description={`${repositoryName(f.repository)} · ${folderOf(f.path)}`}
-                  leftSection={<FileIcon size={18} />}
+                  leftSection={<FileIcon size={16} />}
                   highlightQuery
                   onClick={() => onFile(f.repository, f.path)}
                 />
@@ -239,7 +242,7 @@ export function WorkspaceSpotlight({
                   key={n.entity.key}
                   label={n.qualified_name}
                   description={whereNamed(n, repositoryName)}
-                  leftSection={<EntityBadge entityType={n.entity.type} size={22} />}
+                  leftSection={<EntityBadge entityType={n.entity.type} size={16} />}
                   highlightQuery
                   onClick={() => onName(n)}
                 />

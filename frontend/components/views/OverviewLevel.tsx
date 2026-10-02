@@ -2,9 +2,9 @@
 
 import { useCallback, useMemo, useState } from "react";
 
+import { RepoSwatch } from "@/components/common/RepoSwatch";
 import { Graph } from "@/components/graph/Graph";
 import { flowEdges, place } from "@/components/graph/flow";
-import { Monogram } from "@/components/graph/glyphs";
 import { languagesOf, type GraphNode, type NodeActions } from "@/components/graph/nodes";
 import { useTween } from "@/components/graph/useTween";
 import { Connections } from "@/components/inspector/Connections";
@@ -20,8 +20,8 @@ import { buildOverview, FAMILIES, repositoryId, type Connection, type Family } f
 import type { RepositoryModel } from "@/lib/model/repositories";
 import { useAnimationsOff } from "@/lib/useMotion";
 
-import { Metrics } from "./Metrics";
 import type { Navigation } from "./navigation";
+import { Totals } from "./Totals";
 import classes from "./Views.module.css";
 
 const NO_LINKS: readonly RepositoryLink[] = [];
@@ -88,10 +88,6 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
   const nodes = useMemo<GraphNode[]>(() => {
     if (!ready) return [];
     const out: GraphNode[] = [];
-    for (const ring of shape.rings) {
-      const box = layout.get(ring.id);
-      if (box) out.push(place({ id: ring.id, type: "orbit", data: {}, zIndex: -2, selectable: false }, box, { pointerEvents: "none" }));
-    }
     if (shape.group) {
       out.push(
         place(
@@ -125,10 +121,8 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
     () =>
       flowEdges(graph.edges, {
         route: () => "float",
-        // spokes from the anchor run straight; lines between ring neighbours bow outward
-        curve: (e) => (e.source === shape.anchor || e.target === shape.anchor ? 0 : 0.14),
       }),
-    [graph.edges, shape.anchor],
+    [graph.edges],
   );
 
   const families = useMemo<Family[]>(() => {
@@ -159,7 +153,6 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
 
   return (
     <div className={classes.level}>
-      <Metrics repositories={repositories} crossing={overview.isSuccess ? crossing : null} />
       <div className={classes.stage} data-inspector={repository ? true : undefined}>
         <div className={classes.canvas}>
           <Graph
@@ -178,13 +171,15 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
             extent={extent}
             refit={anchorKey}
             families={families}
-            topCenter={note && <p className={classes.note}>{note}</p>}
+            start={<h1 className={classes.levelTitle}>All repositories</h1>}
+            end={<Totals repositories={repositories} crossing={overview.isSuccess ? crossing : null} />}
+            notice={note && <p>{note}</p>}
           />
         </div>
         {repository && (
           <Inspector
             label={`${repository.name}, inspected`}
-            icon={<Monogram name={repository.name} hue={repository.hue} size={38} />}
+            icon={<RepoSwatch hue={repository.hue} size={12} />}
             title={repository.name}
             subtitle={languagesOf(repository, 4) || "Repository"}
             onClose={() => nav.select(null)}
