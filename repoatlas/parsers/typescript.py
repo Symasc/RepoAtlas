@@ -141,36 +141,42 @@ class _Walker:
             self._visit(child, exported=exported)
 
     def _visit(self, node: Node, *, exported: bool = False) -> None:
-        kind = node.type
+        pending = [(node, exported)]
+        while pending:
+            current, current_exported = pending.pop()
+            kind = current.type
 
-        if kind in USE_NODES and self._uses is not None:
-            site = self._uses.sites.get((node.start_byte, node.end_byte, kind))
-            if site is not None:
-                self._use(site)
-        if kind == "import_statement":
-            self._import_statement(node)
-            return
-        if kind == "export_statement":
-            self._export_statement(node)
-            return
-        if kind in _DECLARATIONS:
-            self._declaration(node, exported=exported)
-            return
-        if kind == "method_definition":
-            self._method(node)
-            return
-        if kind in {"lexical_declaration", "variable_declaration"}:
-            self._variable_declaration(node, exported=exported)
-            return
-        if kind == "object" and (node.start_byte, node.end_byte) in self._returned:
-            self._returned_object(node)
-            return
-        if kind == "call_expression":
-            self._call(node)
-        elif kind in {"member_expression", "subscript_expression"}:
-            self._maybe_env_read(node)
+            if kind in USE_NODES and self._uses is not None:
+                site = self._uses.sites.get(
+                    (current.start_byte, current.end_byte, kind)
+                )
+                if site is not None:
+                    self._use(site)
+            if kind == "import_statement":
+                self._import_statement(current)
+                continue
+            if kind == "export_statement":
+                self._export_statement(current)
+                continue
+            if kind in _DECLARATIONS:
+                self._declaration(current, exported=current_exported)
+                continue
+            if kind == "method_definition":
+                self._method(current)
+                continue
+            if kind in {"lexical_declaration", "variable_declaration"}:
+                self._variable_declaration(current, exported=current_exported)
+                continue
+            if kind == "object" and (current.start_byte, current.end_byte) in self._returned:
+                self._returned_object(current)
+                continue
+            if kind == "call_expression":
+                self._call(current)
+            elif kind in {"member_expression", "subscript_expression"}:
+                self._maybe_env_read(current)
 
-        self._visit_children(node, exported=exported)
+            for child in reversed(current.children):
+                pending.append((child, current_exported))
 
     # -- imports and exports -------------------------------------------------
 
