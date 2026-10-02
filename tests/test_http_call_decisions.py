@@ -25,7 +25,7 @@ from repoatlas.graph.http_chain import (
     chain_from_json,
 )
 from repoatlas.graph.linker import ReferenceLinker
-from repoatlas.services.workspace import Workspace
+from repoatlas.services.workspace import Workspace, open_workspace
 from repoatlas.storage.protocols import HttpCallDecisionRow
 from repoatlas.storage.sqlite.database import open_database
 from repoatlas.storage.sqlite.stores import SqliteKnowledgeStore
@@ -36,7 +36,7 @@ from tests.http_crossing_corpus import (
     LOAD_USER_CALL_LINE,
     WORKSPACE,
 )
-from tests.impact_corpus import build
+from tests.impact_corpus import build, make_repo
 from tests.incremental_corpus import edit, fresh_index, sync_all
 from tests.test_http_crossings import ALTERNATED
 from tests.test_http_ts_injection import MAIN, WEB
@@ -159,6 +159,71 @@ def test_a_decision_ref_is_the_same_after_a_sync_and_in_a_fresh_index(
     assert sorted((row.decision_ref, row.decision) for row in stored(joined)) == before
     with fresh_index(settings, root, tmp_path, "refs") as fresh:
         assert sorted((row.decision_ref, row.decision) for row in stored(fresh)) == before
+
+
+def named(rows: list[HttpCallDecisionRow]) -> dict[str, tuple[object, ...]]:
+    """Each ref with the request it names, in what the source states: no row ID."""
+    found: dict[str, tuple[object, ...]] = {
+        row.decision_ref: (
+            row.path,
+            row.line_start,
+            row.line_end,
+            row.src_key,
+            row.variant,
+            row.url,
+            row.decision,
+        )
+        for row in rows
+    }
+    assert len(found) == len(rows)
+    return found
+
+
+DECOY = {
+    "decoy.py": 'import requests\n\n\ndef ping():\n    requests.get("https://decoy.example/ping")\n'
+}
+
+
+def test_a_decision_ref_names_the_same_request_however_the_index_got_there(
+    joined: Workspace, settings, tmp_path: Path
+) -> None:
+    """C2: the ref is the request's, never a row's: the same after a sync that changes
+    nothing, read through a reopened index and replanned from it, and in a rebuild of the
+    same source whose every repository, file, entity and claim has another row ID."""
+    before = named(stored(joined))
+    root = tmp_path / "repos"
+    sync_all(joined, root)
+    assert named(stored(joined)) == before
+
+    ids = {row.decision_ref: (row.repo_id, row.file_id, row.src_id) for row in stored(joined)}
+    rooted = joined.settings
+    joined.close()
+    reopened = open_workspace(settings=rooted)
+    try:
+        assert named(stored(reopened)) == before
+        plan = ReferenceLinker(reopened.knowledge).prepare_global().http_crossings
+        assert sorted(call.ref for call in plan.calls) == sorted(before)
+        sync_all(reopened, root)
+        assert named(stored(reopened)) == before
+    finally:
+        reopened.close()
+
+    shifted = tmp_path / "shifted"
+    make_repo(shifted, "aaa-decoy", DECOY)
+    for name, files in WORKSPACE.items():
+        make_repo(shifted, name, files)
+    with fresh_index(settings, shifted, tmp_path, "shifted") as rebuilt:
+        decoy = rebuilt.repositories.get_by_slug("aaa-decoy")
+        assert decoy is not None
+        rows = [row for row in stored(rebuilt) if row.repo_id != decoy.id]
+        assert named(rows) == before
+        # Not vacuous: every row the refs name has another ID here.
+        for row in rows:
+            old = ids[row.decision_ref]
+            assert all(
+                new != was
+                for new, was in zip((row.repo_id, row.file_id, row.src_id), old, strict=True)
+            )
 
 
 def test_a_sync_replaces_every_stored_decision(joined: Workspace, tmp_path: Path) -> None:
