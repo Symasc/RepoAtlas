@@ -102,20 +102,35 @@ def test_every_stored_decision_is_one_crossing_of_one_caller_row(joined: Workspa
 
 
 def test_a_request_only_the_join_reads_has_a_row_of_its_own(joined: Workspace) -> None:
-    """Its path is read, so it counts as no unknown path; its status is no route match."""
+    """Of a status of its own: neither a route match nor an unresolved path, and counted as
+    neither, but listed, filtered and explained like any other."""
     response = _ask(joined)
     row = _caller(response, "load_user")
-    assert (row.status, row.detail) == (OperationStatus.UNRESOLVED, "join_only")
+    assert (row.status, row.detail) == (OperationStatus.JOIN_ONLY, "")
     assert (row.method, row.route, row.path) == ("GET", "/api/users/{user_id}", "client.py")
     assert (row.line_start, row.line_end) == (LOAD_USER_CALL_LINE, LOAD_USER_CALL_LINE)
     assert [c.status for c in row.crossings] == [CrossingStatus.LINKED]
-    joined_only = [r for r in response.operations if r.detail == "join_only"]
-    assert response.coverage.unresolved == {"join_only": len(joined_only)}
+    joined_only = [r for r in response.operations if r.status is OperationStatus.JOIN_ONLY]
+    assert len(joined_only) > 1
+    assert response.summary.by_status["join_only"] == len(joined_only)
+    assert response.coverage.unresolved == {}
     assert response.coverage.unknown_paths == 0
+    codes = {item.code for item in response.coverage.limitations}
+    assert "unresolved_path" not in codes
     [limitation] = [item for item in response.coverage.limitations if item.code == "join_only"]
     assert limitation.count == len(joined_only)
+    assert "join_only" in limitation.note
     # A host the source does not state still has its path to filter by.
     assert _caller(response, "dynamic").route == "/users/{user_id}"
+
+    only = _ask(joined, status=(OperationStatus.JOIN_ONLY,))
+    assert only.operations == tuple(joined_only)
+    assert _ask(joined, status=(OperationStatus.UNRESOLVED,)).operations == ()
+    rest = _ask(
+        joined, status=tuple(s for s in OperationStatus if s is not OperationStatus.JOIN_ONLY)
+    )
+    assert rest.summary.total == response.summary.total - len(joined_only)
+    assert not any(r.status is OperationStatus.JOIN_ONLY for r in rest.operations)
 
 
 def test_a_row_keeps_its_route_match_status_beside_its_crossings(joined: Workspace) -> None:
@@ -136,13 +151,13 @@ def test_a_row_keeps_its_route_match_status_beside_its_crossings(joined: Workspa
     assert not without.basis.crossings.built
     assert "crossings_not_built" in {item.code for item in without.coverage.limitations}
     assert not any(row.crossings for row in without.operations)
-    assert all(row.detail != "join_only" for row in without.operations)
+    assert all(row.status is not OperationStatus.JOIN_ONLY for row in without.operations)
 
     def statuses(response: HttpOperationsResponse) -> set[tuple[object, ...]]:
         return {
             (row.path, row.line_start, row.status, row.detail)
             for row in response.operations
-            if row.detail != "join_only"
+            if row.status is not OperationStatus.JOIN_ONLY
         }
 
     assert statuses(with_crossings) == statuses(without)
@@ -202,7 +217,7 @@ def test_a_request_a_wrapper_composes_is_crossed_on_its_composed_row(
     web = {"package.json": '{"name": "web"}', "src/client.ts": WRAPPED}
     built = build(workspace, tmp_path, {"accounts": ACCOUNTS, "web": web})
     rows = _ask(built, "web").operations
-    assert [row.detail for row in rows if row.detail == "join_only"] == []
+    assert [row for row in rows if row.status is OperationStatus.JOIN_ONLY] == []
     assert [
         (row.route, [c.chain[0].provenance[0].line_start for c in row.crossings])
         for row in rows

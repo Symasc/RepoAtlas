@@ -71,7 +71,7 @@ class OperationRole(enum.StrEnum):
 class OperationStatus(enum.StrEnum):
     """What one row is, in indexed static facts of one repository.
 
-    The first four are callers, the last three providers. None of them is a
+    The first five are callers, the last three providers. None of them is a
     statement about the whole system: "no indexed handler" is absence in the
     index, and so is "no indexed caller".
     """
@@ -84,6 +84,10 @@ class OperationStatus(enum.StrEnum):
     NO_INDEXED_HANDLER = "no_indexed_handler"
     #: The path cannot be established; ``detail`` says why.
     UNRESOLVED = "unresolved"
+    #: A request only the workspace join reads (an absolute or deployment-addressed
+    #: URL, or a host the source does not state): not a route match, not an unresolved
+    #: path. Its ``crossings`` say what the join decided.
+    JOIN_ONLY = "join_only"
     #: A route served here that an indexed caller in this repository reaches.
     CALLED = "called"
     #: A route served here that no indexed caller in this repository reaches.

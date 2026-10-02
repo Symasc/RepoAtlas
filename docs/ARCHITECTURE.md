@@ -1909,7 +1909,8 @@ the decisions the last global pass stored (`http_call_decisions`, §5), placed o
 by the same entity, one per request: literal alternatives and injected roots each have their own. A crossing is
 apart from the row's status, which keeps its route-matching meaning. A request only the join reads — an absolute
 or deployment-addressed URL, or a host the source does not state — has no route-matching row, so it gets one of its
-own, `unresolved` with detail `join_only`, counted under the `join_only` limitation and not as an unknown path.
+own, of status `join_only`: neither a route match nor an unresolved path, so it is counted under the `join_only`
+limitation and in `summary.by_status`, never under `coverage.unresolved` or as an unknown path; `status` filters it.
 `crossing` filters rows to those decisions and narrows each row's crossings to them; `summary.by_crossing` counts
 them. An index no global pass has written since migration 008 says so (`crossings_not_built`) rather than listing
 none.
