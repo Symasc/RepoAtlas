@@ -123,7 +123,6 @@ def _settings(tmp_path: Path, tag: str) -> Settings:
     return Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / tag / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 64},
         }
     )
 
@@ -210,7 +209,7 @@ def _per_file_facts(connection: sqlite3.Connection, rel_path: str) -> dict[str, 
         "chunks": sorted(
             tuple(row)
             for row in connection.execute(
-                "SELECT k.line_start, k.line_end, k.content_hash, k.span_index, "
+                "SELECT k.line_start, k.line_end, k.text, k.span_index, "
                 "k.split_index, k.split_total FROM chunks k "
                 "JOIN files f ON f.id = k.file_id WHERE f.rel_path = ?",
                 (rel_path,),
@@ -273,9 +272,9 @@ def assert_no_partial_file(observed: Settings, reference: Settings) -> None:
 def logical_snapshot(settings: Settings) -> dict[str, object]:
     """Id-independent snapshot covering every derived representation.
 
-    Wider than ``tests.conftest.fact_snapshot``: it also compares the FTS content
-    and the embedding vectors, because a recovery that rebuilt the rows but not the
-    search index would answer questions differently while looking equivalent.
+    Wider than ``tests.conftest.fact_snapshot``: it also compares the FTS content,
+    because a recovery that rebuilt the rows but not the search index would answer
+    questions differently while looking equivalent.
     """
     connection = _connect(settings)
     try:
@@ -320,7 +319,7 @@ def logical_snapshot(settings: Settings) -> dict[str, object]:
                 tuple(r)
                 for r in connection.execute(
                     "SELECT f.rel_path, k.line_start, k.line_end, k.text, "
-                    "k.content_hash, k.span_index, k.split_index, k.split_total "
+                    "k.span_index, k.split_index, k.split_total "
                     "FROM chunks k JOIN files f ON f.id = k.file_id"
                 )
             ),
@@ -330,12 +329,6 @@ def logical_snapshot(settings: Settings) -> dict[str, object]:
                     "SELECT f.rel_path, d.ecosystem, d.normalized_name, d.role, "
                     "d.constraint_text, d.version, d.group_name, d.line_start "
                     "FROM dependencies d JOIN files f ON f.id = d.file_id"
-                )
-            ),
-            "embeddings": sorted(
-                tuple(r)
-                for r in connection.execute(
-                    "SELECT content_hash, model, dim, hex(vector) FROM embeddings"
                 )
             ),
         }
@@ -1082,9 +1075,7 @@ class Harness:
         self.database = base / "state" / "atlas.db"
         self.config = base / "config.yaml"
         self.config.write_text(
-            f"repos:\n  root: {self.root}\n"
-            f"storage:\n  database: {self.database}\n"
-            f"embeddings:\n  provider: hashing\n  dim: 64\n"
+            f"repos:\n  root: {self.root}\nstorage:\n  database: {self.database}\n"
         )
         self.runner = base / "runner.py"
         self.runner.write_text(RUNNER_SOURCE)
@@ -1097,7 +1088,6 @@ class Harness:
         return Settings.model_validate(
             {
                 "storage": {"database": str(self.database)},
-                "embeddings": {"provider": "hashing", "dim": 64},
             }
         )
 

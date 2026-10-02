@@ -59,7 +59,6 @@ def test_the_trace_records_every_stage(measured: Workspace) -> None:
         "file",
         "lexical",
         "symbol",
-        "semantic",
         "graph",
         "fuse",
         "dedup",
@@ -122,7 +121,6 @@ def test_an_unchanged_sync_reindexes_nothing(measured: Workspace, workspace_root
 
     assert report.files_indexed == 0
     assert all(entry.unchanged > 0 or entry.files_indexed == 0 for entry in report.repositories)
-    assert report.embedded_chunks == 0
 
 
 def test_one_changed_file_reindexes_one_file(measured: Workspace, workspace_root: Path) -> None:

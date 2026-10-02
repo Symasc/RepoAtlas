@@ -71,7 +71,7 @@ def build_config(overrides=None):
 
 # The adversary (§28 of the remediation brief): many entity names matching
 # `config`, many imports, high graph degree, the literal text `config.py`
-# repeated, and enough prose to be a strong lexical and semantic match.
+# repeated, and enough prose to be a strong lexical match.
 TESTS_CONFIG = '''"""Tests for config.py. config.py config.py config.py config.py."""
 
 import config
@@ -184,7 +184,6 @@ def ecosystem(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Worksp
     settings = Settings.model_validate(
         {
             "storage": {"database": str(base / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     workspace = open_workspace(settings=settings, require_root=False)
@@ -591,10 +590,10 @@ def test_a_high_degree_same_basename_adversary_still_loses(
     assert adversary_rank is None or adversary_rank > target_rank
 
 
-def test_a_semantically_similar_file_does_not_outrank_the_named_path(
+def test_a_lexically_similar_file_does_not_outrank_the_named_path(
     workspace: Workspace, root: Path
 ) -> None:
-    """Priority, not suppression: the semantic stage still runs and still returns."""
+    """Priority, not suppression: the lexical stage still runs and still returns."""
     evidence = ask(workspace, root, TARGET)
     assert ranked(evidence)[0] == f"svc/{TARGET}"
 
@@ -812,52 +811,6 @@ def test_debug_keeps_the_path_anchor_with_supporting_evidence(
     assert lines, done.stdout
     assert f"svc/{TARGET}" in lines[0], done.stdout
     assert len(lines) > 1, "supporting evidence must remain available"
-
-
-# --- 25. the real semantic backend -------------------------------------------
-
-
-@pytest.mark.slow
-def test_the_anchor_holds_against_the_real_embedding_model(
-    tmp_path: Path,
-) -> None:
-    """The same guarantee with a genuine semantic model, not the hashing stub.
-
-    Deselected by default: the first run downloads the model, and CI must never
-    depend on the network (V1_SPEC §19). It exists because the stub cannot
-    produce the failure this guards against — a file that is *semantically* about
-    configuration, scoring highly for a query that is a path, is exactly what a
-    real model returns and what a hash of the text does not.
-
-    Priority, not suppression: the semantic stage still runs and its neighbours
-    are still in the answer, below the file the query named.
-    """
-    from repoatlas.embeddings.fastembed_backend import FastEmbedModel
-
-    model = FastEmbedModel(allow_download=True)
-    if not model.available():
-        pytest.skip(model.availability_detail())
-
-    root = tmp_path / "repos"
-    _write(root / "svc", SVC_FILES)
-    _write(root / "other", OTHER_FILES)
-    settings = Settings.model_validate(
-        {
-            "storage": {"database": str(tmp_path / "real" / "atlas.db")},
-            "embeddings": {"provider": "fastembed", "allow_download": True},
-        }
-    )
-    real = open_workspace(settings=settings, require_root=False)
-    try:
-        initialize(real, root, config_path=tmp_path / "real-config.yaml")
-        evidence = locate(real, TARGET, real.resolver().resolve(root / "svc"))
-
-        assert ranked(evidence)[0] == f"svc/{TARGET}"
-        assert f"svc/{TARGET}" in anchored(evidence)
-        tiers = [c.tier for c in evidence.candidates]
-        assert tiers == sorted(tiers)
-    finally:
-        real.close()
 
 
 # --- state guard --------------------------------------------------------------

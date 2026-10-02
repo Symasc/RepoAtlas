@@ -90,7 +90,6 @@ def settings_for(tmp_path: Path, tag: str = "state") -> Settings:
     return Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / tag / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 64},
         }
     )
 

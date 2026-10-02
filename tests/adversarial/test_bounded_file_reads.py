@@ -554,7 +554,6 @@ def _settings(tmp_path: Path, cap: int = CAP, tag: str = "state") -> Settings:
     return Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / tag / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
             "indexing": {"max_file_bytes": cap},
         }
     )
@@ -701,8 +700,8 @@ def test_a_file_that_becomes_oversized_loses_every_fact_it_asserted(
 ) -> None:
     """§17, the transition that matters most.
 
-    A file is indexed while small, so its contents are entities, edges, chunks,
-    FTS rows and — through the chunks — embeddings. It then grows past the cap.
+    A file is indexed while small, so its contents are entities, edges, chunks
+    and FTS rows. It then grows past the cap.
     "Skipped for size" must not quietly mean "kept whatever we had", or the index
     would keep serving content from a file RepoAtlas has decided it may not read.
     """
@@ -719,13 +718,10 @@ def test_a_file_that_becomes_oversized_loses_every_fact_it_asserted(
         before = _files(space)["app.py"]
         assert before["chunks"] > 0 and before["entities"] > 1
 
-        hashes = [
-            str(r["content_hash"])
-            for r in space.database.execute("SELECT content_hash FROM chunks").fetchall()
+        texts = [
+            str(r["text"]) for r in space.database.execute("SELECT text FROM chunks").fetchall()
         ]
-        assert hashes, "there must be chunks to lose"
-        embedded = space.database.execute("SELECT COUNT(*) AS n FROM embeddings").fetchone()["n"]
-        assert embedded > 0, "there must be embeddings to lose"
+        assert texts, "there must be chunks to lose"
 
         (repo / "app.py").write_bytes(f"SECRET = '{STALE}'\n".encode() + b"#" * (CAP * 2))
         _commit(repo)
@@ -738,9 +734,9 @@ def test_a_file_that_becomes_oversized_loses_every_fact_it_asserted(
         assert space.search.search_literal(STALE) == [], "FTS must not still serve it"
         assert (
             space.database.execute(
-                "SELECT COUNT(*) AS n FROM chunks WHERE content_hash IN "  # noqa: S608
-                f"({','.join('?' * len(hashes))})",
-                tuple(hashes),
+                "SELECT COUNT(*) AS n FROM chunks WHERE text IN "  # noqa: S608
+                f"({','.join('?' * len(texts))})",
+                tuple(texts),
             ).fetchone()["n"]
             == 0
         ), "no chunk of the small version may survive"
@@ -818,39 +814,6 @@ def test_a_file_that_grows_past_the_cap_between_scan_and_read(
 
 
 # == 7. nothing oversized reaches the model =================================
-
-
-def test_no_oversized_text_is_ever_offered_to_the_embedding_backend(
-    tmp_path: Path,
-) -> None:
-    """§22. Instrumented at the backend rather than inferred from the database:
-    a build that embedded the text and then failed to store the vector would pass
-    a database check and still have sent the content through the model."""
-    root = tmp_path / "repos"
-    repo = _repo(root)
-    (repo / "small.py").write_text(f"OK = '{MARKER}_EMBED_OK'\n", encoding="utf-8")
-    (repo / "big.py").write_bytes(f"HUGE = '{MARKER}_EMBED_BIG'\n".encode() + b"#" * (CAP * 2))
-    _commit(repo)
-
-    space = open_workspace(settings=_settings(tmp_path), require_root=False)
-    seen: list[str] = []
-    backend = space.embeddings()
-    assert backend is not None
-    real_embed = backend.embed
-
-    def recording(texts):
-        seen.extend(texts)
-        return real_embed(texts)
-
-    backend.embed = recording  # type: ignore[assignment]
-    try:
-        initialize(space, root, config_path=tmp_path / "config.yaml")
-        assert seen, "the backend must actually have been used"
-        assert any(f"{MARKER}_EMBED_OK" in t for t in seen)
-        assert not any(f"{MARKER}_EMBED_BIG" in t for t in seen)
-        assert all(len(t) <= CAP + 1 for t in seen)
-    finally:
-        space.close()
 
 
 def test_no_oversized_content_reaches_retrieved_evidence(tmp_path: Path) -> None:
@@ -1108,7 +1071,6 @@ root, state, cap = Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3])
 baseline = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 settings = Settings.model_validate({
     "storage": {"database": str(state / "atlas.db")},
-    "embeddings": {"provider": "hashing", "dim": 128},
     "indexing": {"max_file_bytes": cap},
 })
 space = open_workspace(settings=settings, require_root=False)
@@ -1127,8 +1089,7 @@ def test_peak_memory_does_not_scale_with_the_size_of_a_refused_file(tmp_path: Pa
     Two runs of the same code over the same repository, differing only in whether
     a 256 MiB file is present. Before the fix the difference was the file; after
     it, the difference is noise. Reported as a delta over each run's own baseline,
-    because absolute RSS is mostly the interpreter and the ONNX-free embedding
-    backend.
+    because absolute RSS is mostly the interpreter.
     """
     root = tmp_path / "repos"
     repo = _repo(root)

@@ -116,18 +116,8 @@ def unmanaged_repo(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    """Settings pointing storage at the temp directory.
-
-    Embeddings use the deterministic hashing backend. Tests must not download a
-    model or touch the network (V1_SPEC §19), and a stub also makes the semantic
-    stage assertable: the same text always yields the same vector.
-    """
-    return Settings.model_validate(
-        {
-            "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
-        }
-    )
+    """Settings pointing storage at the temp directory."""
+    return Settings.model_validate({"storage": {"database": str(tmp_path / "state" / "atlas.db")}})
 
 
 @pytest.fixture
@@ -211,7 +201,7 @@ def fact_snapshot(workspace: Workspace) -> dict[str, object]:
         # reproduced the text but not the seam metadata would not be equivalent.
         # They also make the ordering total — several pieces of one span share a
         # line range, so line_start alone left the comparison order undefined.
-        "SELECT r.name, f.rel_path, c.line_start, c.line_end, c.content_hash, "
+        "SELECT r.name, f.rel_path, c.line_start, c.line_end, c.text, "
         "c.span_index, c.split_index, c.split_total "
         "FROM chunks c JOIN files f ON f.id = c.file_id "
         "JOIN repositories r ON r.id = c.repo_id "

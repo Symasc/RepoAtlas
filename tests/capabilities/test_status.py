@@ -598,7 +598,6 @@ def test_neither_capability_writes_the_index(
     )
     monkeypatch.setattr(initialized.knowledge, "add_edges", forbid("knowledge.add_edges"))
     monkeypatch.setattr(initialized.knowledge, "intern_entity", forbid("knowledge.intern_entity"))
-    monkeypatch.setattr(initialized.vectors, "upsert_many", forbid("vectors.upsert_many"))
 
     service.repositories(RepositoriesRequest(context=GLOBAL))
     service.status(StatusRequest(context=GLOBAL))

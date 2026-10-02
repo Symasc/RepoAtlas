@@ -6,7 +6,7 @@ Three invariants, and the third is the one this suite was written for:
     preference, and cannot be negated by ``.repoatlasignore``.
 
     An excluded secret file is rejected before its contents are parsed, chunked,
-    embedded, retrieved, serialized into prompts, or logged.
+    retrieved, serialized into prompts, or logged.
 
     Filename-case variation cannot bypass a built-in secret exclusion.
 
@@ -118,7 +118,6 @@ def _settings(tmp_path: Path, tag: str) -> Settings:
     return Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / f"{tag}-state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
 
@@ -326,41 +325,6 @@ def test_no_secret_file_becomes_an_entity(vault: Workspace) -> None:
         assert f"file:vault:{secret}" not in keys, secret
 
 
-def test_no_canary_is_embedded(vault: Workspace) -> None:
-    """Vectors are keyed by chunk content hash, so a chunk that never existed has
-    none. Asserted at the source text, because an embedding is not reversible."""
-    rows = vault.database.execute(
-        "SELECT c.text FROM chunks c JOIN embeddings e ON e.content_hash = c.content_hash"
-    ).fetchall()
-    assert leaked_canaries("\n".join(str(r["text"]) for r in rows)) == []
-
-
-def test_the_embedding_backend_never_receives_a_canary(tmp_path: Path, vault_root: Path) -> None:
-    """The strongest form: record every string handed to the model.
-
-    Absence of a chunk implies absence of an embedding, but only if nothing else
-    embeds text by another route. This checks the backend's own input.
-    """
-    from repoatlas.embeddings.hashing import HashingEmbedding
-
-    seen: list[str] = []
-    real_embed = HashingEmbedding.embed
-
-    def recording(self: HashingEmbedding, texts: list[str]):
-        seen.extend(texts)
-        return real_embed(self, texts)
-
-    HashingEmbedding.embed = recording  # type: ignore[method-assign]
-    try:
-        space = _indexed(tmp_path, "embcap", vault_root)
-        space.close()
-    finally:
-        HashingEmbedding.embed = real_embed  # type: ignore[method-assign]
-
-    assert seen, "no text was embedded at all; the assertion below would be vacuous"
-    assert leaked_canaries("\n".join(seen)) == []
-
-
 def test_no_secret_reaches_an_evidence_set(vault: Workspace, vault_root: Path) -> None:
     context = vault.resolver().resolve(vault_root, command="locate")
     questions = [
@@ -454,7 +418,7 @@ def contaminated(
     """A database indexed by the *vulnerable* build, then handed to the fixed one.
 
     Fixing enumeration for new files is not enough: an upgraded RepoAtlas whose
-    `files`, `chunks`, FTS and embedding tables still hold `.ENV` has not fixed
+    `files`, `chunks` and FTS tables still hold `.ENV` has not fixed
     anything for the user who was already running it.
     """
     monkeypatch.setattr("repoatlas.sync.scanner.is_secret_path", _case_sensitive_is_secret_path)
@@ -512,36 +476,11 @@ def test_every_dependent_table_is_cleared_by_the_upgrade_sync(
         assert n == 0, (table, secret)
 
 
-def test_the_upgrade_sync_clears_chunks_fts_and_vectors(
-    contaminated: Workspace, vault_root: Path
-) -> None:
+def test_the_upgrade_sync_clears_chunks_and_fts(contaminated: Workspace, vault_root: Path) -> None:
     sync(contaminated, contaminated.resolver().resolve(vault_root))
     assert leaked_canaries(chunk_text(contaminated)) == []
     for canary in CANARIES:
         assert contaminated.search.search_literal(canary) == [], canary
-    rows = contaminated.database.execute(
-        "SELECT c.text FROM chunks c JOIN embeddings e ON e.content_hash = c.content_hash"
-    ).fetchall()
-    assert leaked_canaries("\n".join(str(r["text"]) for r in rows)) == []
-
-
-def test_the_upgrade_sync_leaves_no_orphan_vector_for_a_secret(
-    contaminated: Workspace, vault_root: Path
-) -> None:
-    """Vectors are content-addressed, so they outlive the chunk that produced
-    them until they are collected. A vector is not the text, but a vector nobody
-    can account for is state the user did not consent to keep."""
-    before = int(contaminated.database.execute("SELECT COUNT(*) n FROM embeddings").fetchone()["n"])
-    sync(contaminated, contaminated.resolver().resolve(vault_root))
-    after = int(contaminated.database.execute("SELECT COUNT(*) n FROM embeddings").fetchone()["n"])
-    orphans = int(
-        contaminated.database.execute(
-            "SELECT COUNT(*) n FROM embeddings v WHERE NOT EXISTS "
-            "(SELECT 1 FROM chunks c WHERE c.content_hash = v.content_hash)"
-        ).fetchone()["n"]
-    )
-    assert orphans == 0
-    assert after < before
 
 
 def test_no_secret_survives_the_upgrade_into_retrieval(

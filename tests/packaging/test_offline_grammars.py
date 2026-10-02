@@ -232,7 +232,7 @@ def _index_offline(python: Path, repos: Path, sandbox: Path) -> dict[str, Any]:
     config, data, state = sandbox / "xdg-config", sandbox / "xdg-data", sandbox / "state"
     for directory in (home, cache, config, data, state):
         directory.mkdir(parents=True)
-    (state / "config.yaml").write_text("embeddings:\n  provider: hashing\n  dim: 128\n")
+    (state / "config.yaml").write_text("")
     driver = sandbox / "driver.py"
     driver.write_text(_DRIVER)
     env = {

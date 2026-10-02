@@ -430,7 +430,6 @@ def _indexed(tmp_path: Path, tag: str, root: Path) -> Workspace:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / f"{tag}-state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     space = open_workspace(settings=settings, require_root=False)
