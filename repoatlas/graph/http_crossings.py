@@ -516,15 +516,18 @@ def _refs(
 ) -> list[tuple[str, str]]:
     """Each request's ``decision_ref`` and variant, from what the source states of it:
     its repository, file, lines, the request as written, and the variant. Requests alike
-    in all of that are told apart by their order, which is then all that differs."""
+    in all of that are told apart by their order — by the rest of what their claims
+    record, then as given — so no row ID of any index ever reaches a ref."""
     keys: list[str] = []
     for claim, meta in asked:
         row = by_file.get(claim.file_id)
-        place = [row.repo_slug, row.rel_path] if row else [f"repository:{claim.repo_id}", ""]
+        place = [row.repo_slug, row.rel_path] if row else ["", ""]
         keys.append(
             json.dumps([*place, claim.line_start, claim.line_end, claim.target_key, _variant(meta)])
         )
-    order = sorted(range(len(asked)), key=lambda i: (keys[i], asked[i][0].id or 0))
+    order = sorted(
+        range(len(asked)), key=lambda i: (keys[i], json.dumps(asked[i][1], sort_keys=True))
+    )
     seen: dict[str, int] = defaultdict(int)
     refs: list[tuple[str, str]] = [("", "")] * len(asked)
     for index in order:

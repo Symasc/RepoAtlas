@@ -13,6 +13,7 @@ between two repositories.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -322,6 +323,41 @@ def test_a_claim_the_join_cannot_read_is_never_joined() -> None:
     plan = plan_http_crossings([exposure, broken], files, producer="linker:global")
     assert plan.edges == ()
     assert [(call.claim.id, call.decision) for call in plan.calls] == [(2, "http-claim-unread")]
+
+
+@pytest.mark.parametrize("ids", [(1, 2), (2, 1)])
+@pytest.mark.parametrize("step", [1, -1])
+def test_requests_alike_but_for_their_bases_keep_their_refs_whatever_their_row_ids(
+    ids: tuple[int, int], step: int
+) -> None:
+    """Two requests on one line, written alike, their bases bound on two lines: which ref
+    names which follows what the claims record, never their row IDs or their order."""
+    files = [_row(2, 2, "web", "client.py")]
+    claims = [
+        _claim(
+            claim_id,
+            2,
+            2,
+            22,
+            "GET https://svc.example/users",
+            pending_fact=HTTP_CLIENT_CALL,
+            method="GET",
+            origin="https://svc.example",
+            segments='["users"]',
+            base_at=base_at,
+        )
+        for claim_id, base_at in zip(ids, ("3", "4"), strict=True)
+    ]
+    plan = plan_http_crossings(claims[::step], files, producer="linker:global")
+    refs = {json.loads(call.claim.meta_json or "{}")["base_at"]: call.ref for call in plan.calls}
+    assert refs == {
+        "3": "hcd1-" + _digest('["web", "client.py", 5, 5, "GET https://svc.example/users", ""]'),
+        "4": "hcd1-" + _digest('["web", "client.py", 5, 5, "GET https://svc.example/users", ""]#1'),
+    }
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
 
 
 # -- impact: inward only, with the evidence (H10, A2, A3) --------------------------------
