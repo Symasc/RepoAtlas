@@ -222,7 +222,6 @@ def test_the_internal_limits_keep_configured_biases_out_of_the_callers_hands(
     assert limits.graph_hops == default_settings.retrieval.graph_hops
     assert limits.graph_seeds == default_settings.retrieval.graph_seeds
     assert limits.primary_boost == default_settings.retrieval.primary_boost
-    assert limits.semantic_floor == default_settings.retrieval.semantic_floor
 
 
 def test_the_token_prefilter_rounds_up_so_it_never_cuts_below_the_grant(

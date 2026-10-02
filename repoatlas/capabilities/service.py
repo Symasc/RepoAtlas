@@ -3800,8 +3800,6 @@ class CapabilityService:
             linked_references=report.linked_references,
             unresolved_references=report.unresolved_references,
             cross_repository_edges=report.cross_repository_edges,
-            embedded_chunks=report.embedded_chunks,
-            pending_embeddings=report.pending_embeddings,
             evidence_revalidation=revalidation,
             freshness=freshness,
             completed_at=completed_at,

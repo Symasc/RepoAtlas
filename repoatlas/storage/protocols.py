@@ -74,11 +74,7 @@ class SyncCompletion(BaseModel):
 
 
 class ChunkRecord(BaseModel):
-    """A retrievable span of a file, carrying the lines that prove it.
-
-    ``content_hash`` is the key vectors are stored under, so text that survives a
-    reparse unchanged is never embedded twice (V1_SPEC §20).
-    """
+    """A retrievable span of a file, carrying the lines that prove it."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -88,7 +84,6 @@ class ChunkRecord(BaseModel):
     line_end: int
     text: str
     token_estimate: int = 0
-    content_hash: str = ""
     #: Position of the line span this chunk came from, within its file.
     span_index: int = 0
     #: Position of this piece within that span, and how many pieces it became.
@@ -170,30 +165,6 @@ class FileHit(BaseModel):
     #: 2 = the basename. Lower is more specific; all three are exact.
     specificity: int
     score: float
-
-
-class VectorHit(BaseModel):
-    """A chunk reached by vector similarity. ``score`` is cosine, in [-1, 1]."""
-
-    model_config = ConfigDict(frozen=True)
-
-    chunk_id: int
-    file_id: int
-    repo_id: int
-    repository: str
-    repository_slug: str = ""
-    path: str
-    line_start: int
-    line_end: int
-    text: str
-    score: float
-    #: The same cut provenance :class:`ChunkHit` carries, and for the same
-    #: reason. A vector hit is a chunk like any other, so a piece of a cut span
-    #: can be reached semantically exactly as it can be reached lexically; a
-    #: caller that must prove line coverage needs to see that on both routes or
-    #: the weaker one becomes the way around the rule.
-    split_index: int = 0
-    split_total: int = 1
 
 
 class EntityHit(BaseModel):
@@ -854,33 +825,6 @@ class TopologyStore(Protocol):
     def references_in(
         self, file_id: int, *, exclude: Sequence[EdgeType], limit: int
     ) -> list[ReferenceRow]: ...
-
-
-class VectorIndex(Protocol):
-    """Semantic neighbours of a query vector.
-
-    The V1 implementation is brute-force NumPy cosine; the interface exists so
-    ``sqlite-vec`` or FAISS can replace it without touching a caller
-    (ARCHITECTURE.md §3).
-    """
-
-    def upsert_many(
-        self, model: str, dim: int, vectors: Sequence[tuple[str, Sequence[float]]]
-    ) -> int: ...
-    def missing_hashes(self, model: str, repo_ids: Sequence[int] | None) -> list[str]: ...
-    def texts_for_hashes(self, hashes: Sequence[str]) -> list[tuple[str, str]]: ...
-    def gc_orphan_vectors(self) -> int: ...
-    def count(self, model: str | None) -> int: ...
-    def query(
-        self,
-        vector: Sequence[float],
-        model: str,
-        repo_ids: Sequence[int] | None,
-        limit: int,
-        floor: float,
-        *,
-        path_prefix: str | None = None,
-    ) -> list[VectorHit]: ...
 
 
 class SearchIndex(Protocol):

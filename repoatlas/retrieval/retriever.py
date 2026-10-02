@@ -4,12 +4,11 @@ Turns a question plus a ``RepositoryContext`` into a bounded ``EvidenceSet``. Ev
 stage is deterministic — this is the layer that makes the trust rule affordable,
 and it is the whole of what RepoAtlas contributes to an answer.
 
-The funnel's governing rule is V1_SPEC §14: **vector search must not replace exact
-search.** Semantic retrieval is one more source feeding fusion, and every
-candidate carries an :class:`EvidenceTier` that fusion sorts on before it looks at
-any score. Exact identifiers, exact error strings, exact symbol names, environment
-variables and graph-supported relationships are therefore unreachable by
-similarity — an embedding neighbour can only ever be considered after all of them.
+The funnel's governing rule is V1_SPEC §14: **deterministic evidence outranks
+association.** Every candidate carries an :class:`EvidenceTier` that fusion sorts on
+before it looks at any score. Exact identifiers, exact error strings, exact symbol
+names, environment variables and graph-supported relationships are therefore
+unreachable by word-overlap recall, which is only ever considered after all of them.
 
 Every stage records its cost and its effect on the candidate count, so retrieval
 performance can be measured later without changing anything structural
@@ -24,7 +23,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 
 from repoatlas.config.settings import RetrievalSettings
-from repoatlas.embeddings.protocol import EmbeddingModel, EmbeddingUnavailable
 from repoatlas.graph.traversal import expand_from_seeds
 from repoatlas.models.context import ContextScope, RepositoryContext
 from repoatlas.models.evidence import (
@@ -52,10 +50,9 @@ from repoatlas.retrieval.ranking import (
     enforce_precedence,
     fuse,
 )
-from repoatlas.storage.protocols import ChunkHit, EntityHit, FileHit, VectorHit
+from repoatlas.storage.protocols import ChunkHit, EntityHit, FileHit
 from repoatlas.storage.sqlite.search import SqliteSearchIndex
 from repoatlas.storage.sqlite.stores import SqliteKnowledgeStore
-from repoatlas.storage.sqlite.vectors import SqliteVectorIndex
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,8 +66,6 @@ class RetrievalLimits:
     graph_fanout: int = 25
     graph_seeds: int = 20
     primary_boost: float = 0.5
-    semantic_limit: int = 30
-    semantic_floor: float = 0.25
 
     @classmethod
     def from_settings(cls, settings: RetrievalSettings) -> RetrievalLimits:
@@ -82,8 +77,6 @@ class RetrievalLimits:
             graph_fanout=settings.graph_fanout,
             graph_seeds=settings.graph_seeds,
             primary_boost=settings.primary_boost,
-            semantic_limit=settings.semantic_limit,
-            semantic_floor=settings.semantic_floor,
         )
 
     def widened(self, *, per_source: int, final: int, token_budget: int) -> RetrievalLimits:
@@ -99,26 +92,6 @@ class RetrievalLimits:
 #: and the caller chooses a documented profile instead of assembling raw limits.
 DIAGNOSTIC_LIMITS = RetrievalLimits(per_source=40, final=18, token_budget=8000)
 
-#: What the trace says when the embedding backend could not answer.
-#:
-#: Fixed text, authored here, and deliberately not derived from the exception.
-#: :class:`~repoatlas.embeddings.protocol.EmbeddingUnavailable` carries whatever
-#: the backend raised — a loader's ``OSError`` naming a model cache directory, an
-#: ``ImportError`` naming a shared object, an HTTP body, a filesystem path — and a
-#: stage detail is a **public field of a successful response**, reaching the agent
-#: through ``search(include_trace=True)`` and V1's ``locate --json``. Repeating
-#: third-party text there discloses host layout that the caller asked nothing
-#: about and can act on in no way.
-#:
-#: It says what RepoAtlas could not do rather than what a backend complained
-#: about, so it stays true when the backend is replaced (V1_SPEC §3 makes that a
-#: configuration change). It is also distinct from every other semantic detail —
-#: "embeddings not configured", "no vectors stored for ...", "empty query vector"
-#: and "<model>: n hit(s)" — so the reason the stage produced nothing is still
-#: legible, and a failure is never mistaken for a stage that ran and matched
-#: nothing.
-SEMANTIC_UNAVAILABLE = "semantic retrieval unavailable"
-
 
 class Retriever:
     """Builds bounded evidence sets from deterministic signals, ranked by tier."""
@@ -128,15 +101,11 @@ class Retriever:
         *,
         search: SqliteSearchIndex,
         knowledge: SqliteKnowledgeStore,
-        vectors: SqliteVectorIndex | None = None,
-        embeddings: EmbeddingModel | None = None,
         reranker: Reranker | None = None,
         limits: RetrievalLimits | None = None,
     ) -> None:
         self._search = search
         self._knowledge = knowledge
-        self._vectors = vectors
-        self._embeddings = embeddings
         self._reranker = reranker or NoopReranker()
         self._limits = limits or RetrievalLimits()
 
@@ -313,16 +282,6 @@ class Retriever:
         self._settle_crowded(proofs, _reported_terms(analysis), scopes, path_prefix=path_prefix)
         term_matches = _term_matches(analysis, proofs)
 
-        semantic, semantic_used, semantic_detail = self._stage_semantic(
-            question,
-            primary_ids if context.scope is not ContextScope.GLOBAL else None,
-            stages,
-            suppressed=suppressed,
-            path_prefix=path_prefix,
-        )
-        if semantic:
-            ranked_lists.append(semantic)
-
         graph, visited = self._stage_graph(
             entity_ids, stages, home_repo_id=home_repo_id, path_prefix=path_prefix
         )
@@ -341,8 +300,6 @@ class Retriever:
                         stages=tuple(stages),
                         literal_terms=tuple(literal_terms),
                         scoped_repositories=len(primary_ids),
-                        semantic_used=semantic_used,
-                        semantic_detail=semantic_detail,
                     ),
                 ),
                 suppression=suppressed,
@@ -397,8 +354,6 @@ class Retriever:
                 stages=tuple(stages),
                 literal_terms=tuple(literal_terms),
                 scoped_repositories=len(primary_ids),
-                semantic_used=semantic_used,
-                semantic_detail=semantic_detail,
                 graph_hops=self._limits.graph_hops,
                 graph_nodes_visited=visited,
                 deterministic_candidates=sum(
@@ -961,12 +916,11 @@ class Retriever:
         merely read like the name would be plausible, unfounded output, which is
         the failure V1_SPEC §2 exists to prevent.
 
-        This holds for *every* associative source, not only for embeddings. FTS
-        recall that matches `@company` when the user asked for
-        `@company/absent-918273`, and an entity coincidentally named `retries` when
-        the user quoted an error string, are the same mistake as a cosine
-        neighbour — and the entity match is worse, because an exact-name lookup
-        marks it `DETERMINISTIC` and it then outranks everything.
+        This holds for *every* associative source. FTS recall that matches
+        `@company` when the user asked for `@company/absent-918273` is one such
+        mistake, and an entity coincidentally named `retries` when the user quoted
+        an error string is a worse one, because an exact-name lookup marks it
+        `DETERMINISTIC` and it then outranks everything.
 
         A question with no literal terms ("where is deployment configuration
         generated?") is exactly what the associative half of the funnel is for, so
@@ -1018,77 +972,6 @@ class Retriever:
             # Produced here and read from here. The trace renders this sentence; it
             # is never the source anything recovers the decision from.
             message=f"suppressed: none of the named terms exist{where} ({named})",
-        )
-
-    def _stage_semantic(
-        self,
-        question: str,
-        repo_ids: list[int] | None,
-        stages: list[StageTiming],
-        *,
-        suppressed: SuppressionOutcome | None = None,
-        path_prefix: str | None = None,
-    ) -> tuple[list[EvidenceCandidate], bool, str]:
-        """Vector neighbours. Always associative — a guess about what was meant."""
-        with Stopwatch("semantic") as watch:
-            if suppressed is not None:
-                candidates, used, detail = [], False, suppressed.message
-            else:
-                candidates, used, detail = self._semantic_candidates(
-                    question, repo_ids, path_prefix=path_prefix
-                )
-            watch.candidates_out = len(candidates)
-            watch.detail = detail
-        stages.append(_recorded(watch))
-        return candidates, used, detail
-
-    def _semantic_candidates(
-        self, question: str, repo_ids: list[int] | None, *, path_prefix: str | None = None
-    ) -> tuple[list[EvidenceCandidate], bool, str]:
-        """Vector neighbours, whether the stage ran, and what the trace should say.
-
-        Every string returned here is written here, and that is the rule rather
-        than an accident of the current branches: the third element is published
-        verbatim as a public stage detail. It may describe RepoAtlas state —
-        configuration, stored vector counts, hit counts, the configured model id —
-        and it may never repeat text RepoAtlas did not author.
-        """
-        if self._vectors is None or self._embeddings is None:
-            return [], False, "embeddings not configured"
-
-        model_id = self._embeddings.id
-        # Checking the index first means a workspace that was never embedded never
-        # triggers a model load, so `locate` stays instant and offline.
-        if self._vectors.count(model_id) == 0:
-            return [], False, f"no vectors stored for {model_id}"
-
-        try:
-            vector = self._embeddings.embed_query(question)
-        except EmbeddingUnavailable:
-            # Never fatal: the deterministic stages are the mandatory ones.
-            #
-            # The exception is deliberately not bound. Its text belongs to
-            # whoever raised it — a backend, a loader, a transport — and this
-            # value is published. Not naming it is what keeps the two apart:
-            # there is no variable here through which backend text could reach a
-            # trace, so the guarantee cannot erode later into "just the class
-            # name" or "just the first line".
-            return [], False, SEMANTIC_UNAVAILABLE
-        if not vector:
-            return [], False, "empty query vector"
-
-        hits = self._vectors.query(
-            vector,
-            model_id,
-            repo_ids,
-            self._limits.semantic_limit,
-            self._limits.semantic_floor,
-            path_prefix=path_prefix,
-        )
-        return (
-            [self._vector_candidate(hit) for hit in hits],
-            True,
-            f"{model_id}: {len(hits)} hit(s)",
         )
 
     def _stage_graph(
@@ -1244,23 +1127,6 @@ class Retriever:
             # decides whether anything may be cited by line. It is a fact the
             # store already established, so it travels rather than being
             # re-derived downstream from the shape of the text.
-            split_total=hit.split_total,
-        )
-
-    @staticmethod
-    def _vector_candidate(hit: VectorHit) -> EvidenceCandidate:
-        return EvidenceCandidate(
-            repository=hit.repository,
-            repository_slug=hit.repository_slug,
-            path=hit.path,
-            line_start=hit.line_start,
-            line_end=hit.line_end,
-            text=hit.text,
-            score=hit.score,
-            source=EvidenceSource.SEMANTIC,
-            tier=EvidenceTier.ASSOCIATIVE,
-            match=MatchClass.SIMILAR,
-            description="semantically similar",
             split_total=hit.split_total,
         )
 

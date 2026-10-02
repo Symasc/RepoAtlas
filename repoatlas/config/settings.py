@@ -32,7 +32,7 @@ DEFAULT_EXCLUSIONS: tuple[str, ...] = (
 )
 
 #: Files never read (V1_SPEC §17). Applied at enumeration, before any content is
-#: read, so excluded content cannot reach chunks, embeddings, prompts or logs.
+#: read, so excluded content cannot reach chunks, prompts or logs.
 SECRET_PATTERNS: tuple[str, ...] = (
     ".env",
     ".env.*",
@@ -127,28 +127,6 @@ class StorageSettings(BaseModel):
     lock_timeout_seconds: float = 30.0
 
 
-class EmbeddingSettings(BaseModel):
-    """The embedding backend is replaceable behind an interface (V1_SPEC §3)."""
-
-    model_config = ConfigDict(frozen=True)
-
-    #: ``fastembed`` (the V1 default), ``hashing`` (deterministic, offline) or
-    #: ``none``. Disabling embeddings is a supported state: exact search is the
-    #: mandatory half of retrieval, semantic search is the aid (V1_SPEC §14).
-    provider: str = "fastembed"
-    model: str = "BAAI/bge-small-en-v1.5"
-    dim: int = 384
-    batch_size: int = 32
-    cache_dir: Path | None = None
-    enabled: bool = True
-    #: Whether a sync may fetch a missing model. Off by default: an index run must
-    #: not silently stall on a download, so fetching is an explicit act
-    #: (``repoatlas sync --embed``). A missing model is reported rather than
-    #: pulled, and semantic retrieval is off until somebody asks for it
-    #: (V1_SPEC §3).
-    allow_download: bool = False
-
-
 class RetrievalSettings(BaseModel):
     """Bounds and biases of the retrieval funnel (ARCHITECTURE.md §10)."""
 
@@ -166,10 +144,6 @@ class RetrievalSettings(BaseModel):
     graph_seeds: int = 20
     #: Additive bias toward the repository the question was asked in (V1_SPEC §6).
     primary_boost: float = 0.5
-    #: Candidates fetched from the vector index before fusion.
-    semantic_limit: int = 30
-    #: Below this cosine similarity a vector hit is not worth carrying.
-    semantic_floor: float = 0.25
 
 
 class OutputSettings(BaseModel):
@@ -214,7 +188,6 @@ class Settings(BaseModel):
     repos: ReposSettings = Field(default_factory=ReposSettings)
     discovery: DiscoverySettings = Field(default_factory=DiscoverySettings)
     indexing: IndexingSettings = Field(default_factory=IndexingSettings)
-    embeddings: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     output: OutputSettings = Field(default_factory=OutputSettings)

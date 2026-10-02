@@ -86,15 +86,6 @@ def test_the_sentinel_is_not_searchable_by_any_route(adversarial: Workspace) -> 
     assert adversarial.search.find_entities_by_name([SECRET_SENTINEL], None, 20) == []
 
 
-def test_no_embedding_was_computed_from_secret_text(adversarial: Workspace) -> None:
-    rows = adversarial.database.execute(
-        "SELECT COUNT(*) AS n FROM chunks c JOIN embeddings e "
-        "ON e.content_hash = c.content_hash WHERE c.text LIKE ?",
-        (f"%{SECRET_SENTINEL}%",),
-    ).fetchone()
-    assert rows["n"] == 0
-
-
 def test_a_secret_created_after_the_first_index_is_still_excluded(
     adversarial: Workspace, adversarial_root: Path
 ) -> None:

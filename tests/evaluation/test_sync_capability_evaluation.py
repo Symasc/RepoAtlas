@@ -145,7 +145,6 @@ def _run_uninitialized(case: SyncCase, tmp_path: Path) -> None:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     workspace = open_workspace(settings=settings, require_root=False)

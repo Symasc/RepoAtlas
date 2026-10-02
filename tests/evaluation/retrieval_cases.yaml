@@ -8,7 +8,7 @@
 #
 # Fields
 #   id                  stable identifier, used in the metric report
-#   category            exact | semantic | cross-repo | salt | bash | dependencies
+#   category            exact | cross-repo | salt | bash | dependencies
 #                       | unanswerable | ambiguity | misleading
 #   command             locate | ask | debug   (retrieval is evaluated, not prose)
 #   query               what the user types
@@ -469,74 +469,6 @@ cases:
     notes: >
       Globally, the reads and the configuration must both surface. README prose is
       acceptable at low rank but the file that does not contain the string is not.
-
-  # -------------------------------------------------------------- semantic ----
-  # These four are the only cases whose result depends on the embedding backend.
-  # Under the deterministic HashingEmbedding stub used by CI they measure nothing —
-  # the stub shares tokens, not meaning. `pytest -m slow` re-runs them against the
-  # real BAAI/bge-small-en-v1.5, and those are the numbers worth reading.
-  - id: semantic-hostname-origin
-    category: semantic
-    command: locate
-    query: "Where does the backend get its hostname?"
-    context_repo: python-service
-    required_evidence:
-      - python-service/src/config.py
-    alternate_evidence:
-      - deployment/service/init.sls
-      - deployment/service/pillar.sls
-    forbidden_evidence: []
-    recall_k: 5
-    notes: >
-      No identifier in the question appears in the answer's file, so only the
-      semantic stage can reach it. config.py:12 is where the host is obtained.
-
-      legacy_config.py is deliberately NOT forbidden here, and the distinction is
-      the point of the tier system. It contains `"host": "legacy.internal"`, so it
-      genuinely is about hostnames and a real embedding model ranks it first. As
-      ASSOCIATIVE evidence that is a lead, which is what the associative tier means.
-      What must never happen is it appearing as an *exact* match for SERVICE_HOST —
-      it contains no such string — and that is asserted by exact-env-service-host
-      and misleading-legacy-note, where it is forbidden.
-
-  - id: semantic-startup-preparation
-    category: semantic
-    command: locate
-    query: "What prepares this service before startup?"
-    context_repo: scripts
-    required_evidence:
-      - scripts/deploy.sh
-    alternate_evidence:
-      - scripts/env.sh
-      - deployment/service/init.sls
-    recall_k: 5
-    notes: deploy.sh sources the environment and applies the Salt state.
-
-  - id: semantic-deployment-config-generation
-    category: semantic
-    command: locate
-    query: "Where is deployment configuration generated?"
-    context_repo: deployment
-    required_evidence:
-      - deployment/service/init.sls
-    alternate_evidence:
-      - deployment/service/files/service.conf.jinja
-    recall_k: 5
-    notes: The file.managed state renders the Jinja template into /etc/service.
-
-  - id: semantic-retry-behaviour
-    category: semantic
-    command: locate
-    query: "What controls connection retry behaviour?"
-    context_repo: python-service
-    required_evidence:
-      - python-service/src/config.py
-    alternate_evidence:
-      - ts-service/src/settings.ts
-      - ts-service/src/retry.ts
-      - deployment/service/pillar.sls
-    recall_k: 10
-    notes: CONNECT_RETRIES is read in config.py:14; the pillar supplies the value.
 
   # ------------------------------------------------------------ cross-repo ----
   - id: cross-repo-service-host-chain

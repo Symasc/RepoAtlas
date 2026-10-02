@@ -4,7 +4,9 @@
 > boundary. It is kept unedited as the record of what was there. Since it was written, the embedded reasoning
 > subsystem it maps --- `repoatlas/llm/`, `services.reason`, `ask`, `debug`, `--no-llm`, `LLMSettings`,
 > `REPOATLAS_LLM_BASE_URL` and exit code 4 --- has been removed. Its "Local-model only" classifications turned out
-> to be right, and everything it marked reusable was reused.
+> to be right, and everything it marked reusable was reused. The embedding model has since gone too: FastEmbed,
+> the `embeddings` table, the semantic stage and `EmbeddingSettings` no longer exist, and the schema history it
+> describes was squashed into a single migration before the first release.
 
 # RepoAtlas V1 Architecture Dossier
 

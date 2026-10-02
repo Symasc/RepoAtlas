@@ -11,7 +11,7 @@ whichever behaviour the caller happened to reach.
 
 **What this guarantees.** A file whose *name* matches the built-in policy is
 rejected from the path alone, before it is opened — so its contents cannot be
-parsed, chunked, embedded, retrieved, serialized into a prompt, or logged.
+parsed, chunked, retrieved, serialized into a prompt, or logged.
 
 **What it does not.** This is filename policy, not content scanning. A credential
 pasted into ``app.py`` is indexed like any other line of that file. RepoAtlas

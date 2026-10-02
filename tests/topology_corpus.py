@@ -81,7 +81,6 @@ def open_corpus(root: Path, repos: dict[str, dict[str, str]]) -> Workspace:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(root / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     workspace = open_workspace(settings=settings, require_root=False)

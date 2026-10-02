@@ -80,8 +80,8 @@ class EnumerationUnavailable(Exception):
     not be reached. That walk is a faithful answer to "what files are here", and it
     is not an answer to the question above at all: it admitted every ignored file,
     which is how content a user deliberately kept out of Git — local overrides,
-    generated configuration, private notes — reached chunks, embeddings, retrieval
-    and model prompts, while ``sync`` exited 0 and reported success.
+    generated configuration, private notes — reached chunks, retrieval and model
+    prompts, while ``sync`` exited 0 and reported success.
 
     **Reproducing the set faithfully is not a small job**, and this class records
     why the attempt was refused rather than made. It needs three separate pieces of
@@ -171,8 +171,8 @@ def scan_repository(
     needed to be.
 
     Every decision is made before any content is read, so a file failing either
-    filter is never opened and cannot reach chunks, embeddings, retrieval,
-    prompts or logs (ARCHITECTURE.md §12).
+    filter is never opened and cannot reach chunks, retrieval, prompts or logs
+    (ARCHITECTURE.md §12).
     """
     config = settings or DiscoverySettings()
     client = git or GitClient()

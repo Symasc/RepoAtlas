@@ -1,7 +1,7 @@
 """Ranking, tiering, expansion and budgeting (V1_SPEC §14, ARCHITECTURE.md §10).
 
 The single most important property in this file is that **deterministic evidence
-outranks semantic similarity**. Everything else in the funnel exists to make that
+outranks word overlap**. Everything else in the funnel exists to make that
 affordable.
 """
 
@@ -50,16 +50,16 @@ def candidate(
 # --- the precedence guarantee -------------------------------------------------
 
 
-def test_semantic_similarity_never_outranks_a_deterministic_match() -> None:
-    """A cosine of 0.99 does not beat an exact identifier. Ever."""
-    semantic = candidate(
-        "similar.py", score=0.99, tier=EvidenceTier.ASSOCIATIVE, source=EvidenceSource.SEMANTIC
+def test_word_overlap_never_outranks_a_deterministic_match() -> None:
+    """A strong full-text score does not beat an exact identifier. Ever."""
+    lexical = candidate(
+        "similar.py", score=0.99, tier=EvidenceTier.ASSOCIATIVE, source=EvidenceSource.LEXICAL
     )
     exact = candidate("exact.py", score=0.01)
 
-    # Semantic appears in three lists and exact in one, so RRF alone would put
-    # semantic first.
-    ordered = fuse([[semantic], [semantic], [semantic], [exact]])
+    # Lexical appears in three lists and exact in one, so RRF alone would put
+    # lexical first.
+    ordered = fuse([[lexical], [lexical], [lexical], [exact]])
 
     assert [c.path for c in ordered] == ["exact.py", "similar.py"]
     assert ordered[0].tier is EvidenceTier.DETERMINISTIC
@@ -69,26 +69,18 @@ def test_semantic_similarity_never_outranks_a_deterministic_match() -> None:
     "source",
     [EvidenceSource.EXACT, EvidenceSource.SYMBOL, EvidenceSource.GRAPH],
 )
-def test_every_deterministic_source_outranks_semantics(source: EvidenceSource) -> None:
+def test_every_deterministic_source_outranks_word_overlap(source: EvidenceSource) -> None:
     deterministic = candidate("fact.py", score=0.0, source=source)
-    semantic = candidate(
-        "guess.py", score=1000.0, tier=EvidenceTier.ASSOCIATIVE, source=EvidenceSource.SEMANTIC
+    lexical = candidate(
+        "guess.py", score=1000.0, tier=EvidenceTier.ASSOCIATIVE, source=EvidenceSource.LEXICAL
     )
-    ordered = fuse([[semantic] * 5, [deterministic]])
+    ordered = fuse([[lexical] * 5, [deterministic]])
     assert ordered[0].path == "fact.py"
-
-
-def test_lexical_recall_and_semantics_compete_on_score() -> None:
-    """Only *deterministic* evidence is protected; recall and similarity are peers."""
-    lexical = candidate("lex.py", tier=EvidenceTier.ASSOCIATIVE, source=EvidenceSource.LEXICAL)
-    semantic = candidate("sem.py", tier=EvidenceTier.ASSOCIATIVE, source=EvidenceSource.SEMANTIC)
-    ordered = fuse([[semantic], [semantic], [lexical]])
-    assert ordered[0].path == "sem.py"
 
 
 def test_a_span_found_by_two_retrievers_takes_its_strongest_claim() -> None:
     associative = candidate(
-        "shared.py", tier=EvidenceTier.ASSOCIATIVE, source=EvidenceSource.SEMANTIC
+        "shared.py", tier=EvidenceTier.ASSOCIATIVE, source=EvidenceSource.LEXICAL
     )
     deterministic = candidate("shared.py", source=EvidenceSource.EXACT)
     ordered = fuse([[associative], [deterministic]])
@@ -97,14 +89,14 @@ def test_a_span_found_by_two_retrievers_takes_its_strongest_claim() -> None:
 
 
 def test_the_primary_boost_competes_inside_a_tier_not_across_one() -> None:
-    primary_semantic = candidate(
+    primary_lexical = candidate(
         "a.py",
         repository="primary",
         tier=EvidenceTier.ASSOCIATIVE,
-        source=EvidenceSource.SEMANTIC,
+        source=EvidenceSource.LEXICAL,
     )
     other_exact = candidate("b.py", repository="other")
-    ordered = fuse([[primary_semantic], [other_exact]], primary_repository="primary")
+    ordered = fuse([[primary_lexical], [other_exact]], primary_repository="primary")
     assert ordered[0].repository == "other"
 
 
@@ -135,7 +127,7 @@ def test_repeating_one_span_inside_a_list_does_not_buy_rank() -> None:
             end=1,
             text=f"chunk {i}",
             tier=EvidenceTier.ASSOCIATIVE,
-            source=EvidenceSource.SEMANTIC,
+            source=EvidenceSource.LEXICAL,
         )
         for i in range(12)
     ]
@@ -144,7 +136,7 @@ def test_repeating_one_span_inside_a_list_does_not_buy_rank() -> None:
         start=10,
         end=20,
         tier=EvidenceTier.ASSOCIATIVE,
-        source=EvidenceSource.SEMANTIC,
+        source=EvidenceSource.LEXICAL,
     )
 
     ordered = fuse([[answer, *noise]])
@@ -257,8 +249,6 @@ def test_a_custom_reranker_is_used_without_changing_a_caller(initialized: Worksp
     reversed_retriever = Retriever(
         search=initialized.search,
         knowledge=initialized.knowledge,
-        vectors=initialized.vectors,
-        embeddings=initialized.embeddings(),
         reranker=_Reverser(),
         limits=RetrievalLimits.from_settings(initialized.settings.retrieval),
     )
@@ -305,22 +295,25 @@ def test_the_evidence_set_is_bounded(initialized: Workspace) -> None:
     assert len(evidence.candidates) <= initialized.settings.retrieval.final
 
 
+def _stage_detail(evidence: EvidenceSet, name: str) -> str:
+    assert evidence.trace is not None
+    return next(stage.detail for stage in evidence.trace.stages if stage.name == name)
+
+
 def test_a_named_term_that_exists_nowhere_yields_no_evidence(
     initialized: Workspace,
 ) -> None:
-    """Similarity is not an answer to a question about a specific identifier."""
+    """Word overlap is not an answer to a question about a specific identifier."""
     context = initialized.resolver().resolve(initialized.root or Path())
     evidence = locate(initialized, "ZZZ_NO_SUCH_TOKEN_QQQ", context)
     assert evidence.candidates == ()
-    assert evidence.trace is not None
-    assert "suppressed" in evidence.trace.semantic_detail
+    assert "suppressed" in _stage_detail(evidence, "lexical")
 
 
-def test_prose_questions_still_reach_the_semantic_stage(initialized: Workspace) -> None:
+def test_prose_questions_still_reach_the_lexical_stage(initialized: Workspace) -> None:
     context = initialized.resolver().resolve(initialized.root or Path())
     evidence = locate(initialized, "where does startup configuration come from", context)
-    assert evidence.trace is not None
-    assert "suppressed" not in evidence.trace.semantic_detail
+    assert "suppressed" not in _stage_detail(evidence, "lexical")
 
 
 def test_graph_expansion_reaches_another_repository_through_a_typed_edge(
@@ -336,8 +329,6 @@ def test_expansion_is_bounded_by_hops(initialized: Workspace, workspace_root: Pa
     shallow = Retriever(
         search=initialized.search,
         knowledge=initialized.knowledge,
-        vectors=initialized.vectors,
-        embeddings=initialized.embeddings(),
         limits=RetrievalLimits(graph_hops=0),
     ).retrieve("SERVICE_HOST", context)
     deep = initialized.retriever().retrieve("SERVICE_HOST", context)
@@ -351,8 +342,6 @@ def test_expansion_is_bounded_by_fanout(initialized: Workspace, workspace_root: 
     narrow = Retriever(
         search=initialized.search,
         knowledge=initialized.knowledge,
-        vectors=initialized.vectors,
-        embeddings=initialized.embeddings(),
         limits=RetrievalLimits(graph_fanout=1),
     ).retrieve("SERVICE_HOST", context)
     wide = initialized.retriever().retrieve("SERVICE_HOST", context)
@@ -382,7 +371,6 @@ def test_every_stage_is_instrumented(initialized: Workspace) -> None:
         "file",
         "lexical",
         "symbol",
-        "semantic",
         "graph",
         "fuse",
         "dedup",
@@ -431,20 +419,6 @@ def test_the_global_link_pass_is_instrumented(initialized: Workspace) -> None:
     assert trace.claims_considered > 0
 
 
-def test_retrieval_without_embeddings_still_works(initialized: Workspace) -> None:
-    """Exact search is mandatory; semantic search is the aid (V1_SPEC §14)."""
-    context = initialized.resolver().resolve(initialized.root or Path())
-    without = Retriever(
-        search=initialized.search,
-        knowledge=initialized.knowledge,
-        vectors=None,
-        embeddings=None,
-    ).retrieve("SERVICE_HOST", context)
-    assert without.candidates
-    assert without.trace is not None
-    assert without.trace.semantic_used is False
-
-
 # --- the guarantee at the final boundary (V1_SPEC §14) --------------------------
 #
 # The tests above prove that `fuse` orders by tier. These prove the property that
@@ -477,29 +451,6 @@ def assert_deterministic_first(evidence: EvidenceSet) -> None:
     ]
 
 
-class _Saturating:
-    """An embedding model that claims every text is a perfect match.
-
-    The adversary the tier rule exists to defeat: maximal, uniform similarity. If
-    score could ever cross a tier, this would flood the evidence set.
-    """
-
-    id = "saturating"
-    dim = 8
-
-    def embed(self, texts):
-        return [[1.0] + [0.0] * (self.dim - 1) for _ in texts]
-
-    def embed_query(self, text):
-        return [1.0] + [0.0] * (self.dim - 1)
-
-    def available(self) -> bool:
-        return True
-
-    def availability_detail(self) -> str:
-        return "saturating stub"
-
-
 class _TierInverter:
     """A reranker that deliberately violates the rule it is asked to respect."""
 
@@ -513,8 +464,6 @@ def _retriever(workspace: Workspace, **overrides) -> Retriever:
     return Retriever(
         search=workspace.search,
         knowledge=workspace.knowledge,
-        vectors=workspace.vectors,
-        embeddings=overrides.pop("embeddings", workspace.embeddings()),
         reranker=overrides.pop("reranker", NoopReranker()),
         limits=overrides.pop("limits", RetrievalLimits.from_settings(workspace.settings.retrieval)),
     )
@@ -528,39 +477,12 @@ def test_the_returned_evidence_set_is_always_tier_ordered(
     assert_deterministic_first(initialized.retriever().retrieve(question, context))
 
 
-@pytest.mark.parametrize("question", QUESTIONS)
-def test_saturated_similarity_displaces_nothing(initialized: Workspace, question: str) -> None:
-    """Every vector scores 1.0 against every query, and the order is unchanged."""
-    context = initialized.resolver().resolve(initialized.root or Path())
-    baseline = initialized.retriever().retrieve(question, context)
-
-    saturating = _Saturating()
-    initialized.vectors.upsert_many(
-        saturating.id,
-        saturating.dim,
-        [
-            (row["content_hash"], [1.0] + [0.0] * 7)
-            for row in initialized.database.execute(
-                "SELECT DISTINCT content_hash FROM chunks WHERE content_hash != ''"
-            ).fetchall()
-        ],
-    )
-    flooded = _retriever(initialized, embeddings=saturating).retrieve(question, context)
-
-    assert_deterministic_first(flooded)
-    # The deterministic half is exactly what it was. Saturated similarity can
-    # reinforce agreement about a span, which reorders within the tier; it can
-    # neither add to that half nor take anything out of it.
-    assert {c.location for c in flooded.deterministic} == {
-        c.location for c in baseline.deterministic
-    }
-
-
 #: A question whose evidence set is genuinely mixed, so inverting the tiers is
-#: something the boundary has to undo rather than a no-op. The quoted term exists,
-#: which keeps the associative stages open, while the exact match on it supplies
-#: the deterministic half.
-MIXED = "'SERVICE_TIMEOUT'"
+#: something the boundary has to undo rather than a no-op. The identifier exists,
+#: which keeps the lexical stage open and supplies the deterministic half; the
+#: prose word adds full-text leads. It has more deterministic candidates than the
+#: three-slot budget below, so a hostile order has something to displace.
+MIXED = "load_config service"
 
 
 def test_a_reranker_that_inverts_the_tiers_is_corrected(initialized: Workspace) -> None:
