@@ -17,8 +17,8 @@ import yaml
 from repoatlas.graph.deploy_identity import (
     CONTROLLED,
     NAME_UNREAD,
-    NO_ROUTES,
     NOT_ONE_APPLICATION,
+    NOTHING_SERVED,
     RELEASE_UNBOUND,
     TIED,
     helm_fullname,
@@ -235,6 +235,7 @@ CHART = {
         docker_build('devices', '.')
         k8s_yaml(helm('charts/devices', name='devices', set=['stage=dev']))
         k8s_yaml(helm('charts/devices', name='edge', set=['fullnameOverride=devices-edge']))
+        k8s_yaml(helm('charts/devices', name='staging', values=['staging.yaml']))
     """),
 }
 
@@ -254,6 +255,19 @@ DEVICES = {
         @app.get("/health")
         def health():
             return {}
+    """),
+    # A specification document serves the same routes; it is not a second application.
+    "openapi.yaml": d("""
+        openapi: 3.0.3
+        info:
+          title: devices
+          version: "1"
+        paths:
+          /items/{item_id}:
+            get:
+              responses:
+                "200":
+                  description: ok
     """),
     **CHART,
 }
@@ -291,9 +305,50 @@ TWO_APPS = {
 }
 
 
+# One traced application beside a NestJS controller, which names no constructing module.
+MIXED = {
+    "pyproject.toml": '[project]\nname = "mixed"\n',
+    "package.json": '{"name": "mixed", "dependencies": {"@nestjs/core": "10.0.0"}}\n',
+    "public.py": _APP.format(route="/a"),
+    "src/main.ts": d("""
+        import { NestFactory } from "@nestjs/core";
+        import { AppModule } from "./app.module";
+
+        async function bootstrap() {
+          const app = await NestFactory.create(AppModule);
+          await app.listen(3000);
+        }
+    """),
+    "src/app.module.ts": d("""
+        import { Module } from "@nestjs/common";
+        import { StatusController } from "./status.controller";
+
+        @Module({ controllers: [StatusController] })
+        export class AppModule {}
+    """),
+    "src/status.controller.ts": d("""
+        import { Controller, Get } from "@nestjs/common";
+
+        @Controller("status")
+        export class StatusController {
+          @Get()
+          status() {}
+        }
+    """),
+    **{
+        path.replace("devices", "mixed"): text.replace("devices", "mixed")
+        for path, text in CHART.items()
+    },
+}
+
+
 @pytest.fixture
 def cluster(workspace: Workspace, tmp_path: Path) -> Workspace:
-    return build(workspace, tmp_path, {"devices": DEVICES, "portal": PORTAL, "twoapps": TWO_APPS})
+    return build(
+        workspace,
+        tmp_path,
+        {"devices": DEVICES, "portal": PORTAL, "twoapps": TWO_APPS, "mixed": MIXED},
+    )
 
 
 def test_a_service_s_identity_reaches_its_repository_s_one_application(cluster: Workspace) -> None:
@@ -344,6 +399,28 @@ def test_each_service_is_tied_or_says_why_not(cluster: Workspace) -> None:
         ("devices", "charts/unbound/templates/service.yaml"): RELEASE_UNBOUND,
     }
     assert outcomes[("twoapps", "charts/twoapps/templates/service.yaml")] == NOT_ONE_APPLICATION
+    assert outcomes[("mixed", "charts/mixed/templates/service.yaml")] == NOT_ONE_APPLICATION
+
+
+def test_a_specification_document_is_not_a_second_application(cluster: Workspace) -> None:
+    served = cluster.database.execute(
+        """
+        SELECT COUNT(*) FROM edges e JOIN files f ON f.id = e.file_id
+        WHERE e.type = 'SERVES_HTTP_ROUTE' AND f.rel_path = 'openapi.yaml'
+        """
+    ).fetchone()[0]
+    assert served > 0
+    assert _outcomes(cluster)[("devices", "charts/devices/templates/service.yaml")] == TIED
+
+
+def test_only_literal_releases_without_values_files_give_identities(cluster: Workspace) -> None:
+    plan = ReferenceLinker(cluster.knowledge).prepare_global().http
+    assert {json.loads(e.meta_json)["deployment"] for e in plan.exposed} == {
+        "http://devices",
+        "http://devices:80",
+        "http://devices-edge",
+        "http://devices-edge:80",
+    }
 
 
 def test_a_chart_in_a_repository_serving_nothing_has_no_routes(
@@ -352,7 +429,8 @@ def test_a_chart_in_a_repository_serving_nothing_has_no_routes(
     build(
         workspace, tmp_path, {"deploy": {"pyproject.toml": '[project]\nname = "deploy"\n', **CHART}}
     )
-    assert _outcomes(workspace)[("deploy", "charts/devices/templates/service.yaml")] == NO_ROUTES
+    outcome = _outcomes(workspace)[("deploy", "charts/devices/templates/service.yaml")]
+    assert outcome == NOTHING_SERVED
 
 
 def test_editing_the_release_name_moves_the_identity(
