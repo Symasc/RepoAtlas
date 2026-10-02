@@ -144,7 +144,9 @@ lines; its ⓘ button names the marks.
 
 The chrome is deliberately plain, so the colour on the canvas carries meaning.
 It uses IBM Plex Sans and Plex Mono, served from the app itself, and warm
-neutrals in both themes. The accent marks only what is selected, focused or
+neutrals in both themes. The type steps are wide on purpose (11, 12, 13, 15 and
+18 px, with 16, 20 and 28 for headings): where you are, a card's title and the
+inspector's title are plainly headings, not body text. The accent marks only what is selected, focused or
 pressed next, and there are three corner radii (2, 4 and 6 px). The colour
 tokens are in `lib/theme/tokens.ts`; every text tone keeps 4.5:1 contrast on
 the backgrounds it sits on.

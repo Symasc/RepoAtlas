@@ -76,8 +76,9 @@ export const theme = createTheme({
   focusRing: "auto",
   fontFamily: SANS,
   fontFamilyMonospace: MONO,
-  // 11 / 12 / 13 / 14 / 16, with 20 and 28 for headings; 13 is the body size
-  fontSizes: { xs: rem(11), sm: rem(12), md: rem(13), lg: rem(14), xl: rem(16) },
+  // 11 / 12 / 13 / 15 / 18, with 16, 20 and 28 for headings; 13 is the body
+  // size. The steps are wide on purpose: a title is plainly not body text.
+  fontSizes: { xs: rem(11), sm: rem(12), md: rem(13), lg: rem(15), xl: rem(18) },
   lineHeights: { xs: "1.4", sm: "1.45", md: "1.5", lg: "1.5", xl: "1.45" },
   headings: {
     fontFamily: SANS,
@@ -86,7 +87,7 @@ export const theme = createTheme({
       h1: { fontSize: rem(28), lineHeight: "1.2" },
       h2: { fontSize: rem(20), lineHeight: "1.3" },
       h3: { fontSize: rem(16), lineHeight: "1.35" },
-      h4: { fontSize: rem(14), lineHeight: "1.4" },
+      h4: { fontSize: rem(15), lineHeight: "1.4" },
     },
   },
   // a 4px grid

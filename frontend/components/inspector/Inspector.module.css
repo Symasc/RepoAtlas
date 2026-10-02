@@ -27,7 +27,7 @@
   place-items: center;
   flex-shrink: 0;
   width: 18px;
-  height: 25px;
+  height: 28px;
 }
 
 .heading {
@@ -39,6 +39,7 @@
   margin: 0;
   font-size: var(--mantine-font-size-xl);
   font-weight: 600;
+  letter-spacing: -0.01em;
   line-height: 1.55;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -283,7 +284,8 @@
 .rowCount {
   flex-shrink: 0;
   font-size: var(--mantine-font-size-sm);
-  color: var(--ra-text-muted);
+  font-weight: 600;
+  color: var(--ra-text);
   font-variant-numeric: tabular-nums;
 }
 

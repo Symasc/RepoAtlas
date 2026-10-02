@@ -5,18 +5,18 @@
   align-items: center;
   gap: var(--mantine-spacing-sm);
   width: 100%;
-  height: 32px;
+  height: 34px;
   padding: 0 6px 0 10px;
   color: var(--ra-text-subtle);
-  background-color: var(--ra-canvas);
-  border: 1px solid var(--ra-border-strong);
+  background-color: var(--ra-card);
+  border: 1px solid var(--ra-card-outline);
   border-radius: var(--ra-radius);
   transition:
     border-color var(--ra-duration-fast) var(--ra-ease),
     color var(--ra-duration-fast) var(--ra-ease);
 
   @mixin hover {
-    border-color: var(--ra-border-strong);
+    border-color: var(--ra-text-subtle);
     color: var(--ra-text-muted);
   }
 
@@ -64,8 +64,8 @@
 }
 
 .content {
-  background-color: var(--ra-surface-elevated);
-  border: 1px solid var(--ra-border-strong);
+  background-color: var(--ra-card);
+  border: 1px solid var(--ra-card-outline);
   border-radius: var(--ra-radius-l);
   box-shadow: var(--ra-shadow);
 }
