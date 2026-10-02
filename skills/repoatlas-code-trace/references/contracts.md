@@ -249,6 +249,8 @@ An endpoint a specification composes from a server URL and a path has no single 
 - `provider_repository`, `served_at` (the route decorator), `identity_source`, `identity_at` (the line naming the host) and `bound_at` (where that identity is bound to the application);
 - `method`, `url` as the request writes it, `endpoint` as the service declares it, and `deployment`.
 
+`repoatlas_relationships` walks the link by default inside one repository, and across repositories with `cross_repository: true`; from the request, `repoatlas_http_operations` lists the same decision as a `linked` crossing with its whole chain.
+
 Read those lines before stating the relationship, and state it as source evidence: "portal's `load_user` requests GET https://accounts.example/api/users/{user_id}, which accounts' `get_user` serves under the host its Swagger template publishes." It is not proof the request is sent at run time or reaches that deployment.
 
 ## HTTP inventory and coverage

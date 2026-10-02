@@ -21,7 +21,7 @@ None of these proves runtime reachability. Do not invent a deployment, a public 
 
 1. **Known repository**: call `repoatlas_http_operations` under a repository scope, narrowed by `role`, `route_prefix`, `method`, `owner` or `within_path`, with `include_provenance: true` on that same call for the rows you will cite.
 2. **Unknown provider**: use `"scope": "global"`, `discover: true` and a non-root `route_prefix` (with `method` if known). Rows are candidates grouped by repository, and each keeps its own local status.
-3. **Every side of one route**: walk `repoatlas_relationships` from the row's exact `http-route:` or `http-endpoint:` key, under global scope or with `cross_repository: true`. Rows can lack a key; do not build one.
+3. **Every side of one route**: walk `repoatlas_relationships` from the row's exact `http-route:` or `http-endpoint:` key, under global scope or with `cross_repository: true`. Rows can lack a key; do not build one. From a caller or handler entity, `cross_repository: true` also follows its `CALLS_HTTP_HANDLER` link.
 4. **Which service a client really reaches** is configuration: search and inspect the client's base URL and the service's host, port and environment variables. Label each finding as route, configuration or ownership.
 5. **What a route or handler change may affect** is a `repoatlas_impact` question (the repoatlas-change-impact skill); it follows a handler link from the handler to its requests.
 

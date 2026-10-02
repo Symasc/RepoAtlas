@@ -18,8 +18,9 @@ Links are kept apart by **kind**, because the three kinds are different claims a
 summing them would manufacture a number no fact supports:
 
 * ``observed`` — stored graph edges between code, other than HTTP;
-* ``http`` — stored HTTP edges. A caller-to-handler edge rests on route
-  compatibility, never on deployment identity;
+* ``http`` — stored HTTP edges. A caller-to-handler edge rests on a
+  source-backed deployment identity chain, never on route shape alone, and says
+  nothing of what runs;
 * ``dependency`` — stored ``DEPENDS_ON`` edges: a manifest declaring a package,
   resolved by the linker to the repository that publishes it where exactly one
   other repository does.

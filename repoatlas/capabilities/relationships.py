@@ -33,7 +33,11 @@ from dataclasses import dataclass
 
 from repoatlas.capabilities.errors import InvalidRelationshipRequestError
 from repoatlas.graph.keys import is_positional
-from repoatlas.graph.traversal import CONTAINMENT_EDGES, EXPANSION_EDGES, RELATIONSHIP_EDGES
+from repoatlas.graph.traversal import (
+    CONTAINMENT_EDGES,
+    RELATIONSHIP_DEFAULT_EDGES,
+    RELATIONSHIP_EDGES,
+)
 from repoatlas.models.investigation import ProposedEvidence
 from repoatlas.models.parsing import EdgeDirection, EdgeType
 from repoatlas.models.relationships import (
@@ -217,10 +221,11 @@ def admitted_edge_types(request: RelationshipsRequest) -> tuple[EdgeType, ...]:
     * what a caller may *name* is :data:`~repoatlas.graph.traversal.RELATIONSHIP_EDGES`
       — an explicit request for call relationships is a request the graph can
       honour, and refusing it hid facts the index already held;
-    * what a caller gets when naming *nothing* stays
-      :data:`~repoatlas.graph.traversal.EXPANSION_EDGES`. Folding ~26,000 call
-      edges into the default would change every existing answer and swamp the
-      neighbourhood a caller actually asked about.
+    * what a caller gets when naming *nothing* is
+      :data:`~repoatlas.graph.traversal.RELATIONSHIP_DEFAULT_EDGES`: search's
+      expansion set and the HTTP handler links. Folding ~26,000 call edges into the
+      default would change every existing answer and swamp the neighbourhood a
+      caller actually asked about.
 
     A request naming a type outside the policy is refused rather than answered
     with nothing: "no relationships of that kind" and "that kind is not
@@ -231,7 +236,7 @@ def admitted_edge_types(request: RelationshipsRequest) -> tuple[EdgeType, ...]:
     The returned order follows the policy rather than the request, so two callers
     asking for the same set in a different order get the same query. It must be
     built from the same wider set the policy check used: narrowing it to
-    ``EXPANSION_EDGES`` would return an **empty** tuple for a CALLS-only request,
+    ``RELATIONSHIP_DEFAULT_EDGES`` would return an **empty** tuple for a CALLS-only request,
     and an empty tuple reaches the store as *no type filter at all* — silently
     turning the narrowest possible request into an unrestricted walk.
     """
@@ -239,7 +244,7 @@ def admitted_edge_types(request: RelationshipsRequest) -> tuple[EdgeType, ...]:
     if request.include_containment:
         policy |= CONTAINMENT_EDGES
     if request.edge_types is None:
-        return tuple(EXPANSION_EDGES)
+        return tuple(RELATIONSHIP_DEFAULT_EDGES)
 
     refused = [edge_type for edge_type in request.edge_types if edge_type not in policy]
     if refused:
