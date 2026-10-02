@@ -7,11 +7,13 @@ import { LineGlyph } from "@/components/graph/glyphs";
 import { ApiError } from "@/lib/api/client";
 import type { EvidenceItem, TopologyEdgeResponse } from "@/lib/api/generated";
 import { useEdges } from "@/lib/api/topology";
+import { decisionRefOf, type HopPlace } from "@/lib/model/decisions";
 import { formatCount, plural } from "@/lib/model/format";
 import { relationOf, type Connection, type Family } from "@/lib/model/graph";
 
 import { Quiet } from "./Inspector";
 import classes from "./Inspector.module.css";
+import { DecisionEvidence } from "./Requests";
 
 export interface LineSpan {
   start: number;
@@ -27,6 +29,7 @@ export function Evidence({
   subject,
   here,
   onShowInCode,
+  onOpenPlace,
 }: {
   connection: Connection | null;
   /** The thing inspected: its evidence is recorded in one investigation. */
@@ -34,6 +37,8 @@ export function Evidence({
   /** The file inspected, if one is: its own lines can be shown in Code. */
   here?: { repository: string; path: string };
   onShowInCode?: (span: LineSpan) => void;
+  /** Opens a place a handler link's decision cites. */
+  onOpenPlace?: (place: HopPlace) => void;
 }) {
   const refs = connection?.link.examples ?? [];
   const results = useEdges(refs, subject);
@@ -67,7 +72,14 @@ export function Evidence({
           {results.map((result, i) => (
             <li key={refs[i]}>
               {result.data ? (
-                <EdgeCard edge={result.data} family={link.family} here={here} onShowInCode={onShowInCode} />
+                <EdgeCard
+                  edge={result.data}
+                  family={link.family}
+                  here={here}
+                  subject={subject}
+                  onShowInCode={onShowInCode}
+                  onOpenPlace={onOpenPlace}
+                />
               ) : result.error ? (
                 <p className={classes.problem}>
                   {result.error instanceof ApiError && result.error.code === "EDGE_NOT_FOUND"
@@ -96,13 +108,18 @@ function EdgeCard({
   edge,
   family,
   here,
+  subject,
   onShowInCode,
+  onOpenPlace,
 }: {
   edge: TopologyEdgeResponse;
   family: Family;
   here?: { repository: string; path: string };
+  subject: string;
   onShowInCode?: (span: LineSpan) => void;
+  onOpenPlace?: (place: HopPlace) => void;
 }) {
+  const decisionRef = edge.edge.type === "CALLS_HTTP_HANDLER" ? decisionRefOf(edge) : null;
   const { source, target, type, provenance, confidence } = edge.edge;
   const at = provenance?.path
     ? `${provenance.repository_slug ?? ""}/${provenance.path}${provenance.line_start ? `:${provenance.line_start}${provenance.line_end && provenance.line_end !== provenance.line_start ? `–${provenance.line_end}` : ""}` : ""}`
@@ -167,6 +184,17 @@ function EdgeCard({
           <dd>{edge.http.endpoint}</dd>
         </dl>
       )}
+      {edge.edge.type === "CALLS_HTTP_HANDLER" &&
+        (decisionRef ? (
+          <section className={classes.decision} aria-label="The stored decision">
+            <p className={classes.decisionTitle}>
+              Decision <span className={classes.mono}>{decisionRef}</span>
+            </p>
+            <DecisionEvidence decisionRef={decisionRef} subject={subject} onOpenPlace={onOpenPlace} withHead />
+          </section>
+        ) : (
+          <Quiet>This link names no stored decision; a sync records one.</Quiet>
+        ))}
       {inHere && onShowInCode && (
         <Button
           size="compact-xs"

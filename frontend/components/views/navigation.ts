@@ -17,3 +17,14 @@ export interface Navigation {
   /** Whether `id` is selected now, in an event handler: ahead of any render. */
   isSelected: (id: string) => boolean;
 }
+
+/** The selection a file level reads as "this line": a place opened at its line lands on it. */
+export const LINE_SELECT = "line:";
+
+/** Opens a file at a line (or at its top), as following a reference does. */
+export function openAt(nav: Navigation, place: { repository: string; path: string; line_start?: number | null }): void {
+  nav.go(
+    { repository: place.repository, path: place.path },
+    { select: place.line_start != null ? `${LINE_SELECT}${place.line_start}` : null },
+  );
+}

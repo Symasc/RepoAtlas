@@ -11,6 +11,7 @@ import { Connections } from "@/components/inspector/Connections";
 import { Contents } from "@/components/inspector/Entries";
 import { Evidence } from "@/components/inspector/Evidence";
 import { Inspector, OpenButton } from "@/components/inspector/Inspector";
+import { Requests } from "@/components/inspector/Requests";
 import inspectorClasses from "@/components/inspector/Inspector.module.css";
 import type { RepositoryLink } from "@/lib/api/generated";
 import { useTopologyOverview } from "@/lib/api/topology";
@@ -20,7 +21,7 @@ import { buildOverview, FAMILIES, repositoryId, type Connection, type Family } f
 import type { RepositoryModel } from "@/lib/model/repositories";
 import { useAnimationsOff } from "@/lib/useMotion";
 
-import type { Navigation } from "./navigation";
+import { openAt, type Navigation } from "./navigation";
 import { Totals } from "./Totals";
 import classes from "./Views.module.css";
 
@@ -212,11 +213,24 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
                   />
                 ),
               },
+              {
+                value: "requests",
+                label: "Requests",
+                panel: (
+                  <Requests
+                    scope={{ repository: repository.slug, path: "" }}
+                    subject={`repo:${repository.slug}`}
+                    onOpenPlace={(at) => openAt(nav, at)}
+                  />
+                ),
+              },
               { value: "details", label: "Details", panel: <RepositoryDetails repository={repository} /> },
               {
                 value: "evidence",
                 label: "Evidence",
-                panel: <Evidence connection={picked} subject={`repo:${repository.slug}`} />,
+                panel: (
+                  <Evidence connection={picked} subject={`repo:${repository.slug}`} onOpenPlace={(at) => openAt(nav, at)} />
+                ),
               },
             ]}
           />

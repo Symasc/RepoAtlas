@@ -13,6 +13,7 @@ import { Connections } from "@/components/inspector/Connections";
 import { Contents, EntryList } from "@/components/inspector/Entries";
 import { Evidence } from "@/components/inspector/Evidence";
 import { Inspector, OpenButton, type InspectorTab } from "@/components/inspector/Inspector";
+import { Requests } from "@/components/inspector/Requests";
 import { ApiError } from "@/lib/api/client";
 import type { TopologyChildrenResponse } from "@/lib/api/generated";
 import { useChildren, usePreviews } from "@/lib/api/topology";
@@ -34,7 +35,7 @@ import { DIRECTORY_TRACE } from "@/lib/model/location";
 import type { RepositoryModel } from "@/lib/model/repositories";
 
 import { FileLevel } from "./FileLevel";
-import type { Navigation } from "./navigation";
+import { openAt, type Navigation } from "./navigation";
 import { Trail, useClimb } from "./Trail";
 import classes from "./Views.module.css";
 
@@ -343,6 +344,17 @@ function CardInspector({
     title = card.name;
     subtitle = `${plural(card.files, "file")} · ${repository.name}/${card.path}`;
     tabs.push({ value: "contents", label: "Contents", panel: <Contents repository={repository.slug} path={card.path} onGo={go} /> });
+    tabs.push({
+      value: "requests",
+      label: "Requests",
+      panel: (
+        <Requests
+          scope={{ repository: repository.slug, path: card.path }}
+          subject={`${repository.slug}:${id}`}
+          onOpenPlace={(at) => openAt(nav, at)}
+        />
+      ),
+    });
   } else if (id === FILES_ID && graph.files) {
     icon = <PathBadge path="file" file size={18} />;
     title = "Files here";
@@ -383,7 +395,11 @@ function CardInspector({
       />
     ),
   });
-  tabs.push({ value: "evidence", label: "Evidence", panel: <Evidence connection={picked} subject={`${repository.slug}:${id}`} /> });
+  tabs.push({
+    value: "evidence",
+    label: "Evidence",
+    panel: <Evidence connection={picked} subject={`${repository.slug}:${id}`} onOpenPlace={(at) => openAt(nav, at)} />,
+  });
 
   return (
     <Inspector
