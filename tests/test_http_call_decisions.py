@@ -175,6 +175,76 @@ def test_a_sync_replaces_every_stored_decision(joined: Workspace, tmp_path: Path
     )
 
 
+TWINNED = MIRRORED.replace("https://mirror.example/api", "https://accounts.example/api")
+
+
+def test_two_roots_with_the_same_base_are_two_decisions_and_two_links(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """The same URL from two roots is still two requests: neither root's decision, with
+    its own options and base, overwrites the other's."""
+    built = build(
+        workspace, tmp_path, {"accounts": ACCOUNTS, "web": {**WEB, "src/main.ts": TWINNED}}
+    )
+    rows = by_caller(built)["createUserModel.getUser"]
+    assert len({row.variant for row in rows}) == 2
+    assert {row.url for row in rows} == {"https://accounts.example/api/users/{id}"}
+    assert [row.decision for row in rows] == ["linked", "linked"]
+    linked = [row.decision_ref for row in stored(built) if row.decision == "linked"]
+    assert Counter(handler_refs(built)) == Counter(linked)
+
+
+def test_a_request_s_ref_does_not_depend_on_another_request(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """Two roots alike in all but where they are written: each ref is its own, so a change
+    to either root's base leaves the other's ref as it was, whichever was decided first."""
+    built = build(
+        workspace, tmp_path, {"accounts": ACCOUNTS, "web": {**WEB, "src/main.ts": TWINNED}}
+    )
+
+    def refs() -> dict[str, str]:
+        rows = by_caller(built)["createUserModel.getUser"]
+        return {row.variant: row.decision_ref for row in rows}
+
+    before = refs()
+    assert len(before) == 2 and len(set(before.values())) == 2
+    root = tmp_path / "repos"
+    first = TWINNED.replace(
+        "?? 'https://accounts.example/api'", "?? 'https://elsewhere.example/api'"
+    )
+    for changed in (MIRRORED, first):
+        assert changed != TWINNED
+        edit(root, "web", "src/main.ts", changed)
+        sync_all(built, root)
+        after = refs()
+        assert len(set(after.values()) & set(before.values())) == 1, changed
+    edit(root, "web", "src/main.ts", TWINNED)
+    sync_all(built, root)
+    assert refs() == before
+
+
+def test_a_stored_decision_goes_with_its_request_whichever_file_said_so(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """Moving an injected root moves its request's variant: the request's own file is
+    untouched, and its old decision still does not survive the sync."""
+    built = build(
+        workspace, tmp_path, {"accounts": ACCOUNTS, "web": {**WEB, "src/main.ts": MIRRORED}}
+    )
+    before = {row.variant for row in stored(built)}
+    moved = MIRRORED.replace("\nexport const mirrored", "\n// moved\nexport const mirrored")
+    assert moved != MIRRORED
+    edit(tmp_path / "repos", "web", "src/main.ts", moved)
+    sync_all(built, tmp_path / "repos")
+    plan = ReferenceLinker(built.knowledge).prepare_global().http_crossings
+    assert sorted(row.decision_ref for row in stored(built)) == sorted(c.ref for c in plan.calls)
+    after = {row.variant for row in stored(built)}
+    # The moved root's requests are decided under its new place, and only under it.
+    assert len(before - after) == 1 and len(after - before) == 1
+    assert len(by_caller(built)["createUserModel.getUser"]) == 2
+
+
 def test_an_index_no_global_pass_has_written_says_so(tmp_path: Path) -> None:
     knowledge = SqliteKnowledgeStore(open_database(tmp_path / "atlas.db"))
     assert not knowledge.http_call_decisions_built()

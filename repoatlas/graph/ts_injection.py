@@ -96,7 +96,10 @@ def plan_injected_requests(
         found = exports.get((target.file_id, meta.get("name", "")), []) if target else []
         return (target.file_id, found[0]) if target is not None and len(found) == 1 else None
 
-    derived: dict[tuple[int | None, str], UnresolvedRefRecord] = {}
+    # One per request and root: a request two roots make with the same URL is two
+    # requests, each with its own root and base, and only the same one reached twice is
+    # one.
+    derived: dict[tuple[int | None, str, str], UnresolvedRefRecord] = {}
 
     def visit(
         key: Key, bound: Spec, hops: int, seen: frozenset[Key], root: UnresolvedRefRecord
@@ -104,7 +107,7 @@ def plan_injected_requests(
         for request in requests.get(key, ()):
             record = _derive(request, bound, root, by_id)
             if record is not None:
-                derived[(request.id, record.target_key)] = record
+                derived[(request.id, record.target_key, record.meta_json or "")] = record
         if hops >= MAX_HOPS:
             return
         for forward in forwards.get(key, ()):
@@ -119,7 +122,7 @@ def plan_injected_requests(
         if target is not None:
             argument = _tagged(json.loads(_meta(root).get("argument", "null")), root.file_id)
             visit(target, argument, 1, frozenset({target}), root)
-    return tuple(derived[key] for key in sorted(derived, key=lambda k: (k[0] or 0, k[1])))
+    return tuple(derived[key] for key in sorted(derived, key=lambda k: (k[0] or 0, k[1], k[2])))
 
 
 def _tagged(spec: Spec, file_id: int) -> Spec:
