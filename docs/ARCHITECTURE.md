@@ -1904,6 +1904,25 @@ names it), or in a construct not extracted at all — direct fetch, member-call 
 implementations, concatenated paths, constant decorator paths. `coverage.limitations` lists each of those, counted
 from the rows where it can be counted and merely declared possible where it cannot.
 
+**Crossings are read, not replanned.** The workspace join needs every repository, so a caller row's `crossings` are
+the decisions the last global pass stored (`http_call_decisions`, §5), placed on the row written at the same lines
+by the same entity, one per request: literal alternatives and injected roots each have their own. A crossing is
+apart from the row's status, which keeps its route-matching meaning. A request only the join reads — an absolute
+or deployment-addressed URL, or a host the source does not state — has no route-matching row, so it gets one of its
+own, `unresolved` with detail `join_only`, counted under the `join_only` limitation and not as an unknown path.
+`crossing` filters rows to those decisions and narrows each row's crossings to them; `summary.by_crossing` counts
+them. An index no global pass has written since migration 008 says so (`crossings_not_built`) rather than listing
+none.
+
+The scope contract applies hop by hop. Under repository scope, a place another repository proves is withheld, with
+the hop's detail, and so are a link's handler and provider; the hop keeps its kind, status and reason code, says it
+was `withheld`, and a link keeps its shared `http-endpoint:` node, the way out. `cross_repository: true` shows them,
+and the response's freshness then covers every repository a crossing shows. Evidence follows the same line: with
+`include_provenance`, a proven hop's lines are rebuilt from indexed chunks at read time and supplied when they are
+in the row's own repository, or in any repository under global scope; a place a file proves as a whole is never
+evidence, and no evidence id is stored. The `basis` says a crossing establishes a source-backed deployment identity
+chain, and never that the request runs or the deployment does.
+
 **Search** generates the exact keys a question spells, then feeds them to the existing exact-name lookup. A key hit
 is a seed, and its handle is published like `env:` handles, so no tier, match class or ranking changed. The spellings
 it reads:

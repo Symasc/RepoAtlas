@@ -12,6 +12,14 @@ not — by the same plan. Nothing is read from a previous run's decisions and no
 is inferred: a row states what one repository's indexed source says, in the terms
 of :class:`~repoatlas.models.http_inventory.OperationStatus`, and no status is a
 statement about any other repository or about source RepoAtlas does not extract.
+
+**Crossings are read, not replanned.** The workspace join needs every repository, so
+a caller row's crossings are the decisions the last global link pass stored
+(``http_call_decisions``), placed on the row written at the same lines by the same
+entity. A request only the join reads — an absolute or deployment-addressed URL, a
+host the source does not state — has no route-matching row; it gets one of its own,
+``unresolved`` with detail ``join_only``, so no stored decision goes unlisted.
+:func:`project` then withholds what another repository proves, as the scope asks.
 """
 
 from __future__ import annotations
@@ -20,12 +28,12 @@ import base64
 import binascii
 import json
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 
 from repoatlas.capabilities.dependencies import digest
 from repoatlas.capabilities.errors import InvalidCursorError, StaleCursorError
-from repoatlas.graph import http_claims
+from repoatlas.graph import http_chain, http_claims
 from repoatlas.graph.http_claims import CallDecision, HttpClaimPlan
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models import http
@@ -35,7 +43,11 @@ from repoatlas.models.http_inventory import (
     MAX_COUNTERPARTS,
     MAX_PAGE_SIZE,
     CoverageLimitation,
+    CrossingHop,
+    CrossingStatus,
     DeclaredMatch,
+    HopPlace,
+    HttpCrossing,
     HttpOperation,
     HttpOperationsRequest,
     OperationCounterpart,
@@ -52,7 +64,13 @@ from repoatlas.parsers.http_facts import (
     PYTHON_ROUTE,
     TS_HANDLER_OBJECT,
 )
-from repoatlas.storage.protocols import EntityIdentity, FileRow, HttpEdgeRow, UnresolvedRefRecord
+from repoatlas.storage.protocols import (
+    EntityIdentity,
+    FileRow,
+    HttpCallDecisionRow,
+    HttpEdgeRow,
+    UnresolvedRefRecord,
+)
 
 #: Claims whose routes the global pass serves, or lists as declared.
 _ROUTE_ROLES = frozenset({http_claims.NESTJS_ROUTE, PYTHON_ROUTE, FASTIFY_ROUTE, TS_HANDLER_OBJECT})
@@ -64,6 +82,12 @@ GLOBAL_PARSER = "linker:global"
 
 _CURSOR_REFUSED = "that HTTP operations cursor does not belong to this request"
 _CURSOR_STALE = "the HTTP operation inventory changed since that page was issued"
+
+#: The detail of a caller row only the workspace join reads.
+JOIN_ONLY = "join_only"
+
+#: Hops whose places are always the caller's own repository.
+_OWN_HOPS = frozenset({http_chain.CALLER, http_chain.ORIGIN})
 
 #: Why an imported-helper call that never reached a decision is unresolved.
 _JOIN_FAILURES = {
@@ -131,6 +155,8 @@ class Inventory:
     parsers: Mapping[str, str | None] = field(default_factory=dict)
     #: Whether the replanned edges disagree with the stored global graph.
     stale_graph: bool = False
+    #: Whether a global link pass has stored the join's decisions in this index.
+    crossings_built: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,8 +180,16 @@ def build_inventory(
     index: ResolutionIndex,
     edges: Sequence[HttpEdgeRow],
     parsers: Mapping[str, str | None],
+    joined: Sequence[HttpCallDecisionRow] = (),
+    slugs: Mapping[int, str] | None = None,
+    crossings_built: bool = False,
 ) -> Inventory:
-    """Every caller and provider row of one repository, unfiltered."""
+    """Every caller and provider row of one repository, unfiltered.
+
+    ``joined`` are the stored join decisions of this repository's requests; their
+    handlers and callers must be in ``entities``, and every repository their chains
+    name in ``slugs``.
+    """
     by_file = {row.file_id: row for row in files}
     by_path = {row.rel_path: row for row in files}
     by_claim = {claim.id: claim for claim in claims if claim.id is not None}
@@ -279,6 +313,8 @@ def build_inventory(
             )
         )
 
+    drafts = _crossed(drafts, joined, entities, slugs or {}, package)
+
     # -- providers ------------------------------------------------------------------------
     reaching: dict[str, list[OperationCounterpart]] = {}
     for draft in drafts:
@@ -372,7 +408,278 @@ def build_inventory(
         (edge.src_id, str(edge.type), edge.target.key, edge.line_start, edge.line_end)
         for edge in plan.http
     }
-    return Inventory(drafts=drafts, parsers=parsers, stale_graph=stored != planned)
+    return Inventory(
+        drafts=drafts,
+        parsers=parsers,
+        stale_graph=stored != planned,
+        crossings_built=crossings_built,
+    )
+
+
+def _crossed(
+    drafts: list[Draft],
+    decisions: Sequence[HttpCallDecisionRow],
+    entities: Mapping[int, EntityIdentity],
+    slugs: Mapping[int, str],
+    package: Callable[[str | None], str | None],
+) -> list[Draft]:
+    """The caller rows with their crossings, and a row for each request only the join reads.
+
+    A request's decisions go on the caller row written at its lines by its entity — the
+    first in order when two rows are — so each stored decision is listed exactly once.
+    """
+    grouped: dict[tuple[str | None, int | None, int | None, str | None], list[HttpCrossing]] = {}
+    for row in decisions:
+        key = (row.path, row.line_start, row.line_end, row.src_key)
+        grouped.setdefault(key, []).append(_crossing(row, entities, slugs))
+    by_key = {found.key: found for found in entities.values()}
+    placed: list[Draft] = []
+    for draft in sorted(drafts, key=lambda d: d.sort_key):
+        row = draft.operation
+        crossings = grouped.pop((row.path, row.line_start, row.line_end, row.entity), None)
+        if crossings is None:
+            placed.append(draft)
+            continue
+        ordered = tuple(sorted(crossings, key=lambda c: c.decision_ref))
+        placed.append(replace(draft, operation=row.model_copy(update={"crossings": ordered})))
+    for (path, line_start, line_end, entity), crossings in grouped.items():
+        ordered = tuple(sorted(crossings, key=lambda c: c.decision_ref))
+        first = ordered[0]
+        owner = by_key.get(entity) if entity is not None else None
+        placed.append(
+            Draft(
+                operation=HttpOperation(
+                    role="caller",
+                    status=OperationStatus.UNRESOLVED,
+                    method=first.method or None,
+                    route=_path_of(first.url),
+                    path=path,
+                    line_start=line_start,
+                    line_end=line_end,
+                    entity=entity,
+                    package=package(path),
+                    detail=JOIN_ONLY,
+                    crossings=ordered,
+                ),
+                qualified_name=owner.qualified_name if owner else None,
+            )
+        )
+    return placed
+
+
+def handler_ids(decisions: Sequence[HttpCallDecisionRow]) -> set[int]:
+    """The entities the decisions' chains name, for their keys to be read."""
+    found: set[int] = set()
+    for row in decisions:
+        found.update(
+            hop.entity_id
+            for hop in http_chain.chain_from_json(row.chain_json)
+            if hop.entity_id is not None
+        )
+    return found
+
+
+def _crossing(
+    row: HttpCallDecisionRow, entities: Mapping[int, EntityIdentity], slugs: Mapping[int, str]
+) -> HttpCrossing:
+    """One stored decision, in full: every place with its repository."""
+    chain: list[CrossingHop] = []
+    handler: str | None = None
+    for hop in http_chain.chain_from_json(row.chain_json):
+        key = None
+        if hop.entity_id is not None and (found := entities.get(hop.entity_id)) is not None:
+            key = found.key
+        if hop.kind == http_chain.HANDLER and hop.status == http_chain.PROVEN:
+            handler = key
+        chain.append(
+            CrossingHop(
+                kind=hop.kind,
+                status=hop.status,
+                provenance=tuple(
+                    HopPlace(
+                        repository=slugs.get(place.repo_id, f"repository:{place.repo_id}"),
+                        path=place.path,
+                        line_start=place.line_start,
+                        line_end=place.line_end,
+                        role=place.role,
+                    )
+                    for place in hop.provenance
+                ),
+                reason=hop.reason,
+                note=http_chain.REASONS.get(hop.reason, ""),
+                detail=hop.detail,
+                handler=key,
+            )
+        )
+    evidence = json.loads(row.evidence_json or "{}")
+    linked = row.decision == CrossingStatus.LINKED
+    endpoint = str(evidence.get("endpoint", "")) if linked else ""
+    return HttpCrossing(
+        decision_ref=row.decision_ref,
+        status=CrossingStatus(row.decision),
+        method=row.method,
+        url=row.url,
+        variant=row.variant,
+        chain=tuple(chain),
+        handler=handler,
+        provider=str(evidence.get("provider", "")) or None if linked else None,
+        endpoint=http.endpoint_key(endpoint) if endpoint else None,
+    )
+
+
+def _path_of(url: str) -> str:
+    """The path of a request as the join read it: after its origin, or after the
+    expression that stands for an origin the source does not state. No query."""
+    rest = url
+    if rest.startswith("{"):
+        depth = 0
+        for index, char in enumerate(rest):
+            depth += {"{": 1, "}": -1}.get(char, 0)
+            if depth == 0:
+                rest = rest[index + 1 :]
+                break
+    elif "://" in rest:
+        rest = rest.partition("://")[2]
+        slash = rest.find("/")
+        rest = rest[slash:] if slash >= 0 else "/"
+    path = rest.partition("?")[0].partition("#")[0]
+    return path if path.startswith("/") else ""
+
+
+@dataclass(slots=True)
+class Span:
+    """Lines to supply as evidence, and what they state."""
+
+    #: The operations a row written here makes or serves, for a route named in prose.
+    routes: set[str] = field(default_factory=set)
+    #: A row's own lines, rather than only a place a crossing's hop cites.
+    written: bool = False
+
+
+def evidence_spans(
+    rows: Sequence[HttpOperation], home: str | None, everywhere: bool
+) -> dict[str, dict[tuple[str, int, int], Span]]:
+    """The spans a page supplies as evidence, by repository.
+
+    Each row's own lines, and the lines its crossings' proven hops cite: in the row's own
+    repository, or in any under global scope (``everywhere``). A hop not proven cites
+    nothing to supply, and a place a file proves as a whole is no span.
+    """
+    found: dict[str, dict[tuple[str, int, int], Span]] = {}
+    for row in rows:
+        own = row.repository or home
+        if own is None:
+            continue
+        if row.path is not None and row.line_start is not None and row.line_end is not None:
+            span = found.setdefault(own, {}).setdefault(
+                (row.path, row.line_start, row.line_end), Span()
+            )
+            span.written = True
+            if row.route:
+                span.routes.add(f"{row.method} {row.route}" if row.method else row.route)
+        for crossing in row.crossings:
+            for hop in crossing.chain:
+                if hop.status != http_chain.PROVEN:
+                    continue
+                for place in hop.provenance:
+                    if place.line_start is None or place.line_end is None:
+                        continue
+                    if not everywhere and place.repository != own:
+                        continue
+                    found.setdefault(place.repository, {}).setdefault(
+                        (place.path, place.line_start, place.line_end), Span()
+                    )
+    return found
+
+
+def with_evidence(
+    row: HttpOperation, ids: Mapping[tuple[str, str, int, int], str], home: str | None
+) -> HttpOperation:
+    """The row with the evidence ids recorded for its lines and its hops' places."""
+    own = row.repository or home or ""
+    update: dict[str, object] = {}
+    if row.path is not None and row.line_start is not None and row.line_end is not None:
+        found = ids.get((own, row.path, row.line_start, row.line_end))
+        if found is not None:
+            update["evidence_id"] = found
+    if row.crossings:
+        crossings: list[HttpCrossing] = []
+        for crossing in row.crossings:
+            chain = tuple(
+                hop.model_copy(
+                    update={
+                        "provenance": tuple(
+                            place.model_copy(update={"evidence_id": found})
+                            if place.line_start is not None
+                            and place.line_end is not None
+                            and (
+                                found := ids.get(
+                                    (place.repository, place.path, place.line_start, place.line_end)
+                                )
+                            )
+                            else place
+                            for place in hop.provenance
+                        )
+                    }
+                )
+                for hop in crossing.chain
+            )
+            crossings.append(crossing.model_copy(update={"chain": chain}))
+        update["crossings"] = tuple(crossings)
+    return row.model_copy(update=update) if update else row
+
+
+def repositories_named(rows: Sequence[HttpOperation]) -> set[str]:
+    """Every repository the rows' crossings show a place or a provider in."""
+    named: set[str] = set()
+    for row in rows:
+        for crossing in row.crossings:
+            if crossing.provider:
+                named.add(crossing.provider)
+            for hop in crossing.chain:
+                named.update(place.repository for place in hop.provenance)
+    return named
+
+
+def project(row: HttpOperation, home: str | None, shown: bool) -> HttpOperation:
+    """A row as this scope may show it.
+
+    Under repository scope without ``cross_repository`` (``home`` named, ``shown``
+    false), every place another repository proves is withheld, and with it a hop's
+    detail unless the hop is the caller's own; a link's handler and provider are
+    withheld too. Each hop keeps its kind, status and reason, and says when something
+    was withheld; a link keeps its shared endpoint node, the way out.
+    """
+    if home is None or shown or not row.crossings:
+        return row
+    crossings: list[HttpCrossing] = []
+    for crossing in row.crossings:
+        chain: list[CrossingHop] = []
+        for hop in crossing.chain:
+            own = tuple(place for place in hop.provenance if place.repository == home)
+            foreign = len(own) != len(hop.provenance)
+            keeps = hop.kind in _OWN_HOPS or (bool(own) and not foreign)
+            chain.append(
+                hop.model_copy(
+                    update={
+                        "provenance": own,
+                        "detail": hop.detail if keeps else "",
+                        "handler": hop.handler if not foreign else None,
+                        "withheld": foreign or (bool(hop.detail) and not keeps),
+                    }
+                )
+            )
+        away = crossing.provider is not None and crossing.provider != home
+        crossings.append(
+            crossing.model_copy(
+                update={
+                    "chain": tuple(chain),
+                    "handler": None if away else crossing.handler,
+                    "provider": None if away else crossing.provider,
+                }
+            )
+        )
+    return row.model_copy(update={"crossings": tuple(crossings)})
 
 
 def _caller(
@@ -478,11 +785,21 @@ def selected(
 
     Filters apply to rows, after the whole repository was planned: narrowing what
     is returned must never narrow what is known.
+    A ``crossing`` filter keeps the callers with a crossing of those decisions, each
+    with only those crossings.
     """
     wanted = set(request.status)
+    crossing = set(request.crossing)
     rows: list[Draft] = []
     for draft in drafts:
         row = draft.operation
+        if crossing:
+            kept = tuple(c for c in row.crossings if c.status in crossing)
+            if not kept:
+                continue
+            if len(kept) != len(row.crossings):
+                row = row.model_copy(update={"crossings": kept})
+                draft = replace(draft, operation=row)
         if request.role is not OperationRole.BOTH and row.role != request.role.value:
             continue
         if prefix is not None and not _under(row.path, prefix):
@@ -547,6 +864,9 @@ def summarize(drafts: Sequence[Draft]) -> OperationSummary:
         total=len(drafts),
         by_status=dict(sorted(Counter(d.operation.status.value for d in drafts).items())),
         by_role=dict(sorted(Counter(d.operation.role for d in drafts).items())),
+        by_crossing=dict(
+            sorted(Counter(c.status.value for d in drafts for c in d.operation.crossings).items())
+        ),
     )
 
 
@@ -561,16 +881,36 @@ def coverage(
     )
     callers = [d.operation for d in scoped if d.operation.role == "caller"]
     unresolved = Counter(row.detail for row in callers if row.status is OperationStatus.UNRESOLVED)
+    # A request only the join reads has a path; its crossings say what became of it.
+    joined = unresolved.get(JOIN_ONLY, 0)
     ambiguous = sum(1 for row in callers if row.status is OperationStatus.AMBIGUOUS)
     declared = sum(1 for d in scoped if d.operation.status is OperationStatus.DECLARED)
     limitations = [
         CoverageLimitation(
             code="same_repository_only",
-            note="Only this repository's routes and callers are considered; other "
-            "repositories are never examined here, and their routes on the shared nodes "
-            "are reached with relationships.",
+            note="A row's status considers only this repository's routes and callers; "
+            "other repositories' routes on the shared nodes are reached with "
+            "relationships. Crossings are the workspace join's stored decisions.",
         )
     ]
+    if not inventory.crossings_built:
+        limitations.append(
+            CoverageLimitation(
+                code="crossings_not_built",
+                note="No global link pass has stored the workspace join's decisions in "
+                "this index, so no row lists crossings; sync to store them.",
+            )
+        )
+    if joined:
+        limitations.append(
+            CoverageLimitation(
+                code="join_only",
+                count=joined,
+                note="Requests only the workspace join reads (an absolute or "
+                "deployment-addressed URL, or a host the source does not state). Their "
+                "status is not a route match; their crossings say what the join decided.",
+            )
+        )
     fetch = unresolved.get(http_claims.REASON_DIRECT_FETCH, 0)
     if fetch:
         limitations.append(
@@ -580,7 +920,7 @@ def coverage(
                 note="Direct fetch calls with a template URL are recorded, never matched.",
             )
         )
-    others = sum(unresolved.values()) - fetch
+    others = sum(unresolved.values()) - fetch - joined
     if others:
         limitations.append(
             CoverageLimitation(
@@ -623,7 +963,7 @@ def coverage(
         unresolved=dict(sorted(unresolved.items())),
         ambiguous=ambiguous,
         declared=declared,
-        unknown_paths=sum(unresolved.values()),
+        unknown_paths=sum(unresolved.values()) - joined,
         limitations=tuple(limitations),
     )
 
@@ -653,6 +993,8 @@ def request_digest(request: HttpOperationsRequest, repository: str, prefix: str 
             ("method", request.method or ""),
             ("route_prefix", request.route_prefix or ""),
             ("status", *sorted(status.value for status in request.status)),
+            ("crossing", *sorted(status.value for status in request.crossing)),
+            ("cross_repository", str(request.cross_repository)),
             ("provenance", str(request.include_provenance)),
         ]
     )
@@ -678,6 +1020,8 @@ def inventory_digest(drafts: Sequence[Draft]) -> str:
                 str(row.counterpart_count),
                 "|",
                 *(f"{m.route}@{m.entity}" for m in row.declared_matches),
+                "|",
+                *(f"{c.decision_ref}={c.status.value}" for c in row.crossings),
             )
         )
     return digest(records)
