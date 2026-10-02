@@ -3,9 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.24.0",
+  "packageManager": "pnpm@10.34.6",
   "engines": {
-    "node": ">=22"
+    "node": ">=20.19"
   },
   "scripts": {
     "dev": "next dev --hostname 127.0.0.1 --port 7318",
@@ -37,7 +37,7 @@
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
     "@playwright/test": "^1.63.0",
-    "@types/node": "^22",
+    "@types/node": "^20.19",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "eslint": "^9.39.5",
@@ -46,6 +46,6 @@
     "postcss-preset-mantine": "^1.18.0",
     "postcss-simple-vars": "^7.0.1",
     "typescript": "~6.0.3",
-    "vitest": "^5.0.2"
+    "vitest": "^4.1.11"
   }
 }

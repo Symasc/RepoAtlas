@@ -28,10 +28,9 @@ indistinguishable from a fabricated one.
 
 from __future__ import annotations
 
-import enum
-
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from repoatlas.compat import StrEnum
 from repoatlas.models.capability import (
     PRESENTATION_DESCRIPTION,
     CapabilityContext,
@@ -61,7 +60,7 @@ MAX_NEIGHBORS_CEILING = 200
 DEFAULT_MAX_NEIGHBORS = 50
 
 
-class RelationshipDirection(enum.StrEnum):
+class RelationshipDirection(StrEnum):
     """Which end of an edge the queried entity is asked to sit on.
 
     A question about the neighbourhood, not a claim about the edges: narrowing to

@@ -51,13 +51,16 @@ jobs:
           uv run ruff check .
           uv run ruff format --check .
           uv run pyright
+          # pyproject checks as 3.10, the oldest supported; this checks the 3.12+ branches.
+          uv run pyright --pythonversion 3.13
 
       - name: Tests
         run: uv run pytest
 
+      # The oldest Node frontend/package.json accepts, so the floor it states is tested.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22"
+          node-version: "20.19.0"
 
       # pnpm is the version frontend/package.json names, through Node's corepack.
       # `check` includes `dto:check`, which reads the contract from .venv (above).

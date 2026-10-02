@@ -13,7 +13,7 @@ sentence. The suite is built around four claims:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -33,7 +33,7 @@ from repoatlas.services.workspace import Workspace
 
 GLOBAL = CapabilityContext(scope=CapabilityScope.GLOBAL)
 HEAD = "a" * 40
-INDEXED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+INDEXED_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 def _service(workspace: Workspace) -> CapabilityService:

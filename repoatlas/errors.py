@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import enum
 from typing import TYPE_CHECKING
+
+from repoatlas.compat import StrEnum
 
 if TYPE_CHECKING:
     # Annotation only. This module sits under everything and is imported by
@@ -38,7 +39,7 @@ class RepoAtlasError(Exception):
         return self.message
 
 
-class ContextFailure(enum.StrEnum):
+class ContextFailure(StrEnum):
     """Why a context could not be resolved, as a value rather than a sentence.
 
     Four different situations reach :class:`ContextResolutionError`, and until now

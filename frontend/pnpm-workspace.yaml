@@ -1,5 +1,8 @@
 packages:
   - .
+# pnpm 11's supply-chain defaults, which pnpm 10 (the last to run on Node 20) leaves off.
+minimumReleaseAge: 1440
+blockExoticSubdeps: true
 allowBuilds:
   # its prebuilt binary arrives as an optional dependency; the script only repairs a missing one
   unrs-resolver: false

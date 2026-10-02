@@ -18,11 +18,11 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tarfile
-import tomllib
 import zipfile
 from pathlib import Path
 
 import pytest
+from repoatlas.compat import tomllib
 from tests.skills.conftest import SKILL_NAMES, SKILL_PATH, skill_paths
 
 ROOT = SKILL_PATH.parent.parent.parent

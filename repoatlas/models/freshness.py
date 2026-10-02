@@ -21,13 +21,14 @@ and it is the half that was missing.
 
 from __future__ import annotations
 
-import enum
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from repoatlas.compat import StrEnum
 
-class FreshnessDepth(enum.StrEnum):
+
+class FreshnessDepth(StrEnum):
     """How hard RepoAtlas looked, and therefore what it is entitled to say.
 
     The depth is part of the answer, not a parameter that produced it. A caller
@@ -42,7 +43,7 @@ class FreshnessDepth(enum.StrEnum):
     LIVE = "live"
 
 
-class FreshnessState(enum.StrEnum):
+class FreshnessState(StrEnum):
     """What RepoAtlas established about one repository's index.
 
     Five states are reachable at ``STORED`` depth and five more need ``LIVE``.
@@ -99,7 +100,7 @@ def severity(state: FreshnessState) -> int:
     return _SEVERITY[state]
 
 
-class WorktreeContentStatus(enum.StrEnum):
+class WorktreeContentStatus(StrEnum):
     """Whether the bytes on disk are the bytes that were indexed.
 
     A separate dimension because it is a different question from

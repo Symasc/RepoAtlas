@@ -49,7 +49,7 @@ def main(expected: str) -> None:
     package = resources.files("repoatlas")
     migrations = [
         entry.name
-        for entry in package.joinpath("storage", "sqlite", "migrations").iterdir()
+        for entry in package.joinpath("storage").joinpath("sqlite").joinpath("migrations").iterdir()
         if entry.name.endswith(".sql")
     ]
     assert migrations, "no schema migrations in the package"
@@ -59,7 +59,7 @@ def main(expected: str) -> None:
         if entry.name.startswith("repoatlas-")
     ]
     assert len(skills) == SKILLS, f"skills in the package: {sorted(skills)}"
-    explorer = package.joinpath("ui", "explorer")
+    explorer = package.joinpath("ui").joinpath("explorer")
     assert explorer.joinpath("index.html").is_file(), "no exported explorer in the package"
 
     with tempfile.TemporaryDirectory() as scratch:

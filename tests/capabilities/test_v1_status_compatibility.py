@@ -15,7 +15,7 @@ to move.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from repoatlas.freshness import legacy_index_state, repository_freshness
@@ -27,7 +27,7 @@ from repoatlas.services.status_service import status
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace
 
-INDEXED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+INDEXED_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
 HEAD = "a" * 40
 
 #: The complete historical vocabulary of ``index_state``, keyed by the typed state

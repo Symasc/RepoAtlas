@@ -34,10 +34,9 @@ and match are the whole of the public strength vocabulary.
 
 from __future__ import annotations
 
-import enum
-
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from repoatlas.compat import StrEnum
 from repoatlas.models.capability import (
     PRESENTATION_DESCRIPTION,
     AppliedBudget,
@@ -53,7 +52,7 @@ from repoatlas.models.investigation import LedgerSummary
 from repoatlas.models.retrieval import SuppressionOutcome, TermMatch
 
 
-class SearchMode(enum.StrEnum):
+class SearchMode(StrEnum):
     """How widely to run the same composed funnel.
 
     Not two algorithms. Both modes run the identical retrieval pipeline with the

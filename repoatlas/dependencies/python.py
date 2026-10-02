@@ -15,9 +15,9 @@ from __future__ import annotations
 import ast
 import configparser
 import re
-import tomllib
 from pathlib import Path
 
+from repoatlas.compat import tomllib
 from repoatlas.dependencies.normalize import PYPI, normalize, python_requirement
 from repoatlas.models.dependencies import (
     DeclaredDependency,

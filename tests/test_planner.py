@@ -5,7 +5,7 @@ Pure unit tests: no filesystem, no git. The hashing callable is injected.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from repoatlas.gitstate.client import GitRepositoryState
 from repoatlas.models.repository import FileState, Repository, SyncStatus
@@ -21,7 +21,7 @@ def _repo(**overrides: object) -> Repository:
         "name": "svc",
         "path": "/repos/svc",
         "head_sha": "abc123",
-        "last_indexed_at": datetime.now(UTC),
+        "last_indexed_at": datetime.now(timezone.utc),
         "last_indexed_head": "abc123",
         "last_indexed_dirty": False,
         "last_sync_status": SyncStatus.OK,

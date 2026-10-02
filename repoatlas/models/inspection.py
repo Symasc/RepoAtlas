@@ -38,10 +38,9 @@ the index, and every line of it would look equally trustworthy.
 
 from __future__ import annotations
 
-import enum
-
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from repoatlas.compat import StrEnum
 from repoatlas.models.capability import (
     PRESENTATION_DESCRIPTION,
     AppliedBudget,
@@ -65,7 +64,7 @@ DEFAULT_CONTEXT_LINES = 20
 MAX_CONTEXT_LINES = 200
 
 
-class InspectTargetKind(enum.StrEnum):
+class InspectTargetKind(StrEnum):
     """Which of the three things an inspection was asked about."""
 
     #: Evidence supplied earlier in this same investigation.
@@ -154,7 +153,7 @@ def validate_path_shape(path: str) -> None:
         raise ValueError("path must not contain a null byte")
 
 
-class InspectionSource(enum.StrEnum):
+class InspectionSource(StrEnum):
     """Where the text in this response came from. Exactly one per inspection."""
 
     #: The working tree, read once through the containment boundary and proven

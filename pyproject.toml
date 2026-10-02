@@ -5,7 +5,7 @@ name = "symasc-repoatlas"
 version = "0.1.0"
 description = "Local multi-repository engineering intelligence system"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "AbdelrahmanSayed" }]
@@ -16,6 +16,9 @@ classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development",
 ]
@@ -57,6 +60,11 @@ dependencies = [
     # now. The SDK still installs `httpx` transitively, and an installed HTTP
     # library is not network use: on stdio nothing opens a connection.
     "mcp>=1.30,<2",
+    # `tomllib` arrived in 3.11; on 3.10 it is `tomli`, the project it was taken
+    # from (`repoatlas/compat.py`). Pinned exactly for the grammars' reason: it
+    # reads `pyproject.toml` and the TOML lockfiles into facts, so a different
+    # version is a different parser.
+    "tomli==2.4.1; python_version < '3.11'",
 ]
 
 [project.urls]
@@ -74,6 +82,9 @@ dev = [
     "ruff>=0.9",
     "pyright>=1.1.390",
     "pytest-xdist>=3.8",
+    # Pyright checks as 3.10 (below), so it reads `repoatlas/compat.py`'s `import tomli`
+    # on every Python; the runtime dependency is 3.10's only.
+    "tomli==2.4.1",
 ]
 
 [build-system]
@@ -138,7 +149,7 @@ exclude = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py313"
+target-version = "py310"
 src = ["repoatlas", "tests"]
 # Fixture repositories are sample content, not project code, and some of it is
 # deliberately unparseable (invalid UTF-8, truncated YAML). A parse error is not
@@ -189,7 +200,7 @@ exclude = ["tests/fixtures/repos", "tests/fixtures/http", "tests/adversarial/fix
 # keeps it correct on Windows, where the interpreter is `.venv\Scripts\python.exe`.
 venvPath = "."
 venv = ".venv"
-pythonVersion = "3.13"
+pythonVersion = "3.10"
 typeCheckingMode = "standard"
 reportMissingTypeStubs = false
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -40,6 +41,12 @@ def _isolate_worker_state() -> None:
 
 # Before any fixture or test module reads the environment.
 _isolate_worker_state()
+
+#: Tests whose sources are 3.12 syntax (PEP 695), which an older ``ast`` cannot read:
+#: there, such a file gives no Python facts at all (docs/installation.md, Python versions).
+PEP_695 = pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 695 syntax needs 3.12")
+#: Type-parameter defaults (PEP 696) are 3.13 syntax.
+PEP_696 = pytest.mark.skipif(sys.version_info < (3, 13), reason="PEP 696 syntax needs 3.13")
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "repos"
 

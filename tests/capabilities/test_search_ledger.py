@@ -185,7 +185,7 @@ def test_the_response_reports_this_run_while_the_ledger_keeps_the_strongest(
 
 def _fill(service: CapabilityService, investigation_id: str, count: int) -> None:
     """Occupy ``count`` ledger slots with evidence unrelated to the fixture corpus."""
-    from datetime import UTC, datetime
+    from datetime import datetime, timezone
 
     from repoatlas.models.investigation import EvidenceRef, ProposedEvidence
 
@@ -205,7 +205,7 @@ def _fill(service: CapabilityService, investigation_id: str, count: int) -> None
             )
             for n in range(count)
         ],
-        now=datetime(2026, 1, 1, tzinfo=UTC),
+        now=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
 
 

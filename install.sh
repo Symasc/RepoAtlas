@@ -12,7 +12,7 @@
 #   1. checks for git, and for uv (offering to install it);
 #   2. installs RepoAtlas and its pinned dependencies into .venv (uv sync --locked);
 #   3. links `repoatlas` into ~/.local/bin, so it is on PATH;
-#   4. installs and builds the graph explorer, when Node.js 22+ is present;
+#   4. installs and builds the graph explorer, when Node.js 20.19+ is present;
 #   5. registers the MCP server with Claude Code and links the five skills,
 #      when the `claude` command is present;
 #   6. indexes a directory of repositories, when you name one.
@@ -152,18 +152,21 @@ esac
 EXPLORER_STATE="skipped"
 if [ "$WITH_EXPLORER" -eq 1 ]; then
   step "Setting up the graph explorer (repoatlas ui)"
+  # major and minor: the floor is 20.19, so 20.0-20.18 must not pass.
   NODE_MAJOR=""
+  NODE_MINOR=""
   if have node; then
-    NODE_MAJOR="$(node --version 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\).*/\1/p')"
+    NODE_MAJOR="$(node --version 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1/p')"
+    NODE_MINOR="$(node --version 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\2/p')"
   fi
   if [ -z "$NODE_MAJOR" ]; then
-    note "skipped: the explorer needs Node.js 22 or later, and node is not on PATH."
+    note "skipped: the explorer needs Node.js 20.19 or later, and node is not on PATH."
     note "Install Node.js (https://nodejs.org), then run \`repoatlas ui\`: it sets itself up."
-  elif [ "$NODE_MAJOR" -lt 22 ]; then
-    note "skipped: the explorer needs Node.js 22 or later, and node is $(node --version)."
+  elif [ "$NODE_MAJOR" -lt 20 ] || { [ "$NODE_MAJOR" -eq 20 ] && [ "$NODE_MINOR" -lt 19 ]; }; then
+    note "skipped: the explorer needs Node.js 20.19 or later, and node is $(node --version)."
   elif ! have pnpm && ! have corepack; then
     note "skipped: the explorer's packages are installed with pnpm, which is not on PATH."
-    note "Install it (npm install -g pnpm@11), then run \`repoatlas ui\`."
+    note "Install it (npm install -g pnpm@10), then run \`repoatlas ui\`."
   else
     "$REPOATLAS" ui --prepare
     EXPLORER_STATE="ready"

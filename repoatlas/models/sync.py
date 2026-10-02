@@ -34,11 +34,11 @@ anyone else can resolve.
 
 from __future__ import annotations
 
-import enum
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from repoatlas.compat import StrEnum
 from repoatlas.models.capability import CapabilityContext
 from repoatlas.models.capability_io import ContextView
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
@@ -71,7 +71,7 @@ class SyncRequest(BaseModel):
     depth: FreshnessDepth = FreshnessDepth.LIVE
 
 
-class SyncStatus(enum.StrEnum):
+class SyncStatus(StrEnum):
     """What the mutation achieved. Never a claim about freshness afterwards."""
 
     #: Every repository in the run was enumerated, indexed and marked current.
@@ -150,7 +150,7 @@ class RepositorySyncView(BaseModel):
     diagnostics: tuple[SyncDiagnostic, ...] = ()
 
 
-class RevalidationStatus(enum.StrEnum):
+class RevalidationStatus(StrEnum):
     """Whether active investigations were re-checked after the index changed."""
 
     #: Every live investigation's evidence was re-decided against one coherent

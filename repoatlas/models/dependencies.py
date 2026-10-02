@@ -9,11 +9,11 @@ that lets V2 retrieve documentation for the version a repository really runs
 
 from __future__ import annotations
 
-import enum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from repoatlas.compat import StrEnum
 from repoatlas.models.parsing import ParseDiagnostic
 
 DependencyKind = Literal["manifest", "lockfile"]
@@ -100,7 +100,7 @@ class DependencyRecord(BaseModel):
     parser: str = ""
 
 
-class DependencyRole(enum.StrEnum):
+class DependencyRole(StrEnum):
     """What a dependency observation asserts.
 
     ``DECLARED`` is a request (``left-pad ^1.0.0``), ``RESOLVED`` is what a lockfile
@@ -124,7 +124,7 @@ _ROLE_ORDER: dict[str, int] = {
 }
 
 
-class Agreement(enum.StrEnum):
+class Agreement(StrEnum):
     """How many *distinct* values a set of observations carries.
 
     Deliberately not called "conflict". V1 has no ecosystem-aware constraint

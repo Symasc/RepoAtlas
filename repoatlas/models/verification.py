@@ -41,11 +41,11 @@ through unchanged or lowered, and is never raised.
 
 from __future__ import annotations
 
-import enum
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from repoatlas.compat import StrEnum
 from repoatlas.models.capability import PRESENTATION_DESCRIPTION, Presentation
 from repoatlas.models.capability_io import LineRange
 from repoatlas.models.evidence import EvidenceSource
@@ -64,7 +64,7 @@ MAX_CITATIONS_PER_CLAIM = 50
 MAX_UNKNOWNS = 200
 
 
-class GroundingVerdict(enum.StrEnum):
+class GroundingVerdict(StrEnum):
     """What verification concluded about an answer's **citations**.
 
     Deliberately not ``SUPPORTED`` / ``UNSUPPORTED``. Those words name a relation
@@ -84,7 +84,7 @@ class GroundingVerdict(enum.StrEnum):
     UNGROUNDED = "ungrounded"
 
 
-class GroundingFindingCode(enum.StrEnum):
+class GroundingFindingCode(StrEnum):
     """Why one citation or claim did not ground.
 
     Every member names something the implementation can *prove* from the ledger

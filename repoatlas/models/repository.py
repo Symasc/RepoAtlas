@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import enum
 from datetime import datetime
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from repoatlas.compat import StrEnum
 
-class SyncStatus(enum.StrEnum):
+
+class SyncStatus(StrEnum):
     """Outcome of the last sync run for a repository.
 
     ``INTERRUPTED`` is load-bearing: per V1_SPEC §12 a sync that did not complete

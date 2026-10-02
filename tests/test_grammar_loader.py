@@ -37,12 +37,12 @@ import json
 import re
 import subprocess
 import sys
-import tomllib
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 import tree_sitter
+from repoatlas.compat import tomllib
 from repoatlas.models.parsing import GRAMMAR_UNAVAILABLE, EntityType, ParsedFile
 from repoatlas.parsers import treesitter
 from repoatlas.parsers.bash import BashParser

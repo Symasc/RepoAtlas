@@ -33,11 +33,20 @@ after a `git pull` is how you update.
 | | Needed for | Notes |
 |---|---|---|
 | `git` | everything | RepoAtlas reads repositories through git |
-| [uv](https://docs.astral.sh/uv/) | everything | The installer offers to install it. uv fetches Python 3.13 itself if you do not have it |
-| Node.js 22 or later, and pnpm 11 | building the explorer from source (`repoatlas ui` in a checkout) | Without them, everything else still works. pnpm can come from `npm install -g pnpm@11` or Node's `corepack`. A PyPI installation needs neither |
+| [uv](https://docs.astral.sh/uv/) | everything | The installer offers to install it. RepoAtlas runs on Python 3.10 or later; uv fetches one itself if you have none. See [Python versions](#python-versions) |
+| Node.js 20.19 or later, and pnpm 10 | building the explorer from source (`repoatlas ui` in a checkout) | Without them, everything else still works. pnpm can come from `npm install -g pnpm@10` or Node's `corepack`. A PyPI installation needs neither |
 | [Claude Code](https://claude.com/claude-code) (`claude`) | connecting it automatically | Any MCP client works; see [Other agents](#other-agents) |
 
 Linux and macOS are supported. On Windows, use WSL.
+
+### Python versions
+
+RepoAtlas runs on Python 3.10 or later, and one thing depends on which. Python sources, `setup.py`,
+`pyproject.toml` and the TOML lockfiles are read with the running interpreter's own `ast` and `tomllib` (`tomli`
+on 3.10), so a file written in syntax newer than that interpreter --- `except*` (3.11), a `type` statement or
+`def f[T]` (3.12) --- gives no Python facts. Run RepoAtlas on at least the Python your repositories are written
+for: `uv sync --python 3.13` in a checkout, or `uv tool install --python 3.13 symasc-repoatlas`. The index records
+which interpreter read each file, and a sync on a different one reads those files again.
 
 ## What the installer does
 
@@ -48,7 +57,7 @@ flowchart TD
     uv --> sync
     prereq -->|yes| sync["uv sync --locked<br/>RepoAtlas into .venv"]
     sync --> link["link ~/.local/bin/repoatlas<br/>to .venv/bin/repoatlas"]
-    link --> node{"Node.js 22+<br/>and pnpm?"}
+    link --> node{"Node.js 20.19+<br/>and pnpm?"}
     node -->|yes| explorer["repoatlas ui --prepare<br/>install and build the explorer"]
     node -->|no| agent
     explorer --> agent{"claude on PATH?"}
@@ -67,7 +76,7 @@ flowchart TD
    `.venv` in the checkout. This is the step that downloads packages; indexing never does.
 3. **PATH.** Links `~/.local/bin/repoatlas` (or `$XDG_BIN_HOME/repoatlas`) to `.venv/bin/repoatlas`. If that
    directory is not on your PATH, it prints the line to add to your shell's startup file.
-4. **The explorer.** With Node.js 22+ and pnpm present, runs `repoatlas ui --prepare`, which installs the
+4. **The explorer.** With Node.js 20.19+ and pnpm present, runs `repoatlas ui --prepare`, which installs the
    explorer's packages and builds it, so the first `repoatlas ui` starts at once.
 5. **Your agent.** With `claude` on PATH, registers the MCP server at user scope (every project sees it):
    `claude mcp add --scope user repoatlas -- <checkout>/.venv/bin/repoatlas mcp`. It also links the five skills
@@ -180,7 +189,7 @@ rm -rf ~/.config/repoatlas ~/.local/share/repoatlas   # configuration and the in
 |---|---|
 | `repoatlas: command not found` | `~/.local/bin` is not on PATH. Add `export PATH="$HOME/.local/bin:$PATH"` to your shell's startup file and open a new shell |
 | A command exits with code 3 | Nothing is indexed yet: `repoatlas init <directory>` |
-| `repoatlas ui`: "needs Node.js 22 or later" | In a checkout the explorer is built from source. Install Node.js 22+ (nodejs.org, or nvm), then run it again |
+| `repoatlas ui`: "needs Node.js 20.19 or later" | In a checkout the explorer is built from source. Install Node.js 20.19+ (nodejs.org, or nvm), then run it again |
 | `repoatlas ui`: "port 7318 is already in use" | Another explorer, or a `pnpm dev`, holds it. Stop it or use `repoatlas ui --port 7320` |
 | `repoatlas ui`: "the explorer is not part of this installation" | This RepoAtlas was built without it. Install the release (`uv tool install symasc-repoatlas`), or pass `--frontend <checkout>/frontend` |
 | The explorer shows an old version | In a checkout, `repoatlas ui --rebuild`. A PyPI installation's explorer is the release's: `uv tool upgrade symasc-repoatlas` |

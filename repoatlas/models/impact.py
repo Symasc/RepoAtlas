@@ -25,10 +25,9 @@ Three kinds of answer are kept apart in the types rather than in prose:
 
 from __future__ import annotations
 
-import enum
-
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from repoatlas.compat import StrEnum
 from repoatlas.models.capability import CapabilityContext, Presentation
 from repoatlas.models.capability_io import ContextView
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
@@ -74,14 +73,14 @@ class ImpactRequest(BaseModel):
         return value
 
 
-class SeedStatus(enum.StrEnum):
+class SeedStatus(StrEnum):
     RESOLVED = "resolved"
     #: More than one thing in scope answers to the seed: nothing is followed.
     AMBIGUOUS = "ambiguous"
     UNRESOLVED = "unresolved"
 
 
-class SeedBasis(enum.StrEnum):
+class SeedBasis(StrEnum):
     """How the seed was identified."""
 
     KEY = "key"
@@ -90,7 +89,7 @@ class SeedBasis(enum.StrEnum):
     DIRECTORY = "directory"
 
 
-class Granularity(enum.StrEnum):
+class Granularity(StrEnum):
     """What kind of thing changes, which decides what its members are."""
 
     SYMBOL = "symbol"
@@ -134,7 +133,7 @@ class ImpactSeed(BaseModel):
     reason: str | None = None
 
 
-class ImpactRole(enum.StrEnum):
+class ImpactRole(StrEnum):
     """What a candidate does to the changed thing's reach."""
 
     #: It depends on what precedes it: uses, imports, calls, reads, is configured by.

@@ -7,12 +7,12 @@ keeps parsers pure functions of ``(path, content)``.
 
 from __future__ import annotations
 
-import enum
-
 from pydantic import BaseModel, ConfigDict, Field
 
+from repoatlas.compat import StrEnum
 
-class EntityType(enum.StrEnum):
+
+class EntityType(StrEnum):
     """Entity types in the knowledge graph (V1_SPEC §8).
 
     Deliberately small. Add a member only when a concrete retrieval need requires
@@ -44,7 +44,7 @@ class EntityType(enum.StrEnum):
     HTTP_ENDPOINT = "http_endpoint"
 
 
-class EdgeType(enum.StrEnum):
+class EdgeType(StrEnum):
     """Relationship types in the knowledge graph (V1_SPEC §8)."""
 
     CONTAINS = "CONTAINS"
@@ -98,7 +98,7 @@ USES_EXPORT_TABLE = "export-table"
 USES_ONLY_KINDS = frozenset({"variable", "type-alias"})
 
 
-class EdgeDirection(enum.StrEnum):
+class EdgeDirection(StrEnum):
     """Which end of an edge the queried entity is required to sit on.
 
     Edges are directed facts — ``a IMPORTS b`` is not ``b IMPORTS a`` — but a
@@ -114,7 +114,7 @@ class EdgeDirection(enum.StrEnum):
     IN = "in"
 
 
-class NeighborOrder(enum.StrEnum):
+class NeighborOrder(StrEnum):
     """Which order the store returns one hop's edges in.
 
     It matters only because a bounded hop is a *cut*, and whatever comes back
@@ -135,7 +135,7 @@ class NeighborOrder(enum.StrEnum):
     NATURAL = "natural"
 
 
-class Severity(enum.StrEnum):
+class Severity(StrEnum):
     WARNING = "warning"
     ERROR = "error"
 

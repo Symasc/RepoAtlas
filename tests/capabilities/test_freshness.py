@@ -13,7 +13,7 @@ working tree and neither was consulted. Asserted by making git fatal to call.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -33,7 +33,7 @@ from repoatlas.services.freshness_service import repository_freshness_for
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace
 
-INDEXED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+INDEXED_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
 HEAD = "a" * 40
 
 

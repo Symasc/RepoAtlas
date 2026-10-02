@@ -23,6 +23,7 @@ from repoatlas.models.search import SearchRequest
 from repoatlas.parsers.python import PythonParser
 from repoatlas.parsers.ts_uses import USES_EXPORTS
 from repoatlas.services.workspace import Workspace
+from tests.conftest import PEP_695
 from tests.impact_corpus import build, use_edges, uses, verify_steps
 from tests.incremental_corpus import assert_equals_fresh, edit, sync_all
 from tests.python_corpus import refusals
@@ -118,6 +119,7 @@ def test_a_star_import_after_a_value_leaves_it_undeclared() -> None:
     assert values("X = 1\nfrom other import *\nY = 2\n") == {"Y": (3, 3, "Y")}
 
 
+@PEP_695
 def test_a_type_alias_is_one_only_where_the_syntax_says_so() -> None:
     """V11, V12: a ``type`` statement, or a ``TypeAlias`` this module proves is typing's."""
     source = (
@@ -143,6 +145,7 @@ def test_a_type_alias_is_one_only_where_the_syntax_says_so() -> None:
     }
 
 
+@PEP_695
 def test_a_type_alias_is_used_and_uses_what_it_names() -> None:
     """V12: the parameters stay the statement's own; the alias owns the rest of it."""
     source = (

@@ -37,7 +37,7 @@ import socket
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from repoatlas.errors import RepoAtlasError, SyncInProgressError
@@ -133,7 +133,7 @@ def _record_owner(handle: int, *, now: datetime | None) -> None:
     by then. The ``fsync`` cost about 4 ms, which is most of what acquiring an
     uncontended lock would otherwise be.
     """
-    stamp = (now or datetime.now(UTC)).isoformat(timespec="seconds")
+    stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
     owner = f"pid={os.getpid()} host={socket.gethostname()} since={stamp}\n"
     try:
         os.ftruncate(handle, 0)

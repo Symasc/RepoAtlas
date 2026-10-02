@@ -30,11 +30,11 @@ facts alone.
 
 from __future__ import annotations
 
-import enum
 import posixpath
 from dataclasses import dataclass
 from pathlib import PurePath
 
+from repoatlas.compat import StrEnum
 from repoatlas.dependencies.normalize import NPM, normalize
 
 #: Declarations that name a directory, read from the declaring manifest's directory.
@@ -43,7 +43,7 @@ PATH_PROTOCOLS = frozenset({"file", "link", "portal"})
 VERSION_PROTOCOLS = frozenset({"catalog"})
 
 
-class TargetKind(enum.StrEnum):
+class TargetKind(StrEnum):
     VERSION = "version"
     WORKSPACE = "workspace"
     ALIAS = "alias"

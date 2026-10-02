@@ -8,16 +8,18 @@ citation verification will validate model output against ``EvidenceSet``.
 from __future__ import annotations
 
 import enum
+import inspect
 from collections.abc import Mapping
-from typing import Annotated
+from typing import Annotated, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from repoatlas.compat import StrEnum
 from repoatlas.models.parsing import EntityType
 from repoatlas.models.telemetry import RetrievalTrace
 
 
-class EvidenceSource(enum.StrEnum):
+class EvidenceSource(StrEnum):
     """How a piece of evidence was reached. Used by rank fusion and by --verbose.
 
     The first six are retrieval stages, and they are the only ones fusion ever
@@ -179,7 +181,10 @@ MATCH_MEANINGS: dict[MatchClass, str] = {
 }
 
 
-def value_legend[Member: enum.IntEnum](meanings: Mapping[Member, str]) -> str:
+Member = TypeVar("Member", bound=enum.IntEnum)
+
+
+def value_legend(meanings: Mapping[Member, str]) -> str:
     """The published number-to-name key, built from the members themselves.
 
     The point of generating it is that there is then no second place holding the
@@ -198,11 +203,11 @@ def value_legend[Member: enum.IntEnum](meanings: Mapping[Member, str]) -> str:
 # this one generated sentence is what reaches every client that inspects the
 # contract, whichever way it came to be looking at it.
 EvidenceTier.__doc__ = (
-    f"{EvidenceTier.__doc__}\n\n"
+    f"{inspect.cleandoc(EvidenceTier.__doc__ or '')}\n\n"
     f"Serialized as an integer. Values, strongest first: {value_legend(TIER_MEANINGS)}."
 )
 MatchClass.__doc__ = (
-    f"{MatchClass.__doc__}\n\n"
+    f"{inspect.cleandoc(MatchClass.__doc__ or '')}\n\n"
     f"Serialized as an integer. Values, most specific first: {value_legend(MATCH_MEANINGS)}."
 )
 

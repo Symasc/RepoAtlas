@@ -29,7 +29,7 @@ import secrets
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from repoatlas.capabilities.ledger import EvidenceLedger
 from repoatlas.models.investigation import DEFAULT_LEDGER_CAPACITY
@@ -107,7 +107,7 @@ class SessionRegistry:
         self._idle_ttl = timedelta(seconds=idle_ttl_seconds)
         self._ledger_capacity = ledger_capacity
         self._id_factory = id_factory or _opaque_id
-        self._clock = clock or (lambda: datetime.now(UTC))
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
         #: Least-recently-used first, which is the order eviction reads.
         self._sessions: OrderedDict[str, InvestigationSession] = OrderedDict()
 
