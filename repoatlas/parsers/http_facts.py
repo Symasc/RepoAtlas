@@ -72,6 +72,10 @@ HTTP_LOCAL_CALL = "http-local-call"
 #: (:mod:`repoatlas.graph.http_crossings`), whatever stated the base: ``identity_source``
 #: names it, and nothing downstream reads anything more specific.
 HTTP_EXPOSED_ENDPOINT = "http-exposed-endpoint"
+#: An identity a deployment resolves -- a name and a port -- that reaches no code: derived by
+#: the global pass (:mod:`repoatlas.graph.deploy_identity`), never stored. A request to it is
+#: refused as ``http-deployment-source-unresolved``, and a link it could rival is refused.
+HTTP_UNSOURCED_IDENTITY = "http-unsourced-identity"
 #: A request whose origin and path shape the source states: a literal URL, a module
 #: constant, or an f-string on a literal or constant origin. The other side of the join.
 #: A request whose path is read but whose host is not carries ``base`` =

@@ -260,6 +260,9 @@ class HttpClaimPlan:
     #: The exposure claims deployment identities derive for the routes their code serves
     #: (repoatlas.graph.deploy_identity): for the cross-repository join.
     exposed: tuple[UnresolvedRefRecord, ...] = ()
+    #: Identities a deployment resolves that reach no code (and, later, ones it cannot
+    #: resolve), for the join's refusals: derived, never stored.
+    identities: tuple[UnresolvedRefRecord, ...] = ()
     #: Deployment claim id → ``tied`` or why its identity reaches no code.
     deployments: dict[int, str] = field(default_factory=dict)
 
@@ -698,6 +701,7 @@ def plan_http_claims(
         declared=declared_routes,
         injected=plan_injected_requests(grouped, index, by_id),
         exposed=tuple(deployed.exposures),
+        identities=tuple(deployed.identities),
         deployments=deployed.outcomes,
     )
 

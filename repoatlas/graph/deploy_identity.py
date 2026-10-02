@@ -56,6 +56,7 @@ from repoatlas.parsers.http_facts import (
     HELM_SERVICE,
     HELM_VALUES,
     HTTP_EXPOSED_ENDPOINT,
+    HTTP_UNSOURCED_IDENTITY,
     PENDING_FACT,
 )
 from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
@@ -183,6 +184,9 @@ class DeploymentPlan:
     exposures: list[UnresolvedRefRecord] = field(default_factory=list)
     #: Deployment claim id → ``tied`` or why not.
     outcomes: dict[int, str] = field(default_factory=dict)
+    #: ``http-unsourced-identity`` claims: identities resolved to an origin that reach no
+    #: code, one per origin, so the join can say which hop a request failed.
+    identities: list[UnresolvedRefRecord] = field(default_factory=list)
 
 
 def _meta(claim: UnresolvedRefRecord) -> dict[str, str]:
@@ -356,18 +360,37 @@ def _tie(
     plan: DeploymentPlan,
 ) -> str:
     meta = _meta(service)
+    origins = _origins(json.loads(meta.get("names", "[]")), json.loads(meta.get("ports", "[]")))
+    identity_in = f"{origin.rel_path}:{service.line_start}"
+    scope = f"compose:{service.repo_id}:{origin.rel_path}:{service.target_key}"
+
+    def untied(outcome: str, bound_in: str = "") -> str:
+        """The service resolves to its origins but reaches no code: say so for the join."""
+        _unsourced(
+            plan,
+            service,
+            origins,
+            source=COMPOSE,
+            identity_in=identity_in,
+            bound_in=bound_in,
+            outcome=outcome,
+            scope=scope,
+        )
+        return outcome
+
     build = json.loads(meta.get("build", "null"))
     if not isinstance(build, dict):
-        return NO_BUILD
+        return untied(NO_BUILD)
     dockerfile_id = files.get(str(build.get("dockerfile", "")))
     command = commands.get(dockerfile_id) if dockerfile_id is not None else None
     if command is None or dockerfile_id is None:
-        return DOCKERFILE_UNREAD
+        return untied(DOCKERFILE_UNREAD)
     command_meta = _meta(command)
     read = _argv(meta, command_meta)
     paths = _application(read[0], command_meta.get("workdir")) if read is not None else None
     if read is None or paths is None:
-        return COMMAND_UNREAD
+        return untied(COMMAND_UNREAD)
+    bound_in = identity_in if read[1] else f"{by_id[dockerfile_id].rel_path}:{command.line_start}"
     copies = json.loads(command_meta.get("copies", "[]"))
     context = str(build.get("context", ""))
     module = next(
@@ -375,15 +398,12 @@ def _tie(
         None,
     )
     if module is None:
-        return NOT_IN_IMAGE
+        return untied(NOT_IN_IMAGE, bound_in)
     served = by_root.get(files[module], ())
     if not served:
-        return NO_ROUTES
-    origins = _origins(json.loads(meta.get("names", "[]")), json.loads(meta.get("ports", "[]")))
+        return untied(NO_ROUTES, bound_in)
     if not origins:
         return NO_PORT
-    identity_in = f"{origin.rel_path}:{service.line_start}"
-    bound_in = identity_in if read[1] else f"{by_id[dockerfile_id].rel_path}:{command.line_start}"
     _expose(
         plan,
         served,
@@ -392,6 +412,7 @@ def _tie(
         identity_in=identity_in,
         bound_in=bound_in,
         kind="docker-compose",
+        scope=scope,
     )
     return TIED
 
@@ -492,10 +513,16 @@ class _Charts:
         if chart is None or not releases:
             return RELEASE_UNBOUND
         served = self._routes[origin.repo_id]
-        if not served:
-            return NOTHING_SERVED
-        if origin.repo_id in self._untraced or len(self._roots[origin.repo_id]) != 1:
-            return NOT_ONE_APPLICATION
+        # Without one application to tie to, a bound name is still an identity: one that
+        # reaches no code, which the join reports instead of a service it never heard of.
+        untied = (
+            NOTHING_SERVED
+            if not served
+            else NOT_ONE_APPLICATION
+            if origin.repo_id in self._untraced or len(self._roots[origin.repo_id]) != 1
+            else None
+        )
+        scope = f"chart:{origin.repo_id}:{meta.get('chart', '')}"
         outcome = NAME_UNREAD
         for release in releases:
             values = self._values(chart, _meta(release))
@@ -515,6 +542,18 @@ class _Charts:
                 continue
             releaser = self._by_id.get(release.file_id)
             bound_in = f"{releaser.rel_path}:{release.line_start}" if releaser else ""
+            if untied is not None:
+                _unsourced(
+                    plan,
+                    service,
+                    origins,
+                    source=KUBERNETES,
+                    identity_in=f"{origin.rel_path}:{service.line_start}",
+                    bound_in=bound_in,
+                    outcome=untied,
+                    scope=scope,
+                )
+                continue
             _expose(
                 plan,
                 served,
@@ -523,9 +562,10 @@ class _Charts:
                 identity_in=f"{origin.rel_path}:{service.line_start}",
                 bound_in=bound_in,
                 kind="kubernetes",
+                scope=scope,
             )
             outcome = TIED
-        return outcome
+        return untied or outcome
 
     @staticmethod
     def _values(chart: _Chart, release: Mapping[str, str]) -> dict[str, str] | None:
@@ -587,6 +627,7 @@ def _expose(
     identity_in: str,
     bound_in: str,
     kind: str,
+    scope: str,
 ) -> None:
     """One exposure claim per route and origin."""
     for route in served:
@@ -607,6 +648,7 @@ def _expose(
                 "identity_in": identity_in,
                 "bound_in": bound_in,
                 "source": kind,
+                "scope": scope,
             }
             plan.exposures.append(
                 UnresolvedRefRecord(
@@ -621,3 +663,40 @@ def _expose(
                     meta_json=json.dumps(claim_meta, sort_keys=True),
                 )
             )
+
+
+def _unsourced(
+    plan: DeploymentPlan,
+    service: UnresolvedRefRecord,
+    origins: Sequence[str],
+    *,
+    source: str,
+    identity_in: str,
+    bound_in: str,
+    outcome: str,
+    scope: str,
+) -> None:
+    """One ``http-unsourced-identity`` claim per origin of an identity that reaches no code."""
+    for deployment in origins:
+        claim_meta = {
+            PENDING_FACT: HTTP_UNSOURCED_IDENTITY,
+            "deployment": deployment,
+            "identity_source": source,
+            "identity_in": identity_in,
+            "bound_in": bound_in,
+            "source_outcome": outcome,
+            "scope": scope,
+        }
+        plan.identities.append(
+            UnresolvedRefRecord(
+                repo_id=service.repo_id,
+                file_id=service.file_id,
+                src_id=service.src_id,
+                edge_type=EdgeType.REFERENCES,
+                target_kind=EntityType.HTTP_ENDPOINT,
+                target_key=deployment,
+                line_start=service.line_start,
+                line_end=service.line_end,
+                meta_json=json.dumps(claim_meta, sort_keys=True),
+            )
+        )

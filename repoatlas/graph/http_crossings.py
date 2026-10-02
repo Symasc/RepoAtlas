@@ -47,6 +47,7 @@ from repoatlas.parsers.http_facts import (
     BASE_UNKNOWN,
     HTTP_CLIENT_CALL,
     HTTP_EXPOSED_ENDPOINT,
+    HTTP_UNSOURCED_IDENTITY,
     PENDING_FACT,
 )
 from repoatlas.storage.protocols import EdgeRecord, FileRow, UnresolvedRefRecord
@@ -63,9 +64,12 @@ SERVICE_UNMATCHED = "http-service-unmatched"
 #: and listed, never joined.
 UNKNOWN_BASE = "http-base-unknown"
 UNREAD = "http-claim-unread"
+#: A request whose origin is an identity a deployment resolves, but which reaches no code:
+#: the chain stops at the source tie.
+SOURCE_UNRESOLVED = "http-deployment-source-unresolved"
 
 #: The roles this join reads; every other pending fact is someone else's.
-ROLES = frozenset({HTTP_EXPOSED_ENDPOINT, HTTP_CLIENT_CALL})
+ROLES = frozenset({HTTP_EXPOSED_ENDPOINT, HTTP_CLIENT_CALL, HTTP_UNSOURCED_IDENTITY})
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +102,9 @@ class HttpCrossingPlan:
     edges: tuple[EdgeRecord, ...] = ()
     #: Request claim id → its decision. Diagnostics, never identity.
     decisions: dict[int, str] = field(default_factory=dict)
+    #: Request claim id → the hops its decision rests on: every hop a link proves, or for a
+    #: refusal the hops proven before the one that failed. Diagnostics, never identity.
+    evidence: dict[int, dict[str, str]] = field(default_factory=dict)
 
     @property
     def detail(self) -> str:
@@ -190,8 +197,11 @@ def plan_http_crossings(
     by_file = {row.file_id: row for row in files}
     exposures: dict[tuple[str, str], list[_Exposure]] = defaultdict(list)
     served: list[_Exposure] = []
+    #: Origin → the identities resolved to it that reach no code.
+    unsourced: dict[str, list[UnresolvedRefRecord]] = defaultdict(list)
     requests: list[_Request] = []
     decisions: dict[int, str] = {}
+    evidence: dict[int, dict[str, str]] = {}
     for claim in claims:
         meta = _meta(claim)
         role = meta.get(PENDING_FACT)
@@ -200,15 +210,21 @@ def plan_http_crossings(
             if exposure is not None and claim.file_id in by_file:
                 exposures[(exposure.method, exposure.origin)].append(exposure)
                 served.append(exposure)
+        elif role == HTTP_UNSOURCED_IDENTITY:
+            target = http.client_target(meta.get("deployment", "") + "/")
+            if target is not None and target.origin is not None and claim.file_id in by_file:
+                unsourced[target.origin].append(claim)
         elif role == HTTP_CLIENT_CALL:
             if meta.get("base") == BASE_UNKNOWN and "origin" not in meta:
                 if claim.id is not None:
                     decisions[claim.id] = UNKNOWN_BASE if _segments(meta) else UNREAD
+                    evidence[claim.id] = _called(claim, meta, by_file)
                 continue
             request = _request(claim, meta)
             if request is None or claim.file_id not in by_file:
                 if claim.id is not None:
                     decisions[claim.id] = UNREAD
+                    evidence[claim.id] = _called(claim, meta, by_file)
                 continue
             requests.append(request)
 
@@ -221,21 +237,39 @@ def plan_http_crossings(
         ]
         # One handler serving one endpoint is one candidate, however many claims say so.
         distinct = {(e.claim.src_id, e.endpoint): e for e in matched}
+        # An identity resolved to this origin that reaches no code: the request may be
+        # meant for it, so no handler found elsewhere can be the one it reaches.
+        rivals = unsourced.get(request.origin, [])
+        found = _called(request.claim, request.meta, by_file)
         if len(distinct) > 1:
             decision = PROVIDER_AMBIGUOUS
+            found.update(_identities([e.claim for e in distinct.values()], by_file))
         elif distinct:
-            # Inside its own repository too: an identity the source proves says which
-            # handler the request reaches, as route shape alone cannot.
-            decision = LINKED
-            edges.append(_edge(request, next(iter(distinct.values())), by_file, producer))
-        elif any(_covers(e, request) for e in served):
+            exposure = next(iter(distinct.values()))
+            if rivals:
+                decision = PROVIDER_AMBIGUOUS
+                found.update(_identities([exposure.claim, *rivals], by_file))
+            else:
+                # Inside its own repository too: an identity the source proves says which
+                # handler the request reaches, as route shape alone cannot.
+                decision = LINKED
+                edge = _edge(request, exposure, by_file, producer)
+                edges.append(edge)
+                record = json.loads(edge.resolution or "{}").get(HTTP_CROSSING, {})
+                found.update({str(k): str(v) for k, v in record.items()})
+        elif rivals:
+            decision = SOURCE_UNRESOLVED
+            found.update(_identities(rivals, by_file))
+        elif covering := [e for e in served if _covers(e, request)]:
             decision = ROUTE_UNMATCHED
+            found.update(_identities([e.claim for e in covering], by_file))
         else:
             decision = SERVICE_UNMATCHED
         if request.claim.id is not None:
             decisions[request.claim.id] = decision
+            evidence[request.claim.id] = found
     edges.sort(key=lambda e: (e.file_id or 0, e.line_start or 0, e.src_id, e.dst_id))
-    return HttpCrossingPlan(edges=tuple(edges), decisions=decisions)
+    return HttpCrossingPlan(edges=tuple(edges), decisions=decisions, evidence=evidence)
 
 
 def _edge(
@@ -281,3 +315,41 @@ def _edge(
         parser=producer,
         resolution=json.dumps({HTTP_CROSSING: record}, sort_keys=True),
     )
+
+
+def _called(
+    claim: UnresolvedRefRecord, meta: dict[str, str], by_file: dict[int, FileRow]
+) -> dict[str, str]:
+    """The request's own hops: where it is made, and where its base is stated."""
+    consumer = by_file.get(claim.file_id)
+    if consumer is None:
+        return {}
+    found = {"called_at": f"{consumer.rel_path}:{claim.line_start}"}
+    base_at = _line(meta.get("base_at"))
+    if base_at is not None:
+        found["base_at"] = f"{consumer.rel_path}:{base_at}"
+    for key in ("injected_at", "base_in", "alternatives"):
+        if key in meta:
+            found[key] = meta[key]
+    return found
+
+
+def _identities(claims: list[UnresolvedRefRecord], by_file: dict[int, FileRow]) -> dict[str, str]:
+    """The identities a decision rests on, each by its deployment and the lines that
+    declare and bind it; several are joined with ``; `` in a stable order."""
+    rows: dict[str, list[str]] = defaultdict(list)
+    for claim in sorted(claims, key=lambda c: (c.repo_id, c.file_id, c.line_start, c.target_key)):
+        meta = _meta(claim)
+        provider = by_file.get(claim.file_id)
+        values = {
+            "deployment": meta.get("deployment", ""),
+            "identity_source": meta.get("identity_source", ""),
+            "identity_in": meta.get("identity_in", ""),
+            "bound_in": meta.get("bound_in", ""),
+            "source_outcome": meta.get("source_outcome", ""),
+            "provider": provider.repo_slug if provider is not None else "",
+        }
+        for key, value in values.items():
+            if value and value not in rows[key]:
+                rows[key].append(value)
+    return {key: "; ".join(values) for key, values in rows.items()}

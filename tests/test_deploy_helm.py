@@ -35,7 +35,7 @@ from repoatlas.parsers.deploy_helm import (
 )
 from repoatlas.parsers.http_facts import HELM_SERVICE, PENDING_FACT
 from repoatlas.services.workspace import Workspace
-from tests.http_crossing_corpus import crossings, links
+from tests.http_crossing_corpus import crossings, decided, links
 from tests.impact_corpus import build
 from tests.incremental_corpus import assert_equals_fresh, edit, sync_all
 
@@ -443,3 +443,65 @@ def test_editing_the_release_name_moves_the_identity(
     # release `prod` does not contain the chart's name: the Service is `prod-devices`
     assert {caller for caller, *_ in links(cluster)} == {"edge_health"}
     assert_equals_fresh(cluster, settings, root, tmp_path, "release")
+
+
+CALLER = {
+    "pyproject.toml": '[project]\nname = "caller"\n',
+    "client.py": d("""
+        import requests
+
+
+        def load_item(item_id):
+            return requests.get(f"http://devices/items/{item_id}", timeout=5)
+    """),
+}
+
+
+def test_a_bound_service_whose_repository_serves_nothing_refuses_at_the_source(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    deploy = {"pyproject.toml": '[project]\nname = "deploy"\n', **CHART}
+    built = build(workspace, tmp_path, {"deploy": deploy, "caller": CALLER})
+    assert decided(built, "caller") == {
+        "load_item": [
+            (
+                "http-deployment-source-unresolved",
+                {
+                    "called_at": "client.py:5",
+                    "deployment": "http://devices",
+                    "identity_source": "kubernetes-service",
+                    "identity_in": "charts/devices/templates/service.yaml:4",
+                    "bound_in": "Tiltfile:2",
+                    "source_outcome": NOTHING_SERVED,
+                    "provider": "deploy",
+                },
+            )
+        ]
+    }
+    assert links(built) == set()
+
+
+def test_an_unbound_release_resolves_no_identity_to_refuse_against(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    unbound = {path: text for path, text in CHART.items() if path != "Tiltfile"}
+    built = build(
+        workspace,
+        tmp_path,
+        {"deploy": {"pyproject.toml": '[project]\nname = "deploy"\n', **unbound}, "caller": CALLER},
+    )
+    assert [d for d, _ in decided(built, "caller")["load_item"]] == ["http-service-unmatched"]
+
+
+def test_an_identity_that_reaches_no_code_makes_a_shared_origin_ambiguous(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """A second chart binds the same Service names in a repository with no code: either
+    could be what the request reaches, so neither link is made."""
+    mirror = {"pyproject.toml": '[project]\nname = "mirror"\n', **CHART}
+    built = build(workspace, tmp_path, {"devices": DEVICES, "portal": PORTAL, "mirror": mirror})
+    assert links(built) == set()
+    load = decided(built, "portal")["load_item"]
+    assert [d for d, _ in load] == ["http-provider-ambiguous"]
+    assert load[0][1]["provider"] == "devices; mirror"
+    assert load[0][1]["source_outcome"] == NOTHING_SERVED
