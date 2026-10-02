@@ -117,6 +117,10 @@ class CrossingStatus(enum.StrEnum):
     CLAIM_UNREAD = "http-claim-unread"
 
 
+#: A stored decision's ``decision_ref``, as the global link pass writes it.
+DECISION_REF_PATTERN = r"^hcd1-[0-9a-f]{20}$"
+
+
 class HttpOperationsRequest(BaseModel):
     """List the HTTP operations one repository's indexed source makes or serves."""
 
@@ -170,6 +174,15 @@ class HttpOperationsRequest(BaseModel):
         "are withheld and each hop keeps its status. Lines in another repository are "
         "supplied as evidence only under global scope.",
     )
+    decision_ref: str | None = Field(
+        default=None,
+        pattern=DECISION_REF_PATTERN,
+        description="Return only the caller row holding this stored decision, with only "
+        "that crossing; a ref nothing stores returns no rows. Under repository scope the "
+        "decision must be that repository's. With it, global scope needs no discover: the "
+        "decision's repository answers, every place is shown, and include_provenance "
+        "supplies the lines of every proven hop in any repository.",
+    )
     limit: int | None = Field(default=None, gt=0)
     #: Opaque continuation from a previous page. Never constructed by a caller.
     cursor: str | None = None
@@ -181,6 +194,15 @@ class HttpOperationsRequest(BaseModel):
     )
     investigation_id: str | None = None
     depth: FreshnessDepth = FreshnessDepth.STORED
+
+    @model_validator(mode="after")
+    def _decision_ref_is_one_caller_s(self) -> HttpOperationsRequest:
+        if self.decision_ref is not None:
+            if self.discover:
+                raise ValueError("decision_ref looks up one stored decision, never with discover")
+            if self.role is OperationRole.PROVIDER:
+                raise ValueError("decision_ref names a request's decision: its row is a caller")
+        return self
 
     @model_validator(mode="after")
     def _discovery_is_bounded(self) -> HttpOperationsRequest:

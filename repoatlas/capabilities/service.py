@@ -1211,9 +1211,16 @@ class CapabilityService:
             # Before any investigation exists, so a rejected context or a
             # malformed request leaves no session behind.
             resolution = resolve_context(request.context, registered)
-            if not request.discover and (
-                resolution.scope is not CapabilityScope.REPOSITORY
-                or len(resolution.repositories) != 1
+            # A stored decision's exact ref is the one global read that needs neither a
+            # named repository nor discovery: the decision's own repository answers.
+            ref = request.decision_ref if resolution.scope is CapabilityScope.GLOBAL else None
+            if (
+                not request.discover
+                and ref is None
+                and (
+                    resolution.scope is not CapabilityScope.REPOSITORY
+                    or len(resolution.repositories) != 1
+                )
             ):
                 raise ContextResolutionError(
                     "the HTTP inventory needs a repository scope",
@@ -1224,7 +1231,11 @@ class CapabilityService:
                     reason=ContextFailure.AMBIGUOUS,
                     candidates=tuple(sorted(repo.slug for repo in resolution.repositories)),
                 )
-            repository = None if request.discover else resolution.repositories[0]
+            if ref is not None:
+                owner = self._workspace.knowledge.http_call_decision_repository(ref)
+                repository = next((r for r in resolution.repositories if r.id == owner), None)
+            else:
+                repository = None if request.discover else resolution.repositories[0]
             prefix = _search_path(request.within_path, resolution)
             limits = http_inventory.page_limits_for(request)
 
@@ -1247,6 +1258,12 @@ class CapabilityService:
                         raise FileNotIndexedError("no indexed file stands at or beneath that path")
                     if repository is not None:
                         inventory = self._http_inventory(repository, slugs)
+                    elif ref is not None:
+                        # No stored decision has that ref: nothing to read, and no row.
+                        inventory = http_inventory.Inventory(
+                            drafts=[],
+                            crossings_built=self._workspace.knowledge.http_call_decisions_built(),
+                        )
                     else:
                         inventories = [
                             (repo, self._http_inventory(repo, slugs))
@@ -1283,12 +1300,10 @@ class CapabilityService:
                         limits=limits,
                     )
                     home = repository.slug if repository is not None else None
+                    shown = request.cross_repository or ref is not None
                     page = replace(
                         page,
-                        rows=[
-                            http_inventory.project(row, home, request.cross_repository)
-                            for row in page.rows
-                        ],
+                        rows=[http_inventory.project(row, home, shown) for row in page.rows],
                     )
                     supplies: list[ProvenanceSupply] = []
                     if request.include_provenance:
@@ -2461,9 +2476,11 @@ class CapabilityService:
         home = repository.slug if repository else None
         rows = [http_inventory.with_evidence(row, ids, home) for row in page.rows]
         # Every repository the answer shows a fact of, not only the one named: a
-        # crossing shown across repositories rests on their index too.
-        drawn = list(resolution.repositories)
-        if request.cross_repository:
+        # crossing shown across repositories rests on their index too. A global
+        # lookup by ref shows its decision's repository and what the crossing names.
+        lookup = request.decision_ref is not None and resolution.scope is CapabilityScope.GLOBAL
+        drawn = [repository] if lookup and repository else list(resolution.repositories)
+        if request.cross_repository or lookup:
             named = http_inventory.repositories_named(rows) - {repo.slug for repo in drawn}
             drawn += [repo for repo in registered if repo.slug in named]
         facts = current_facts_version(self._workspace)
@@ -2498,7 +2515,7 @@ class CapabilityService:
                 if repository
                 else DiscoveryBasis(
                     repositories=tuple(sorted(repo.slug for repo in resolution.repositories)),
-                    repositories_examined=len(resolution.repositories),
+                    repositories_examined=0 if lookup else len(resolution.repositories),
                     operations_examined=len(inventory.drafts),
                     crossings=crossings,
                 )

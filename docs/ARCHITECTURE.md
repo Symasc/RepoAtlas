@@ -1915,6 +1915,13 @@ limitation and in `summary.by_status`, never under `coverage.unresolved` or as a
 them. An index no global pass has written since migration 008 says so (`crossings_not_built`) rather than listing
 none.
 
+`decision_ref` reads one stored decision exactly: the caller row holding it, with only that crossing, matched on
+the ref itself (the table's key), never found by scanning a page. Under repository scope the decision must be that
+repository's, or nothing is returned. It is the one global read that needs no `discover`: the decision's own
+repository answers under the `global` projection, so every place is shown and `include_provenance` supplies the
+lines of every proven hop in any repository. The explorer reads its Requests views under repository scope and
+escalates to this lookup only when its evidence is opened. A ref nothing stores returns no rows.
+
 The scope contract applies hop by hop. Under repository scope, a place another repository proves is withheld, with
 the hop's detail, and so are a link's handler and provider; the hop keeps its kind, status and reason code, says it
 was `withheld`, and a link keeps its shared `http-endpoint:` node, the way out. `cross_repository: true` shows them,
