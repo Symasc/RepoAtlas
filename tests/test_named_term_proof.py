@@ -62,7 +62,7 @@ STAGE_NAMES = (
     "graph",
     "fuse",
     "dedup",
-    "rerank",
+    "precedence",
     "budget",
 )
 
@@ -184,7 +184,7 @@ def test_a_qualified_symbol_exists_only_as_entity_metadata(workspace: Workspace)
     reason — the literal stage would be proving the term rather than the entity
     index.
     """
-    assert workspace.search.search_literal(QUALIFIED) == []
+    assert workspace.search.find_literal(QUALIFIED).hits == []
     assert workspace.search.find_files_by_path([QUALIFIED]) == []
     assert workspace.search.find_entities_by_name([QUALIFIED])
 

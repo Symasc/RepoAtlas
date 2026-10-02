@@ -71,10 +71,10 @@ def test_fts_rows_are_removed_with_their_chunks(workspace: Workspace, tmp_path: 
             )
         ),
     )
-    assert workspace.search.search_literal("UNIQUE_SEARCH_TOKEN_HERE")
+    assert workspace.search.find_literal("UNIQUE_SEARCH_TOKEN_HERE").hits
 
     workspace.files.delete_many([file_id])
-    assert workspace.search.search_literal("UNIQUE_SEARCH_TOKEN_HERE") == []
+    assert workspace.search.find_literal("UNIQUE_SEARCH_TOKEN_HERE").hits == []
 
 
 def test_interning_is_idempotent(workspace: Workspace) -> None:

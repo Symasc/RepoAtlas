@@ -93,7 +93,6 @@ class _Walker:
     def __init__(
         self,
         source: bytes,
-        language: str,
         http: TypeScriptHttp | None = None,
         nest: NestDeclarations | None = None,
         wrappers: FetchWrappers | None = None,
@@ -103,7 +102,6 @@ class _Walker:
         oas3: SpecRoutedApps | None = None,
     ) -> None:
         self._source = source
-        self._language = language
         self._http = http
         self._nest = nest
         self._wrappers = wrappers
@@ -779,7 +777,7 @@ class TypeScriptParser:
         # Uses are proven by scoping, and a tree the grammar had to recover may have
         # lost a declaration: such a file states no uses at all.
         uses = None if has_error(tree) else UseAnalysis(source, tree.root_node)
-        walker = _Walker(source, grammar, http, nest, wrappers, uses, fastify, injections, oas3)
+        walker = _Walker(source, http, nest, wrappers, uses, fastify, injections, oas3)
         walker.run(tree.root_node)
 
         whole_file_start, whole_file_last = whole_file_span(content)

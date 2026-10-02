@@ -1,8 +1,8 @@
 """Workspace-aware module resolution: aliases, workspace packages and barrels.
 
-:class:`~repoatlas.graph.modules.ModuleResolver` answers two questions from indexed
-facts: which file a specifier names, and which file and declaration a name imported
-from it is defined at. It serves declaration uses and package links only. The import,
+:class:`~repoatlas.graph.modules.ModuleResolver` answers one question from indexed
+facts: which file a specifier names. It serves declaration uses and package links
+only. The import,
 reference and call edges the global pass writes are resolved exactly as before, and
 the last tests here pin that.
 
@@ -236,7 +236,6 @@ def resolver(workspace: Workspace) -> tuple[ModuleResolver, dict[tuple[str, str]
     built = ModuleResolver(
         index,
         knowledge.list_unresolved_refs(),
-        knowledge.list_exported_names(exclude_parser=GLOBAL_PARSER),
     )
     return built, {(row.repo_slug, row.rel_path): row for row in rows}
 
@@ -331,51 +330,6 @@ def test_what_cannot_be_resolved_exactly_stays_unresolved(
     assert modules.resolve(files["mono", APP], specifier) is None, why
 
 
-def test_a_name_is_traced_through_barrels_to_the_file_that_defines_it(indexed: Workspace) -> None:
-    modules, files = resolver(indexed)
-    entry = modules.resolve(files["mono", APP], "@acme/shapes")
-    assert entry is not None
-    barrel = ("packages/shapes/src/index.ts",)
-
-    def traced(name: str) -> tuple[str, bool, tuple[str, ...]] | None:
-        found = modules.definition(entry.file, name)
-        if found is None:
-            return None
-        return found.file.rel_path, found.symbol_id is not None, found.via
-
-    assert traced("circleSchema") == ("packages/shapes/src/circle.ts", True, barrel)
-    # a renamed re-export is followed under the name importers use
-    assert traced("area") == ("packages/shapes/src/polygon.ts", True, barrel)
-    assert traced("Square") == ("packages/shapes/src/square.ts", True, barrel)
-    # a namespace re-export names a module, not a declaration
-    assert traced("units") == ("packages/shapes/src/units.ts", False, barrel)
-    assert traced("deepLeaf") == (
-        "packages/shapes/src/deep/leaf.ts",
-        True,
-        (*barrel, "packages/shapes/src/deep/index.ts"),
-    )
-    # loop-a and loop-b re-export each other; loopB is still found, once
-    assert traced("loopB") == (
-        "packages/shapes/src/loop-b.ts",
-        True,
-        (*barrel, "packages/shapes/src/loop-a.ts"),
-    )
-    # two `export *` define twin: ambiguous, so nothing
-    assert traced("twin") is None
-    assert traced("absent") is None
-
-
-def test_a_high_degree_barrel_gives_each_name_its_own_definition(indexed: Workspace) -> None:
-    modules, files = resolver(indexed)
-    for i in range(FANOUT):
-        consumer = files["mono", f"apps/web/src/consumers/c{i}.ts"]
-        entry = modules.resolve(consumer, "@acme/big")
-        assert entry is not None
-        found = modules.definition(entry.file, f"name{i}")
-        assert found is not None
-        assert found.file.rel_path == f"packages/big/src/m{i}.ts"
-
-
 def test_a_package_name_never_resolves_into_another_repository(indexed: Workspace) -> None:
     modules, files = resolver(indexed)
     own = modules.resolve(files["team-a", "apps/use/src/use.ts"], "common-lib")
@@ -390,17 +344,10 @@ def test_the_resolver_reads_indexed_facts_never_the_working_tree(
 ) -> None:
     paths = tmp_path / "repos" / "mono" / "apps" / "web" / "tsconfig.paths.json"
     paths.write_text(json.dumps({"compilerOptions": {"paths": {"@/*": ["./nowhere/*"]}}}))
-    (tmp_path / "repos" / "mono" / "packages" / "shapes" / "src" / "index.ts").write_text("")
     modules, files = resolver(indexed)
-    app = files["mono", APP]
-    target = modules.resolve(app, "@/api/client")
+    target = modules.resolve(files["mono", APP], "@/api/client")
     assert target is not None
     assert target.file.rel_path == "apps/web/src/api/client.ts"
-    entry = modules.resolve(app, "@acme/shapes")
-    assert entry is not None
-    found = modules.definition(entry.file, "circleSchema")
-    assert found is not None
-    assert found.file.rel_path == "packages/shapes/src/circle.ts"
 
 
 # --- the import graph is resolved exactly as before ----------------------------
@@ -440,67 +387,6 @@ def test_alias_workspace_and_barrel_imports_add_no_import_graph_edges(indexed: W
     assert recorded == 0
 
 
-# --- bounded tracing, directly on the resolver ---------------------------------
-
-
-def _resolver(barrels: dict[str, list[str]], exported: dict[str, list[str]]) -> tuple[Any, dict]:
-    """A resolver over synthetic files: ``barrels`` maps a file to the files it ``export *``s."""
-    from repoatlas.models.parsing import EdgeType, EntityType
-    from repoatlas.storage.protocols import UnresolvedRefRecord
-
-    names = sorted(set(barrels) | set(exported) | {t for ts in barrels.values() for t in ts})
-    rows = {
-        name: FileRow(
-            file_id=i + 1,
-            file_entity_id=100 + i,
-            repo_id=1,
-            repo_name="r",
-            repo_slug="r",
-            repo_path=Path("/nowhere/r"),
-            rel_path=f"src/{name}.ts",
-        )
-        for i, name in enumerate(names)
-    }
-    claims = [
-        UnresolvedRefRecord(
-            repo_id=1,
-            file_id=rows[source].file_id,
-            src_id=rows[source].file_entity_id,
-            edge_type=EdgeType.IMPORTS,
-            target_kind=EntityType.MODULE,
-            target_key=f"./{target}",
-            meta_json=json.dumps({"role": "re-export", "reexport": "*"}),
-        )
-        for source, target_list in barrels.items()
-        for target in target_list
-    ]
-    symbols = {
-        rows[f].file_id: {n: [1000 + rows[f].file_id * 10 + k] for k, n in enumerate(ns)}
-        for f, ns in exported.items()
-    }
-    return ModuleResolver(ResolutionIndex.build(list(rows.values()), []), claims, symbols), rows
-
-
-def test_a_re_export_cycle_is_walked_once() -> None:
-    modules, rows = _resolver({"a": ["b"], "b": ["c"], "c": ["a"]}, {"c": ["here"]})
-    found = modules.definition(rows["a"], "here")
-    assert found is not None
-    assert found.file.rel_path == "src/c.ts"
-    assert found.via == ("src/a.ts", "src/b.ts")
-    assert modules.definition(rows["a"], "absent") is None
-    # each file is entered once per lookup: three for the found name, three for the absent one
-    assert modules.steps == 6
-
-
-def test_barrels_that_all_export_each_other_stay_within_the_step_budget() -> None:
-    from repoatlas.graph.modules import MAX_TRACE_STEPS
-
-    files = [f"m{i}" for i in range(10)]
-    modules, rows = _resolver({f: [g for g in files if g != f] for f in files}, {})
-    assert modules.definition(rows["m0"], "absent") is None
-    assert modules.steps <= MAX_TRACE_STEPS
-
-
 def _extends_cycle() -> tuple[ModuleResolver, dict[str, FileRow]]:
     """Two tsconfigs, in ``one/`` and ``two/``, extend each other; only ``one`` sets baseUrl."""
     from repoatlas.models.parsing import EdgeType, EntityType
@@ -536,7 +422,7 @@ def _extends_cycle() -> tuple[ModuleResolver, dict[str, FileRow]]:
         )
         for config, value in facts.items()
     ]
-    return ModuleResolver(ResolutionIndex.build(list(rows.values()), []), claims, {}), rows
+    return ModuleResolver(ResolutionIndex.build(list(rows.values()), []), claims), rows
 
 
 def test_an_extends_cycle_gives_each_config_its_own_chain_whatever_was_asked_first() -> None:

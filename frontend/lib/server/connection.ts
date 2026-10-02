@@ -8,7 +8,7 @@ import { CONTRACT } from "@/lib/api/generated";
  * How the explorer's server finds `repoatlas serve`: the connection file the
  * API writes, named by this variable and nothing else (docs/local-api.md).
  */
-export const CONNECTION_FILE_ENV = "REPOATLAS_API_CONNECTION_FILE";
+const CONNECTION_FILE_ENV = "REPOATLAS_API_CONNECTION_FILE";
 
 /** The most of a connection file read; a record is ~150 bytes, as the API itself assumes. */
 const CEILING = 4096;

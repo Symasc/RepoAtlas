@@ -305,21 +305,3 @@ class IndexedEvidenceState(BaseModel):
     @property
     def key(self) -> tuple[str, str]:
         return (self.repository_slug, self.path)
-
-
-def state_index(
-    states: tuple[IndexedEvidenceState, ...] | list[IndexedEvidenceState],
-) -> dict[tuple[str, str], IndexedEvidenceState]:
-    """Index revalidation input by ``(slug, path)``, the way the ledger reads it."""
-    return {state.key: state for state in states}
-
-
-#: Fields a caller may pass to :class:`LedgerSummary` that are derived rather than
-#: counted. Kept beside the model so the ledger and the model cannot disagree.
-SUMMARY_STATUS_FIELDS: dict[EvidenceStatus, str] = {
-    EvidenceStatus.VALID: "valid",
-    EvidenceStatus.STALE: "stale",
-    EvidenceStatus.SUPERSEDED: "superseded",
-    EvidenceStatus.INVALID: "invalid",
-    EvidenceStatus.UNVERIFIED: "unverified",
-}

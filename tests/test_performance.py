@@ -93,7 +93,7 @@ def test_the_trace_accounts_for_the_time_actually_spent(measured: Workspace) -> 
         "graph",
         "fuse",
         "dedup",
-        "rerank",
+        "precedence",
         "budget",
     }
     # The traced total is a lower bound on the wall time and a large fraction of
@@ -109,7 +109,7 @@ def test_the_funnel_narrows_rather_than_widens(measured: Workspace, question: st
     grows at the end is how whole repositories end up in a prompt."""
     evidence = _retrieve(measured, question)
     assert evidence.trace is not None
-    for name in ("fuse", "dedup", "rerank", "budget"):
+    for name in ("fuse", "dedup", "precedence", "budget"):
         stage = _stage(evidence, name)
         assert stage.candidates_out <= stage.candidates_in, name
 

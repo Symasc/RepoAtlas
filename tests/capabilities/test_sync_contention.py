@@ -117,7 +117,6 @@ def test_contention_changes_nothing_and_rechecks_nothing(
     _no_wait(initialized)
     service = CapabilityService(initialized)
     _search(service)
-    generation = service.generation
     before = _statuses(service)
 
     def refuse(*args: object, **kwargs: object) -> object:
@@ -130,7 +129,6 @@ def test_contention_changes_nothing_and_rechecks_nothing(
     ):
         _sync(service)
 
-    assert service.generation == generation
     assert _statuses(service) == before
     assert len(service.sessions) == 1
 

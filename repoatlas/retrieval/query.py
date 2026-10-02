@@ -379,7 +379,7 @@ def analyze(question: str) -> QueryAnalysis:
     # what makes `debug "接続できませんでした"` work at all.
     #
     # It cannot manufacture evidence: a literal term is resolved by
-    # `search_literal`, which verifies with a Python substring test on the stored
+    # `find_literal`, which verifies with a Python substring test on the stored
     # chunk text, so a term that is not byte-present yields nothing.
     stripped = question.strip()
     pasted = (

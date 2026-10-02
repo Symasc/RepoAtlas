@@ -224,13 +224,6 @@ class SqliteRepositoryStore:
         ).fetchone()
         return None if row is None else self._row_to_repository(row)
 
-    def find_all_by_name(self, name: str) -> list[Repository]:
-        """All repositories sharing a name — used to report ambiguity (V1_SPEC §6)."""
-        rows = self._db.execute(
-            "SELECT * FROM repositories WHERE name = ? ORDER BY path", (name,)
-        ).fetchall()
-        return [self._row_to_repository(row) for row in rows]
-
     def get_by_slug(self, slug: str) -> Repository | None:
         """Lookup by identity. Unlike a name, this can only ever match one row."""
         row = self._db.execute(
@@ -1028,30 +1021,6 @@ class SqliteKnowledgeStore:
             for row in rows
         ]
 
-    def list_exported_names(self, *, exclude_parser: str) -> dict[int, dict[str, list[int]]]:
-        """Per file, each name its own ``EXPORTS`` edges declare, with the defining entities.
-
-        Only a file's own definitions: an ``EXPORTS`` edge to a symbol in another file,
-        and anything the named producer (the global pass) wrote, are left out, so what
-        the global pass reads never depends on its own previous output.
-        """
-        rows = self._db.execute(
-            """
-            SELECT e.file_id, d.name, d.id
-            FROM edges e JOIN entities d ON d.id = e.dst_id
-            WHERE e.type = ? AND d.file_id = e.file_id
-              AND (e.parser IS NULL OR e.parser != ?)
-            ORDER BY e.file_id, d.name, d.id
-            """,
-            (str(EdgeType.EXPORTS), exclude_parser),
-        ).fetchall()
-        found: dict[int, dict[str, list[int]]] = {}
-        for row in rows:
-            ids = found.setdefault(row["file_id"], {}).setdefault(row["name"], [])
-            if row["id"] not in ids:
-                ids.append(row["id"])
-        return found
-
     def list_served_routes(
         self, *, exclude_parser: str, repo_id: int | None = None
     ) -> dict[int, list[str]]:
@@ -1518,7 +1487,7 @@ class SqliteKnowledgeStore:
             e.id AS edge_id, e.type AS type, e.{near}_id AS near_id, e.{far}_id AS far_id,
             {far}.key AS far_key, {far}.type AS far_type, {far}.name AS far_name,
             {far}.qualified_name AS far_qualified_name, {far}.repo_id AS far_repo_id,
-            {far}.file_id AS far_file_id, ff.rel_path AS far_path,
+            ff.rel_path AS far_path,
             {far}.line_start AS far_line_start, {far}.line_end AS far_line_end,
             e.file_id AS file_id, af.repo_id AS file_repo_id, af.rel_path AS file_path,
             e.line_start AS line_start,
@@ -1546,7 +1515,6 @@ class SqliteKnowledgeStore:
             far_name=row["far_name"],
             far_qualified_name=row["far_qualified_name"],
             far_repo_id=row["far_repo_id"],
-            far_file_id=row["far_file_id"],
             far_path=row["far_path"],
             far_line_start=row["far_line_start"],
             far_line_end=row["far_line_end"],

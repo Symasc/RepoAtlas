@@ -19,7 +19,7 @@ export function useTopologyOverview() {
   });
 }
 
-export function childrenQuery(slug: string, path: string) {
+function childrenQuery(slug: string, path: string) {
   return {
     queryKey: ["topology/children", slug, path] as const,
     queryFn: ({ signal }: { signal: AbortSignal }) =>
@@ -175,7 +175,7 @@ export function useReferences(slug: string, path: string) {
 }
 
 /** How many things one trace lists at most: impact's own ceiling. */
-export const TRACE_CANDIDATES = 100;
+const TRACE_CANDIDATES = 100;
 
 /**
  * What a change to one thing reaches, and by which indexed steps. One

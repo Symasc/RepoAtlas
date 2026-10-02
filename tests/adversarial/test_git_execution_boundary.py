@@ -137,7 +137,6 @@ def test_a_repository_filter_never_runs_during_init(
 OPERATIONS: dict[str, Callable[[GitClient, Path], object]] = {
     "state": lambda client, repo: client.state(repo),
     "list_files": lambda client, repo: client.list_files(repo),
-    "toplevel": lambda client, repo: client.toplevel(repo),
     "scan_repository": lambda client, repo: scan_repository(repo, git=client),
 }
 
@@ -337,14 +336,6 @@ def test_file_enumeration_still_reflects_the_working_tree(tmp_path: Path) -> Non
     # A readable tree produces no incompleteness warning, so a short listing that
     # carries one is always distinguishable from a complete one.
     assert listed.warnings == ()
-
-
-def test_the_repository_root_is_still_found(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    _build(repo)
-    (repo / "src").mkdir()
-
-    assert GitClient().toplevel(repo / "src") == repo.resolve()
 
 
 def test_a_hostile_repository_still_indexes_correctly(tmp_path: Path, canary: Canary) -> None:

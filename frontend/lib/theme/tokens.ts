@@ -141,12 +141,12 @@ export const LIGHT: ColorTokens = {
  * bullet on a transit map. Lightness is set per scheme for contrast against
  * that scheme's surfaces.
  */
-export const REPOSITORY_HUES = [255, 195, 150, 100, 65, 25, 340, 295] as const;
+const REPOSITORY_HUES = [255, 195, 150, 100, 65, 25, 340, 295] as const;
 
 /** At light's lightness, teal, olive and amber hold less chroma inside sRGB than the rest. */
 const LIGHT_CHROMA: Partial<Record<number, number>> = { 195: 0.078, 100: 0.095, 65: 0.104 };
 
-export function repositoryColor(hue: number, scheme: "light" | "dark"): string {
+function repositoryColor(hue: number, scheme: "light" | "dark"): string {
   return scheme === "dark" ? `oklch(0.75 0.115 ${hue})` : `oklch(0.47 ${LIGHT_CHROMA[hue] ?? 0.12} ${hue})`;
 }
 

@@ -25,13 +25,19 @@ from repoatlas.models.investigation import (
     EvidenceStatus,
     IndexedEvidenceState,
     ProposedEvidence,
-    state_index,
 )
 
 SLUG = "team/service"
 PATH = "src/config.py"
 FILE_HASH = "filehash-1"
 FACTS = "schema:4||py:3||deps:2||chunks:2"
+
+
+def state_index(
+    states: tuple[IndexedEvidenceState, ...] | list[IndexedEvidenceState],
+) -> dict[tuple[str, str], IndexedEvidenceState]:
+    """Index revalidation input by ``(slug, path)``, the way the ledger reads it."""
+    return {state.key: state for state in states}
 
 
 def _proposed(
@@ -285,30 +291,6 @@ def test_the_reference_survives_every_status_change() -> None:
     assert entry.ref.span_digest == "digest-a"
     assert entry.ref.file_content_hash == FILE_HASH
     assert entry.ref.indexed_facts_version == FACTS
-
-
-# -- the grounding projection ------------------------------------------------------------
-
-
-def test_the_grounding_projection_excludes_everything_but_valid_by_default() -> None:
-    ledger = EvidenceLedger("investigation-under-test")
-    ledger.record([_proposed(start=1, end=1, digest="a")])
-    ledger.record([_proposed(start=2, end=2, digest="b")])
-    ledger.record([_proposed(start=1, end=1, digest="a2")])
-    ledger.revalidate(state_index((_state(),)))
-
-    groundable = ledger.entries_for_grounding()
-    assert {entry.status for entry in groundable} == {EvidenceStatus.VALID}
-    assert [entry.id for entry in groundable] == ["E2", "E3"]
-
-
-def test_the_grounding_projection_is_deterministic_and_widenable() -> None:
-    ledger = EvidenceLedger("investigation-under-test")
-    ledger.record([_proposed(start=1, end=1, digest="a")])
-    ledger.record([_proposed(start=1, end=1, digest="b")])
-    everything = ledger.entries_for_grounding((EvidenceStatus.VALID, EvidenceStatus.SUPERSEDED))
-    assert [entry.id for entry in everything] == ["E1", "E2"]
-    assert ledger.entries_for_grounding(()) == ()
 
 
 def test_ids_are_never_renumbered_by_revalidation_or_summary() -> None:

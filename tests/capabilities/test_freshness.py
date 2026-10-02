@@ -17,15 +17,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from repoatlas.capabilities.service import CapabilityService
 from repoatlas.freshness import index_freshness, repository_freshness
 from repoatlas.gitstate.client import GitClient, GitRepositoryState
+from repoatlas.models.capability import CapabilityContext, CapabilityScope
+from repoatlas.models.capability_io import StatusRequest
 from repoatlas.models.freshness import (
     FreshnessDepth,
     FreshnessState,
+    IndexFreshness,
     WorktreeContentStatus,
 )
 from repoatlas.models.repository import Repository, SyncStatus
-from repoatlas.services.freshness_service import index_freshness_for, repository_freshness_for
+from repoatlas.services.freshness_service import repository_freshness_for
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace
 
@@ -206,6 +210,18 @@ def test_no_stored_answer_is_ever_a_live_only_state() -> None:
                 assert freshness.depth is FreshnessDepth.STORED
 
 
+def _status(
+    workspace: Workspace, *, depth: FreshnessDepth, include_drift: bool = False
+) -> IndexFreshness:
+    """The index freshness ``status`` reports, at one depth, with drift opt-in."""
+    request = StatusRequest(
+        context=CapabilityContext(scope=CapabilityScope.GLOBAL),
+        depth=depth,
+        include_drift=include_drift,
+    )
+    return CapabilityService(workspace).status(request).freshness
+
+
 def test_stored_depth_never_invokes_git(
     initialized: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -215,9 +231,7 @@ def test_stored_depth_never_invokes_git(
         raise AssertionError("STORED freshness invoked git")
 
     monkeypatch.setattr(GitClient, "state", explode)
-    freshness = index_freshness_for(
-        initialized, initialized.repositories.list_all(), depth=FreshnessDepth.STORED
-    )
+    freshness = _status(initialized, depth=FreshnessDepth.STORED)
     assert freshness.depth is FreshnessDepth.STORED
     assert freshness.repositories
 
@@ -233,9 +247,8 @@ def test_live_depth_asks_git_once_per_repository(
         return original(self, repo_path)
 
     monkeypatch.setattr(GitClient, "state", counting)
-    repositories = initialized.repositories.list_all()
-    index_freshness_for(initialized, repositories, depth=FreshnessDepth.LIVE)
-    assert len(calls) == len(repositories)
+    _status(initialized, depth=FreshnessDepth.LIVE)
+    assert len(calls) == len(initialized.repositories.list_all())
 
 
 def test_repository_set_drift_is_not_computed_unless_asked(
@@ -251,9 +264,7 @@ def test_repository_set_drift_is_not_computed_unless_asked(
         raise AssertionError("drift was computed without being requested")
 
     monkeypatch.setattr(service, "plan_repository_set", counting)
-    freshness = index_freshness_for(
-        initialized, initialized.repositories.list_all(), depth=FreshnessDepth.STORED
-    )
+    freshness = _status(initialized, depth=FreshnessDepth.STORED)
     assert calls == []
     assert freshness.repository_set_drifted is None
     assert freshness.content_verified_current is False
@@ -264,18 +275,11 @@ def test_unchecked_drift_cannot_make_the_index_content_current(
 ) -> None:
     """Silence about the repository set is not evidence the set is complete."""
     sync(initialized, initialized.resolver().resolve(workspace_root))
-    without = index_freshness_for(
-        initialized, initialized.repositories.list_all(), depth=FreshnessDepth.LIVE
-    )
+    without = _status(initialized, depth=FreshnessDepth.LIVE)
     assert without.repository_set_drifted is None
     assert without.content_verified_current is False
 
-    checked = index_freshness_for(
-        initialized,
-        initialized.repositories.list_all(),
-        depth=FreshnessDepth.LIVE,
-        include_repository_set_drift=True,
-    )
+    checked = _status(initialized, depth=FreshnessDepth.LIVE, include_drift=True)
     assert checked.repository_set_drifted is False
     assert checked.content_verified_current is True
 

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from repoatlas.discovery.reconcile import RepositorySetPlan, plan_repository_set
 from repoatlas.freshness import legacy_index_state
 from repoatlas.models.context import ContextScope, RepositoryContext
 from repoatlas.models.freshness import FreshnessDepth
 from repoatlas.models.reports import RepositoryStatus, StatusReport
 from repoatlas.models.repository import Repository
-from repoatlas.services.freshness_service import current_facts_version, repository_freshness_for
+from repoatlas.services.freshness_service import (
+    current_facts_version,
+    repository_freshness_for,
+    repository_set_drift,
+)
 from repoatlas.services.workspace import Workspace
 
 
@@ -31,36 +34,14 @@ def _index_state(repo: Repository, workspace: Workspace, facts: str | None = Non
     return legacy_index_state(freshness)
 
 
-def _drift(workspace: Workspace, context: RepositoryContext) -> RepositorySetPlan | None:
-    """Re-derive what the managed root contains. **Reads only.**
-
-    ``status`` is a read command, so it detects and never reconciles: it says the
-    workspace is not current and names why, and ``sync`` is what changes anything.
-    Registering a repository here would make "check whether anything changed" a
-    mutating operation, indistinguishable in a terminal from having run a sync
-    (V1_SPEC §4).
-
-    Run at **every** scope, unlike reconciliation. ``sync`` only reconciles
-    membership globally, because registering a repository during
-    ``repoatlas sync --repo foo`` would touch a row outside the requested scope
-    and leave it registered without facts. Detection has no such constraint: it
-    writes nothing, so a repository-scoped status can say "this repository is
-    current, and the workspace is missing two" without overstepping. Reporting it
-    only from the root would leave anyone who works inside their repositories
-    exactly as uninformed as before.
-    """
-    if workspace.root is None:
-        return None
-    return plan_repository_set(
-        workspace.root, workspace.settings.discovery, workspace.repositories.list_all()
-    )
-
-
 def status(workspace: Workspace, context: RepositoryContext) -> StatusReport:
     root = workspace.root
     assert root is not None
 
-    drift = _drift(workspace, context)
+    # Detected at every scope, unlike reconciliation: detection writes nothing, so a
+    # repository-scoped status can say "this repository is current, and the
+    # workspace is missing two" without overstepping.
+    drift = repository_set_drift(workspace)
 
     # Computed once for the whole report: it is derived from the parser and
     # dependency registries, so it cannot differ between two repositories of one

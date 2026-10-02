@@ -350,14 +350,12 @@ def test_an_unknown_repository_is_refused_before_anything_changes(
     monkeypatch.setattr(Workspace, "writer_lock", _forbid("the writer lock"))
     monkeypatch.setattr(sync_service, "sync", _forbid("V1 sync"))
     service = CapabilityService(initialized)
-    generation = service.generation
 
     with pytest.raises(ContextResolutionError) as raised:
         _sync(service, _repo("no-such-repository"))
 
     # Slice A's mapping: an unknown selector is NOT_FOUND, an ambiguous one CONTEXT.
     assert capability_error(raised.value).category.value == "not_found"
-    assert service.generation == generation
 
 
 def test_an_ambiguous_repository_is_refused_before_anything_changes(
@@ -454,7 +452,7 @@ def test_sync_never_modifies_repository_source(
 
 
 # ---------------------------------------------------------------------------
-# Investigations and the generation hint
+# Investigations
 # ---------------------------------------------------------------------------
 
 
@@ -466,17 +464,6 @@ def test_sync_creates_no_investigation(initialized: Workspace) -> None:
     _sync(service)
 
     assert len(service.sessions) == 0
-
-
-def test_the_generation_moves_exactly_once_per_successful_sync(initialized: Workspace) -> None:
-    """An in-process hint that the index changed through this service. Not proof."""
-    service = CapabilityService(initialized)
-    start = service.generation
-
-    _sync(service)
-    assert service.generation == start + 1
-    _sync(service)
-    assert service.generation == start + 2
 
 
 def test_a_response_with_no_live_investigation_rechecks_nothing(initialized: Workspace) -> None:

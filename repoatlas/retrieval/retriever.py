@@ -43,8 +43,6 @@ from repoatlas.models.retrieval import (
 from repoatlas.models.telemetry import RetrievalTrace, StageTiming, Stopwatch
 from repoatlas.retrieval.query import QueryAnalysis, analyze
 from repoatlas.retrieval.ranking import (
-    NoopReranker,
-    Reranker,
     apply_budget,
     deduplicate,
     enforce_precedence,
@@ -101,12 +99,10 @@ class Retriever:
         *,
         search: SqliteSearchIndex,
         knowledge: SqliteKnowledgeStore,
-        reranker: Reranker | None = None,
         limits: RetrievalLimits | None = None,
     ) -> None:
         self._search = search
         self._knowledge = knowledge
-        self._reranker = reranker or NoopReranker()
         self._limits = limits or RetrievalLimits()
 
     def retrieve(
@@ -321,24 +317,21 @@ class Retriever:
             watch.candidates_out = len(deduped)
         stages.append(_recorded(watch))
 
-        with Stopwatch("rerank", candidates_in=len(deduped)) as watch:
-            # Tier order and path specificity are re-imposed on whatever comes
-            # back. The reranker is a seam for code that does not exist yet, and
-            # the guarantees of V1_SPEC §14 must hold at this boundary rather than
-            # depend on every future implementation choosing to honour them.
-            reordered = self._reranker.rerank(question, deduped)
-            reranked = enforce_precedence(reordered)
-            watch.candidates_out = len(reranked)
-            watch.detail = type(self._reranker).__name__
-            if [c.tier for c in reordered] != [c.tier for c in reranked]:
-                watch.detail += " (tier order restored)"
-            elif [c.identity for c in reordered] != [c.identity for c in reranked]:
-                watch.detail += " (path specificity restored)"
+        with Stopwatch("precedence", candidates_in=len(deduped)) as watch:
+            # Tier order and path specificity are re-imposed before the budget is
+            # spent: the guarantees of V1_SPEC §14 must hold at this boundary rather
+            # than depend on every earlier stage having kept them.
+            ordered = enforce_precedence(deduped)
+            watch.candidates_out = len(ordered)
+            if [c.tier for c in deduped] != [c.tier for c in ordered]:
+                watch.detail = "tier order restored"
+            elif [c.identity for c in deduped] != [c.identity for c in ordered]:
+                watch.detail = "path specificity restored"
         stages.append(_recorded(watch))
 
-        with Stopwatch("budget", candidates_in=len(reranked)) as watch:
+        with Stopwatch("budget", candidates_in=len(ordered)) as watch:
             bounded, truncated, tokens = apply_budget(
-                reranked, max_items=self._limits.final, token_budget=self._limits.token_budget
+                ordered, max_items=self._limits.final, token_budget=self._limits.token_budget
             )
             watch.candidates_out = len(bounded)
             watch.detail = f"{tokens} tokens" + (", truncated" if truncated else "")

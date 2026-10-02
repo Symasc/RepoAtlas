@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 from repoatlas.models.parsing import ParsedFile, Severity
-from repoatlas.parsers.jinja import JinjaParser, has_jinja, neutralize
+from repoatlas.parsers.jinja import JinjaParser, neutralize
 from repoatlas.parsers.registry import ParserRegistry, default_parsers
 from repoatlas.parsers.salt import SaltParser
 from repoatlas.parsers.structured import StructuredParser
@@ -228,7 +228,6 @@ def test_a_non_literal_include_names_nothing() -> None:
 def test_empty_delimiters_produce_no_references() -> None:
     parsed = JinjaParser().parse(Path("t.jinja"), BROKEN_JINJA["only-delimiters"])
     assert parsed.references == ()
-    assert has_jinja(BROKEN_JINJA["only-delimiters"])
 
 
 # -- end to end: a broken file must not break a sync -------------------------
@@ -264,4 +263,4 @@ def test_a_broken_file_is_still_searchable_as_text(
     repo = workspace_root / "deployment"
     (repo / "broken.sls").write_text("unparseable_marker_state:\n  file.managed:\n\t- bad: [\n")
     sync(initialized, initialized.resolver().resolve(repo))
-    assert initialized.search.search_literal("unparseable_marker_state")
+    assert initialized.search.find_literal("unparseable_marker_state").hits

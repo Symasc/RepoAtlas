@@ -178,7 +178,7 @@ cases:
       retryable: true
     notes: >-
       Another writer holds V1's lock. The refusal is V1's own condition, retryable,
-      and nothing changed — the generation does not move.
+      and nothing changed.
 
   - id: not-initialized
     category: initialization

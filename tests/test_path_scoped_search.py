@@ -113,11 +113,11 @@ def _in_scope(path: str, prefix: str = SCOPE) -> bool:
 
 def test_literal_search_finds_the_in_path_match_past_a_full_bound(indexed: Workspace) -> None:
     ids = [_repo_id(indexed)]
-    unscoped = indexed.search.search_literal("IDENTITY_RESET_MARKER", ids, 30)
+    unscoped = indexed.search.find_literal("IDENTITY_RESET_MARKER", ids, 30).hits
     assert len(unscoped) == 30
     assert all(not _in_scope(hit.path) for hit in unscoped), "the bound must be full of noise"
 
-    scoped = indexed.search.search_literal("IDENTITY_RESET_MARKER", ids, 30, path_prefix=SCOPE)
+    scoped = indexed.search.find_literal("IDENTITY_RESET_MARKER", ids, 30, path_prefix=SCOPE).hits
     assert [hit.path for hit in scoped] == [IN_PATH]
 
 
@@ -178,7 +178,7 @@ def test_a_similarly_named_directory_is_not_inside_the_path(indexed: Workspace, 
 
 def test_an_exact_file_is_a_path_scope_of_one_file(indexed: Workspace) -> None:
     ids = [_repo_id(indexed)]
-    scoped = indexed.search.search_literal("RESET_WINDOW_SECONDS", ids, 30, path_prefix=IN_PATH)
+    scoped = indexed.search.find_literal("RESET_WINDOW_SECONDS", ids, 30, path_prefix=IN_PATH).hits
     assert [hit.path for hit in scoped] == [IN_PATH]
     assert indexed.search.has_files_under(ids, IN_PATH)
     assert not indexed.search.has_files_under(ids, "services/identity/src/reset")

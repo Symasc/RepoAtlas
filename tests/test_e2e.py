@@ -191,7 +191,6 @@ def test_the_installed_command_offers_no_reasoning_command(repoatlas, workspace_
     assert run(workspace_root, "init", str(workspace_root)).exit_code == ExitCode.OK
     result = run(workspace_root, "ask", "why does the service fail to start")
     assert result.exit_code != ExitCode.OK, result
-    assert result.exit_code != ExitCode.LLM_UNAVAILABLE, result
 
 
 def test_commands_before_init_exit_three(repoatlas, tmp_path: Path) -> None:

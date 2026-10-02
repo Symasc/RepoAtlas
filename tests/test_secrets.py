@@ -93,8 +93,8 @@ def test_no_secret_content_reaches_a_chunk(with_secrets: Workspace) -> None:
 
 def test_no_secret_content_is_searchable(with_secrets: Workspace) -> None:
     for canary in CANARIES:
-        assert with_secrets.search.search_literal(f"canary{canary}") == []
-    assert with_secrets.search.search_literal("SECRET_TOKEN") == []
+        assert with_secrets.search.find_literal(f"canary{canary}").hits == []
+    assert with_secrets.search.find_literal("SECRET_TOKEN").hits == []
 
 
 def test_no_secret_becomes_an_entity(with_secrets: Workspace) -> None:

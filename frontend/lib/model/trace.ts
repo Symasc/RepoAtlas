@@ -39,7 +39,7 @@ export interface TraceCard {
   test: boolean;
 }
 
-export interface TraceColumn {
+interface TraceColumn {
   distance: number;
   cards: TraceCard[];
 }

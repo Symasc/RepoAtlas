@@ -80,7 +80,7 @@ def test_deleted_file_removes_its_chunks(initialized: Workspace, workspace_root:
     (workspace_root / "python-service" / "src" / "config.py").unlink()
     _sync_one(initialized, workspace_root, "python-service")
 
-    hits = initialized.search.search_literal("SERVICE_HOST")
+    hits = initialized.search.find_literal("SERVICE_HOST").hits
     assert all("config.py" not in hit.path for hit in hits)
 
 
@@ -238,11 +238,11 @@ def test_secret_files_are_never_indexed(initialized: Workspace, workspace_root: 
     ).fetchall()
     assert not [r for r in rows if r["rel_path"] == ".env"]
 
-    assert initialized.search.search_literal("super-secret-value-that-must-not-be-indexed") == []
+    assert initialized.search.find_literal("super-secret-value-that-must-not-be-indexed").hits == []
 
 
 def test_repoatlasignore_is_honored(initialized: Workspace, workspace_root: Path) -> None:
-    assert initialized.search.search_literal("IGNORED_MARKER_SHOULD_NOT_BE_INDEXED") == []
+    assert initialized.search.find_literal("IGNORED_MARKER_SHOULD_NOT_BE_INDEXED").hits == []
 
 
 def test_nested_repository_files_belong_to_the_inner_repository(

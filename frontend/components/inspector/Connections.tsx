@@ -22,7 +22,7 @@ const FAMILY_LABEL: Record<Family, string> = {
 /** Rows listed per family before "show all". */
 const SHOWN = 12;
 
-export function PartnerIcon({ partner, hue = null }: { partner: Partner; hue?: number | null }) {
+function PartnerIcon({ partner, hue = null }: { partner: Partner; hue?: number | null }) {
   switch (partner.kind) {
     case "repository":
       return (
