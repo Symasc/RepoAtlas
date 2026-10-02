@@ -40,7 +40,6 @@ answerable from the file itself. Only the invented relationship is gone.
 from __future__ import annotations
 
 import sqlite3
-import time
 from collections import Counter
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -791,27 +790,3 @@ def test_the_namespace_check_reads_each_instructions_flags_once(
     # flag scan per instruction (each FROM scans its own flags too).
     assert scans(local) == {"flags": 11, "domain": 10}
     assert scans(staged) == {"flags": 12, "domain": 10}
-
-
-@pytest.mark.timing
-def test_the_namespace_check_costs_nothing_measurable() -> None:
-    """§50. One flag scan per instruction, not per operand and not per candidate."""
-    local = "FROM node:22\n" + "".join(f"COPY src/m{i}.js /app/m{i}.js\n" for i in range(100))
-    staged = "FROM node:22 AS b\nFROM node:22\n" + "".join(
-        f"COPY --from=b src/m{i}.js /app/m{i}.js\n" for i in range(100)
-    )
-
-    def elapsed(source: str) -> float:
-        start = time.perf_counter()
-        for _ in range(20):
-            parse(source)
-        return time.perf_counter() - start
-
-    local_seconds = elapsed(local)
-    staged_seconds = elapsed(staged)
-
-    assert files(staged) == set()
-    assert len(files(local)) == 100
-    # Suppressed sources do less work, never more; the bound is generous because
-    # this asserts the absence of a new per-operand cost, not a benchmark.
-    assert staged_seconds < local_seconds * 3, (local_seconds, staged_seconds)

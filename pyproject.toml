@@ -197,12 +197,15 @@ reportMissingTypeStubs = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers -m 'not slow and not scale'"
+# Parallel by default, one worker per core (pytest-xdist). `loadfile` keeps each
+# file on one worker, so module-scoped fixtures are built once. `-n 0` runs serially,
+# which is handy for one test under a debugger. No test asserts wall-clock time:
+# a bound a loaded machine can cross is a flake under parallel load.
+addopts = "-q --strict-markers -m 'not slow and not scale' -n auto --dist loadfile"
 markers = [
     "slow: exercises a real model download or network access; deselected by default",
     "adversarial: adversarial validation; runs by default, selectable with -m adversarial",
     "scale: builds a large synthetic tree; deselected by default",
-    "timing: asserts elapsed wall-clock time; a parallel run excludes it (-m 'not timing') and runs it alone afterwards",
 ]
 
 [tool.coverage.run]
