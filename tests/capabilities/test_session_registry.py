@@ -110,7 +110,6 @@ def test_a_new_investigation_starts_with_an_empty_ledger() -> None:
     assert isinstance(session.ledger, EvidenceLedger)
     assert len(session.ledger) == 0
     assert session.ledger.investigation_id == session.id
-    assert session.validated_generation is None
 
 
 # -- refusal ------------------------------------------------------------------------
@@ -280,8 +279,8 @@ def test_a_grounding_projection_from_one_investigation_never_sees_the_other() ->
     a.ledger.record([_proposed("digest-from-a", path="a/only.py")])
     b.ledger.record([_proposed("digest-from-b", path="b/only.py")])
 
-    assert {entry.ref.path for entry in a.ledger.entries_for_grounding()} == {"a/only.py"}
-    assert {entry.ref.path for entry in b.ledger.entries_for_grounding()} == {"b/only.py"}
+    assert {entry.ref.path for entry in a.ledger.entries()} == {"a/only.py"}
+    assert {entry.ref.path for entry in b.ledger.entries()} == {"b/only.py"}
 
 
 def test_no_evidence_can_be_looked_up_without_naming_an_investigation() -> None:
@@ -302,37 +301,14 @@ def test_each_investigations_ledger_has_its_own_capacity() -> None:
     assert b.ledger.full is False
 
 
-# -- the generation hint -------------------------------------------------------------------
-
-
-def test_the_validated_generation_is_an_optimisation_and_not_a_verdict() -> None:
-    """A concurrent sync moves the index without touching this counter.
-
-    Recorded as a hint a service may use to skip repeated work, and never as
-    evidence that anything is current. The field is writable and carries no
-    behaviour, which is the point: nothing here can mistake it for a check.
-    """
-    registry = SessionRegistry()
-    session = registry.create()
-    assert session.validated_generation is None
-
-    session.validated_generation = 7
-    assert session.validated_generation == 7
-    # Setting it changes no evidence status anywhere.
-    (entry,) = session.ledger.record([_proposed("a")])
-    assert session.ledger.get(entry.id) is not None
-
-
 def test_creating_and_fetching_an_investigation_updates_its_clock() -> None:
     clock = _Clock()
     registry = SessionRegistry(clock=clock)
     session = registry.create()
-    assert session.created_at == START
     assert session.last_used_at == START
 
     clock.advance(120)
     fetched = registry.get(session.id)
-    assert fetched.created_at == START
     assert fetched.last_used_at == START + timedelta(seconds=120)
 
 

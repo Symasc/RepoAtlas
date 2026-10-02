@@ -52,7 +52,6 @@ from types import TracebackType
 
 from repoatlas.capabilities import http_inventory
 from repoatlas.capabilities.budget import (
-    BudgetCeiling,
     apply_budget_policy,
     ceiling_for,
     retrieval_limits_for,
@@ -515,13 +514,6 @@ class CapabilityService:
         #: at runtime rather than a design decision made on purpose.
         self._call_lock = threading.RLock()
         self._closed = False
-        #: An in-process cache hint and nothing else. It exists so a later slice
-        #: can skip repeated revalidation within one unchanged generation. It is
-        #: not persisted, it is not evidence, and no capability may treat a
-        #: matching value as proof that anything is current: another process can
-        #: sync this index without this counter ever moving (V1_SPEC §12).
-        #: Slice C has no mutating capability, so it does not move at all.
-        self._generation = 0
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -591,16 +583,6 @@ class CapabilityService:
         reads a session, and a test asserts that.
         """
         return self._sessions
-
-    @property
-    def budget_ceiling(self) -> BudgetCeiling:
-        """The most evidence this server will grant for one question."""
-        return self._budget_ceiling
-
-    @property
-    def generation(self) -> int:
-        """In-process cache hint. Never a freshness verdict — see the constructor."""
-        return self._generation
 
     @property
     def closed(self) -> bool:
@@ -1155,7 +1137,7 @@ class CapabilityService:
                 # lockfile location from after, and the result would look exactly
                 # like a fact.
                 with self._workspace.database.read_snapshot():
-                    views, page, supplies = self._dependency_page(request, resolution, limits)
+                    page, supplies = self._dependency_page(request, resolution, limits)
                 # The single atomic point. A capacity refusal raises here having
                 # allocated nothing and strengthened nothing.
                 entries = session.ledger.record([supply.proposed for supply in supplies])
@@ -1171,7 +1153,6 @@ class CapabilityService:
                 request=request,
                 resolution=resolution,
                 session=session,
-                views=views,
                 page=page,
                 supplies=supplies,
                 entries=entries,
@@ -2040,7 +2021,7 @@ class CapabilityService:
         request: DependenciesRequest,
         resolution: ContextResolution,
         limits: AppliedPageLimits,
-    ) -> tuple[list[DependencyPackageView], _DependencyPage, list[ProvenanceSupply]]:
+    ) -> tuple[_DependencyPage, list[ProvenanceSupply]]:
         """Build the whole ordered dataset, then cut one page out of it.
 
         The whole dataset first, deliberately. ``has_more`` is then something
@@ -2099,7 +2080,6 @@ class CapabilityService:
         page = views[start:stop]
         supplies = self._dependency_supplies(page) if request.include_provenance else []
         return (
-            views,
             _DependencyPage(
                 packages=page,
                 has_more=stop < len(views),
@@ -2243,7 +2223,6 @@ class CapabilityService:
         request: DependenciesRequest,
         resolution: ContextResolution,
         session: InvestigationSession,
-        views: Sequence[DependencyPackageView],
         page: _DependencyPage,
         supplies: Sequence[ProvenanceSupply],
         entries: tuple[LedgerEntry, ...],
@@ -3679,9 +3658,8 @@ class CapabilityService:
             except Exception as exc:
                 # The lock was held and the run had begun. The index may already
                 # differ from the one every live ledger was checked against, so the
-                # hint moves and the ledgers are re-checked against the index as the
-                # failure left it — then the failure is reported, never rolled back.
-                self._generation += 1
+                # ledgers are re-checked against the index as the failure left it —
+                # then the failure is reported, never rolled back.
                 revalidation = self._revalidate_live_investigations()
                 raise SyncFailedError(
                     cause=capability_error(exc).code,
@@ -3689,8 +3667,7 @@ class CapabilityService:
                     exit_code=getattr(exc, "exit_code", None),
                 ) from exc
 
-            # The mutation committed. The hint moves once, and only after it.
-            self._generation += 1
+            # The mutation committed.
             completed_at = datetime.now(UTC)
             revalidation = self._revalidate_live_investigations()
             return self._sync_response(
@@ -3735,9 +3712,6 @@ class CapabilityService:
         results = []
         for session, snapshot in snapshots:
             transitions = session.ledger.revalidate(snapshot)
-            # An optimisation hint and never evidence validity. Verification
-            # compares real file state whatever this says.
-            session.validated_generation = self._generation
             results.append((transitions, session.ledger.summary()))
         return revalidation_summary(results)
 

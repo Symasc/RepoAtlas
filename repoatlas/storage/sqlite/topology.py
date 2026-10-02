@@ -1,4 +1,4 @@
-"""SQLite reads behind the topology capabilities (``TopologyStore``).
+"""SQLite reads behind the topology capabilities.
 
 Every method is one statement, however many rows it returns. A directory's links
 are read as two joins — the edges leaving entities under the path and the edges

@@ -27,7 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from repoatlas.capabilities.evidence_shaping import provable_span, supply
+from repoatlas.capabilities.evidence_shaping import supply
 from repoatlas.models.capability import AppliedBudget
 from repoatlas.models.evidence import EvidenceCandidate
 
@@ -95,21 +95,6 @@ def offered_lines(candidate: EvidenceCandidate) -> tuple[int | None, int | None]
     if candidate.declaration:
         return (None, None)
     return (candidate.line_start, candidate.line_end)
-
-
-def provable_line_span(candidate: EvidenceCandidate) -> tuple[int, int] | None:
-    """The source lines this candidate's text demonstrably covers, or ``None``.
-
-    The candidate-shaped spelling of
-    :func:`~repoatlas.capabilities.evidence_shaping.provable_span`, which holds the
-    reasoning and the four producers that legitimately prove nothing, applied to
-    the range :func:`offered_lines` allows.
-    """
-    return provable_span(
-        candidate.text,
-        *offered_lines(candidate),
-        split_total=candidate.split_total,
-    )
 
 
 def shape_candidates(

@@ -163,14 +163,6 @@ class GitClient:
             return GitResult(ok=False, stdout="")
         return GitResult(ok=True, stdout=completed.stdout, stderr=completed.stderr)
 
-    def toplevel(self, path: Path) -> Path | None:
-        """The working-tree root of the repository containing ``path``."""
-        result = self._run(path, "rev-parse", "--show-toplevel")
-        if not result.ok:
-            return None
-        text = result.stdout.strip()
-        return Path(text).resolve() if text else None
-
     def state(self, repo_path: Path) -> GitRepositoryState:
         """Current branch, HEAD SHA and dirty state of the working tree."""
         head = self._run(repo_path, "rev-parse", "HEAD")
@@ -396,13 +388,12 @@ def is_git_repository(path: Path) -> bool:
     return marker.is_dir() or marker.is_file()
 
 
-def git_toplevel(path: Path, client: GitClient | None = None) -> Path | None:
+def git_toplevel(path: Path) -> Path | None:
     """Locate the enclosing Git repository root by walking upward.
 
     Used by context resolution to detect an unmanaged repository (V1_SPEC §6). Pure
     filesystem inspection, so it works even when the git binary is missing.
     """
-    del client  # accepted for symmetry with GitClient.toplevel; unused by design
     for candidate in (path, *path.parents):
         if is_git_repository(candidate):
             return candidate

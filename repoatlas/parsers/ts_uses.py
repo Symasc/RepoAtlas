@@ -497,7 +497,7 @@ class UseAnalysis:
             return
         use, form = classified
         if binding.kind == "namespace":
-            member = member if member is not None else self._member(context, parent, field)
+            member = member if member is not None else self._member(parent, field)
             if form == "receiver":
                 form = "member"
             if self._namespace_callee(parent, field):
@@ -540,7 +540,7 @@ class UseAnalysis:
             return "value", "receiver"
         return "value", _FORMS.get(above, "read")
 
-    def _member(self, node: Node, parent: Node, field: str | None) -> str | None:
+    def _member(self, parent: Node, field: str | None) -> str | None:
         if (parent.type, field) == ("member_expression", "object"):
             prop = parent.child_by_field_name("property")
             if prop is not None and prop.type == "property_identifier":

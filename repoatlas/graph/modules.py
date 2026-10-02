@@ -27,13 +27,9 @@ the import stays unresolved. An entry inside build output (``main: dist/index.js
 is mapped to source only on the package's own evidence, described below: no
 ``dist``-to-``src`` rewrite is ever assumed.
 
-**Barrels.** For a named import, :meth:`ModuleResolver.definition` follows
-``export { X } from``, renamed re-exports, ``export * as NS from`` and ``export *
-from`` until it reaches the file whose own ``EXPORTS`` declare the name. An explicit
-re-export wins over ``export *``; two ``export *`` paths to different definitions are
-ambiguous and resolve to nothing, as TypeScript itself treats them; a cycle, more
-than :data:`MAX_REEXPORT_HOPS` hops or more than :data:`MAX_TRACE_STEPS` steps in all
-resolves to nothing, so no arrangement of barrels makes one lookup unbounded.
+**Barrels.** Following a named import through re-exports is :mod:`repoatlas.graph.uses`'s
+work, not this module's; it is bounded by :data:`MAX_REEXPORT_HOPS` and
+:data:`MAX_TRACE_STEPS`, which live here beside the resolution they bound.
 
 Everything :meth:`ModuleResolver.resolve` answers is repository-local by construction:
 every map is keyed by the importing file's repository, and a path that climbs out of
@@ -137,26 +133,6 @@ class PackageEntry:
     reason: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class Definition:
-    """Where an imported name is defined, reached from the module it was imported from."""
-
-    file: FileRow
-    #: The defining symbol, when exactly one declaration carries the name.
-    symbol_id: int | None
-    #: Repository-relative paths of the re-exporting files passed through, in order.
-    via: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class _Reexport:
-    specifier: str
-    kind: str  # "*", "namespace" or "named"
-    #: exported name -> imported name, for named re-exports.
-    names: tuple[tuple[str, str], ...] = ()
-    namespace: str | None = None
-
-
 @dataclass(slots=True)
 class _Workspace:
     root: str
@@ -239,18 +215,16 @@ def binding_pairs(value: str | None) -> list[tuple[str, str]]:
 
 
 class ModuleResolver:
-    """Resolves specifiers and traces imported names, from indexed facts only."""
+    """Resolves specifiers, from indexed facts only."""
 
     def __init__(
         self,
         index: ResolutionIndex,
         claims: list[UnresolvedRefRecord],
-        exported: dict[int, dict[str, list[int]]],
         *,
         declared: Declared | None = None,
     ) -> None:
         self._index = index
-        self._exported = exported
         #: The importer's declarations a workspace member must not contradict; ``None``
         #: when the caller has none to give, and then no member is refused for one.
         self._declared = declared
@@ -265,7 +239,6 @@ class ModuleResolver:
         self._occupied: dict[int, frozenset[str]] = {}
         self._packages: dict[int, dict[str, dict[str, Any]]] = defaultdict(dict)
         self._workspaces: dict[int, list[_Workspace]] = defaultdict(list)
-        self._reexports: dict[int, list[_Reexport]] = defaultdict(list)
         self._effective: dict[tuple[int, str], tuple[dict[str, Any], int]] = {}
         #: What each (repository, directory, specifier) resolved to in this pass. A
         #: specifier's target depends on the importing file only through its repository and
@@ -276,10 +249,6 @@ class ModuleResolver:
         self._refused: dict[tuple[int, str, str], str] = {}
         self._build_dirs_of: dict[tuple[int, str], list[tuple[str, str]]] = {}
         self._source_roots: dict[tuple[int, str], tuple[str, str] | None] = {}
-        self._traced: dict[tuple[int, str], Definition | None] = {}
-        #: Re-export steps taken by the current lookup, and by all lookups so far.
-        self._steps = 0
-        self.steps = 0
         workspaces: list[tuple[int, str, list[str]]] = []
         declarations: list[WorkspaceDeclaration] = []
         for claim in claims:
@@ -302,18 +271,6 @@ class ModuleResolver:
                 if workspace is not None:
                     workspaces.append((origin.repo_id, workspace.root, list(workspace.globs)))
                     declarations.append(workspace)
-            elif meta.get("role") == "re-export" and meta.get("reexport"):
-                self._reexports[claim.file_id].append(
-                    _Reexport(
-                        specifier=claim.target_key,
-                        kind=meta["reexport"],
-                        names=tuple(
-                            (exported, imported)
-                            for imported, exported in binding_pairs(meta.get("bindings"))
-                        ),
-                        namespace=meta.get("namespace"),
-                    )
-                )
         for repo_id, root, globs in sorted(workspaces):
             self._workspaces[repo_id].append(self._members(repo_id, root, globs))
         #: Every workspace any indexed file declares, whichever repository its members are
@@ -321,8 +278,6 @@ class ModuleResolver:
         self.workspace_declarations = tuple(
             sorted(declarations, key=lambda d: (d.repo_id, d.file, d.globs))
         )
-        for reexports in self._reexports.values():
-            reexports.sort(key=lambda r: (r.kind, r.specifier, r.names, r.namespace or ""))
 
     # -- workspaces ----------------------------------------------------------
 
@@ -750,73 +705,6 @@ class ModuleResolver:
                 pairs.add((options["outDir"], options["rootDir"]))
         return sorted(pairs)
 
-    # -- names ---------------------------------------------------------------
-
-    def definition(self, module: FileRow, name: str) -> Definition | None:
-        """Where ``name``, imported from ``module``, is defined; ``None`` if not exactly one."""
-        self._steps = 0
-        return self._trace(module, name, frozenset(), 0)[0]
-
-    def _trace(
-        self, module: FileRow, name: str, visiting: frozenset[tuple[int, str]], depth: int
-    ) -> tuple[Definition | None, bool]:
-        """The definition, and whether a cycle or the hop bound cut the search short.
-
-        Only an uncut answer is remembered: one computed while a cycle was being cut
-        depends on where the walk entered the cycle.
-        """
-        key = (module.file_id, name)
-        if key in self._traced:
-            return self._traced[key], False
-        if key in visiting or depth > MAX_REEXPORT_HOPS or self._steps >= MAX_TRACE_STEPS:
-            return None, True
-        self._steps += 1
-        self.steps += 1
-        result, cut = self._trace_once(module, name, visiting | {key}, depth)
-        if not cut:
-            self._traced[key] = result
-        return result, cut
-
-    def _trace_once(
-        self, module: FileRow, name: str, visiting: frozenset[tuple[int, str]], depth: int
-    ) -> tuple[Definition | None, bool]:
-        local = self._exported.get(module.file_id, {}).get(name)
-        if local:
-            return Definition(module, local[0] if len(local) == 1 else None), False
-        if name == "default":
-            return None, False
-        reexports = self._reexports.get(module.file_id, [])
-        for reexport in reexports:
-            if reexport.kind == "named":
-                imported = dict(reexport.names).get(name)
-                if imported is None:
-                    continue
-                target = self.resolve(module, reexport.specifier)
-                if target is None:
-                    return None, False
-                found, cut = self._trace(target.file, imported, visiting, depth + 1)
-                return (None if found is None else _through(module, found)), cut
-            if reexport.kind == "namespace" and reexport.namespace == name:
-                target = self.resolve(module, reexport.specifier)
-                if target is None:
-                    return None, False
-                return Definition(target.file, None, (module.rel_path,)), False
-        found_all: dict[tuple[int, int | None], Definition] = {}
-        cut_any = False
-        for reexport in reexports:
-            if reexport.kind != "*":
-                continue
-            target = self.resolve(module, reexport.specifier)
-            if target is None:
-                continue
-            definition, cut = self._trace(target.file, name, visiting, depth + 1)
-            cut_any = cut_any or cut
-            if definition is not None:
-                found_all.setdefault((definition.file.file_id, definition.symbol_id), definition)
-        if len(found_all) != 1:
-            return None, cut_any  # not re-exported, or two star exports disagree
-        return _through(module, next(iter(found_all.values()))), cut_any
-
 
 def workspace_declaration(
     kind: str, facts: Mapping[str, Any], repo_id: int, rel_path: str
@@ -881,10 +769,6 @@ def declared_against(constraint: str, wanted: str, manifest: str, member: str) -
 def _elsewhere(manifest: str, path: str, member: str) -> str | None:
     target = _join(manifest, path.rstrip("/"))
     return None if target is not None and target == member else "dependency-elsewhere"
-
-
-def _through(module: FileRow, definition: Definition) -> Definition:
-    return Definition(definition.file, definition.symbol_id, (module.rel_path, *definition.via))
 
 
 def _match_paths(paths: dict[str, list[str]], specifier: str) -> tuple[str, str] | None:

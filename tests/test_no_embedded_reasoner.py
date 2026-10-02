@@ -39,7 +39,7 @@ from pathlib import Path
 import pytest
 import yaml
 from repoatlas.capabilities.service import CapabilityService
-from repoatlas.config.settings import RetrievalSettings, Settings, load_settings, save_settings
+from repoatlas.config.settings import RetrievalSettings, Settings
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.capability_io import RepositoriesRequest, StatusRequest
 from repoatlas.models.dependency_inventory import DependenciesRequest
@@ -262,11 +262,8 @@ def test_case_8_locate_still_answers(initialized: Workspace, workspace_root: Pat
 
 
 # ---------------------------------------------------------------------------
-# CASES 5-6. Configuration
+# CASE 5. Configuration
 # ---------------------------------------------------------------------------
-
-#: Keys a V1 configuration file could carry for the embedded reasoner.
-LEGACY_CONFIG_KEYS = ("llm", "ollama", "provider", "base_url")
 
 
 def test_case_5_the_default_configuration_names_no_reasoning_model() -> None:
@@ -305,10 +302,8 @@ def test_case_5_no_reasoning_environment_variable_is_read() -> None:
     assert result.returncode == 0, result.stderr
     assert "sentinel.invalid" not in result.stdout
 
-    # And no production module names it in code. Docstrings are exempt, and one
-    # uses it: `_env_overrides` records that the override existed and is gone,
-    # which is the note somebody who still sets the variable needs to find. A
-    # comment saying a thing was removed is not a surviving reference to it.
+    # And no production module names it in code. Docstrings are exempt: a comment
+    # saying a thing was removed is not a surviving reference to it.
     for path in PRODUCTION.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         docstrings = {
@@ -322,59 +317,6 @@ def test_case_5_no_reasoning_environment_variable_is_read() -> None:
             if id(node.value) in docstrings:
                 continue
             assert "REPOATLAS_LLM" not in node.value, f"{path}:{node.lineno}"
-
-
-def test_case_6_a_v1_config_carrying_llm_keys_still_loads(tmp_path: Path) -> None:
-    """CASE 6. The chosen policy: tolerate and ignore.
-
-    An existing user has a config file this build no longer understands every key
-    of. Refusing to start over a setting that now controls nothing would cost
-    them their workspace to protect them from nothing, so the obsolete keys are
-    ignored. The model states that policy explicitly rather than inheriting it
-    from Pydantic's default; ``tests/test_config_compatibility.py`` holds the
-    declaration in place (FINAL audit, F-02).
-
-    Newly written configuration does not contain them (CASE 5), so the tolerance
-    is one-way and the keys disappear the first time anything saves.
-    """
-    config = tmp_path / "config.yaml"
-    config.write_text(
-        yaml.safe_dump(
-            {
-                "repos": {"root": str(tmp_path / "repos")},
-                "llm": {
-                    "provider": "ollama",
-                    "model": "gpt-oss:20b",
-                    "base_url": "http://localhost:11434",
-                    "timeout_seconds": 120.0,
-                },
-                "output": {"verbosity": "concise"},
-            },
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
-
-    settings = load_settings(config)
-
-    assert settings.repos.root == tmp_path / "repos"
-    assert settings.output.verbosity == "concise"
-    assert not hasattr(settings, "llm")
-
-
-def test_case_6_saving_a_tolerated_config_drops_the_obsolete_keys(tmp_path: Path) -> None:
-    """CASE 6's other half. Tolerance does not mean preservation."""
-    config = tmp_path / "config.yaml"
-    config.write_text(
-        yaml.safe_dump({"llm": {"provider": "ollama"}, "repos": {"root": str(tmp_path)}}),
-        encoding="utf-8",
-    )
-
-    save_settings(load_settings(config), config)
-
-    rewritten = yaml.safe_load(config.read_text(encoding="utf-8"))
-    assert "llm" not in rewritten
-    assert rewritten["repos"]["root"] == str(tmp_path)
 
 
 # ---------------------------------------------------------------------------

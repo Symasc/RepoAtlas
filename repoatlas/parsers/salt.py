@@ -85,8 +85,7 @@ def _scalar(node: yaml.Node) -> str | None:
 class _Collector:
     """Turns one composed YAML document into Salt symbols and references."""
 
-    def __init__(self, path: Path, lines: list[str]) -> None:
-        self._path = path
+    def __init__(self, lines: list[str]) -> None:
         #: The **raw** file, not the neutralized copy. Neutralization preserves
         #: positions, so marks index these lines exactly — and a line that only
         #: looks blank after neutralization still counts as content.
@@ -458,7 +457,7 @@ class SaltParser:
         # it must use PyYAML's line-break set, not the source-grammar one. They
         # differ only on characters PyYAML either rejects (form feed, vertical tab)
         # or breaks on exactly as ``splitlines()`` does (U+0085, U+2028, U+2029).
-        collector = _Collector(path, content.splitlines())
+        collector = _Collector(content.splitlines())
 
         try:
             documents = list(yaml.compose_all(neutralized, Loader=yaml.SafeLoader))

@@ -641,7 +641,7 @@ def use_resolver(
 ) -> UseResolver:
     """The resolver a pass resolves TypeScript uses with, built from indexed facts alone."""
     modules = ModuleResolver(
-        index, knowledge.list_module_facts(), {}, declared=declared_constraints(index, records)
+        index, knowledge.list_module_facts(), declared=declared_constraints(index, records)
     )
     return UseResolver(
         modules, index, tables or _Tables(knowledge), PackageLinks(modules, index, records)

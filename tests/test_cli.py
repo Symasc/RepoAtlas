@@ -183,17 +183,12 @@ def test_commands_before_init_exit_with_code_three(cli_env: Path, tmp_path: Path
 
 
 def test_a_removed_reasoning_command_is_not_reachable(cli_env: Path, workspace_root: Path) -> None:
-    """``ask`` exited 4 when no model was reachable. There is no model and no
-    command: RepoAtlas supplies evidence and an external agent reasons over it.
-
-    Asserted as a usage error rather than as exit 4, because a product that still
-    answered ``ask`` with "no reasoning model is available" would be describing a
-    subsystem it no longer has.
+    """There is no model and no ``ask`` command: RepoAtlas supplies evidence and an
+    external agent reasons over it.
     """
     run_in(workspace_root, "init", str(workspace_root))
     result = run_in(workspace_root, "ask", "why?")
     assert result.exit_code != ExitCode.OK
-    assert result.exit_code != ExitCode.LLM_UNAVAILABLE
     assert "reasoning model" not in result.output.lower()
 
 

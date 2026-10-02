@@ -149,7 +149,7 @@ def backward(tmp_path: Path) -> Iterator[Workspace]:
 def _chunk_identities(workspace: Workspace) -> list[tuple[str, str, int]]:
     return [
         (hit.repository_slug, hit.path, hit.line_start)
-        for hit in workspace.search.search_literal(LITERAL, None, LIMIT)
+        for hit in workspace.search.find_literal(LITERAL, None, LIMIT).hits
     ]
 
 
@@ -261,9 +261,9 @@ def test_the_order_is_stated_in_repository_facts_not_row_ids(forward: Workspace)
 def test_an_explicit_exact_match_is_unaffected(forward: Workspace, backward: Workspace) -> None:
     """A term present in one file only still resolves to that file, both ways."""
     for workspace in (forward, backward):
-        hits = workspace.search.search_literal(
+        hits = workspace.search.find_literal(
             "SHARED_LITERAL_MARKER_42 in lib/middle.py", None, 50
-        )
+        ).hits
         assert {hit.path for hit in hits} == {"lib/middle.py"}
         assert {hit.repository_slug for hit in hits} == set(REPOSITORIES)
 
@@ -272,6 +272,6 @@ def test_repository_scope_still_narrows(forward: Workspace) -> None:
     alpha = forward.database.execute("SELECT id FROM repositories WHERE slug = 'alpha'").fetchone()[
         "id"
     ]
-    hits = forward.search.search_literal(LITERAL, [alpha], 50)
+    hits = forward.search.find_literal(LITERAL, [alpha], 50).hits
     assert hits
     assert {hit.repository_slug for hit in hits} == {"alpha"}

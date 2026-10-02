@@ -66,7 +66,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from tree_sitter import Node
 
 _SUFFIXES = frozenset({".sh", ".bash", ".zsh", ".ksh"})
-_SHEBANGS = ("#!/bin/sh", "#!/bin/bash", "#!/usr/bin/env bash", "#!/usr/bin/env sh", "#!/bin/zsh")
 
 #: An environment variable, by convention: upper snake case, at least two chars.
 _ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]+$")
@@ -753,9 +752,3 @@ class BashParser:
             references=tuple(walker.references),
             diagnostics=diagnostics,
         )
-
-
-def looks_like_shell(content: str) -> bool:
-    """Whether an extension-less file declares a shell interpreter."""
-    first = content.split("\n", 1)[0].strip()
-    return first.startswith(_SHEBANGS)

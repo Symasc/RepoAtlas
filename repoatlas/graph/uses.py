@@ -47,9 +47,9 @@ from typing import Any
 from repoatlas.graph.modules import MAX_REEXPORT_HOPS, MAX_TRACE_STEPS, ModuleResolver
 from repoatlas.graph.packages import CROSSING, PACKAGE_BASIS, PackageLink, PackageLinks
 from repoatlas.graph.resolution import ResolutionIndex
-from repoatlas.models.parsing import EdgeType, EntityType
+from repoatlas.models.parsing import EntityType
 from repoatlas.parsers.ts_uses import USES_EXPORTS
-from repoatlas.storage.protocols import FileRow, SymbolRow, UnresolvedRefRecord
+from repoatlas.storage.protocols import FileRow, SymbolRow
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,13 +76,6 @@ class UseDefinition:
     via: tuple[str, ...] = ()
     #: ...and the name each of them exports it under.
     via_names: tuple[str, ...] = ()
-
-
-def export_table(claim: UnresolvedRefRecord) -> dict[str, Any] | None:
-    """A file's export table, if ``claim`` is one."""
-    if claim.edge_type is not EdgeType.USES or not claim.meta_json:
-        return None
-    return table_from_meta(claim.meta_json)
 
 
 def table_from_meta(meta_json: str) -> dict[str, Any] | None:

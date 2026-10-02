@@ -112,7 +112,7 @@ export function EntityBadge({ entityType, size = 16 }: { entityType: string | nu
 }
 
 /** A name with an extension reads as a file; the index says only "a path". */
-export function looksLikeFile(path: string): boolean {
+function looksLikeFile(path: string): boolean {
   const name = path.slice(path.lastIndexOf("/") + 1);
   return /\.[A-Za-z0-9]+$/.test(name) && !name.startsWith(".");
 }

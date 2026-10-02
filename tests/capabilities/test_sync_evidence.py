@@ -417,7 +417,6 @@ def test_a_failed_recheck_does_not_pretend_the_sync_failed(
     cited = evidence[0]
     before_hash = _file_hash(initialized, cited.ref)
     _append(workspace_root, cited.ref)
-    generation = service.generation
 
     def unreadable(*args: object, **kwargs: object) -> object:
         raise RuntimeError("injected failure while re-checking evidence")
@@ -430,7 +429,6 @@ def test_a_failed_recheck_does_not_pretend_the_sync_failed(
     assert response.evidence_revalidation.status is RevalidationStatus.FAILED
     assert response.evidence_revalidation.detail
     assert _file_hash(initialized, cited.ref) != before_hash, "the index change must stand"
-    assert service.generation == generation + 1
     assert len(service.sessions) == 1
     assert _status(service, investigation, cited.id) is EvidenceStatus.VALID
 
@@ -472,7 +470,6 @@ def test_a_failed_sync_rechecks_evidence_against_the_index_it_left(
     cited = evidence[0]
     before_hash = _file_hash(initialized, cited.ref)
     _append(workspace_root, cited.ref)
-    generation = service.generation
 
     def failing_commit(self: ReferenceLinker, plan: object) -> object:
         raise RuntimeError("injected failure inside the final transaction")
@@ -491,7 +488,6 @@ def test_a_failed_sync_rechecks_evidence_against_the_index_it_left(
     revalidation = error.context["revalidation"]
     assert isinstance(revalidation, dict)
     assert revalidation["status"] == "completed"
-    assert service.generation == generation + 1
 
     # Nothing was rolled back, and a plain sync is the whole recovery path.
     assert _sync(service).status is SyncStatus.COMPLETED
@@ -534,20 +530,19 @@ def test_sync_allocates_no_evidence_and_rewrites_no_history(
 
 
 # ---------------------------------------------------------------------------
-# The generation hint is never proof
+# An external sync is still seen
 # ---------------------------------------------------------------------------
 
 
 def test_an_external_sync_after_this_one_is_still_seen_by_verification(
     initialized: Workspace, workspace_root: Path
 ) -> None:
-    """Eager re-checking stamps a generation; verification must not trust the stamp.
+    """Eager re-checking happened here; verification must not rely on it.
 
-    This service syncs and re-checks, recording the generation it re-checked at.
-    Another writer then changes the index without going through this service, so
-    the generation never moves. A verifier that took a matching generation as
-    proof of currency would ground a citation to evidence the index no longer
-    holds — which is exactly why the counter is a hint and file state is the test.
+    This service syncs and re-checks. Another writer then changes the index
+    without going through this service. A verifier that trusted the last eager
+    re-check would ground a citation to evidence the index no longer holds —
+    which is why file state is the test.
     """
     from repoatlas.services import sync_service
 
@@ -555,12 +550,9 @@ def test_an_external_sync_after_this_one_is_still_seen_by_verification(
     investigation, evidence = _search(service)
     cited = evidence[0]
     _sync(service)
-    assert service.sessions._sessions[investigation].validated_generation == service.generation
-    generation = service.generation
 
     _append(workspace_root, cited.ref)
     sync_service.sync(initialized, initialized.resolver().resolve(workspace_root))
-    assert service.generation == generation, "the external writer bypassed this service"
 
     verdict = service.verify_grounding(
         VerifyGroundingRequest(

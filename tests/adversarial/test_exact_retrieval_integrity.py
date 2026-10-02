@@ -305,7 +305,7 @@ def test_a_literal_crossing_a_boundary_is_found_by_exact_search(
     space = open_workspace(settings=settings, require_root=False)
     initialize(space, root, config_path=tmp_path / "config.yaml")
 
-    hits = space.search.search_literal(marker)
+    hits = space.search.find_literal(marker).hits
 
     assert hits, f"a literal straddling offset {offset} was lost"
     assert located(ask(space, f'"{marker}"')) == {"svc/bundle.min.js"}
@@ -325,7 +325,7 @@ def test_a_literal_crossing_the_second_boundary_is_found(tmp_path: Path) -> None
     space = open_workspace(settings=settings, require_root=False)
     initialize(space, root, config_path=tmp_path / "config.yaml")
 
-    assert space.search.search_literal(marker)
+    assert space.search.find_literal(marker).hits
 
 
 def test_a_boundary_match_cites_a_real_line_range(tmp_path: Path) -> None:
@@ -342,7 +342,7 @@ def test_a_boundary_match_cites_a_real_line_range(tmp_path: Path) -> None:
     space = open_workspace(settings=settings, require_root=False)
     initialize(space, root, config_path=tmp_path / "config.yaml")
 
-    hit = space.search.search_literal(marker)[0]
+    hit = space.search.find_literal(marker).hits[0]
 
     assert hit.line_start == 1
     assert hit.line_end == 1
@@ -360,7 +360,7 @@ def test_a_literal_absent_from_a_split_file_is_still_absent(tmp_path: Path) -> N
     space = open_workspace(settings=settings, require_root=False)
     initialize(space, root, config_path=tmp_path / "config.yaml")
 
-    assert space.search.search_literal("ZZZ_ABSENT_MARKER_918273") == []
+    assert space.search.find_literal("ZZZ_ABSENT_MARKER_918273").hits == []
 
 
 def test_one_boundary_match_is_one_candidate(tmp_path: Path) -> None:
@@ -377,7 +377,7 @@ def test_one_boundary_match_is_one_candidate(tmp_path: Path) -> None:
     space = open_workspace(settings=settings, require_root=False)
     initialize(space, root, config_path=tmp_path / "config.yaml")
 
-    assert len(space.search.search_literal(marker)) == 1
+    assert len(space.search.find_literal(marker).hits) == 1
 
 
 # --- 6. the file index tracks the working tree --------------------------------
@@ -466,12 +466,12 @@ def test_a_boundary_literal_survives_an_incremental_edit(tmp_path: Path) -> None
     )
     space = open_workspace(settings=settings, require_root=False)
     initialize(space, root, config_path=tmp_path / "config.yaml")
-    assert space.search.search_literal(marker)
+    assert space.search.find_literal(marker).hits
 
     (repo / "bundle.min.js").write_text(one_line_file(marker, (BOUNDARY * 2) - 7), encoding="utf-8")
     _sync(space)
 
-    assert space.search.search_literal(marker), "the marker was lost by an incremental sync"
+    assert space.search.find_literal(marker).hits, "the marker was lost by an incremental sync"
 
 
 def test_a_full_reindex_finds_exactly_what_the_incremental_sync_found(tmp_path: Path) -> None:
@@ -493,7 +493,7 @@ def test_a_full_reindex_finds_exactly_what_the_incremental_sync_found(tmp_path: 
     incremental = (
         located(ask(space, f'"{marker}"')),
         located(ask(space, "src/config.py")),
-        len(space.search.search_literal(marker)),
+        len(space.search.find_literal(marker).hits),
     )
 
     space_root = space.settings.root
@@ -503,7 +503,7 @@ def test_a_full_reindex_finds_exactly_what_the_incremental_sync_found(tmp_path: 
     assert (
         located(ask(space, f'"{marker}"')),
         located(ask(space, "src/config.py")),
-        len(space.search.search_literal(marker)),
+        len(space.search.find_literal(marker).hits),
     ) == incremental
 
 
