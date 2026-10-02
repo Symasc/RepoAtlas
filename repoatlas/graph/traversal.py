@@ -50,13 +50,25 @@ EXPANSION_EDGES = (
     EdgeType.CALLS_HTTP_ENDPOINT,
 )
 
+#: Edge types a relationships request walks when it names none: the expansion set
+#: and ``CALLS_HTTP_HANDLER``.
+#:
+#: A handler link joins a caller to the one handler a source-backed chain proves it
+#: reaches (:mod:`repoatlas.graph.http_crossings`), and asking what a request or a
+#: handler is connected to is asking for exactly that. It joins two repositories
+#: directly, so it leaves one only under ``cross_repository``
+#: (:data:`RELATIONSHIP_CROSSING_EDGES`). It is not in :data:`EXPANSION_EDGES`:
+#: search expands exactly as it did before links existed.
+RELATIONSHIP_DEFAULT_EDGES = (*EXPANSION_EDGES, EdgeType.CALLS_HTTP_HANDLER)
+
 #: Edge types an **explicit** relationship request may name.
 #:
-#: Wider than :data:`EXPANSION_EDGES` by exactly ``CALLS`` and ``USES``, and the
-#: difference is the point. Those two sets answer different questions, and using one tuple for
-#: both is what made ~26,000 indexed ``CALLS`` relationships unreachable: the
-#: relationships capability refused to traverse a type the graph plainly held,
-#: because the set it consulted was the set that governs *automatic* expansion.
+#: Wider than :data:`RELATIONSHIP_DEFAULT_EDGES` by exactly ``CALLS`` and ``USES``,
+#: and the difference is the point. Those two sets answer different questions, and
+#: using one tuple for both is what made ~26,000 indexed ``CALLS`` relationships
+#: unreachable: the relationships capability refused to traverse a type the graph
+#: plainly held, because the set it consulted was the set that governs *automatic*
+#: expansion.
 #:
 #: ``CALLS`` belongs here and not there. An agent asking "what calls this?" is
 #: asking for exactly those edges and has said so. Ordinary search has not: it
@@ -73,7 +85,7 @@ EXPANSION_EDGES = (
 #: Being nameable is not being reachable across a boundary. ``CALLS`` and ``USES``
 #: are deliberately absent from :data:`CROSS_REPOSITORY_EDGES` below, so an explicit
 #: request still cannot follow one out of its repository.
-RELATIONSHIP_EDGES = (*EXPANSION_EDGES, EdgeType.CALLS, EdgeType.USES)
+RELATIONSHIP_EDGES = (*RELATIONSHIP_DEFAULT_EDGES, EdgeType.CALLS, EdgeType.USES)
 
 #: Edge types a traversal may follow **out of one repository into another**.
 #:
@@ -92,6 +104,14 @@ CROSS_REPOSITORY_EDGES = frozenset(
         EdgeType.IMPORTS,
     }
 )
+
+#: Edge types a relationships request with ``cross_repository`` may follow out of
+#: one repository into another: :data:`CROSS_REPOSITORY_EDGES` and
+#: ``CALLS_HTTP_HANDLER``, which the HTTP join emits only for a chain of hops the
+#: source proves, each exact. The change-impact walk keeps its own rule for it
+#: (:mod:`repoatlas.graph.impact`): inward, on that evidence, and never from a file
+#: that does not change whole.
+RELATIONSHIP_CROSSING_EDGES = CROSS_REPOSITORY_EDGES | {EdgeType.CALLS_HTTP_HANDLER}
 
 
 #: Structural edges: what declares or contains what.

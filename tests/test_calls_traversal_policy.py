@@ -37,6 +37,7 @@ from repoatlas.capabilities.service import CapabilityService
 from repoatlas.graph.traversal import (
     CROSS_REPOSITORY_EDGES,
     EXPANSION_EDGES,
+    RELATIONSHIP_DEFAULT_EDGES,
     RELATIONSHIP_EDGES,
     expand_from_seeds,
 )
@@ -103,7 +104,9 @@ def test_a_calls_only_request_admits_exactly_calls() -> None:
 
 def test_the_default_still_excludes_calls() -> None:
     admitted = admitted_edge_types(RelationshipsRequest(context=GLOBAL, target="file:x:y.py"))
-    assert admitted == tuple(EXPANSION_EDGES)
+    # Search's expansion set and the HTTP handler links (M5a, C7); never CALLS.
+    assert admitted == tuple(RELATIONSHIP_DEFAULT_EDGES)
+    assert admitted == (*EXPANSION_EDGES, EdgeType.CALLS_HTTP_HANDLER)
     assert EdgeType.CALLS not in admitted
 
 

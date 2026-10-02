@@ -193,7 +193,7 @@ from repoatlas.graph.declared import root_path
 from repoatlas.graph.impact import ImpactWalk
 from repoatlas.graph.keys import is_positional
 from repoatlas.graph.linker import plan_repository_http
-from repoatlas.graph.traversal import CROSS_REPOSITORY_EDGES, WalkResult, WalkStep, walk
+from repoatlas.graph.traversal import RELATIONSHIP_CROSSING_EDGES, WalkResult, WalkStep, walk
 from repoatlas.graph.units import package_directories, unit_of
 from repoatlas.grounding import GroundingReport, ground_answer
 from repoatlas.indexing.chunking import chunk_hash
@@ -965,7 +965,7 @@ class CapabilityService:
                         edge_types=admitted,
                         direction=EDGE_DIRECTIONS[request.direction],
                         crossing_edges=(
-                            CROSS_REPOSITORY_EDGES if request.cross_repository else frozenset()
+                            RELATIONSHIP_CROSSING_EDGES if request.cross_repository else frozenset()
                         ),
                         containment=request.include_containment,
                         # The cut is the answer here, so it falls on the

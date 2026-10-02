@@ -89,8 +89,10 @@ from repoatlas.storage.protocols import (
 #: nesting, never as a link, and no topology answer counts it.
 STRUCTURAL: tuple[EdgeType, ...] = (EdgeType.CONTAINS, EdgeType.DEFINES)
 
-#: The HTTP edge family. ``CALLS_HTTP_HANDLER`` joins a caller to a handler by
-#: route compatibility; the others reach the shared route and endpoint nodes.
+#: The HTTP edge family. ``CALLS_HTTP_HANDLER`` joins a caller to the handler a
+#: source-backed deployment identity chain proves it reaches (method, route and an
+#: identity the source states); the others reach the shared route and endpoint
+#: nodes by route or endpoint compatibility.
 HTTP_EDGES: frozenset[EdgeType] = frozenset(
     {
         EdgeType.SERVES_HTTP_ROUTE,

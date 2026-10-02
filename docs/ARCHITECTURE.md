@@ -3412,6 +3412,14 @@ withhold — so a confined answer still hands back the handle that leads out of 
 crosses when asked. Retrieval's expansion is not a relationships request and is unchanged: it still reaches the
 other side of a hub, bounded as above.
 
+**Handler links are a relationships edge, not an expansion edge.** A relationships request that names no type walks
+`RELATIONSHIP_DEFAULT_EDGES`: the expansion set and `CALLS_HTTP_HANDLER`, so what a request or a handler is
+connected to includes the one handler or the requests a source-backed chain joins it to (§5). A handler link joins
+two repositories directly, so it is crossed only under `cross_repository` (`RELATIONSHIP_CROSSING_EDGES`); a link
+inside one repository is walked like any other edge, and direction, hops and fan-out bound it as they bound every
+edge. It is in neither `EXPANSION_EDGES` nor the shared `CROSS_REPOSITORY_EDGES`: search expands exactly as before
+links existed, and the change-impact walk crosses a link by its own rule, inward and on the link's evidence.
+
 ### Scoping, fusion and deduplication
 
 Scoping happens at stages 2-7, *before* scoring — this is what satisfies "never scan every repo for every
