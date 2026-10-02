@@ -104,7 +104,7 @@ def initialize(
         # aftermath — configuration moved, rows not.
         save_settings(settings, config_path)
 
-        report = engine.run(managed, scope="global", embed_repo_ids=None, progress=listener)
+        report = engine.run(managed, scope="global", progress=listener)
 
     return (
         report.model_copy(

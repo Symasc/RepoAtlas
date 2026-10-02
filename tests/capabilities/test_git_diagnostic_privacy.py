@@ -140,7 +140,6 @@ def _service(base: Path) -> CapabilityService:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(base / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     workspace = open_workspace(settings=settings, require_root=False)

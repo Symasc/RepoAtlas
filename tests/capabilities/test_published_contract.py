@@ -235,7 +235,6 @@ def test_the_serialized_values_are_still_integers() -> None:
                 "EXACT_CONTENT": 4,
                 "RELATED": 5,
                 "LEXICAL": 6,
-                "SIMILAR": 7,
             },
         ),
     ],
@@ -288,7 +287,6 @@ def service(tmp_path: Path) -> Iterator[CapabilityService]:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     workspace = open_workspace(settings=settings, require_root=False)

@@ -11,7 +11,7 @@ RepoAtlas indexes your local Git repositories and records how their code connect
 configuration and environment variables, packages that one repository provides and another consumes, and HTTP
 requests matched to the handlers that serve them. Your coding agent asks it, over MCP, what a change may affect,
 and gets ranked answers that each name the file and lines to read. It is deterministic and local: it runs no
-language model, indexing needs no network, and it never executes the code it reads.
+model, indexing needs no network, and it never executes the code it reads.
 
 ![The RepoAtlas graph explorer showing the ofetch repository's directories and files, its package links to the ufo and destr repositories, and its external modules, packages and environment variables](https://raw.githubusercontent.com/Symasc/RepoAtlas/master/docs/assets/explorer.png)
 
@@ -38,8 +38,7 @@ the agent reads the right code, including code it would not have thought to sear
   which tool fits which task.
 - **Graph explorer**: a local web app for browsing repositories, files, names and the links between them, down to
   the evidence behind each link.
-- **Local and deterministic**: no language model, no network while indexing, and repository code is never
-  executed.
+- **Local and deterministic**: no model, no network while indexing, and repository code is never executed.
 
 ## Quick start
 
@@ -146,9 +145,6 @@ Inside a repository, `sync` and `status` apply to that repository; at the config
 them. From anywhere else, `sync` updates every repository and `status` asks you to name one. The commands that
 report accept `--json`.
 
-Semantic search is optional. `repoatlas sync --embed` downloads a small local embedding model once (about 67 MB)
-and uses it from then on. Until you run it, semantic retrieval is off and nothing else changes.
-
 ## Example
 
 An agent is about to rename `createPaymentClient` in a shared `contracts` package. It asks RepoAtlas what that
@@ -213,7 +209,7 @@ RepoAtlas finds plausible, source-backed paths, and deliberately stops there:
 - **It does not decide what breaks.** A candidate is a reason to look. The compiler, the tests and the running code
   decide what actually breaks.
 - **It points at source; it does not replace reading it.** The agent reads the lines RepoAtlas names.
-- **It does no reasoning.** It runs no language model. The agent on the other end does the reasoning.
+- **It does no reasoning.** It runs no model. The agent on the other end does the reasoning.
 - **It is static, not a runtime tracer.** A matched route shows that the code agrees, not that a request reaches a
   live deployment. A request whose base URL comes from runtime data is counted, not linked.
 - **It complements text search.** Text search still has its place; RepoAtlas adds the connections it cannot see.
@@ -223,23 +219,12 @@ RepoAtlas finds plausible, source-backed paths, and deliberately stops there:
 - Repositories are treated as untrusted input and are never executed: no scripts, imports, package lifecycle hooks
   or builds. Git runs through a read-only wrapper with hooks disabled.
 - Secret files (`.env`, `*.pem`, `*.key`, `id_rsa`, `id_ed25519`) are excluded before any content is read.
-- Installation is the only step that downloads anything, apart from the embedding model you can opt in to for
-  semantic search. The parser grammars are pinned, hash-verified package dependencies, so indexing needs no network. Their licenses are in
+- Installation is the only step that downloads anything. The parser grammars are pinned, hash-verified package
+  dependencies, so indexing needs no network. Their licenses are in
   [`THIRD_PARTY_NOTICES.md`](https://github.com/Symasc/RepoAtlas/blob/master/THIRD_PARTY_NOTICES.md).
 - `repoatlas sync` changes the index only, never your source, and nothing syncs on its own.
 - The explorer and the local API listen on loopback only. The API requires a token, the explorer answers only its
   own pages, and the browser never holds the token.
-
-## Docker
-
-```bash
-REPOS_DIR=/path/to/your/repos docker compose up -d
-REPOS_DIR=/path/to/your/repos docker compose run --rm repoatlas init /repos
-```
-
-Repositories are mounted read-only and the index lives on a separate volume. The container runs as a non-root user
-with a read-only root filesystem and all capabilities dropped. It carries the CLI and the MCP server, not the
-explorer.
 
 ## Documentation
 
@@ -263,7 +248,7 @@ RepoAtlas is in early development. 0.1.0 is its first release, and its commands,
 ```bash
 uv sync --all-groups
 uv run pytest -n auto    # the default suite, on every core
-uv run pytest -m slow    # slower tests; downloads the embedding model once
+uv run pytest -m slow    # slower tests, deselected by default
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright

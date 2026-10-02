@@ -35,7 +35,6 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -44,7 +43,6 @@ from repoatlas.config.settings import Settings
 from repoatlas.containment import ContentStatus, FileContent, RepositoryBoundary
 from repoatlas.dependencies.registry import DependencyRegistry
 from repoatlas.discovery.languages import detect_language, is_lockfile, is_manifest
-from repoatlas.embeddings.protocol import EmbeddingModel, EmbeddingUnavailable
 from repoatlas.gitstate.client import GitClient
 from repoatlas.graph.keys import file_key, repository_key, symbol_key
 from repoatlas.graph.linker import GLOBAL_PARSER, GlobalLinkResult, ReferenceLinker
@@ -77,7 +75,6 @@ from repoatlas.storage.sqlite.stores import (
     SqliteKnowledgeStore,
     SqliteRepositoryStore,
 )
-from repoatlas.storage.sqlite.vectors import SqliteVectorIndex
 from repoatlas.sync.planner import decide_rehash, facts_version, plan_sync
 from repoatlas.sync.progress import LINK_STAGES, SILENT, SyncProgress
 from repoatlas.sync.scanner import (
@@ -127,20 +124,6 @@ def _enumeration_diagnostics(warning_count: int) -> list[ParseDiagnostic]:
     return [ParseDiagnostic(severity=Severity.WARNING, message=ENUMERATION_INCOMPLETE)]
 
 
-@dataclass(frozen=True, slots=True)
-class EmbeddingResult:
-    """What one embedding pass did. Never a failure: semantic retrieval is an aid."""
-
-    embedded: int = 0
-    pending: int = 0
-    orphans_removed: int = 0
-    detail: str = ""
-
-    @property
-    def skipped(self) -> bool:
-        return self.pending > 0 and self.embedded == 0
-
-
 class SyncEngine:
     """Synchronizes repositories with the working tree."""
 
@@ -153,19 +136,15 @@ class SyncEngine:
         dependencies: SqliteDependencyStore,
         registry: ParserRegistry,
         settings: Settings,
-        vectors: SqliteVectorIndex | None = None,
         git: GitClient | None = None,
         dependency_registry: DependencyRegistry | None = None,
-        embeddings: EmbeddingModel | None = None,
     ) -> None:
         self._repositories = repositories
         self._files = files
         self._knowledge = knowledge
         self._dependencies = dependencies
-        self._vectors = vectors
         self._registry = registry
         self._dependency_registry = dependency_registry or DependencyRegistry()
-        self._embeddings = embeddings
         self._settings = settings
         self._git = git or GitClient()
         self._linker = ReferenceLinker(knowledge, dependencies)
@@ -204,11 +183,11 @@ class SyncEngine:
     def ensure_repository_identity(self, repo: Repository) -> Repository:
         """Give the repository its canonical identity, assigning one if it lacks it.
 
-        A database written before schema v5 has rows with no identity, and the
-        identity is a function of the *configured root* — a value SQL cannot see,
-        which is why the migration leaves the column empty rather than filling it
-        with host-absolute paths. It is assigned here, before anything builds a key
-        from it, and never rewritten afterwards (ARCHITECTURE.md §3).
+        A row can exist with no identity yet, because the identity is a function
+        of the *configured root* — a value SQL cannot see — so the schema leaves
+        the column empty rather than filling it with host-absolute paths. It is
+        assigned here, before anything builds a key from it, and never rewritten
+        afterwards (ARCHITECTURE.md §3).
         """
         if repo.slug:
             return repo
@@ -594,7 +573,6 @@ class SyncEngine:
                     line_end=chunk.line_end,
                     text=chunk.text,
                     token_estimate=chunk.token_estimate,
-                    content_hash=chunk.content_hash,
                     span_index=chunk.span_index,
                     split_index=chunk.split_index,
                     split_total=chunk.split_total,
@@ -659,8 +637,8 @@ class SyncEngine:
         RepoAtlas may legitimately know that a path exists and is too large —
         deletion tracking depends on the row, and an operator asking why a file
         is missing from the index deserves an answer. What it may not do is turn
-        any of that file's bytes into a fact: no parser, no chunks, no
-        embeddings, no evidence (V1_SPEC §17).
+        any of that file's bytes into a fact: no parser, no chunks, no evidence
+        (V1_SPEC §17).
 
         The row still needs a **content** hash, because that hash is the sole
         authority on whether a file changed (ARCHITECTURE.md §9) and the planner
@@ -695,9 +673,9 @@ class SyncEngine:
 
         # `replace_file_facts` with only the file entity is what removes whatever
         # this path asserted when it was small enough to read: entities, edges,
-        # unresolved references, chunks, FTS rows and the embeddings reachable
-        # through them all cascade away (ARCHITECTURE.md §3). It commits together
-        # with the row, so the removal and the claim that it happened are one fact.
+        # unresolved references, chunks and FTS rows all cascade away
+        # (ARCHITECTURE.md §3). It commits together with the row, so the removal
+        # and the claim that it happened are one fact.
         self._record_without_facts(
             repo,
             rel_path,
@@ -852,7 +830,6 @@ class SyncEngine:
         *,
         full: bool = False,
         scope: str = "global",
-        embed_repo_ids: Sequence[int] | None = None,
         progress: SyncProgress | None = None,
     ) -> SyncReport:
         """One synchronization run, from working tree to complete knowledge state.
@@ -865,8 +842,7 @@ class SyncEngine:
         2. the replacement global graph is computed, touching nothing;
         3. **one transaction** swaps the graph in and marks every repository of
            this run synchronized — so the graph and the currency claim it justifies
-           become visible together;
-        4. embedding runs last, over what changed.
+           become visible together.
 
         A failure before step 3 leaves the previous complete graph and every
         in-scope repository recorded as unfinished, which is what makes the next
@@ -891,7 +867,7 @@ class SyncEngine:
         self._knowledge.set_uses_links_state(PENDING)
         self._progress = progress if progress is not None else SILENT
         try:
-            return self._run(repositories, full=full, scope=scope, embed_repo_ids=embed_repo_ids)
+            return self._run(repositories, full=full, scope=scope)
         finally:
             self._uses = None
             self._progress = SILENT
@@ -902,7 +878,6 @@ class SyncEngine:
         *,
         full: bool,
         scope: str,
-        embed_repo_ids: Sequence[int] | None,
     ) -> SyncReport:
         reports: list[RepositorySyncReport] = []
         completions: list[SyncCompletion] = []
@@ -945,20 +920,12 @@ class SyncEngine:
             link = self._linker.commit_global(plan)
             self._repositories.mark_many_synced(completions)
 
-        # Embedding runs last and only over what changed. It is the one stage
-        # allowed to be unavailable without failing the sync (V1_SPEC §14), so it
-        # sits outside the transaction that decides whether the run succeeded.
-        embedding = self.embed_pending(embed_repo_ids)
-
         return SyncReport(
             repositories=tuple(reports),
             scope=scope,
             linked_references=link.resolved,
             unresolved_references=link.unresolved,
             cross_repository_edges=link.cross_repository,
-            embedded_chunks=embedding.embedded,
-            pending_embeddings=embedding.pending,
-            embedding_detail=embedding.detail,
             link_trace=link.trace,
         )
 
@@ -971,67 +938,6 @@ class SyncEngine:
         are separate phases; see :class:`~repoatlas.graph.linker.ReferenceLinker`.
         """
         return self._linker.link_global()
-
-    def embed_pending(self, repo_ids: Sequence[int] | None = None) -> EmbeddingResult:
-        """Embed chunk text that has no vector for the configured model.
-
-        This is the whole of "never re-embed unchanged data" (V1_SPEC §20).
-        Vectors are keyed by chunk content hash, so a chunk whose text survived a
-        reparse byte-for-byte already has one and is never seen here — even though
-        its row was deleted and reinserted with a new id.
-
-        Availability is checked *before* any work is queued, so a missing model
-        produces one clear message rather than failing part-way through.
-        """
-        if self._vectors is None or self._embeddings is None:
-            return EmbeddingResult(detail="embeddings not configured")
-
-        pending = self._vectors.missing_hashes(self._embeddings.id, repo_ids)
-        orphans = self._vectors.gc_orphan_vectors()
-        if not pending:
-            return EmbeddingResult(orphans_removed=orphans, detail="up to date")
-
-        if not self._embeddings.available():
-            # Not fatal: exact, symbol and graph retrieval are unaffected, and the
-            # next sync retries. Semantic retrieval simply stays off.
-            return EmbeddingResult(
-                pending=len(pending),
-                orphans_removed=orphans,
-                detail=self._embeddings.availability_detail(),
-            )
-
-        embedded = 0
-        batch = max(1, self._settings.embeddings.batch_size)
-        self._progress.embedding(0, len(pending))
-        for start in range(0, len(pending), batch):
-            window = pending[start : start + batch]
-            pairs = self._vectors.texts_for_hashes(window)
-            if not pairs:
-                continue
-            try:
-                vectors = self._embeddings.embed([text for _, text in pairs])
-            except EmbeddingUnavailable as exc:
-                return EmbeddingResult(
-                    embedded=embedded,
-                    pending=len(pending) - embedded,
-                    orphans_removed=orphans,
-                    detail=str(exc),
-                )
-            embedded += self._vectors.upsert_many(
-                self._embeddings.id,
-                self._embeddings.dim,
-                [
-                    (content_hash, vector)
-                    for (content_hash, _), vector in zip(pairs, vectors, strict=True)
-                ],
-            )
-            self._progress.embedding(min(embedded, len(pending)), len(pending))
-
-        return EmbeddingResult(
-            embedded=embedded,
-            orphans_removed=orphans,
-            detail=f"model {self._embeddings.id}",
-        )
 
     @staticmethod
     def _file_entity(repo: Repository, file_id: int, rel_path: str) -> EntityRecord:

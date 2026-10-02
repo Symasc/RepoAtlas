@@ -39,8 +39,7 @@ def current_facts_version(workspace: Workspace) -> str:
     """The facts version stored rows are compared against.
 
     A free function rather than a sync-engine method so that a read-only question
-    never constructs an engine — which would build the embedding backend, and
-    possibly download a model, to answer it (V1_SPEC §12).
+    never constructs an engine to answer it (V1_SPEC §12).
     """
     return facts_version(workspace.registry, workspace.dependency_registry)
 

@@ -32,8 +32,6 @@ class Recorder:
 
     def __init__(self) -> None:
         self.events: list[tuple[object, ...]] = []
-        #: The embedding counts alone, typed, for the comparisons below.
-        self.embedded: list[tuple[int, int]] = []
 
     def discovering(self) -> None:
         self.events.append(("discovering",))
@@ -46,10 +44,6 @@ class Recorder:
 
     def linking(self, stage: str, position: int, total: int) -> None:
         self.events.append(("linking", stage, position, total))
-
-    def embedding(self, done: int, total: int) -> None:
-        self.events.append(("embedding", done, total))
-        self.embedded.append((done, total))
 
     def of(self, kind: str) -> list[tuple[object, ...]]:
         return [event for event in self.events if event[0] == kind]
@@ -77,8 +71,8 @@ def test_init_reports_discovery_each_repository_and_every_link_stage(
     assert len(repositories) >= 2
     kinds = _kinds(recorder)
     assert kinds[0] == "discovering"
-    assert kinds[1:-2] == ["scanning", "indexing"] * len(repositories)
-    assert kinds[-2:] == ["linking", "embedding"]
+    assert kinds[1:-1] == ["scanning", "indexing"] * len(repositories)
+    assert kinds[-1] == "linking"
 
     # Each repository's file count is the number the report says it indexed, and
     # the count climbs one file at a time from nothing to all of them.
@@ -93,10 +87,6 @@ def test_init_reports_discovery_each_repository_and_every_link_stage(
         ("linking", stage, position, len(LINK_STAGES))
         for position, stage in enumerate(LINK_STAGES, start=1)
     ]
-
-    done = [count for count, _ in recorder.embedded]
-    assert done[0] == 0 and done == sorted(done)
-    assert recorder.embedded[-1] == (report.embedded_chunks, report.embedded_chunks)
 
 
 def test_a_repository_scoped_sync_reports_one_repository_and_no_discovery(
@@ -223,7 +213,7 @@ def test_a_line_never_reaches_the_terminal_edge() -> None:
     clock.now += 1
     progress.scanning(13, 40, "x" * 80, 123_456)
     clock.now += 1
-    progress.embedding(1, 3)
+    progress.linking("resolve", 2, 5)
     frames = _frames(stream.getvalue())
     assert len(frames) == 3
     assert all(len(frame) <= 39 for frame in frames), frames
@@ -245,7 +235,7 @@ def test_close_erases_the_line_and_only_once_something_was_drawn() -> None:
 def test_a_terminal_that_cannot_encode_blocks_gets_ascii() -> None:
     stream = Terminal(encoding="ascii")
     progress = _renderer(stream)
-    progress.embedding(1, 2)
+    progress.indexing(1, 1, "api", 1, 2)
     (frame,) = _frames(stream.getvalue())
     frame.encode("ascii")
     assert "#" in frame and "-" in frame

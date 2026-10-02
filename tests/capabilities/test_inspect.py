@@ -546,7 +546,6 @@ def test_inspection_never_syncs_the_index_it_reads(
         initialized.knowledge, "replace_file_facts", forbid("knowledge.replace_file_facts")
     )
     monkeypatch.setattr(initialized.knowledge, "intern_entity", forbid("knowledge.intern_entity"))
-    monkeypatch.setattr(initialized.vectors, "upsert_many", forbid("vectors.upsert_many"))
 
     service = _service(initialized)
     service.inspect(InspectRequest(context=_repo(), target=InspectTarget(path=CONFIG)))

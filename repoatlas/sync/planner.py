@@ -31,13 +31,7 @@ def facts_version(registry: ParserRegistry, dependency_registry: DependencyRegis
     files directly instead of hashing the whole tree to learn that nothing moved.
 
     A free function rather than a method on the engine so that ``status`` can
-    compare an index against it without constructing a sync engine — which would
-    build the embedding backend, and possibly download a model, just to answer a
-    read-only question.
-
-    The embedding model is deliberately *not* part of this. Vectors are keyed by
-    the model that produced them, so switching models simply finds no vectors for
-    the new id and re-embeds — without reparsing anything (ARCHITECTURE.md §9).
+    compare an index against it without constructing a sync engine.
     """
     return (
         f"schema:{SCHEMA_VERSION}"

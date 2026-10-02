@@ -1,14 +1,14 @@
-"""Rank fusion, tiering, deduplication and budgeting (ARCHITECTURE.md §10, stages 5-8).
+"""Rank fusion, tiering, deduplication and budgeting (ARCHITECTURE.md §10, stages 7-10).
 
-Reciprocal-rank fusion, because BM25 scores, cosine similarities, literal-match
-scores and graph distances are not commensurable and RRF needs no per-source
+Reciprocal-rank fusion, because BM25 scores, literal-match scores and graph
+distances are not commensurable and RRF needs no per-source
 calibration to combine them stably.
 
 **Fusion never crosses a tier.** RRF answers "how strongly do the retrievers agree
 about this span"; the tier answers "is this a fact about the code or a guess about
 the question", and the second question is settled before the first is asked. That
 ordering is the core retrieval principle of V1_SPEC §14 made structural: no
-similarity score, however high, moves an embedding neighbour above an exact
+word-overlap score, however high, moves a lexical match above an exact
 identifier, an exact error string, an exact symbol, an environment variable or a
 graph-supported relationship.
 
@@ -16,8 +16,8 @@ graph-supported relationship.
 enough, because they conflate two different things a candidate can be strong
 *for*. A question naming ``src/config.py`` produced an exact-path candidate for
 that file — one deterministic vote — while a ``tests/config.py`` stuffed with
-``config``-shaped symbols collected exact-content, entity-name, lexical and
-semantic votes, and a ``docs/notes.txt`` mentioning the target path a hundred
+``config``-shaped symbols collected exact-content, entity-name and lexical
+votes, and a ``docs/notes.txt`` mentioning the target path a hundred
 times won the literal stage outright. All were `DETERMINISTIC`, so the tier
 separated nothing and the fused score decided — by vote count. The file the user
 named finished eighth behind a text file that merely talks about it.
@@ -120,8 +120,8 @@ _EXACT, _SUFFIX, _UNNAMED = 0, 1, 2
 #: exact identity and above everything the user did not spell.
 #:
 #: Nothing below `EXACT_SUBPATH` earns a position. A basename says what a file is
-#: called, not where it lives; an entity name, a content mention and a lexical or
-#: semantic neighbour are weaker still. They remain ordered by agreement, exactly
+#: called, not where it lives; an entity name, a content mention and a lexical
+#: match are weaker still. They remain ordered by agreement, exactly
 #: as before.
 _ANCHORS = {
     MatchClass.EXACT_PATH: _EXACT,
@@ -176,8 +176,8 @@ def fuse(
     The specificity key
     holds the guarantee the score cannot express: **a candidate from a file the
     query named by path outranks every candidate from a file that was merely named
-    less exactly** — a shared basename, a symbol with a matching name, a lexical or
-    semantic neighbour, or a document that quotes the path. It is a rank position
+    less exactly** — a shared basename, a symbol with a matching name, a lexical
+    match, or a document that quotes the path. It is a rank position
     rather than a bonus, so no quantity of agreement can add up to it, and it is
     applied strictly *inside* a tier, so it can never lift a guess above a fact.
 
@@ -305,7 +305,7 @@ def enforce_precedence(candidates: Sequence[EvidenceCandidate]) -> list[Evidence
     boundary.
 
     Applying it before budgeting matters as much as applying it before returning:
-    a hard token budget spent on embedding neighbours would starve deterministic
+    a hard token budget spent on lexical matches would starve deterministic
     evidence out of the answer just as effectively as ranking it lower.
 
     ``sorted`` is stable, so within a tier and a specificity the incoming order —

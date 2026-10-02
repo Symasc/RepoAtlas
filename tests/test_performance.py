@@ -90,7 +90,6 @@ def test_the_trace_accounts_for_the_time_actually_spent(measured: Workspace) -> 
         "file",
         "lexical",
         "symbol",
-        "semantic",
         "graph",
         "fuse",
         "dedup",
@@ -194,7 +193,6 @@ def test_an_unchanged_sync_costs_far_less_than_the_first(
     assert elapsed < NO_OP_SYNC_BUDGET_S
     assert report.files_indexed == 0
     assert all(entry.unchanged > 0 or entry.files_indexed == 0 for entry in report.repositories)
-    assert report.embedded_chunks == 0
 
 
 def test_one_changed_file_reindexes_one_file(measured: Workspace, workspace_root: Path) -> None:

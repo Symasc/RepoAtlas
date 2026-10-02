@@ -110,7 +110,6 @@ def link_settings(tmp_path: Path) -> Settings:
     return Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "link-state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
 

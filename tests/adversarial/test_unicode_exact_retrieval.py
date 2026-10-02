@@ -113,7 +113,6 @@ def indexed(tmp_path: Path, unicode_root: Path) -> Iterator[Workspace]:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     workspace = open_workspace(settings=settings, require_root=False)
@@ -492,7 +491,6 @@ def test_a_unicode_literal_straddling_a_chunk_seam_is_found(
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     cap = settings.indexing.max_chunk_chars

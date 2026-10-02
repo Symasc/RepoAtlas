@@ -454,7 +454,6 @@ def test_no_capability_module_parses_a_trace_string() -> None:
 
     for name in ("search.py", "service.py"):
         source = Path(f"repoatlas/capabilities/{name}").read_text(encoding="utf-8")
-        assert "semantic_detail" not in source
         assert ".detail.startswith" not in source
         assert "suppressed:" not in source
 
@@ -691,7 +690,6 @@ def test_search_writes_nothing_to_the_index(
         initialized.knowledge, "replace_file_facts", forbid("knowledge.replace_file_facts")
     )
     monkeypatch.setattr(initialized.knowledge, "intern_entity", forbid("knowledge.intern_entity"))
-    monkeypatch.setattr(initialized.vectors, "upsert_many", forbid("vectors.upsert_many"))
 
     service.search(SearchRequest(question=SERVICE_HOST, context=GLOBAL))
     service.search(SearchRequest(question="load_config", context=GLOBAL))
@@ -712,16 +710,3 @@ def test_the_indexed_facts_are_unchanged_by_searching(initialized: Workspace) ->
     )
 
     assert fact_snapshot(initialized) == before
-
-
-def test_search_never_populates_missing_embeddings(initialized: Workspace) -> None:
-    """Retrieval reads vectors; it does not build them.
-
-    Embedding on a read would make the first search of a cold index slow, mutating
-    and silently different from the second.
-    """
-    from pathlib import Path
-
-    for name in ("search.py", "service.py"):
-        source = Path(f"repoatlas/capabilities/{name}").read_text(encoding="utf-8")
-        assert "embed_pending" not in source
