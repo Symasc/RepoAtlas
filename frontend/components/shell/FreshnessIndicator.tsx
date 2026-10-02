@@ -5,8 +5,8 @@ import { ArrowClockwiseIcon } from "@phosphor-icons/react";
 
 import { Inline } from "@/components/common/Inline";
 import { RepoSwatch } from "@/components/common/RepoSwatch";
-import { relativeTime } from "@/lib/model/format";
-import { summarize, type FreshnessTone } from "@/lib/model/freshness";
+import { absoluteTime, plural, relativeTime } from "@/lib/model/format";
+import { summarize, type FreshnessModel, type FreshnessTone } from "@/lib/model/freshness";
 import type { RepositoryModel } from "@/lib/model/repositories";
 
 import classes from "./FreshnessIndicator.module.css";
@@ -113,12 +113,29 @@ export function FreshnessIndicator({ repositories, check, offline }: Props) {
                 <p className={classes.explanation}>
                   <Inline text={r.freshness.explanation} />
                 </p>
+                <When freshness={r.freshness} indexedAt={r.lastIndexedAt} />
               </div>
             </li>
           ))}
         </ul>
       </Popover.Dropdown>
     </Popover>
+  );
+}
+
+/** When a repository was indexed, and what of it an older build wrote, as the index records it. */
+function When({ freshness, indexedAt }: { freshness: FreshnessModel; indexedAt: string | null }) {
+  const at = freshness.indexedAt ?? indexedAt;
+  const parts: string[] = [];
+  if (freshness.outdatedFiles > 0) parts.push(`${plural(freshness.outdatedFiles, "file")} indexed by an older build`);
+  if (at === null && parts.length === 0) return null;
+  return (
+    <p className={classes.when}>
+      {at && <time dateTime={at} title={absoluteTime(at)}>Indexed {relativeTime(at)}</time>}
+      {parts.map((part) => (
+        <span key={part}>{part}</span>
+      ))}
+    </p>
   );
 }
 

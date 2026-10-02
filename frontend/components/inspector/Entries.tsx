@@ -20,7 +20,8 @@ export function EntryList({
 }: {
   entries: readonly ChildEntry[];
   total?: number;
-  onGo: (path: string) => void;
+  /** Into a directory or file; a list of declarations has none. */
+  onGo?: (path: string) => void;
   onLine?: (line: number) => void;
 }) {
   if (entries.length === 0) return <Quiet>Nothing is indexed here.</Quiet>;
@@ -37,7 +38,7 @@ export function EntryList({
                 data-static={onLine && entry.line_start ? undefined : true}
                 onClick={() => entry.line_start && onLine?.(entry.line_start)}
               >
-                <PuzzlePieceIcon size={18} className={classes.rowDetail} aria-hidden />
+                <PuzzlePieceIcon size={16} className={classes.entryIcon} aria-hidden />
                 <span className={classes.entryName}>{entry.name}</span>
                 <span className={classes.entryMeta}>
                   {entry.type?.replace(/_/g, " ")}
@@ -45,8 +46,8 @@ export function EntryList({
                 </span>
               </button>
             ) : (
-              <button type="button" className={classes.entry} onClick={() => onGo(entry.path)}>
-                <PathBadge path={entry.name} file={entry.kind !== "directory"} size={24} />
+              <button type="button" className={classes.entry} onClick={() => onGo?.(entry.path)}>
+                <PathBadge path={entry.name} file={entry.kind !== "directory"} />
                 <span className={classes.entryName}>{entry.name}</span>
                 <span className={classes.entryMeta}>
                   {entry.kind === "directory" ? plural(entry.files ?? 0, "file") : (entry.language ?? "")}

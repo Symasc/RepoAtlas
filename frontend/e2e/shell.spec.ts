@@ -192,7 +192,10 @@ test("a file opens on its source, and Links shows its neighbourhood and the evid
     await panel.locator("button[aria-pressed]").first().click();
     await expect(panel.getByRole("tab", { name: "Evidence", selected: true })).toBeVisible();
     await expect(panel).toContainText(/relationship/);
-    await expect(page.locator('.react-flow__edges g[data-emphasis="selected"]')).toHaveCount(1);
+    // the chosen connection, every line of it: one per relationship it carries
+    const selected = page.locator('.react-flow__edges g[data-emphasis="selected"]');
+    await expect(selected.first()).toBeVisible();
+    expect(new Set(await selected.evaluateAll((gs) => gs.map((g) => g.getAttribute("data-link")))).size).toBe(1);
   }
   await page.screenshot({ path: testInfo.outputPath("file.png") });
   expect(problems).toEqual([]);

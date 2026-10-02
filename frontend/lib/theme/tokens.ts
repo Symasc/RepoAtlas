@@ -1,15 +1,31 @@
 /**
  * The semantic colour tokens, one set per scheme, emitted as `--ra-<name>`.
  *
- * Colour carries meaning: neutral inside a repository, the accent across one;
- * a family (package, endpoint) by its own hue; freshness by tone. Light is
- * designed on its own terms (soft grey surfaces a step above a cool grey canvas,
- * a highlighter for evidence), not derived by inverting dark. Every text tone
- * keeps 4.5:1 on every background it sits on, tints included.
+ * Neutrals are warm, like paper and graphite, not the blue-black of a default
+ * dark theme. One accent, a vermilion, marks what is selected, focused or
+ * pressed next, and nothing else: no chrome is tinted with it. A line's colour
+ * is data, set as a transit map sets its lines: saturated and distinct, one per
+ * relationship (imports blue, calls green, uses violet, other code links grey,
+ * HTTP teal, package dependencies magenta, configuration amber), each at 4.5:1
+ * or better on the canvas, and so is the text on a count tag filled with it.
+ * Everything a line joins is one quiet card: a solid fill a step above the
+ * canvas with a clear outline, the same for every kind of thing, told apart by
+ * its icon and its title. An opened level is a district, a plain region a half
+ * step above the canvas, named like a place on a map. The canvas is squared by
+ * a faint graticule.
+ * Light is designed on its own terms, not derived by inverting dark. Every text
+ * tone keeps 4.5:1 on every background it sits on.
  */
 export interface ColorTokens {
   canvas: string;
-  gridDot: string;
+  /** The map's grid lines: a texture, never read. */
+  graticule: string;
+  /** Every node on the canvas: its fill, its outline, and a row pointed at inside it. */
+  card: string;
+  cardOutline: string;
+  cardRaised: string;
+  /** An opened level's region, under its cards. */
+  district: string;
   surface: string;
   surfaceElevated: string;
   border: string;
@@ -23,11 +39,8 @@ export interface ColorTokens {
   selected: string;
   hover: string;
   focus: string;
-  repository: string;
   package: string;
-  file: string;
   endpoint: string;
-  external: string;
   config: string;
   halo: string;
   success: string;
@@ -35,118 +48,141 @@ export interface ColorTokens {
   danger: string;
   evidence: string;
   edge: string;
+  /** Code links that are none of the relationships below: structure, mostly. */
   edgeCross: string;
+  /** Text on a count tag filled with a line's colour. */
+  onLine: string;
+  /** Code links by relationship. */
+  relImports: string;
+  relCalls: string;
+  relUses: string;
   shadow: string;
 }
 
 export const DARK: ColorTokens = {
-  canvas: "#070d16",
-  gridDot: "rgba(154, 168, 188, 0.22)",
-  surface: "#0c1420",
-  surfaceElevated: "#111b29",
-  border: "#1c2838",
-  borderStrong: "#2a3a4f",
-  text: "#e6edf7",
-  textMuted: "#9aa8bc",
-  textSubtle: "#7a889c",
-  accent: "#5b8cff",
-  accentStrong: "#8aabff",
-  onAccent: "#050a12",
-  selected: "rgba(91, 140, 255, 0.16)",
-  hover: "rgba(154, 168, 188, 0.08)",
-  focus: "#8aabff",
-  repository: "#c3cedd",
-  package: "#8b73ff",
-  file: "#9aa8bc",
-  endpoint: "#38cfee",
-  external: "#7a889c",
-  config: "#e2b54f",
-  halo: "rgba(91, 140, 255, 0.28)",
-  success: "#2fd39f",
-  warning: "#f2a33a",
-  danger: "#f0616d",
-  evidence: "rgba(242, 211, 90, 0.22)",
-  edge: "#2a3a4f",
-  edgeCross: "#5b8cff",
-  shadow: "0 1px 0 rgba(0, 0, 0, 0.35), 0 12px 32px rgba(0, 0, 0, 0.45)",
+  canvas: "#111110",
+  graticule: "rgba(236, 233, 226, 0.04)",
+  card: "#1d1d1c",
+  cardOutline: "#5f5c56",
+  cardRaised: "#292927",
+  district: "#171716",
+  surface: "#1a1a19",
+  surfaceElevated: "#212120",
+  border: "#2e2d2b",
+  borderStrong: "#45433f",
+  text: "#ece9e2",
+  textMuted: "#b3aea4",
+  textSubtle: "#9c978d",
+  accent: "#ef7a50",
+  accentStrong: "#ff9a74",
+  onAccent: "#1b0d07",
+  selected: "rgba(239, 122, 80, 0.16)",
+  hover: "rgba(236, 233, 226, 0.06)",
+  focus: "#ef7a50",
+  package: "#ff6fae",
+  endpoint: "#22c7c0",
+  config: "#ffb43a",
+  halo: "rgba(239, 122, 80, 0.28)",
+  success: "#74c27a",
+  warning: "#e2a447",
+  danger: "#f2707f",
+  evidence: "rgba(226, 196, 92, 0.13)",
+  edge: "#45433f",
+  edgeCross: "#a3a09a",
+  onLine: "#111110",
+  relImports: "#4f9dff",
+  relCalls: "#3fcf73",
+  relUses: "#b07cff",
+  shadow: "0 1px 0 rgba(0, 0, 0, 0.3), 0 6px 20px rgba(0, 0, 0, 0.35)",
 };
 
 export const LIGHT: ColorTokens = {
-  // nothing is paper-white: the brightest surface sits near 88% luminance,
+  // nothing is paper-white: the brightest surface sits near 86% luminance,
   // so a long read in daylight does not glare
-  canvas: "#dde2e9",
-  gridDot: "rgba(16, 24, 38, 0.18)",
-  surface: "#e8ecf1",
-  surfaceElevated: "#eff2f5",
-  border: "#cdd4de",
-  borderStrong: "#b3bdca",
-  text: "#101826",
-  textMuted: "#3a4658",
-  textSubtle: "#4a5668",
-  accent: "#2150cc",
-  accentStrong: "#1a44b8",
+  canvas: "#e9e7e2",
+  graticule: "rgba(28, 26, 23, 0.055)",
+  card: "#f6f5f2",
+  cardOutline: "#8f8a7f",
+  cardRaised: "#ecebe6",
+  district: "#efeee9",
+  surface: "#ece9e3",
+  surfaceElevated: "#f1efea",
+  border: "#d2cec5",
+  borderStrong: "#b4afa4",
+  text: "#1c1a17",
+  textMuted: "#46423b",
+  textSubtle: "#58534a",
+  accent: "#a8381a",
+  accentStrong: "#8f2d0f",
   onAccent: "#ffffff",
-  selected: "rgba(37, 86, 216, 0.12)",
-  hover: "rgba(16, 24, 38, 0.06)",
-  focus: "#2150cc",
-  repository: "#2c394b",
-  package: "#5b3fcf",
-  file: "#3a4658",
-  endpoint: "#08657f",
-  external: "#4a5668",
-  config: "#765200",
-  halo: "rgba(33, 80, 204, 0.22)",
-  success: "#08664a",
-  warning: "#7f4a00",
-  danger: "#ad2633",
-  evidence: "#f3e39a",
-  edge: "#b3bdca",
-  edgeCross: "#2150cc",
-  shadow: "0 1px 2px rgba(16, 24, 38, 0.08), 0 10px 28px rgba(16, 24, 38, 0.1)",
+  selected: "rgba(168, 56, 26, 0.11)",
+  hover: "rgba(28, 26, 23, 0.06)",
+  focus: "#a8381a",
+  package: "#ad1263",
+  endpoint: "#006b66",
+  config: "#7f4f00",
+  halo: "rgba(168, 56, 26, 0.2)",
+  success: "#276b2c",
+  warning: "#855000",
+  danger: "#a51833",
+  evidence: "#ecdb95",
+  edge: "#b4afa4",
+  edgeCross: "#57534c",
+  onLine: "#ffffff",
+  relImports: "#1c5bbd",
+  relCalls: "#0f6a33",
+  relUses: "#7139c7",
+  shadow: "0 1px 2px rgba(28, 26, 23, 0.07), 0 6px 18px rgba(28, 26, 23, 0.08)",
 };
 
 /**
- * Repository identity hues, low in chroma so they label without shouting, and
- * never the only signal: a repository is also its frame and its name. Lightness
- * is set per scheme for contrast against that scheme's surfaces.
+ * Repository identity hues, never the only signal: a repository is also its
+ * frame and its name. Each is a solid square beside the name, like a line's
+ * bullet on a transit map. Lightness is set per scheme for contrast against
+ * that scheme's surfaces.
  */
 export const REPOSITORY_HUES = [255, 195, 150, 100, 65, 25, 340, 295] as const;
 
+/** At light's lightness, teal, olive and amber hold less chroma inside sRGB than the rest. */
+const LIGHT_CHROMA: Partial<Record<number, number>> = { 195: 0.078, 100: 0.095, 65: 0.104 };
+
 export function repositoryColor(hue: number, scheme: "light" | "dark"): string {
-  return scheme === "dark" ? `oklch(0.76 0.08 ${hue})` : `oklch(0.465 0.1 ${hue})`;
+  return scheme === "dark" ? `oklch(0.75 0.115 ${hue})` : `oklch(0.47 ${LIGHT_CHROMA[hue] ?? 0.12} ${hue})`;
 }
+
+
 
 /**
  * Source colour, read by the code reader's highlighter as `--ra-code-<name>`.
- * Each tone keeps 4.5:1 on that scheme's code background, comments included:
- * code is text people read, not decoration.
+ * Each tone keeps 4.5:1 on that scheme's code background, comments included,
+ * and on an evidence line: code is text people read, not decoration.
  */
 const CODE: Record<"light" | "dark", Record<string, string>> = {
   dark: {
-    foreground: "#d9e2ef",
-    background: "#0a111c",
-    "token-keyword": "#a597ff",
-    "token-function": "#7cabff",
-    "token-string": "#7fd3a6",
-    "token-string-expression": "#e2b54f",
-    "token-constant": "#f2aa6b",
-    "token-parameter": "#e6edf7",
-    "token-punctuation": "#9aa8bc",
-    "token-comment": "#7d8ba0",
-    "token-link": "#38cfee",
+    foreground: "#e2ded6",
+    background: "#171716",
+    "token-keyword": "#cf9bd0",
+    "token-function": "#8fb8e8",
+    "token-string": "#9bcf8f",
+    "token-string-expression": "#d8b25a",
+    "token-constant": "#eda46f",
+    "token-parameter": "#ece9e2",
+    "token-punctuation": "#a9a49a",
+    "token-comment": "#9c978d",
+    "token-link": "#66c2b9",
   },
   light: {
-    foreground: "#101826",
-    background: "#ecf0f4",
-    "token-keyword": "#5a2fc4",
-    "token-function": "#1a49b8",
-    "token-string": "#0d664b",
-    "token-string-expression": "#765200",
-    "token-constant": "#8c3e05",
-    "token-parameter": "#101826",
-    "token-punctuation": "#3a4658",
-    "token-comment": "#4f5b6c",
-    "token-link": "#08617a",
+    foreground: "#1c1a17",
+    background: "#e9e6df",
+    "token-keyword": "#73306b",
+    "token-function": "#1f4f8a",
+    "token-string": "#2a6528",
+    "token-string-expression": "#6d5000",
+    "token-constant": "#8a3a08",
+    "token-parameter": "#1c1a17",
+    "token-punctuation": "#46423b",
+    "token-comment": "#555048",
+    "token-link": "#0b6058",
   },
 };
 

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { flowEdges } from "@/components/graph/flow";
 import { blend } from "@/components/graph/useTween";
 import type { ChildEntry, ChildLink, RepositoryLink, TopologyChildrenResponse } from "@/lib/api/generated";
-import { arrowhead, centre, floating, LANE_INSET, sideways } from "@/lib/graph/geometry";
+import { arrowhead, centre, floating, LANE_INSET, octilinear, sideways, type Point } from "@/lib/graph/geometry";
 import {
   cardHeight,
   CARD,
@@ -21,14 +21,17 @@ import {
   buildFile,
   buildOpened,
   buildOverview,
+  byRelation,
   childOf,
   familyOf,
+  relationOf,
   FILE_ID,
   FILES_ID,
   FRAME_ID,
   repositoryId,
   SIDE_LIMIT,
   type Box,
+  type LinkData,
 } from "@/lib/model/graph";
 import { depth, direction, search } from "@/lib/model/location";
 import type { RepositoryModel } from "@/lib/model/repositories";
@@ -441,11 +444,65 @@ describe("line geometry", () => {
     expect(onTop || onLeft).toBe(true);
   });
 
-  it("bows a curved line away from the centre", () => {
-    const left: Box = { x: -250, y: -120, width: 100, height: 40 };
-    const right: Box = { x: 150, y: -120, width: 100, height: 40 };
-    const route = floating(left, right, 0, 0.2);
-    expect(route.label.y).toBeLessThan(-100);
+  /** A path's straight runs: each `L` from the point before it, a `Q` (a rounded bend) skipped over. */
+  function runs(path: string): [Point, Point][] {
+    const t = path.split(" ");
+    const out: [Point, Point][] = [];
+    let here: Point = { x: 0, y: 0 };
+    for (let i = 0; i < t.length; ) {
+      const command = t[i++];
+      const next = () => ({ x: Number(t[i++]), y: Number(t[i++]) });
+      if (command === "M") here = next();
+      else if (command === "L") {
+        const to = next();
+        out.push([here, to]);
+        here = to;
+      } else if (command === "Q") {
+        next();
+        here = next();
+      }
+    }
+    return out;
+  }
+  function kindOf([a, b]: [Point, Point]): string {
+    const dx = Math.abs(b.x - a.x);
+    const dy = Math.abs(b.y - a.y);
+    if (dy < 0.2) return "flat";
+    if (dx < 0.2) return "upright";
+    return Math.abs(dx - dy) < 0.3 ? "diagonal" : "other";
+  }
+
+  it("draws a line as a transit map does: straight, one 45° diagonal, straight", () => {
+    const route = octilinear({ x: 0, y: 0 }, { x: 200, y: 60 });
+    expect(runs(route.path).map(kindOf)).toEqual(["flat", "diagonal", "flat"]);
+    // the count sits on the diagonal's middle; the arrow arrives flat
+    expect(route.label).toEqual({ x: 100, y: 30 });
+    expect(route.towards.y).toBe(60);
+    expect(route.start).toEqual({ x: 0, y: 0 });
+  });
+
+  it("crosses at 90° where a diagonal has no room, and runs straight when level", () => {
+    expect(runs(octilinear({ x: 0, y: 0 }, { x: 40, y: 200 }).path).map(kindOf)).toEqual(["flat", "upright", "flat"]);
+    expect(runs(octilinear({ x: 0, y: 0 }, { x: 200, y: 0 }).path).map(kindOf)).toEqual(["flat"]);
+  });
+
+  it("keeps parallel lines one gap apart on the diagonal as on the straight", () => {
+    const from: Box = { x: 0, y: 0, width: 100, height: 40 };
+    const to: Box = { x: 400, y: 120, width: 100, height: 40 };
+    const [upper, lower] = [-4, 4].map((offset) => runs(sideways(from, to, offset).path)[1]!);
+    for (const run of [upper!, lower!]) expect(kindOf(run)).toBe("diagonal");
+    // two lines x − y = c, |c1 − c2| / √2 apart
+    const c = ([p]: [Point, Point]) => p.x - p.y;
+    expect(Math.abs(c(upper!) - c(lower!)) / Math.SQRT2).toBeCloseTo(8, 0);
+  });
+
+  it("leaves a box above another through its bottom and arrives at the other's top", () => {
+    const top: Box = { x: 0, y: 0, width: 100, height: 40 };
+    const below: Box = { x: 20, y: 300, width: 100, height: 40 };
+    const route = floating(top, below);
+    expect(route.start.y).toBe(40);
+    expect(route.end.y).toBe(297);
+    expect(runs(route.path).map(kindOf)).toEqual(["upright", "diagonal", "upright"]);
   });
 
   it("meets a frame as a lane at the other end's height", () => {
@@ -475,9 +532,80 @@ describe("line geometry", () => {
     expect(one).not.toBe(0);
   });
 
+  it("names a code link's relationship by what it does, and every other family as itself", () => {
+    expect(["IMPORTS", "EXPORTS", "CALLS", "EXECUTES", "USES", "REFERENCES", "DEFINES"].map((t) => relationOf("code", t))).toEqual([
+      "imports",
+      "imports",
+      "calls",
+      "calls",
+      "uses",
+      "uses",
+      "other",
+    ]);
+    expect(relationOf("http", "CALLS_HTTP_ROUTE")).toBe("http");
+    expect(relationOf("dependency", "DEPENDS_ON")).toBe("dependency");
+    expect(relationOf("config", "READS")).toBe("config");
+  });
+
+  it("splits a code link into one part per relationship, in a fixed order, counts kept", () => {
+    const link: LinkData = {
+      kind: "observed",
+      family: "code",
+      count: 19,
+      types: [
+        { type: "USES", count: 9 },
+        { type: "IMPORTS", count: 6 },
+        { type: "CALLS", count: 3 },
+        { type: "EXPORTS", count: 1 },
+      ],
+      packages: [],
+      examples: ["e1"],
+    };
+    const parts = byRelation(link);
+    expect(parts.map((p) => [p.relation, p.link.count, p.link.types.map((t) => t.type)])).toEqual([
+      ["imports", 7, ["IMPORTS", "EXPORTS"]],
+      ["calls", 3, ["CALLS"]],
+      ["uses", 9, ["USES"]],
+    ]);
+    // one relationship, or another family: the link itself, whole
+    const single: LinkData = { ...link, types: [{ type: "CALLS", count: 19 }] };
+    expect(byRelation(single)).toEqual([{ relation: "calls", link: single }]);
+    const http: LinkData = { ...link, kind: "http", family: "http" };
+    expect(byRelation(http)).toEqual([{ relation: "http", link: http }]);
+  });
+
+  it("draws each relationship of a code link as its own line, side by side, the count on one", () => {
+    const code: LinkData = {
+      kind: "observed",
+      family: "code",
+      count: 10,
+      types: [
+        { type: "IMPORTS", count: 4 },
+        { type: "CALLS", count: 6 },
+      ],
+      packages: [],
+      examples: [],
+    };
+    const edges = flowEdges(
+      [
+        { id: "code:a->b", source: "a", target: "b", link: code },
+        { id: "http:a->b", source: "a", target: "b", link: { ...code, kind: "http", family: "http", types: [] } },
+      ],
+      { route: () => "side" },
+    );
+    expect(edges.map((e) => [e.id, e.data!.relation, e.data!.base, e.data!.link.count, e.data!.badge?.count ?? null])).toEqual([
+      ["code:a->b~imports", "imports", "code:a->b", 4, 10],
+      ["code:a->b~calls", "calls", "code:a->b", 6, null],
+      ["http:a->b", "http", "http:a->b", 10, 10],
+    ]);
+    // three lines between one pair, none on top of another
+    expect(new Set(edges.map((e) => e.data!.offset)).size).toBe(3);
+  });
+
   it("thickens with the count, within bounds", () => {
     expect(strokeFor(1)).toBeLessThan(strokeFor(100));
-    expect(strokeFor(1e9)).toBe(3.5);
+    expect(strokeFor(1e9)).toBe(5);
+    expect([strokeFor(9), strokeFor(10), strokeFor(999), strokeFor(1000)]).toEqual([2.5, 3.5, 3.5, 5]);
   });
 });
 

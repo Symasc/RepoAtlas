@@ -2,7 +2,7 @@
   margin: 0;
   padding: 8px 0;
   border: 1px solid var(--ra-border);
-  border-radius: 10px;
+  border-radius: var(--ra-radius);
   background-color: var(--ra-code-background);
   font-family: var(--mantine-font-family-monospace);
   font-size: 12px;

@@ -8,15 +8,15 @@
   height: 34px;
   padding: 0 6px 0 10px;
   color: var(--ra-text-subtle);
-  background-color: var(--ra-canvas);
-  border: 1px solid var(--ra-border);
-  border-radius: var(--mantine-radius-sm);
+  background-color: var(--ra-card);
+  border: 1px solid var(--ra-card-outline);
+  border-radius: var(--ra-radius);
   transition:
     border-color var(--ra-duration-fast) var(--ra-ease),
     color var(--ra-duration-fast) var(--ra-ease);
 
   @mixin hover {
-    border-color: var(--ra-border-strong);
+    border-color: var(--ra-text-subtle);
     color: var(--ra-text-muted);
   }
 
@@ -64,8 +64,9 @@
 }
 
 .content {
-  background-color: var(--ra-surface-elevated);
-  border: 1px solid var(--ra-border);
+  background-color: var(--ra-card);
+  border: 1px solid var(--ra-card-outline);
+  border-radius: var(--ra-radius-l);
   box-shadow: var(--ra-shadow);
 }
 
@@ -77,7 +78,7 @@
 }
 
 .action {
-  border-radius: var(--mantine-radius-sm);
+  border-radius: var(--ra-radius);
   color: var(--ra-text);
 
   &[data-selected] {
@@ -103,13 +104,13 @@
 }
 
 .group {
-  /* the group's name is drawn by a pseudo-element: keep it quiet and small */
+  /* the group's name is drawn by a pseudo-element: a quiet heading, in sentence case */
   &::before {
-    color: var(--ra-text-subtle);
-    font-size: var(--mantine-font-size-xs);
+    color: var(--ra-text-muted);
+    font-size: var(--mantine-font-size-sm);
     font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    letter-spacing: 0;
+    text-transform: none;
   }
 }
 
