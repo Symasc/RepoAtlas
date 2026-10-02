@@ -75,9 +75,6 @@
   flex-shrink: 0;
   color: var(--ra-text-muted);
 
-  &[data-tone="folder"] {
-    color: var(--ra-directory);
-  }
   &[data-tone="imports"] {
     color: var(--ra-rel-imports);
   }

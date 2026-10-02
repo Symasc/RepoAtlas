@@ -4,7 +4,7 @@ import { ArrowRightIcon, CaretRightIcon, FileIcon, FolderSimpleIcon, PuzzlePiece
 import { Handle, Position, type Node, type NodeProps, type NodeTypes } from "@xyflow/react";
 import { Fragment, memo, type MouseEvent, type ReactNode } from "react";
 
-import { RepoSwatch, territory } from "@/components/common/RepoSwatch";
+import { RepoSwatch } from "@/components/common/RepoSwatch";
 import type { ChildEntry } from "@/lib/api/generated";
 import { compactCount, formatCount, plural, shortSha } from "@/lib/model/format";
 import type { FreshnessModel } from "@/lib/model/freshness";
@@ -24,7 +24,7 @@ import {
 import type { RepositoryModel } from "@/lib/model/repositories";
 
 import { FAMILY_NOUN } from "./edges";
-import { EntityBadge, LineGlyph, looksLikeFile, PathBadge } from "./glyphs";
+import { EntityBadge, LineGlyph, PathBadge } from "./glyphs";
 import classes from "./Graph.module.css";
 import type { TraceNode } from "./traceNodes";
 
@@ -40,7 +40,6 @@ type Common = { actions: NodeActions; selected?: boolean };
 
 export type RepositoryNodeData = Common & { repository: RepositoryModel; partners: number };
 export type HubNodeData = { repositories: number; files: number; note: string | null };
-export type OrbitNodeData = Record<string, never>;
 export type GroupNodeData = { count: number };
 /** Out to a directory on the way here, `""` for the repository's root (see useClimb). */
 export type Climb = (at: string) => void;
@@ -66,7 +65,6 @@ export type NeighbourNodeData = Common & { node: Neighbour };
 export type GraphNode =
   | Node<RepositoryNodeData, "repository">
   | Node<HubNodeData, "hub">
-  | Node<OrbitNodeData, "orbit">
   | Node<GroupNodeData, "group">
   | Node<FrameNodeData, "frame">
   | Node<DirectoryNodeData, "directory">
@@ -80,7 +78,7 @@ export type GraphNode =
   | TraceNode;
 
 /** Nodes that are backdrop, not things: never faded, never selected. */
-export const BACKDROP: ReadonlySet<string> = new Set(["orbit", "group", "frame", "hub", "traceFrame", "traceLabel"]);
+export const BACKDROP: ReadonlySet<string> = new Set(["group", "frame", "hub", "traceFrame", "traceLabel"]);
 
 /** React Flow wants handles to draw edges from; ours compute their own ends, so one hidden pair will do. */
 export function Anchors() {
@@ -165,12 +163,12 @@ export function languagesOf(repository: RepositoryModel, max = 3): string {
 function RepositoryNode({ id, data }: NodeProps<Node<RepositoryNodeData, "repository">>) {
   const { repository: r, selected = false, actions, partners } = data;
   return (
-    <div className={classes.repository} style={territory(r.hue)} data-selected={selected || undefined}>
+    <div className={classes.repository} data-selected={selected || undefined}>
       <Anchors />
       <Cover id={id} name={r.name} selected={selected} openable actions={actions} />
       <span className={classes.body}>
         <span className={classes.titleLine}>
-          <RepoSwatch hue={r.hue} />
+          <RepoSwatch hue={r.hue} size={12} />
           <span className={classes.name}>{r.name}</span>
           {selected ? <OpenHint /> : <FreshnessWord freshness={r.freshness} />}
         </span>
@@ -195,14 +193,6 @@ function HubNode({ data }: NodeProps<Node<HubNodeData, "hub">>) {
       </span>
       {data.note && <span className={classes.hubNote}>{data.note}</span>}
     </div>
-  );
-}
-
-function OrbitNode() {
-  return (
-    <svg className={classes.orbit} width="100%" height="100%" preserveAspectRatio="none" viewBox="0 0 100 100" aria-hidden>
-      <ellipse cx="50" cy="50" rx="49.5" ry="49.5" vectorEffect="non-scaling-stroke" />
-    </svg>
   );
 }
 
@@ -338,21 +328,19 @@ function EntryRow({ entry, repository, actions }: { entry: ChildEntry; repositor
 
 function CardShell({
   id,
-  kind,
   selected,
   header,
   children,
   summary,
 }: {
   id: string;
-  kind: "directory" | "files";
   selected: boolean;
   header: ReactNode;
   children: ReactNode;
   summary: FamilyCounts;
 }) {
   return (
-    <div className={classes.card} data-kind={kind} data-selected={selected || undefined} data-id={id}>
+    <div className={classes.card} data-selected={selected || undefined} data-id={id}>
       <Anchors />
       {header}
       <ul className={classes.rows}>{children}</ul>
@@ -367,7 +355,6 @@ function DirectoryNode({ id, data }: NodeProps<Node<DirectoryNodeData, "director
   return (
     <CardShell
       id={id}
-      kind="directory"
       selected={selected}
       summary={card.summary}
       header={
@@ -404,7 +391,6 @@ function FilesNode({ id, data }: NodeProps<Node<FilesNodeData, "files">>) {
   return (
     <CardShell
       id={id}
-      kind="files"
       selected={selected}
       summary={card.summary}
       header={
@@ -451,10 +437,10 @@ function SharedNodeView({ id, data }: NodeProps<Node<SharedNodeData, "shared">>)
 function PeerNodeView({ id, data }: NodeProps<Node<PeerNodeData, "peer">>) {
   const { node, hue, actions, selected = false } = data;
   return (
-    <div className={classes.peer} style={territory(hue)} data-selected={selected || undefined}>
+    <div className={classes.peer} data-selected={selected || undefined}>
       <Anchors />
       <Cover id={id} name={node.repository} selected={selected} openable actions={actions} />
-      <RepoSwatch hue={hue} />
+      <RepoSwatch hue={hue} size={12} />
       <span className={classes.body}>
         <span className={classes.name}>{node.repository}</span>
         <span className={classes.meta}>Another repository · {compactCount(node.count)}</span>
@@ -470,7 +456,7 @@ function PlaceNodeView({ id, data }: NodeProps<Node<PlaceNodeData, "place">>) {
   const name = node.path.slice(node.path.lastIndexOf("/") + 1);
   const cut = node.path.lastIndexOf("/");
   return (
-    <div className={classes.place} data-directory={!looksLikeFile(node.path) || undefined} data-selected={selected || undefined}>
+    <div className={classes.place} data-selected={selected || undefined}>
       <Anchors />
       <Cover id={id} name={node.path} selected={selected} openable actions={actions} />
       <PathBadge path={node.path} />
@@ -529,12 +515,7 @@ function AnchorNode({ id, data }: NodeProps<Node<AnchorNodeData, "anchor">>) {
 function NeighbourNode({ id, data }: NodeProps<Node<NeighbourNodeData, "neighbour">>) {
   const { node, actions, selected = false } = data;
   return (
-    <div
-      className={classes.place}
-      data-neighbour
-      data-directory={!looksLikeFile(node.target) || undefined}
-      data-selected={selected || undefined}
-    >
+    <div className={classes.place} data-neighbour data-selected={selected || undefined}>
       <Anchors />
       <Cover id={id} name={node.detail ? `${node.detail}/${node.label}` : node.label} selected={selected} openable actions={actions} />
       <PathBadge path={node.target} />
@@ -551,7 +532,6 @@ function NeighbourNode({ id, data }: NodeProps<Node<NeighbourNodeData, "neighbou
 export const nodeTypes: NodeTypes = {
   repository: memo(RepositoryNode),
   hub: memo(HubNode),
-  orbit: memo(OrbitNode),
   group: memo(GroupNode),
   frame: memo(FrameNode),
   directory: memo(DirectoryNode),

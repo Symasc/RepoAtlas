@@ -97,9 +97,8 @@
 .isFaded {
   --ra-surface: var(--ra-canvas);
   --ra-surface-elevated: var(--ra-canvas);
-  --ra-ground-raised: var(--ra-canvas);
-  --ra-directory-fill: var(--ra-canvas);
-  --ra-directory-border: var(--ra-border);
+  --ra-card: var(--ra-canvas);
+  --ra-card-outline: var(--ra-border);
   --ra-text: var(--ra-text-subtle);
   --ra-text-muted: var(--ra-text-subtle);
   --ra-border-strong: var(--ra-border);
@@ -158,22 +157,13 @@
   pointer-events: none;
 }
 
-/* -- territory: a repository's hue on its own node -------------------------------- */
+/* -- repositories ---------------------------------------------------------------- */
 
 /*
- * As a political map colours its countries: a repository on the overview, or
- * beside an opened one, is washed in its own hue (`--territory`, set by the
- * node). Inside a repository things are coloured by what they are, not whose
- * they are: a directory is the same solid, outlined card in every repository. The wash
- * stays light enough that every text tone keeps 4.5:1 on it. With no territory
- * a surface stays neutral.
+ * One card for everything a line joins, as a transit map draws one station
+ * for every stop: a solid fill a step above the canvas, a clear outline. Kinds
+ * differ by icon and title; colour belongs to the lines.
  */
-.repository,
-.peer {
-  --land: var(--territory, var(--ra-surface));
-}
-
-/* -- repositories ---------------------------------------------------------------- */
 
 .repository,
 .peer,
@@ -186,25 +176,14 @@
   width: 100%;
   height: 100%;
   padding: 0 14px;
-  background-color: var(--ra-surface);
-  border: 1px solid var(--ra-border-strong);
+  background-color: var(--ra-card);
+  border: 1px solid var(--ra-card-outline);
   border-radius: var(--ra-radius);
   color: var(--ra-text);
   transition: border-color var(--ra-duration-fast) var(--ra-ease);
 
   &:hover {
     border-color: var(--ra-text-subtle);
-  }
-}
-
-/* a repository is its own country: a fuller wash than the cards inside one */
-.repository,
-.peer {
-  background-color: color-mix(in oklab, var(--land) var(--ra-wash-country), var(--ra-ground-raised));
-  border-color: color-mix(in oklab, var(--land) 55%, var(--ra-border-strong));
-
-  &:hover {
-    border-color: color-mix(in oklab, var(--land) 50%, var(--ra-text-subtle));
   }
 }
 
@@ -320,23 +299,11 @@
   color: var(--ra-text-subtle);
 }
 
-.orbit {
-  display: block;
-  overflow: visible;
-  pointer-events: none;
-
-  ellipse {
-    fill: none;
-    stroke: var(--ra-border-strong);
-    stroke-width: 1;
-    stroke-dasharray: 3 5;
-  }
-}
-
+/* the unlinked repositories: a district of their own */
 .group {
   width: 100%;
   height: 100%;
-  border: 1px dashed var(--ra-border-strong);
+  background-color: var(--ra-district);
   border-radius: var(--ra-radius-l);
   pointer-events: none;
 }
@@ -349,12 +316,13 @@
   color: var(--ra-text-muted);
 }
 
-/* -- an opened level: the frame and its cards ------------------------------------- */
+/* -- an opened level: its district and its cards ---------------------------------- */
 
+/* a region, not another box: a half step above the canvas, named like a place on a map */
 .frame {
   width: 100%;
   height: 100%;
-  border: 1px solid var(--ra-border-strong);
+  background-color: var(--ra-district);
   border-radius: var(--ra-radius-l);
   pointer-events: none;
 }
@@ -375,8 +343,10 @@
 }
 
 .frameName {
-  font-size: var(--mantine-font-size-xl);
+  font-size: var(--mantine-h2-font-size);
   font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
   color: var(--ra-text);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -453,7 +423,7 @@
 
 /* a directory, the same wherever it is */
 .folder {
-  color: var(--ra-directory);
+  color: var(--ra-text-muted);
 }
 
 .card {
@@ -462,8 +432,8 @@
   flex-direction: column;
   width: 100%;
   height: 100%;
-  background-color: var(--ra-surface);
-  border: 1px solid var(--ra-border-strong);
+  background-color: var(--ra-card);
+  border: 1px solid var(--ra-card-outline);
   border-radius: var(--ra-radius);
   overflow: hidden;
   transition: border-color var(--ra-duration-fast) var(--ra-ease);
@@ -481,6 +451,7 @@
   height: 44px;
   padding: 0 14px;
   border: 0;
+  border-bottom: 1px solid var(--ra-border);
   background: transparent;
   color: var(--ra-text);
   font: inherit;
@@ -488,7 +459,7 @@
   cursor: pointer;
 
   &:hover {
-    background-color: var(--ra-hover);
+    background-color: var(--ra-card-raised);
   }
 
   &:focus-visible {
@@ -502,6 +473,7 @@
   min-width: 0;
   font-size: var(--mantine-font-size-lg);
   font-weight: 600;
+  letter-spacing: -0.01em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -539,7 +511,7 @@
     cursor: pointer;
 
     &:hover {
-      background-color: var(--ra-hover);
+      background-color: var(--ra-card-raised);
       color: var(--ra-text);
     }
   }
@@ -632,8 +604,8 @@
   width: 100%;
   height: 100%;
   padding: 0 12px;
-  background-color: var(--ra-surface);
-  border: 1px solid var(--ra-border-strong);
+  background-color: var(--ra-card);
+  border: 1px solid var(--ra-card-outline);
   border-radius: var(--ra-radius);
   color: var(--ra-text);
   transition: border-color var(--ra-duration-fast) var(--ra-ease);
@@ -658,36 +630,6 @@
   color: var(--ra-text-muted);
 }
 
-/*
- * A shared thing in the colour of the line that reaches it: modules by imports,
- * commands by calls, packages, configuration and HTTP by their own families.
- */
-.shared {
-  --tint: var(--ra-edge-cross);
-  background-color: color-mix(in oklab, var(--tint) 14%, var(--ra-surface));
-  border-color: color-mix(in oklab, var(--tint) 55%, var(--ra-border-strong));
-
-  &[data-entity="module"] {
-    --tint: var(--ra-rel-imports);
-  }
-  &[data-entity="command"] {
-    --tint: var(--ra-rel-calls);
-  }
-  &[data-entity="package"] {
-    --tint: var(--ra-package);
-  }
-  &:is([data-entity="env_var"], [data-entity="config"]) {
-    --tint: var(--ra-config);
-  }
-  &:is([data-entity="http_endpoint"], [data-entity="http_route"], [data-entity="http_deployment"]) {
-    --tint: var(--ra-endpoint);
-  }
-
-  &:hover {
-    border-color: var(--tint);
-  }
-}
-
 /* folded: what is not drawn one by one */
 .moreNode {
   border-style: dashed;
@@ -703,30 +645,15 @@
   pointer-events: none;
 }
 
-/* elsewhere in this repository: lighter than what is here */
+/* elsewhere in this repository */
 .place {
   gap: 8px;
   padding: 0 12px;
-  background-color: var(--ra-canvas);
-
-  &[data-neighbour] {
-    background-color: var(--ra-surface);
-  }
-}
-
-/* after the places, so it wins: a directory is a solid card a step above the
-   canvas with a clear outline, the same in every repository */
-:is(.card[data-kind="directory"], .place[data-directory]) {
-  background-color: var(--ra-directory-fill);
-  border-color: var(--ra-directory-border);
-
-  &:hover {
-    border-color: var(--ra-directory);
-  }
 }
 
 /* -- a file, at the centre of its neighbourhood -------------------------------------- */
 
+/* the interchange: the one station drawn with a heavier outline */
 .fileAnchor {
   gap: 12px;
   padding: 0 18px;
