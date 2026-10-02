@@ -569,6 +569,42 @@ def test_an_unrendered_ingress_s_chain_stops_at_the_deployment_binding(
     assert chain[4][2] == [("app.py", None, "source_in")]
 
 
+@pytest.mark.parametrize(
+    ("enabled", "status", "failed", "reason"),
+    [
+        (False, "http-deployment-binding-unresolved", 3, "binding_unresolved"),
+        (True, "http-deployment-source-unresolved", 4, "source_unresolved"),
+    ],
+)
+def test_the_inventory_lists_a_deployment_refusal_as_itself(
+    workspace: Workspace, tmp_path: Path, enabled: bool, status: str, failed: int, reason: str
+) -> None:
+    """Never folded into service-unmatched: the crossing keeps its own decision, and the
+    hop that failed keeps its reason even where another repository's places are withheld."""
+    from repoatlas.capabilities.service import CapabilityService
+    from repoatlas.models.capability import CapabilityContext, CapabilityScope
+    from repoatlas.models.http_inventory import CrossingStatus, HttpOperationsRequest
+
+    provider = (
+        {**APP, **chart(enabled=False)}
+        if not enabled
+        else {"pyproject.toml": '[project]\nname = "deploy"\n', **chart(enabled=True)}
+    )
+    built = build(workspace, tmp_path, {"devices": provider, "caller": CALLER})
+    response = CapabilityService(built).http_operations(
+        HttpOperationsRequest(
+            context=CapabilityContext(scope=CapabilityScope.REPOSITORY, repository="caller"),
+            crossing=(CrossingStatus(status),),
+        )
+    )
+    rows = [row for row in response.operations if row.entity and ":dev_item:" in row.entity]
+    [crossing] = [c for row in rows for c in row.crossings]
+    assert crossing.status.value == status
+    hop = crossing.chain[failed]
+    assert (hop.status, hop.reason) == ("unresolved", reason)
+    assert set(response.summary.by_crossing) == {status}
+
+
 def test_an_ingress_reaching_no_code_has_a_chain_that_stops_at_the_source(
     workspace: Workspace, tmp_path: Path
 ) -> None:
