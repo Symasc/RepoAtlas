@@ -90,8 +90,8 @@ RELATIONSHIP_EDGES = (*RELATIONSHIP_DEFAULT_EDGES, EdgeType.CALLS, EdgeType.USES
 #: Edge types a traversal may follow **out of one repository into another**.
 #:
 #: Every one of these is produced by the linker's global pass from an exact match
-#: — a resolved package name, a resolved path, a resolved import — so a
-#: cross-repository answer always has a structural reason (V1_SPEC §9). A `CALLS`
+#: — a resolved package name, path, import, or explicitly mapped Salt pillar — so
+#: a cross-repository answer always has a structural reason (V1_SPEC §9). A `CALLS`
 #: or `DEFINES` edge is deliberately absent: those are meaningful within a
 #: repository but would let a traversal wander between repositories on nothing
 #: stronger than a shared symbol name.
@@ -102,6 +102,7 @@ CROSS_REPOSITORY_EDGES = frozenset(
         EdgeType.EXECUTES,
         EdgeType.SOURCES,
         EdgeType.IMPORTS,
+        EdgeType.GENERATES,
     }
 )
 

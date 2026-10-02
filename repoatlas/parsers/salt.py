@@ -25,7 +25,7 @@ marks (ARCHITECTURE.md §5).
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -38,6 +38,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
     Severity,
 )
+from repoatlas.parsers.http_facts import PENDING_FACT
 from repoatlas.parsers.jinja import extract_references, neutralize
 from repoatlas.parsers.marks import diagnostic_line, node_span, split_lines
 from repoatlas.parsers.structured import collect_config_keys
@@ -76,10 +77,113 @@ _FALLBACK_REQUISITE = re.compile(
 
 #: Reduced confidence for facts recovered without a successful YAML parse.
 _FALLBACK_CONFIDENCE = 0.6
+_SAFE_SLS = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def _scalar(node: yaml.Node) -> str | None:
     return node.value if isinstance(node, yaml.ScalarNode) else None
+
+
+def _top_file_references(root: yaml.Node, lines: list[str]) -> list[ParsedReference]:
+    """Record literal top-file environment, target, and SLS assignments."""
+    if not isinstance(root, yaml.MappingNode):
+        return []
+    references: list[ParsedReference] = []
+    for environment_node, targets_node in root.value:
+        environment = _scalar(environment_node)
+        if (
+            environment is None
+            or not _SAFE_SLS.fullmatch(environment)
+            or not isinstance(targets_node, yaml.MappingNode)
+        ):
+            continue
+        for selector_node, entries_node in targets_node.value:
+            selector = _scalar(selector_node)
+            if selector is None or "{{" in selector or "{%" in selector:
+                continue
+            if not isinstance(entries_node, yaml.SequenceNode):
+                continue
+            matcher = "glob"
+            sls_entries: list[yaml.Node] = []
+            for entry in entries_node.value:
+                if isinstance(entry, yaml.ScalarNode):
+                    sls_entries.append(entry)
+                elif isinstance(entry, yaml.MappingNode):
+                    for key_node, value_node in entry.value:
+                        if _scalar(key_node) == "match":
+                            value = _scalar(value_node)
+                            if value is not None:
+                                matcher = value
+            for entry in sls_entries:
+                sls = _scalar(entry)
+                if sls is None or not _SAFE_SLS.fullmatch(sls):
+                    continue
+                start, end = node_span(entry, lines)
+                references.append(
+                    ParsedReference(
+                        edge_type=EdgeType.CONFIGURES,
+                        target_kind=EntityType.CONFIG,
+                        target_key=f"salt-top:{environment}:{matcher}:{selector}:{sls}",
+                        line_start=start,
+                        line_end=end,
+                        meta={
+                            PENDING_FACT: "salt-top-entry",
+                            "salt_fact": "top_entry",
+                            "environment": environment,
+                            "selector": selector,
+                            "matcher": matcher,
+                            "sls": sls,
+                        },
+                    )
+                )
+    return references
+
+
+def _master_root_references(root: yaml.Node, lines: list[str]) -> list[ParsedReference]:
+    """Record statically declared Salt state and pillar roots by environment."""
+    if not isinstance(root, yaml.MappingNode):
+        return []
+    references: list[ParsedReference] = []
+    roles = {"file_roots": "state", "pillar_roots": "pillar"}
+    for key_node, environments_node in root.value:
+        role = roles.get(_scalar(key_node) or "")
+        if role is None or not isinstance(environments_node, yaml.MappingNode):
+            continue
+        for environment_node, paths_node in environments_node.value:
+            environment = _scalar(environment_node)
+            if environment is None or not _SAFE_SLS.fullmatch(environment):
+                continue
+            if not isinstance(paths_node, yaml.SequenceNode):
+                continue
+            for path_node in paths_node.value:
+                salt_path = _scalar(path_node)
+                if (
+                    salt_path is None
+                    or not PurePosixPath(salt_path).is_absolute()
+                    or ".." in PurePosixPath(salt_path).parts
+                    or "$" in salt_path
+                    or "{" in salt_path
+                ):
+                    continue
+                start, end = node_span(path_node, lines)
+                normalized = PurePosixPath(salt_path).as_posix()
+                references.append(
+                    ParsedReference(
+                        edge_type=EdgeType.CONFIGURES,
+                        target_kind=EntityType.CONFIG,
+                        target_key=f"salt-master:{role}:{environment}:{normalized}",
+                        line_start=start,
+                        line_end=end,
+                        meta={
+                            PENDING_FACT: "salt-master-root",
+                            "salt_fact": "master_root",
+                            "role": role,
+                            "environment": environment,
+                            "salt_path": normalized,
+                        },
+                    )
+                )
+    return references
 
 
 class _Collector:
@@ -444,7 +548,7 @@ class SaltParser:
     """Deterministic Salt SLS extraction."""
 
     name = "salt-sls"
-    version = "2"  # 2: the fallback scan splits lines like a source grammar
+    version = "3"  # 3: literal top-file mappings are retained as linker claims
     language = "Salt"
 
     def supports(self, path: Path) -> bool:
@@ -478,7 +582,12 @@ class SaltParser:
         else:
             for document in documents:
                 if document is not None:
-                    collector.document(document)
+                    if path.name == "top.sls":
+                        collector.references.extend(
+                            _top_file_references(document, content.splitlines())
+                        )
+                    else:
+                        collector.document(document)
             symbols, references = collector.symbols, collector.references
 
         references = [*references, *extract_references(content)]
@@ -490,4 +599,38 @@ class SaltParser:
             symbols=tuple(symbols),
             references=tuple(references),
             diagnostics=tuple(diagnostics),
+        )
+
+
+class SaltMasterParser:
+    """Static root declarations from an indexed Salt master configuration."""
+
+    name = "salt-master"
+    version = "1"
+    language = "Salt"
+
+    def supports(self, path: Path) -> bool:
+        return path.name == "master" or (path.parent.name == "master.d" and path.suffix == ".conf")
+
+    def parse(self, path: Path, content: str) -> ParsedFile:
+        diagnostics: tuple[ParseDiagnostic, ...] = ()
+        try:
+            root = yaml.compose(content, Loader=yaml.SafeLoader)
+        except yaml.YAMLError as exc:
+            mark = getattr(exc, "problem_mark", None)
+            diagnostics = (
+                ParseDiagnostic(
+                    severity=Severity.WARNING,
+                    message="Salt master YAML could not be parsed for root mappings",
+                    line=diagnostic_line(mark, content),
+                ),
+            )
+            root = None
+        references = _master_root_references(root, content.splitlines()) if root is not None else []
+        return ParsedFile(
+            language=self.language,
+            parser=self.name,
+            parser_version=self.version,
+            references=tuple(references),
+            diagnostics=diagnostics,
         )

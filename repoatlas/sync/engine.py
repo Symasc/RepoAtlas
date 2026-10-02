@@ -150,7 +150,7 @@ class SyncEngine:
         self._dependency_registry = dependency_registry or DependencyRegistry()
         self._settings = settings
         self._git = git or GitClient()
-        self._linker = ReferenceLinker(knowledge, dependencies)
+        self._linker = ReferenceLinker(knowledge, dependencies, settings.salt)
         #: What the run in progress changed that USES edges depend on; ``None`` outside one.
         self._uses: UsesChangeLog | None = None
         #: Who is watching the run in progress (:mod:`repoatlas.sync.progress`).

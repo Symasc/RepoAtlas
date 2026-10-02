@@ -8,7 +8,7 @@ from repoatlas.models.parsing import EdgeType, EntityType, ParsedFile, Severity
 from repoatlas.parsers.base import LanguageParser
 from repoatlas.parsers.dockerfile import DockerfileParser
 from repoatlas.parsers.jinja import JinjaParser, neutralize
-from repoatlas.parsers.salt import SaltParser
+from repoatlas.parsers.salt import SaltMasterParser, SaltParser
 from repoatlas.parsers.structured import StructuredParser
 
 
@@ -148,6 +148,41 @@ def test_salt_treats_upper_case_context_keys_as_configured_variables() -> None:
 def test_salt_extracts_jinja_facts_from_the_raw_text() -> None:
     parsed = parse_salt()
     assert "pillar:service:host" in references(parsed, EdgeType.READS)
+
+
+def test_salt_top_file_records_environment_target_and_sls_mapping() -> None:
+    parsed = parse_salt(
+        "prod:\n  web01:\n    - service.api\n",
+        "top.sls",
+    )
+
+    [mapping] = [
+        reference
+        for reference in parsed.references
+        if reference.meta.get("salt_fact") == "top_entry"
+    ]
+    assert mapping.edge_type is EdgeType.CONFIGURES
+    assert mapping.target_kind is EntityType.CONFIG
+    assert mapping.target_key == "salt-top:prod:glob:web01:service.api"
+    assert mapping.line_start == 3
+    assert mapping.meta["environment"] == "prod"
+    assert mapping.meta["selector"] == "web01"
+    assert mapping.meta["matcher"] == "glob"
+    assert mapping.meta["sls"] == "service.api"
+
+
+def test_salt_master_records_state_and_pillar_roots_by_environment() -> None:
+    parsed = SaltMasterParser().parse(
+        Path("master"),
+        "file_roots:\n  prod:\n    - /srv/salt\n"
+        "pillar_roots:\n  prod:\n    - /srv/pillar\n",
+    )
+
+    roots = [reference for reference in parsed.references if reference.meta.get("salt_fact")]
+    assert [
+        (root.meta["role"], root.meta["environment"], root.meta["salt_path"], root.line_start)
+        for root in roots
+    ] == [("state", "prod", "/srv/salt", 3), ("pillar", "prod", "/srv/pillar", 6)]
 
 
 def test_salt_indexes_pillar_data_as_configuration_keys() -> None:
