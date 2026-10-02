@@ -151,7 +151,6 @@ def ecosystem(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Worksp
     settings = Settings.model_validate(
         {
             "storage": {"database": str(base / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     workspace = open_workspace(settings=settings, require_root=False)

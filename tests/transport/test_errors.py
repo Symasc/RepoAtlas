@@ -227,7 +227,6 @@ def test_not_initialized_is_the_same_refusal_both_ways(tmp_path: Path) -> None:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     workspace = open_workspace(settings=settings, require_root=False)

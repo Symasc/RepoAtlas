@@ -98,7 +98,7 @@ def test_every_deterministic_candidate_can_name_its_proof(
 
     `SYMBOL` appears in both tiers by design — an exact name match is a fact, a
     full-text name match is a lead — which is precisely why the *seed* rule above
-    matters. `LEXICAL` and `SEMANTIC` are never deterministic.
+    matters. `LEXICAL` is never deterministic.
     """
     evidence = _retrieve(adversarial, adversarial_root, repo, question)
     for candidate in evidence.candidates:

@@ -2,7 +2,7 @@
 
 A run reports what it is doing as it does it: which repository it is scanning,
 how many of the files it must reindex are written, which stage of the global
-link pass it is in, how many chunks are embedded. The command line draws that as
+link pass it is in. The command line draws that as
 a progress bar; every other caller passes nothing and hears nothing.
 
 Reporting is an observation of the run and never a part of it. No event carries
@@ -44,10 +44,6 @@ class SyncProgress(Protocol):
         """The global link pass entered ``stage``, one of :data:`LINK_STAGES`."""
         ...
 
-    def embedding(self, done: int, total: int) -> None:
-        """``done`` of ``total`` pending chunks have vectors."""
-        ...
-
 
 class _Silent:
     """The listener a run has when nobody asked to watch it."""
@@ -62,9 +58,6 @@ class _Silent:
         pass
 
     def linking(self, stage: str, position: int, total: int) -> None:
-        pass
-
-    def embedding(self, done: int, total: int) -> None:
         pass
 
 

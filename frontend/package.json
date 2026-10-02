@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "next dev --hostname 127.0.0.1 --port 7318",
     "build": "next build",
+    "build:static": "RA_EXPORT=1 next build",
     "start": "next start --hostname 127.0.0.1 --port 7318",
     "typecheck": "next typegen && tsc --noEmit",
     "lint": "eslint --max-warnings 0 .",

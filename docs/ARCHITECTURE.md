@@ -76,7 +76,7 @@ A test walks the AST of every module and asserts the import graph respects this 
 review. The diagram itself is checked too: every package it names must exist.
 
 `ui/` is the one module above the transports. It starts the local API in its own process and the explorer
-beside it (§12, "Processes RepoAtlas starts"), so it may import `api/`, and nothing but `cli/` may import it.
+beside it, or has the API serve an exported explorer (§12, "Processes RepoAtlas starts"), so it may import `api/`, and nothing but `cli/` may import it.
 It never reaches the capability layer directly, and neither transport knows it exists.
 
 ---
@@ -89,12 +89,11 @@ RepoAtlas/
 ├── uv.lock
 ├── install.sh          one-command installer (docs/installation.md)
 ├── README.md
-├── Dockerfile
-├── docker-compose.yml
 │
 ├── repoatlas/
 │   ├── cli/            Typer app; argument parsing + rendering only
-│   ├── ui/             `repoatlas ui`: the local API and the explorer, started and stopped together (§12)
+│   ├── ui/             `repoatlas ui`: the local API and the explorer, started and stopped together (§12);
+│   │                   a release build adds `ui/explorer/`, the exported explorer the API serves
 │   ├── mcp/            stdio MCP transport: tool definitions and the server (docs/agent-integration.md)
 │   ├── api/            loopback HTTP transport for a local app, and its schema dump (docs/local-api.md)
 │   ├── capabilities/   the vendor-neutral capability service: search, inspect, relationships, impact,
@@ -105,12 +104,7 @@ RepoAtlas/
 │   ├── context/        RepositoryContextResolver — shared by every command (§7)
 │   ├── gitstate/       hardened git CLI wrapper: branch, HEAD, dirty, file enumeration (§8)
 │   ├── sync/           file-state diffing, sync planning, run orchestration, progress events (§9)
-│   ├── indexing/       chunking, FTS population, embedding population, orphan GC
-│   ├── embeddings/     EmbeddingModel protocol, fastembed backend, deterministic stub
-│   │   ├── protocol.py     EmbeddingModel; a ranking aid, never a source of facts
-│   │   ├── fastembed_backend.py  bge-small-en-v1.5 via ONNX; availability never downloads
-│   │   ├── hashing.py      deterministic, offline stub used by every test
-│   │   └── factory.py      config-driven selection
+│   ├── indexing/       chunking: line-provenanced spans for the full-text index
 │   ├── parsers/        base protocol + registry + one module per language
 │   │   ├── base.py         LanguageParser protocol, ParsedFile contract
 │   │   ├── registry.py     extension/filename → parser dispatch
@@ -139,7 +133,7 @@ RepoAtlas/
 │   │   ├── uses*.py, py_*.py, modules.py, packages.py   declaration uses, module and package resolution
 │   │   ├── http_claims.py, http_crossings.py   HTTP routes matched within and across repositories
 │   │   └── impact.py, traversal.py, neighbourhood.py   the change-impact walk and bounded expansion
-│   ├── retrieval/      query analysis, exact/semantic/graph retrievers, fusion, reranker seam
+│   ├── retrieval/      query analysis, exact/lexical/graph retrievers, fusion, reranker seam
 │   ├── grounding.py    citation verification — deterministic, and the whole of §11
 │   ├── freshness.py    the index-freshness state machine, shared by services and capabilities
 │   ├── containment.py  the filesystem containment boundary: bounded, contained content reads (§12)
@@ -155,7 +149,6 @@ RepoAtlas/
 ├── tests/
 │   ├── fixtures/       synthetic repositories (§13)
 │   ├── test_e2e.py     the §21 scenario through the installed console script
-│   ├── test_docker.py  container delivery invariants, without a daemon
 │   ├── test_performance.py  §20 shape properties, measured through the traces
 │   ├── test_ui_launcher.py  `repoatlas ui` through the real command, with stand-in Node
 │   └── test_installer.py    `install.sh` in a scratch HOME, with stand-in tools
@@ -190,7 +183,8 @@ database would add a dependency and an operational surface for a query pattern w
 if traversal profiling shows it dominates.
 
 Migrations are numbered SQL files in `storage/sqlite/migrations/`, applied in order by
-`storage/sqlite/migrator.py`.
+`storage/sqlite/migrator.py`. Before the first release they were squashed into one, `001_initial.sql`, which creates
+the whole schema; every later change to the schema is a new numbered file.
 
 > **Invariant.** A migration's statements and its `user_version` transition commit atomically.
 
@@ -237,19 +231,18 @@ that already succeeded, and every `user_version` boundary is a valid, openable s
 file of our own would be one more thing to leave behind. A process killed with `SIGTERM` or `SIGKILL` mid-migration
 leaves the previous version intact, `integrity_check` clean, and no stray lock; the next open migrates normally.
 
-**Recovery of historically damaged databases.** Databases wrecked by the previous implementation still exist, and
-making future migrations atomic does not un-strand them. When a migration's first statement already appears applied,
+**Recovery of partially applied migrations.** When a migration's first statement already appears applied,
 the migrator finds the resume point by **simulation**: it builds a scratch in-memory database at version *N-1*,
 applies the migration's statements one at a time, and compares the schema shape against the live database after each
 one. The prefix whose shape matches exactly is the prefix that ran.
 
-Simulation rather than per-statement inspection, because inspection cannot answer the question in general: `003`
-drops `embeddings` and creates a *different* table of the same name, so "has `CREATE TABLE embeddings` been applied?"
-has no order-independent answer. Replaying is exact for every migration rather than for the ones whose statements
-happen to be independent. The shape comparison reads `PRAGMA table_xinfo`, not `table_info`, because the latter omits
-`GENERATED` columns entirely — `004`'s `files.basename` would otherwise read as absent and be added twice.
+Simulation rather than per-statement inspection, because inspection cannot answer the question in general: a
+migration that drops a table and creates a *different* one under the same name makes "has `CREATE TABLE` been
+applied?" a question with no order-independent answer. Replaying is exact for every migration rather than for the
+ones whose statements happen to be independent. The shape comparison reads `PRAGMA table_xinfo`, not `table_info`,
+because the latter omits `GENERATED` columns entirely — `files.basename` would otherwise read as absent.
 
-A statement with no detectable schema effect (today, one `DELETE`) cannot be distinguished as before-or-after by any
+A statement with no detectable schema effect (a `DELETE`, say) cannot be distinguished as before-or-after by any
 shape comparison, so recovery replays it. Every such statement must therefore be idempotent; a test enumerates them
 across all migrations and fails if a future migration adds one that is not.
 
@@ -530,19 +523,14 @@ dependencies(
 
 chunks(
   id, file_id → files ON DELETE CASCADE,
-  line_start, line_end, text, token_estimate, content_hash,
+  line_start, line_end, text, token_estimate,
   span_index, split_index, split_total   -- where this piece sits in the span it was cut from
 )
 
 chunks_fts     -- FTS5, external content over chunks
 entities_fts   -- FTS5, over name + qualified_name
 
-embeddings(
-  content_hash, model, dim, vector BLOB,   -- float16
-  PRIMARY KEY (content_hash, model)
-)
-
-meta(key, value)   -- schema_version, parser_version, embedding_model, last_global_sync
+meta(key, value)   -- schema_version, parser_version, last_global_sync
 
 http_call_decisions(               -- derived: the HTTP join's output, rebuilt by every global commit (§5)
   decision_ref PRIMARY KEY,        -- opaque, deterministic; never a row id
@@ -861,30 +849,6 @@ retrieve. `rel_path` was written on every sync and read back only by path, so `l
 *content*, found no chunk that happened to mention the string, and answered "No indexed evidence matches this
 question" — about a file sitting in the same table. §10 describes the retrieval stage this column serves.
 
-### Vectors
-
-`VectorIndex` is backed in V1 by brute-force cosine over a NumPy array loaded from the `embeddings` blobs, filtered
-to the repositories in scope *before* the dot product. At ~10^5 chunks × 384 dims, float16 storage is ~77 MB and a
-scoped query is single-digit milliseconds — not worth a dependency. The interface hides this completely, so
-`sqlite-vec` or FAISS can replace it without touching a caller.
-
-**Vectors are keyed by `(content_hash, model)`, not by `chunk_id`.** A file is reparsed as a whole, so its chunk
-rows are deleted and reinserted with fresh ids even when the text did not move. Keying by `chunk_id` would
-therefore re-embed every chunk of any touched file — editing one line of a large file would re-embed all of it —
-which V1_SPEC §20 forbids outright ("never re-embed unchanged data"). Keying by the hash of the chunk text makes
-re-embedding genuinely incremental, and deduplicates identical chunks across the whole managed set for free.
-
-The cost is that cleanup is a sweep (`content_hash NOT IN (SELECT content_hash FROM chunks)`) rather than a
-cascade. That is safe precisely because **a vector is not a fact**: it carries no provenance and is never cited, so
-an orphaned vector wastes space but can never become a stale claim. Contrast entities and edges, which do cascade,
-because they are facts and §9's no-stale-facts invariant is about them.
-
-`chunks.content_hash` is the column this rests on, and it is also the reason the schema version participates in the
-per-file `parser_version` (§9): bumping it reparses every file, which is how existing chunks acquire hashes.
-
-The **embedding model id** is deliberately *not* part of that version. Vectors are keyed by the model that produced
-them, so switching models finds none for the new id and re-embeds — without reparsing anything.
-
 ### FTS tokenization
 
 `chunks_fts` uses `unicode61` with `tokenchars '_.-@$'` so `SERVICE_HOST`, `snake_case_name`, `@company/common` and
@@ -909,10 +873,9 @@ without touching callers. Each has exactly one owning package in §2:
 
 | Protocol | Owner |
 |---|---|
-| `RepositoryStore`, `FileStore`, `KnowledgeStore`, `SearchIndex`, `VectorIndex` | `storage/` |
+| `RepositoryStore`, `FileStore`, `KnowledgeStore`, `SearchIndex` | `storage/` |
 | `LanguageParser` | `parsers/base.py` |
 | `DependencyParser` | `dependencies/` |
-| `EmbeddingModel` | `embeddings/` |
 | `Reranker` | `retrieval/` |
 | `Renderer` | `rendering/` |
 
@@ -946,12 +909,6 @@ class KnowledgeStore(Protocol):
 class SearchIndex(Protocol):
     def search_text(self, query: str, repo_ids, limit) -> list[ChunkHit]: ...
     def search_entities(self, query: str, repo_ids, types, limit) -> list[EntityHit]: ...
-
-
-class VectorIndex(Protocol):
-    def upsert(self, chunk_ids, vectors) -> None: ...
-    def query(self, vector, repo_ids, limit) -> list[ChunkHit]: ...
-    def delete(self, chunk_ids) -> None: ...
 ```
 
 `replace_file_facts` is the single write path for a file's entities and chunks, and is transactional. It is *not*
@@ -1012,7 +969,7 @@ deliberately absent.
 **The parser core is pinned the same way, at `tree-sitter==0.26.0`.** A grammar is compiled against a tree-sitter
 ABI, and the shipped JavaScript and Bash grammars are a newer ABI than the shipped TypeScript one: a core older than
 0.25 cannot load them at all. While this requirement was a `>=` range, RepoAtlas's own published metadata had a valid
-solution --- `pip install repoatlas "tree-sitter<0.25"` --- that installed cleanly and then degraded those two
+solution --- `pip install symasc-repoatlas "tree-sitter<0.25"` --- that installed cleanly and then degraded those two
 languages to `parser grammar unavailable`, with no download involved anywhere. An exact pin admits one solution, and
 it is the core this release characterized its parser output against.
 
@@ -1060,19 +1017,9 @@ registry returns nothing for them and the sync spine takes its ordinary no-parse
   `GRAMMARS`, write the parser against the shipped loader, and characterize its output before trusting a fact from
   it. `tests/test_grammar_loader.py` fails if a Ruby grammar is declared without that work.
 
-### Embedding and ranking
+### Ranking and rendering
 
 ```python
-class EmbeddingModel(Protocol):
-    id: str
-    dim: int
-
-    def embed(self, texts: Sequence[str]) -> list[list[float]]: ...
-    def embed_query(self, text: str) -> list[float]: ...
-    def available(self) -> bool: ...
-    def availability_detail(self) -> str: ...
-
-
 class Reranker(Protocol):
     def rerank(self, question: str, candidates: list[Candidate]) -> list[Candidate]: ...
 
@@ -1085,20 +1032,10 @@ class Renderer(Protocol):
 
 `Reranker` ships as `NoopReranker` — the explicit V2 slot (§14).
 
-There was a third protocol here, `ReasoningModel`, and it is gone with the subsystem behind it. RepoAtlas runs no
-generative model; an agent reasons over the evidence and submits its conclusions back through `verify_grounding`
-(§11).
-
-`embed_query` is separate from `embed` because retrieval models are asymmetric: bge-small-en-v1.5 expects a query
-prefix that documents must not receive, and embedding both sides identically measurably degrades recall.
-
-`EmbeddingModel.available()` **never goes to the network.** It probes the local cache and reports "not
-downloaded" rather than fetching 67 MB in the middle of a sync. Fetching is an explicit act — `repoatlas sync
---embed` — and until then semantic retrieval is off and every other command is unaffected, because V1_SPEC §14
-makes exact search the mandatory half and semantic search the aid.
-
-An embedding model is not a reasoning model. It turns text into vectors for recall and generates nothing, which is
-why it stayed when the reasoner went.
+RepoAtlas runs no model of any kind. There were two: a `ReasoningModel` behind the old `ask` and `debug` commands,
+and an `EmbeddingModel` for an optional semantic retrieval stage. Both are gone. An agent reasons over the evidence
+and submits its conclusions back through `verify_grounding` (§11), and retrieval is exact, lexical and graph-based
+(§10).
 
 ---
 
@@ -1912,7 +1849,7 @@ or deployment-addressed URL, or a host the source does not state — has no rout
 own, of status `join_only`: neither a route match nor an unresolved path, so it is counted under the `join_only`
 limitation and in `summary.by_status`, never under `coverage.unresolved` or as an unknown path; `status` filters it.
 `crossing` filters rows to those decisions and narrows each row's crossings to them; `summary.by_crossing` counts
-them. An index no global pass has written since migration 008 says so (`crossings_not_built`) rather than listing
+them. An index no global pass has written yet says so (`crossings_not_built`) rather than listing
 none.
 
 `decision_ref` reads one stored decision exactly: the caller row holding it, with only that crossing, matched on
@@ -1978,7 +1915,7 @@ and the identities or patterns matched, with their deployment or pattern, `ident
 `bound_in`, the values left unresolved, the binding and source outcomes, and the provider. A refusal thus says how
 far its chain got.
 
-**Stored decisions** (`repoatlas/graph/http_chain.py`, table `http_call_decisions`, migration 008). The global commit
+**Stored decisions** (`repoatlas/graph/http_chain.py`, table `http_call_decisions`). The global commit
 writes one row per request decided — per request claim, per literal alternative of its base (`variant`
 `alternative:<base_at>`), and per injected root a transport's request is made from (`root:<injected_at>|<base_in>`;
 those requests share their claim's id) — in the same transaction as the edges, replacing every row. The rows are the
@@ -2104,7 +2041,6 @@ flowchart TD
     end
     requirements --> prepare["global link pass, computed without writing:<br/>index, resolve, uses, dependencies"]
     prepare --> swap["one transaction: swap the graph in<br/>and mark every repository synchronized"]
-    swap --> embed["embed changed chunks<br/>(optional; never fails the run)"]
 ```
 
 ### Repository discovery
@@ -2290,7 +2226,7 @@ enumerate       gitstate: git ls-files --cached --others --exclude-standard
 diff            FileState comparison → unchanged / changed / new / deleted   (§9)
    ↓
 delete          FileStore.delete_many(deleted) → cascade removes entities, edges,
-                chunks, embeddings, FTS rows, unresolved_refs
+                chunks, FTS rows, unresolved_refs
    ↓
 parse           registry dispatch → LanguageParser.parse(path, content)     (pure, no I/O)
    ↓
@@ -2303,7 +2239,7 @@ link (file)     intern global targets; resolve intra-file symbols; record the
    ↓
 chunk           symbol-aligned where line ranges exist, else fixed windows
    ↓
-index           FTS upsert; embed only chunks whose content_hash changed
+index           FTS upsert
    ↓
 ─── once per run, after every repository ────────────────────────────────────
    ↓
@@ -2343,7 +2279,7 @@ and a file that started tracked and only later matched a `.gitignore` rule are b
 **There used to be a second enumerator**, a depth-first walk of the working tree, reached when
 `GitClient.list_files` returned `None`. It answered a different question — *what files are here* — and the
 difference between the two questions is every file the user told git to ignore. Local overrides, generated
-configuration and private notes entered `files`, `chunks`, the FTS index, embeddings, retrieval and model prompts,
+configuration and private notes entered `files`, `chunks`, the FTS index, retrieval and model prompts,
 while `sync` exited 0 and reported success.
 
 The version of this section that shipped before named that divergence under "known differences" and moved on. That
@@ -2426,7 +2362,7 @@ filesystem refuses the path, and depth and path length are separate constraints.
 
 ### Chunking
 
-Chunks are the unit of both lexical and semantic retrieval, so they carry line ranges for provenance. Preference
+Chunks are the unit of lexical retrieval, so they carry line ranges for provenance. Preference
 order: one chunk per top-level symbol where the parser supplied a range (bounded to a max size, split if larger),
 otherwise fixed windows of ~40 lines with ~8 lines of overlap. Files over a size cap, detected-binary files, and
 lockfiles are not chunked — lockfiles are represented by the dependency layer instead, which is both smaller and
@@ -2464,8 +2400,8 @@ instead (§10), which has no constant to be wrong about.
 
 A run reports how far it has got to a `SyncProgress` listener (`repoatlas/sync/progress.py`): discovery
 starting, each repository being scanned (with a count of the files it had to hash), each file of the ones it must
-reindex being written, each of the global link pass's five stages being entered (`index`, `resolve`, `uses`,
-`dependencies`, then `swap`), and chunks being embedded. The linker hears nothing of the protocol:
+reindex being written, and each of the global link pass's five stages being entered (`index`, `resolve`, `uses`,
+`dependencies`, then `swap`). The linker hears nothing of the protocol:
 `prepare_global` takes a plain stage callback, because `graph/` may not import `sync/`, and the engine reports
 the swap itself, so `commit_global` keeps the signature the failure-injection tests replace it with.
 
@@ -2556,7 +2492,7 @@ Repositories are untrusted (§12). All git access goes through `gitstate/`, whic
   ```
   `core.hooksPath=/dev/null` guarantees no repository-supplied hook can run even if a future command would
   normally trigger one; `--no-optional-locks` avoids mutating a repository we only read; `safe.directory=*` is
-  required for the read-only container mount, where the repository is owned by a different uid;
+  required for a repository owned by a different uid, such as a checkout on a shared or mounted filesystem;
 - restricts itself to a **fixed allowlist of subcommands that cannot spawn a process**: `rev-parse`, `ls-files`,
   `ls-tree` — see the trust boundary below;
 - uses `--` and argument arrays; no shell interpolation of repository-derived strings, ever;
@@ -2614,12 +2550,10 @@ provides is exactly the one at issue here: it stops git from reading and acting 
 `safe.directory=*` opts out of it, which unambiguously widens the attack surface along the axis this section is
 about.
 
-It is retained anyway, for a concrete deployment reason: the container mounts repositories read-only from the host
-(§12) and runs as uid 10001, so the repositories are owned by a different uid essentially always. Without it,
-`rev-parse` and `ls-files` fail. That used to mean a silent fall back to `os.walk` with degraded branch/HEAD
-reporting; since §6 removed the fallback it means the repository cannot be enumerated at all and is refused. The
-container would index nothing — the argument for keeping the setting is now considerably stronger than when it was
-written.
+It is retained anyway, because a repository owned by a different uid is an ordinary case: a checkout on a shared
+or network filesystem, or one mounted into a VM or container. Without it, `rev-parse` and `ls-files` fail. That used
+to mean a silent fall back to `os.walk` with degraded branch/HEAD reporting; since §6 removed the fallback it means
+the repository cannot be enumerated at all and is refused.
 
 The decision is therefore to **keep it and stop depending on it**: git's ownership check is treated as unavailable,
 and safety comes from the allowlist and the neutralized configuration above, which hold whoever owns the
@@ -2715,15 +2649,13 @@ every other repository's facts stale.
 The **facts version** — the schema version, both registries and the chunking rules — is handled **per file** rather
 than as a sixth global trigger: it is stored on the file row, so affected files are reparsed directly instead of
 hashing the entire tree to learn that nothing moved. Chunking is in it because a chunk range is cited evidence like
-any other, so a chunking fix that did not move the version would never reach an existing index. The embedding model
-is not part of it at all — vectors are keyed by the model that produced them (§3), so a model change re-embeds
-without reparsing anything. `status` reports a file row carrying an older facts version as stale, which is the only
+any other, so a chunking fix that did not move the version would never reach an existing index. `status` reports a file row carrying an older facts version as stale, which is the only
 signal that a repository nobody has touched is nonetheless out of date.
 
 ### Deletion
 
 Files present in storage but absent from the enumeration are deleted through `FileStore.delete_many`, cascading to
-entities, edges, chunks, embeddings, FTS rows and unresolved references. Because provenance is on the fact row
+entities, edges, chunks, FTS rows and unresolved references. Because provenance is on the fact row
 (§3), this is exact — a fact cannot outlive its source file.
 
 Branch switches need no diffing logic at all: the working-tree enumeration is authoritative, and the forced rehash
@@ -2731,7 +2663,7 @@ above covers the mtime hazard.
 
 ### Invariants, both tested
 
-1. **No orphaned facts.** After any sync, no entity, edge, chunk, embedding or FTS row references a file that is
+1. **No orphaned facts.** After any sync, no entity, edge, chunk or FTS row references a file that is
    not currently on disk with the recorded hash. Tested by walking the fact tables and stat-ing every referenced
    path.
 2. **Incremental equals full.** A sync across any sequence of HEAD changes, edits, additions and deletions
@@ -2761,7 +2693,6 @@ The property both of them serve:
 | **the file row, its facts, its edges, its claims and its dependency rows** | **one transaction per file** | **`SyncEngine._index_file`** |
 | detected metadata (languages, manifests, lockfiles) | per repository | `SyncEngine.sync_repository` |
 | **global graph replaced + every repository marked synchronized** | **one transaction** | **`SyncEngine.run`** |
-| embeddings | per batch, after the run | `SyncEngine.embed_pending` |
 
 Per-file work commits as it is produced, one *file* at a time. Holding a single write transaction across a
 fifty-repository parse would block every other writer for the duration and buy nothing, so the unit is the file —
@@ -2878,7 +2809,7 @@ fails with a clear message rather than running unserialized.
 
 #### The second writer
 
-Waits up to `storage.lock_timeout_seconds` (default 30, overridable per container with
+Waits up to `storage.lock_timeout_seconds` (default 30, overridable with
 `REPOATLAS_SYNC_LOCK_TIMEOUT`), then exits **5** with:
 
 ```
@@ -3006,15 +2937,14 @@ question + RepositoryContext
    ├─ 4. lexical        chunks_fts recall over the whole question     → ASSOCIATIVE
    ├─ 5. symbol         exact entity-name lookup                      → DETERMINISTIC
    │                    entities_fts recall                           → ASSOCIATIVE
-   ├─ 6. semantic       embed(question) → VectorIndex.query(scoped)   → ASSOCIATIVE
-   ├─ 7. graph          ≤2 hops from the exact entity hits,           → DETERMINISTIC
+   ├─ 6. graph          ≤2 hops from the exact entity hits,           → DETERMINISTIC
    │                    capped fan-out, cross-repo only via typed edges
    │
-   ├─ 8. fusion         tier, then path specificity, then reciprocal-rank fusion
+   ├─ 7. fusion         tier, then path specificity, then reciprocal-rank fusion
    │                    + primary-repository boost (inside a tier and specificity)
-   ├─ 9. dedup          drop spans that repeat a higher-ranked one
-   ├─ 10. rerank        Reranker (NoopReranker in V1)
-   └─ 11. budget        hard caps on candidate count and total tokens
+   ├─ 8. dedup          drop spans that repeat a higher-ranked one
+   ├─ 9. rerank         Reranker (NoopReranker in V1)
+   └─ 10. budget        hard caps on candidate count and total tokens
          ↓
       EvidenceSet (+ RetrievalTrace)
 ```
@@ -3097,18 +3027,18 @@ A recovered match is rebuilt from the pieces it actually spans and cited with **
 truthful because every piece of a span carries that span's lines. Only occurrences that genuinely *cross* the seam
 are reported, so a single occurrence stays a single candidate rather than being counted by both passes.
 
-### Deterministic evidence outranks semantic similarity
+### Deterministic evidence outranks association
 
-This is the funnel's governing rule (V1_SPEC §14: *vector search must not replace exact search*), and it is
-enforced by a type rather than by a weight. Every candidate carries an `EvidenceTier`:
+This is the funnel's governing rule (V1_SPEC §14: *recall must not replace exact search*), and it is enforced by a
+type rather than by a weight. Every candidate carries an `EvidenceTier`:
 
 | Tier | Sources | Why |
 |---|---|---|
 | `DETERMINISTIC` | literal-verified chunk matches, exact entity-name matches, graph expansion | facts about the code, each with provenance |
-| `ASSOCIATIVE` | FTS recall, embedding neighbours | leads about what the question might have meant |
+| `ASSOCIATIVE` | FTS recall, entity-name recall | leads about what the question might have meant |
 
-`fuse` sorts on `(tier, specificity, -score)`. Scores are therefore only ever compared **within** a tier, so no cosine
-similarity — 0.99 or otherwise — can move an embedding neighbour above an exact identifier, an exact error string,
+`fuse` sorts on `(tier, specificity, -score)`. Scores are therefore only ever compared **within** a tier, so no
+amount of word overlap can move a lexical match above an exact identifier, an exact error string,
 an exact symbol name, an environment variable or a graph-supported relationship. A span reached by several
 retrievers takes its best tier: found deterministically once means deterministic.
 
@@ -3125,9 +3055,8 @@ rather than documenting:
   deterministic evidence out of the answer** just as effectively as ranking it lower.
 
 When the order is corrected the stage trace says so (`NoopReranker (tier order restored)`, or
-`(path specificity restored)`), because a silent correction is one nobody can audit. Tests assert the guarantee against the returned `EvidenceSet` — including with
-an embedding model that scores every text 1.0, and with a reranker that deliberately inverts the tiers — rather
-than against `fuse` alone.
+`(path specificity restored)`), because a silent correction is one nobody can audit. Tests assert the guarantee against the returned
+`EvidenceSet` — including with a reranker that deliberately inverts the tiers — rather than against `fuse` alone.
 
 ### Match specificity
 
@@ -3166,7 +3095,7 @@ in its own answer.
 
 Every candidate above was `DETERMINISTIC` — correctly, each is a fact — so the tier separated none of them and
 the fused score decided. RRF measures *agreement between retrievers*, and a `tests/config.py` full of
-`config`-shaped symbols is reached by the exact, entity-name, lexical and semantic stages, while a file whose only
+`config`-shaped symbols is reached by the exact, entity-name and lexical stages, while a file whose only
 claim is that its path is what was typed is reached by exactly one. The wrong signal won because it was the only
 signal left.
 
@@ -3183,7 +3112,6 @@ that into a human-readable description and dropped the rest. `MatchClass` carrie
 | `EXACT_CONTENT` | `exact` | the literal occurs in this span, verified by substring |
 | `RELATED` | `graph` | reached by an edge from something the query named |
 | `LEXICAL` | `lexical`, entity FTS | word-overlap recall |
-| `SIMILAR` | `semantic` | an embedding neighbour |
 
 **Ordering is `(tier, specificity, -score, tie-break)`, and specificity is a set of boundaries rather than a
 gradient.** Two classes take precedence, in this order, and they are the two the user has to have *typed a path*
@@ -3195,8 +3123,8 @@ to reach:
 | 1 | `EXACT_SUBPATH` | spelled a multi-component trailing path, matched on segment boundaries | names every file ending that way — may be several |
 | 2 | everything else | did not spell a path | — |
 
-Everything at position 2 — a basename, an entity name, a content mention, a lexical or semantic neighbour — is
-ordered by agreement exactly as before. That limit is deliberate. A full gradient over all eight classes would
+Everything at position 2 — a basename, an entity name, a content mention, a lexical match — is ordered by
+agreement exactly as before. That limit is deliberate. A full gradient over all seven classes would
 re-rank the entire funnel on a signal nobody asked about: an exact-name symbol hit would start outranking an exact
 error-string match, which is a different product decision with none of the evidence behind it. These two
 boundaries answer the questions that were actually ambiguous.
@@ -3356,8 +3284,7 @@ segmentation.
 model; the requirement met here is only that such a query fails conservatively rather than crashing.
 
 When query analysis extracts literal terms and **none of them exist anywhere in the index**, the whole
-**associative half of the funnel** is skipped: FTS recall over chunks, entity-name recall and the embedding stage
-alike. The user named something specific; the honest answer is that it does not exist.
+**associative half of the funnel** is skipped: FTS recall over chunks and entity-name recall alike. The user named something specific; the honest answer is that it does not exist.
 
 "Exist" means exist *anywhere RepoAtlas indexed it*, and that is more than chunk text. Suppression consults the
 exact content stage **and** the file stage, which is why they both run before it is decided. Consulting content
@@ -3366,13 +3293,12 @@ question naming a file that plainly existed was declared unanswerable, and the s
 correctly on an incomplete notion of existence. The fix is to complete the notion, not to weaken the suppression —
 absent names are still refused, which the regression suite asserts in both directions. Returning spans that
 merely read like the name would be plausible, unfounded output, which is the failure V1_SPEC §2 exists to prevent.
-A question with no literal terms ("where is deployment configuration generated?") is exactly what semantic
-retrieval is for, and nothing is suppressed there.
+A question with no literal terms ("where is deployment configuration generated?") is exactly what associative
+recall is for, and nothing is suppressed there.
 
-Suppressing the lexical stage matters as much as suppressing the semantic one, and for a sharper reason: FTS ranks
-by word overlap, so a question about something absent still matches whatever files happen to share its *other*
-words — and those hits arrive with a location and a line range, which reads as an answer. Silencing embeddings
-while leaving word matching on would have moved the fabrication one stage earlier, not removed it.
+Suppressing the lexical stage matters most, because FTS ranks by word overlap: a question about something absent
+still matches whatever files happen to share its *other* words, and those hits arrive with a location and a line
+range, which reads as an answer.
 
 **Not every literal term may declare a question unanswerable.** Two `QueryAnalysis` properties are therefore
 distinguished:
@@ -3447,8 +3373,8 @@ links existed, and the change-impact walk crosses a link by its own rule, inward
 
 ### Scoping, fusion and deduplication
 
-Scoping happens at stages 2-7, *before* scoring — this is what satisfies "never scan every repo for every
-question" (V1_SPEC §20), for the vector stage as much as the lexical one. In `REPOSITORY` scope the primary
+Scoping happens at stages 2-6, *before* scoring — this is what satisfies "never scan every repo for every
+question" (V1_SPEC §20). In `REPOSITORY` scope the primary
 repository is searched first; other repositories stay reachable, so primary scope is a bias rather than a wall.
 
 **Two callers, two readings of the same scope, and the difference is the caller rather than the funnel.** The
@@ -3463,8 +3389,8 @@ differs between the two; one pass happens or it does not. Crossing from a capabi
 `scope: global` or by `relationships(cross_repository=true)`, and the handle that leads across still comes back
 from a confined search — a hub belongs to no repository, so no repository's boundary hides it.
 
-Reciprocal-rank fusion is chosen over score normalization because BM25 ranks, cosine similarities, literal-match
-scores and graph distances are not commensurable, and RRF needs no per-source calibration to combine them stably.
+Reciprocal-rank fusion is chosen over score normalization because BM25 ranks, literal-match scores and graph
+distances are not commensurable, and RRF needs no per-source calibration to combine them stably.
 
 **Each ranked list contributes one reciprocal rank per span, its best.** RRF is defined over *items*, and the item
 here is a span — `(repository identity, path, line_start, line_end)` — while a retriever returns *chunks*. The two are
@@ -3483,9 +3409,7 @@ synthetic range: a citation must point at text that was actually retrieved (V1_S
 `common/index.ts:1` from `teamA/common` and `teamB/common` into a single candidate — two repositories, one
 evidence line, and no way to tell which. A shared library copied between teams makes this worse rather than
 rarer: the two files are often byte-identical, so every appearance-based test for "the same evidence" says yes.
-Content is not identity either; identical content in two repositories is two pieces of repository evidence, and
-content hashing stays where it belongs, in vector reuse (§3), which is about avoiding recomputation rather than
-about provenance.
+Content is not identity either: identical content in two repositories is two pieces of repository evidence.
 
 The **primary-repository boost** keys on identity for the same reason. Matching on a display name meant that
 standing inside `teamB/common` promoted evidence from `teamA/common`, because both directories are called
@@ -3497,7 +3421,7 @@ Two are measured and accepted in V1 rather than tuned away, because every fix co
 have improved the fixture set and told us nothing about a real one:
 
 - **Prose about a topic competes with the code that implements it.** A README or a design note that repeats an
-  identifier is a legitimate lexical and semantic match for it, and the primary-repository boost (V1_SPEC §6)
+  identifier is a legitimate lexical match for it, and the primary-repository boost (V1_SPEC §6)
   applies to it as much as to source. A question whose answer is structural can therefore find the narrative first.
   Nothing here is *wrong* — every candidate contains what was asked about, and provenance says exactly what each
   one is — but rank 1 may be a paragraph rather than a definition. Demoting a file type by extension is precisely
@@ -3677,7 +3601,7 @@ Repositories are **untrusted input**. Static analysis only.
 | Git hooks / config | `core.hooksPath=/dev/null`, read-only plumbing allowlist (§8) |
 | Path traversal via symlinks | Every read goes through the containment boundary below: the *object opened*, not the path, is proven to be inside the root |
 | Zip-bomb / huge files | `max_file_bytes` enforced *by the reader*, on the descriptor it reads from, with a hard ceiling independent of any prior `stat` (below) |
-| The explorer launcher (`repoatlas ui`) | Runs Node on RepoAtlas's own `frontend/`, never on repository content and never git; both servers on loopback; the token passed by an owner-only file (below) |
+| The explorer launcher (`repoatlas ui`) | In a checkout, runs Node on RepoAtlas's own `frontend/`; an installed release runs no Node and the API serves the exported explorer. Never runs repository content or git; everything on loopback; the token passed by an owner-only file and never to the browser (below) |
 
 ### Bounded repository-content reads
 
@@ -3688,7 +3612,7 @@ Repositories are **untrusted input**. Static analysis only.
 
 > **Invariant.** A file that becomes oversized between scan and read cannot bypass the configured memory bound.
 
-> **Invariant.** Oversized files produce no partial parser facts, chunks, embeddings or prompt content.
+> **Invariant.** Oversized files produce no partial parser facts, chunks or prompt content.
 
 The cap used to be applied to `len(raw)` *after* `raw` had been read, which is not a cap. Pointed at a repository
 holding a 600 MiB file and a 5 GiB sparse file with `max_file_bytes` at 1 MiB, peak RSS reached **10.2 GiB** — the
@@ -3721,9 +3645,9 @@ meaning — and zero does what it says: only an empty file has content within it
 **What an oversized file leaves behind.** A `files` row and its `file` entity, so deletion tracking stays exact and
 an operator can see the path was seen; a `WARNING` diagnostic naming the repository-relative path, the observed size
 and the configured limit — never content, never an absolute host path. No parser, no chunks, no FTS rows, no
-embeddings, no evidence. When a previously-small file crosses the cap, `replace_file_facts` with only the file
+evidence. When a previously-small file crosses the cap, `replace_file_facts` with only the file
 entity is what removes everything the small version asserted: entities, edges, unresolved references, chunks, FTS
-rows and the embeddings reachable through them all cascade away (§3). "Skipped for size" must never mean "kept
+rows all cascade away (§3). "Skipped for size" must never mean "kept
 whatever we had".
 
 **Byte cap and line cap.** There is no line cap, and this document previously implied there was. There is nothing
@@ -3839,13 +3763,7 @@ the other's cases.
 **Stale escaped content in an existing index** needs no special handling, by the same argument as stale secrets: a
 refused file is absent from the scan, so the ordinary no-stale-facts mechanism (§9) classifies it *deleted*. One
 `repoatlas sync` — no `--full`, no manual database surgery — removes the file row and cascades to its entities,
-edges, unresolved refs, chunks and FTS rows, and the next embedding pass collects the orphaned vectors.
-
-**In the container**, the boundary is the second line rather than the first: repositories are mounted read-only
-and the process has no capabilities, but `/etc` and the state volume are still *reachable paths* inside the
-namespace, and a symlinked ancestor in a mounted repository names them exactly as it would on a host. The
-read-only mount prevents writes; it does nothing about reads. Containment is what stops the container's own
-`/etc/passwd` and RepoAtlas's own state volume from being indexed as repository content.
+edges, unresolved refs, chunks and FTS rows.
 
 **The leaf is held to two further conditions.** It must be a regular file, and it must have exactly one link. A
 **hardlink** is not a route out of the tree — the inode really is linked into it, so the walk never leaves — but the
@@ -3883,7 +3801,7 @@ Three invariants, all tested:
 > **Invariant.** Built-in obvious-secret filename checks are *security policy, not user preference*, and cannot be
 > negated by `.repoatlasignore`.
 
-> **Invariant.** An excluded secret file is rejected **before its contents are parsed, chunked, embedded, retrieved,
+> **Invariant.** An excluded secret file is rejected **before its contents are parsed, chunked, retrieved,
 > serialized into prompts, or logged** — and before it is opened at all.
 
 > **Invariant.** Filename-case variation cannot bypass a built-in secret exclusion.
@@ -3919,7 +3837,7 @@ exclusions, `.gitignore` and `.repoatlasignore`:
 ```
 git ls-files / walk  →  is_secret_path  →  SKIP        (never opened, never read)
                              ↓ no
-                        exclusions → .repoatlasignore → stat → ScannedFile → hash → parse → chunk → FTS → embed
+                        exclusions → .repoatlasignore → stat → ScannedFile → hash → parse → chunk → FTS
 ```
 
 Order is what makes the policy mandatory rather than usually-applied. A user who writes `!.ENV` in
@@ -4005,7 +3923,7 @@ its only caller, and a second copy of the rule would be a second policy.
 rows, and no upgrade flag exists to discover. None is needed: the file list is recomputed from the current policy on
 every sync, and a stored file absent from the new scan is classified *deleted* by the ordinary no-stale-facts
 mechanism (§9). One `repoatlas sync` therefore removes the file row and — by cascade — its entities, edges,
-unresolved refs, chunks and FTS rows; the next embedding pass collects the now-orphaned vectors. Nothing here
+unresolved refs, chunks and FTS rows. Nothing here
 depends on mtime, on `--full`, or on the file having changed.
 
 No separate *policy version* is introduced, and that is a decision rather than an omission: `facts_version` forces
@@ -4028,7 +3946,7 @@ excluded files, because a list of a repository's secret paths in terminal scroll
 operationally.
 
 Each of these is asserted separately, at every stage the content could otherwise reach — the predicate, the reader,
-enumeration, chunks, the FTS index, embeddings (including the strings handed to the embedding backend), entities,
+enumeration, chunks, the FTS index, entities,
 evidence sets, the model prompt and `--verbose` output. A single choke point is only a guarantee if the stages
 behind it genuinely depend on it, and a test per stage is what keeps that true as stages are added.
 
@@ -4068,19 +3986,15 @@ flowchart LR
   that downloads, as installing RepoAtlas is: `pnpm install --frozen-lockfile`, once, and again only when the
   lockfile changes.
 
-### Container posture
-
-The image and compose file are part of the security model, not merely packaging:
-
-| Property | Why it is a deployment property rather than a code property |
-|---|---|
-| Repositories mounted `read_only: true` | "V1 never writes to a repository" is a claim about every code path forever; the mount makes the kernel enforce it |
-| State on a separate named volume | The index, config and model cache can never be written into the tree under inspection |
-| `read_only` root filesystem, tmpfs for `/tmp` and `/home` | The writable surface is exactly the state volume, and it is visible in one file |
-| Non-root user, `cap_drop: ALL`, `no-new-privileges` | Untrusted input is parsed in a process that has nothing to escalate to |
-| Only `git` installed | The one external binary RepoAtlas invokes, through the allowlist in §8 |
-| Dependencies installed `--frozen` from `uv.lock` | A build never resolves a version the test suite has not seen |
-| Model server published on loopback only | The stack is for the machine it runs on |
+**An installed release starts nothing.** Its explorer is the app exported as static files, in the package at
+`ui/explorer/`, and `repoatlas ui` serves it from the local API itself: no Node, no child process, one port. The
+API then also answers the pages at `/api/ra/<name>` without the token, so that door carries the `/api/ra`
+route's own checks: a loopback `Host` naming the port, no cross-site `Sec-Fetch-Site` or `Origin`, a JSON body,
+an endpoint the contract lists. Files are sent from inside the export only, by segment checks before the disk is
+read and a containment check after links are resolved. `/v1` keeps its token. A checkout's `frontend/` wins over
+an export, so the process model above is what a developer runs. The API reads each connection on its own thread,
+because a browser opens spare connections it may never send on, and still makes every capability call on the
+one thread that owns the index connection.
 
 ---
 
@@ -4118,13 +4032,11 @@ Test layers:
 | Secrets | One canary per pattern in `SECRET_PATTERNS`, asserted absent at every downstream stage (§12) |
 | Malformed input | A matrix of broken YAML, Salt and Jinja fed to every parser claiming the extension. Nothing may raise, no line number may fall outside the file, and anything recovered must be marked below full confidence |
 | Performance | Shape properties from the traces (§10) plus wall-clock ceilings roughly 20× the observed cost |
-| Container | The delivery invariants of §12, parsed out of `Dockerfile` and `docker-compose.yml`, so they need no daemon |
 | Progress | The events of a real run checked against its own report, the terminal line checked on what it writes, and a watched run's facts compared with an unwatched run's (§6) |
 | Explorer launcher | `repoatlas ui` run as a subprocess with stand-in `node` and `pnpm`; the stand-in server reads the connection file and calls the API. A real SIGINT, an explorer that stops or never starts, a taken port, an old Node, and a worker that must not outlive it (§12) |
 | Installer | `install.sh` in a scratch HOME with stand-in `uv`, `claude`, `node` and `pnpm`: the exact commands it issues, a rerun that changes nothing, and links it did not create left alone |
 
-Once dependencies are installed, the tests require no network and no embedding-model download.
-- **Embeddings.** Semantic-search tests use a deterministic stub `EmbeddingModel` (hash-based pseudo-vectors).
+Once dependencies are installed, the tests require no network.
 - **Reasoning.** There is no reasoning layer left to stub.
 - **Parsing.** Grammars are installed with the dependencies rather than fetched on first parse (§4).
 
@@ -4137,15 +4049,8 @@ Once dependencies are installed, the tests require no network and no embedding-m
 blind spot is exactly how the old grammar fetch went unnoticed. So the `slow` suite also indexes from a freshly
 installed wheel inside a network namespace with loopback only: `tests/packaging/test_offline_grammars.py`.
 
-**The real model is exercised behind the `slow` marker**, which `addopts` deselects by default. `tests/test_real_embeddings.py`
-runs `BAAI/bge-small-en-v1.5` through the whole pipeline — factory, sync, vector index, retrieval funnel — and
-asserts the two properties the hashing stub structurally cannot have: that semantically related text outscores
-unrelated text without sharing tokens, and that the asymmetric query prefix actually changes the vector. It also
-re-checks the precedence guarantee with a real model, so the tier rule is not an artifact of the stub.
-
 **Performance tests assert shape, not speed.** The §20 rules — never scan every repository for a question, never
-re-index everything after one file changes, never re-embed unchanged data — are all statements about *what was
-touched*, and those are exactly reproducible. Wall-clock bounds exist only to catch a categorical regression, and
+re-index everything after one file changes — are all statements about *what was touched*, and those are exactly reproducible. Wall-clock bounds exist only to catch a categorical regression, and
 are set far above the observed cost so a loaded CI box does not teach people to ignore the suite.
 
 ### The adversarial ecosystem and the evaluation dataset
@@ -4194,7 +4099,6 @@ Every deferred capability (V1_SPEC §22) has a place to land that requires no re
 | Git-history debugging, regression introduction | The provenance columns already pin every fact to `repo/file/lines`; history analysis joins against them without schema change |
 | Blast-radius analysis | **Delivered** as the `impact` capability (`repoatlas_impact`; `repoatlas/graph/impact.py`): a bounded walk over the existing `edges`, as this seam said — a new query, not new data |
 | A visual explorer | **Delivered** as the local API (`api/`, `docs/local-api.md`) and the explorer in `frontend/`, started together by `repoatlas ui`. The topology capabilities it reads are served over HTTP only, never as agent tools |
-| Alternative vector backends | `VectorIndex` protocol; `sqlite-vec` or FAISS replaces `SqliteVectorIndex` without touching a caller |
 | Performance work of any kind | `RetrievalTrace` and `LinkTrace` already report per-stage cost and candidate counts, so a regression is measurable before anything is restructured |
 
 **Resolved dependency versions are stored in V1 despite being unused** precisely because the V2 documentation flow
@@ -4217,8 +4121,8 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | tree-sitter for TS/JS/Bash | Hand-written parsers, or language-native tooling (tsc) | Language-native tooling means executing runtimes near untrusted code; tree-sitter is in-process, error-tolerant, and one dependency for three languages |
 | Grammars as the tree-sitter organisation's pinned per-language wheels (OFF-01) | Keep `tree-sitter-language-pack` and pre-populate its cache; vendor grammar binaries into this wheel; compile grammars at build time | The pack downloads at run time and trusts a mutable cache, and has no offline mode in its Python wheel. Vendoring or compiling would turn a `py3-none-any` wheel into one platform wheel per OS and architecture, with a release pipeline to match. Upstream wheels already cover the same platforms, carry their own licenses, and are hash-pinned by `uv.lock` (§4) |
 | No Ruby structural parser rather than a guarded or refusing one | Ship `tree-sitter-ruby` 0.23.1 with a pre-parse check on heredocs; build a patched Ruby wheel; keep a parser that only refuses | 0.23.1 lacks upstream fix `ad907a69` for a scanner buffer overflow, and no check on raw text is sound under error recovery. A RepoAtlas-built grammar is a platform-wheel release decision. A parser that refuses every file is dead weight the spine already handles. Text search and Gemfile dependencies are unaffected (§4) |
-| Brute-force NumPy vectors | `sqlite-vec`, FAISS | ~77 MB / single-digit ms at target scale. Hidden behind `VectorIndex`, so upgrading is a one-file change if profiling demands it |
-| RRF for fusion | Weighted score normalization | BM25, cosine and graph distance are not commensurable; RRF is stable without per-source calibration |
+| RRF for fusion | Weighted score normalization | BM25, literal-match scores and graph distance are not commensurable; RRF is stable without per-source calibration |
+| No semantic retrieval: no embedding model, no vector store | Optional embeddings behind `sync --embed` | It was off by default, so almost no run used it, while every installation carried ONNX Runtime and its model tooling (about 80 MB). Exact, file, symbol, lexical and graph retrieval answer from the code itself, with provenance; a neighbour in vector space is a guess, and RepoAtlas runs no model of any kind (§4, §10) |
 | `git ls-files` for enumeration | Reimplementing gitignore over `os.walk` | Real gitignore semantics for free, including nested and negated patterns, plus tracked/untracked distinction |
 | git CLI subprocess | pygit2 / dulwich | No native dependency; the hardening flags (§8) are explicit and auditable in one wrapper |
 | Parsers emit unresolved references | Parsers resolve to entity IDs directly | Keeps parsers pure and testable; confines cross-repo matching rules to one auditable place; enables retroactive linking via `unresolved_refs` |
@@ -4230,10 +4134,8 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | `ask`/`debug` fail with exit 4 when no model is reachable | Fall back to `locate` output | Silently answering a different question than the one asked is worse than a clear message naming the command that does work; `--no-llm` makes the fallback explicit and opt-in |
 | `httpx` promoted to a core dependency | Keep it behind the `llm` extra | The Ollama backend is the V1 default; failing at import time behind an extra is a worse experience than one small dependency |
 | Ollama availability includes "model is pulled" | Probe reachability only | A running server without the model fails at request time; checking early turns a mid-query failure into an actionable `ollama pull` message |
-| Deterministic evidence outranks similarity via an `EvidenceTier`, not a weight | A large additive boost for exact matches | A weight is a value someone will tune until it is wrong. A tier is a guarantee: fusion compares scores only within a tier, so no cosine can displace an exact identifier — which is what V1_SPEC §14 actually requires |
-| Vectors keyed by `(content_hash, model)` | Keyed by `chunk_id` with a cascade | Chunk rows are replaced wholesale on reparse, so `chunk_id` keying re-embeds unchanged text — forbidden by V1_SPEC §20. A vector carries no provenance and is never cited, so sweeping orphans is safe where facts must cascade (§3) |
-| **Every associative stage** suppressed when named terms exist nowhere | Suppress the semantic stage only | A question naming a specific identifier that is not in the index is answered by "it is not here", not by something that reads like it. Silencing embeddings while leaving FTS on moves the fabrication one stage earlier rather than removing it — word overlap on the question's *other* words still returns files with line numbers, which reads as an answer (§2, §10) |
-| `EmbeddingModel.available()` never downloads | Load (and fetch) on first use | A 67 MB fetch inside `sync` is a multi-minute stall with no explanation. Reporting "not downloaded, run `sync --embed`" makes acquiring the model an explicit act, and leaves every deterministic command working until someone performs it |
+| Deterministic evidence outranks association via an `EvidenceTier`, not a weight | A large additive boost for exact matches | A weight is a value someone will tune until it is wrong. A tier is a guarantee: fusion compares scores only within a tier, so no amount of word overlap can displace an exact identifier — which is what V1_SPEC §14 actually requires |
+| **Every associative stage** suppressed when named terms exist nowhere | Suppress only the weakest stage | A question naming a specific identifier that is not in the index is answered by "it is not here", not by something that reads like it. Word overlap on the question's *other* words still returns files with line numbers, which reads as an answer, so FTS recall and entity-name recall are both silenced (§2, §10) |
 | Graph traversal excludes `DEFINES`/`CONTAINS` | Traverse every edge type | Containment edges turn one file node into a fan-out over every symbol it declares; two hops of that buries the relationship the question was about under an inventory of the neighbourhood |
 | Graph evidence labelled by the edge that reached it | Reuse the entity's own description | The reader asked about a relationship. "exports (hop 1)" answers that; "defines builder" answers a different question |
 | Instrumentation as models attached to results | A logging framework, or none | A trace that is part of the result is testable, serializable through `--json`, and provably inert — nothing reads it to decide anything, so it cannot change an answer |
@@ -4252,9 +4154,7 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | Cross-file symbol references resolved only through a written import | Resolve on name equality within the repository | Name equality is not evidence (V1_SPEC §2). The import is the proof, and it is already in the file, so requiring it costs nothing and removes a whole class of wrong edges |
 | `salt://` sources resolved at confidence < 1.0 | Resolve at full confidence, or not at all | `file_roots` is not readable, so no `salt://` mapping is ever proven. Refusing to resolve would lose a genuinely useful link; resolving silently at 1.0 would overstate it. The confidence value carries the distinction |
 | `unresolved_refs` retained after a successful resolution | Delete rows once resolved | The row is the file's durable claim, not a work queue. Keeping it is what makes the global pass rebuildable and what lets a repository added later gain its edges without a reparse |
-| Repository mount is read-only in the container | Rely on V1 having no write path | "V1 never writes to a repository" is a claim about every code path forever. `read_only: true` makes it a property of the deployment, checked by the kernel rather than by review (§12) |
 | A tier order re-imposed after the reranker | Document the rule and trust implementations | The `Reranker` is a seam for code that does not exist yet. A guarantee that holds only while every future implementation remembers it is not a guarantee, and the budget is spent immediately after — so a hostile order would also starve deterministic evidence out of the answer (§10) |
-| `available()` answers an empty cache without importing fastembed | Always import to read the model mapping | The import pulls in ONNX Runtime: seconds of startup and, on a read-only container filesystem, a telemetry warning on every command — all to search a directory that does not exist |
 | Diagnostic and symbol line numbers clamped to the file | Report the parser's raw mark | A YAML end-of-stream mark sits one line past the last line. A citation to a line that does not exist is a fabrication, however small, and §11 makes provenance a guarantee rather than a best effort |
 | An empty Salt requisite target yields no reference | Record it and let the linker fail to resolve | `- pkg:` with nothing after it names no state. An edge to the empty string is a relationship RepoAtlas cannot support with evidence (§2) |
 | Performance asserted as shape, with generous wall-clock ceilings | Benchmark thresholds tuned to this machine | The §20 rules are shape properties — what was scanned, what was reparsed, what was re-embedded — and those are exactly reproducible. A millisecond threshold fails on a loaded CI box and teaches people to ignore the suite |
@@ -4341,5 +4241,6 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | The progress line is erased, not kept | Leave one finished line per repository on screen | The report that follows already lists every repository, so a kept line would print each one twice; erasing keeps the command's output exactly what it was before (§6) |
 | `repoatlas ui` runs the API in-process and the explorer as a child | Two daemons; or a launcher that shells out to `repoatlas serve` | One process owns the API's lifetime and the explorer's, so stopping either stops both, and the connection file is written in the process that knows where it is. No pidfile, no daemon, nothing to clean up after a crash beyond a file the next start replaces (§12) |
 | The launcher has its own connection file (`ui-api.json`) | Reuse `api.json` | A `repoatlas serve` running beside it keeps working, and stopping one never removes the other's file |
-| The explorer is installed and built on first use, and again only when its inputs change | Ship a prebuilt explorer in the wheel; or build on every start | A wheel carrying Node output would tie the Python package to a Node build. Rebuilding every time costs a minute per start; comparing modification times costs a directory walk and reads no file (§12) |
+| A release ships the explorer as a static export in the wheel, served by the local API; a checkout installs and builds it on first use, and again only when its inputs change | Require Node.js wherever the explorer runs; or build on every start | An installed RepoAtlas should need nothing beyond Python, so the release workflow builds the export once and the API sends it, answering the pages at the door the explorer's own server keeps, with that server's checks. A checkout runs the sources a developer is editing: rebuilding every time would cost a minute per start, while comparing modification times costs a directory walk and reads no file (§12) |
+| The local API reads each connection on its own thread, and runs every capability call on one index thread | One thread for everything | A browser opens spare connections it may never send on; read one at a time, such a connection holds the server until its socket timeout. The index's connection is bound to the thread that opened it, so calls still run there, one at a time (§12, docs/local-api.md) |
 | `install.sh` reruns safely and replaces nothing it did not create | An installer that overwrites existing links and registrations | Running it again is how an installation is updated, and the operator's own `repoatlas` on PATH, their skills and their MCP registration are theirs (docs/installation.md) |

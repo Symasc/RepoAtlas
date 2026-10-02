@@ -307,8 +307,10 @@ def build_server(service: CapabilityService) -> Server[object, object]:
 def _package_version() -> str:
     from importlib.metadata import PackageNotFoundError, version
 
+    from repoatlas import DISTRIBUTION
+
     try:
-        return version("repoatlas")
+        return version(DISTRIBUTION)
     except PackageNotFoundError:  # pragma: no cover - only outside an install
         return "0"
 

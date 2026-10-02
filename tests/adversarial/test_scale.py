@@ -95,7 +95,6 @@ def scaled(tmp_path: Path) -> Iterator[Built]:
         settings = Settings.model_validate(
             {
                 "storage": {"database": str(tmp_path / f"state-{repositories}" / "atlas.db")},
-                "embeddings": {"provider": "hashing", "dim": 128},
             }
         )
         workspace = open_workspace(settings=settings, require_root=False)

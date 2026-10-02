@@ -52,13 +52,28 @@ from repoatlas.storage.sqlite.identity import Ownership, establish, user_objects
 from repoatlas.storage.sqlite.migrator import (
     APPLICATION_ID,
     application_id,
-    load_migrations,
     recognizes,
     user_version,
 )
+from tests.adversarial import migration_probe
+from tests.adversarial.migration_probe import PROBE
 
 CLI = Path(sys.executable).parent / "repoatlas"
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: The committed schema's version; the upgrade cases start from it.
+CURRENT = PROBE.version - 1
+#: The version an upgrade reaches once the probe migration is installed.
+PROBED = PROBE.version
+#: Prepended to every subprocess that has to see the probe migration.
+INSTALL = "from tests.adversarial.migration_probe import install; install()\n"
+
+
+@pytest.fixture
+def probed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the test-only probe migration part of the chain for this test."""
+    migration_probe.patch(monkeypatch.setattr)
+
 
 pytestmark = pytest.mark.adversarial
 
@@ -104,7 +119,7 @@ def historical(path: Path, version: int) -> sqlite3.Connection:
     """
     connection = connect(path)
     connection.execute("PRAGMA journal_mode = WAL")
-    for migration in load_migrations():
+    for migration in migration_probe.chain():
         if migration.version > version:
             break
         connection.execute("BEGIN IMMEDIATE")
@@ -470,7 +485,7 @@ def test_every_foreign_shape_is_refused_without_mutation(bare: Harness, shape: s
     assert marker(bare.database) == 0
 
 
-@pytest.mark.parametrize("version", [0, 3, SCHEMA_VERSION, 99])
+@pytest.mark.parametrize("version", [0, SCHEMA_VERSION, 99])
 def test_a_foreign_database_is_refused_at_every_user_version(bare: Harness, version: int) -> None:
     """``user_version`` is a schema version, never proof of ownership.
 
@@ -583,27 +598,21 @@ def near_repoatlas(path: Path, variant: str) -> None:
         connection.commit()
         connection.close()
         return
-    if variant == "v5-plus-one-column":
-        connection = historical(path, SCHEMA_VERSION)
+    if variant == "current-plus-one-column":
+        connection = historical(path, PROBED)
         connection.execute("ALTER TABLE files ADD COLUMN extra TEXT")
         connection.commit()
         connection.close()
         return
-    if variant == "v5-minus-one-index":
-        connection = historical(path, SCHEMA_VERSION)
+    if variant == "current-minus-one-index":
+        connection = historical(path, PROBED)
         connection.execute("DROP INDEX idx_files_hash")
         connection.commit()
         connection.close()
         return
-    if variant == "v4-shape-stamped-v5":
-        connection = historical(path, 4)
-        connection.execute("PRAGMA user_version = 5")
-        connection.commit()
-        connection.close()
-        return
-    if variant == "v5-shape-stamped-v4":
-        connection = historical(path, SCHEMA_VERSION)
-        connection.execute("PRAGMA user_version = 4")
+    if variant == "older-shape-stamped-current":
+        connection = historical(path, CURRENT)
+        connection.execute(f"PRAGMA user_version = {PROBED}")
         connection.commit()
         connection.close()
         return
@@ -613,12 +622,13 @@ def near_repoatlas(path: Path, variant: str) -> None:
 LOOKALIKES = (
     "repositories-only",
     "files-and-edges-wrong-shape",
-    "v5-plus-one-column",
-    "v5-minus-one-index",
-    "v4-shape-stamped-v5",
+    "current-plus-one-column",
+    "current-minus-one-index",
+    "older-shape-stamped-current",
 )
 
 
+@pytest.mark.usefixtures("probed")
 @pytest.mark.parametrize("variant", LOOKALIKES)
 def test_a_near_repoatlas_schema_never_gains_identity(tmp_path: Path, variant: str) -> None:
     """The marker must never be used to bless an unproven database.
@@ -655,7 +665,8 @@ def test_a_colliding_table_name_is_not_ownership_evidence(bare: Harness) -> None
 # == 13-18. genuine historical databases are recognized ======================
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 4, SCHEMA_VERSION])
+@pytest.mark.usefixtures("probed")
+@pytest.mark.parametrize("version", [CURRENT, PROBED])
 def test_a_genuine_historical_database_is_marked_and_migrated(tmp_path: Path, version: int) -> None:
     """§11: the one safe adoption path. Recognized by shape, then marked.
 
@@ -675,7 +686,7 @@ def test_a_genuine_historical_database_is_marked_and_migrated(tmp_path: Path, ve
 
     database = open_database(path)
     try:
-        assert user_version(database.connection) == SCHEMA_VERSION
+        assert user_version(database.connection) == PROBED
         assert application_id(database.connection) == APPLICATION_ID
         row = database.connection.execute("SELECT name, path FROM repositories").fetchone()
         assert (row["name"], row["path"]) == ("svc", "/repos/svc")
@@ -683,24 +694,24 @@ def test_a_genuine_historical_database_is_marked_and_migrated(tmp_path: Path, ve
         database.close()
 
 
+@pytest.mark.usefixtures("probed")
 def test_a_recognized_partial_migration_is_recovered_and_marked(tmp_path: Path) -> None:
     """§18/§46.18: the shape a database damaged by the pre-atomicity implementation
-    has — part of migration 005 committed, ``user_version`` still 4. Pass 2
-    recovers it; this pass must recognize it as genuinely RepoAtlas rather than
-    call it an unknown schema."""
+    has — part of a migration committed, ``user_version`` still the one before.
+    Pass 2 recovers it; this pass must recognize it as genuinely RepoAtlas rather
+    than call it an unknown schema."""
     path = tmp_path / "partial.db"
-    connection = historical(path, 4)
-    pending = next(m for m in load_migrations() if m.version == 5)
+    connection = historical(path, CURRENT)
     connection.execute("BEGIN IMMEDIATE")
-    connection.execute(pending.statements[0])
+    connection.execute(PROBE.statements[0])
     connection.commit()
-    assert user_version(connection) == 4
-    assert recognizes(connection, 4, load_migrations()) is True
+    assert user_version(connection) == CURRENT
+    assert recognizes(connection, CURRENT, migration_probe.chain()) is True
     connection.close()
 
     database = open_database(path)
     try:
-        assert user_version(database.connection) == SCHEMA_VERSION
+        assert user_version(database.connection) == PROBED
         assert application_id(database.connection) == APPLICATION_ID
     finally:
         database.close()
@@ -711,7 +722,8 @@ def test_recognition_is_shape_not_table_names(tmp_path: Path) -> None:
     genuine = connect(tmp_path / "genuine.db")
     lookalike = connect(tmp_path / "lookalike.db")
     try:
-        for migration in load_migrations():
+        migrations = migration_probe.chain()
+        for migration in migrations:
             for statement in migration.statements:
                 genuine.execute(statement)
             genuine.execute(f"PRAGMA user_version = {migration.version}")
@@ -720,32 +732,27 @@ def test_recognition_is_shape_not_table_names(tmp_path: Path) -> None:
         lookalike.execute("CREATE TABLE files(id INTEGER PRIMARY KEY)")
         lookalike.commit()
 
-        migrations = load_migrations()
-        assert recognizes(genuine, SCHEMA_VERSION, migrations) is True
+        assert recognizes(genuine, PROBED, migrations) is True
         assert recognizes(lookalike, 0, migrations) is False
-        assert recognizes(lookalike, SCHEMA_VERSION, migrations) is False
+        assert recognizes(lookalike, PROBED, migrations) is False
         # The latest shape stamped one lower is not a mismatch: it is exactly what
         # a crash between the last statement of the latest migration and its
         # version stamp leaves behind, and Pass 2 recovers it. Recognition has to
         # include it or that database becomes unopenable.
-        assert recognizes(genuine, SCHEMA_VERSION - 1, migrations) is True
+        assert recognizes(genuine, PROBED - 1, migrations) is True
         # The other direction has no such reading. Nothing produces the latest
         # version over a schema two behind, because each stamp lands last.
-        assert recognizes(genuine, SCHEMA_VERSION - 2, migrations) is False
+        assert recognizes(genuine, PROBED - 2, migrations) is False
         assert recognizes(genuine, 99, migrations) is False
-        # The same reading at 005, whose crash window the rule was written for.
-        v5 = connect(tmp_path / "v5.db")
+        # The same reading at the first migration: its whole shape, unstamped.
+        first = connect(tmp_path / "first.db")
         try:
-            for migration in migrations:
-                if migration.version > 5:
-                    break
-                for statement in migration.statements:
-                    v5.execute(statement)
-            v5.commit()
-            assert recognizes(v5, 4, migrations) is True
-            assert recognizes(v5, 3, migrations) is False
+            for statement in migrations[0].statements:
+                first.execute(statement)
+            first.commit()
+            assert recognizes(first, 0, migrations) is True
         finally:
-            v5.close()
+            first.close()
     finally:
         genuine.close()
         lookalike.close()
@@ -771,7 +778,6 @@ def test_ownership_outcomes_are_what_each_fixture_deserves(tmp_path: Path) -> No
         ("empty-sqlite", lambda p: connect(p).close(), Ownership.EMPTY),
         ("foreign", foreign_payroll, IndexNotRecognizedError),
         ("view-only", foreign_view_only, IndexNotRecognizedError),
-        ("legacy-v4", lambda p: historical(p, 4).close(), Ownership.LEGACY),
         ("legacy-current", lambda p: historical(p, SCHEMA_VERSION).close(), Ownership.LEGACY),
     ]
     for name, build, expected in cases:
@@ -854,12 +860,13 @@ def test_a_marked_database_with_an_impossible_schema_is_refused(tmp_path: Path) 
     assert objects(path) == before_objects, "no RepoAtlas table was created"
 
 
+@pytest.mark.usefixtures("probed")
 def test_a_marked_database_below_current_with_a_wrong_schema_is_refused(tmp_path: Path) -> None:
     """The same rule where it costs something: a marked database that a migration
     is about to be applied to has its shape checked first, because the
     alternative is migrating a schema RepoAtlas cannot account for."""
-    path = tmp_path / "marked-wrong-v4.db"
-    connection = historical(path, 4)
+    path = tmp_path / "marked-wrong-old.db"
+    connection = historical(path, CURRENT)
     connection.execute("DROP TABLE chunks")
     connection.execute(f"PRAGMA application_id = {APPLICATION_ID}")
     connection.commit()
@@ -977,6 +984,7 @@ def test_a_read_only_legacy_index_stays_readable_and_is_never_called_foreign(
         legacy.database.chmod(0o600)
 
 
+@pytest.mark.usefixtures("probed")
 def test_a_read_only_historical_index_is_recognized_not_refused(tmp_path: Path) -> None:
     """§41 for an *old* schema: recognition must not depend on being able to write.
 
@@ -984,7 +992,7 @@ def test_a_read_only_historical_index_is_recognized_not_refused(tmp_path: Path) 
     not because RepoAtlas decided it was foreign.
     """
     path = tmp_path / "old-ro.db"
-    historical(path, 3).close()
+    historical(path, CURRENT).close()
     before = digest(path)
     path.chmod(0o400)
     try:
@@ -1081,9 +1089,9 @@ def test_a_held_writer_lock_still_wins_for_a_genuine_index(indexed: Harness) -> 
 # == 31-32. concurrency ======================================================
 
 
-def open_concurrently(path: Path, count: int) -> list[str]:
+def open_concurrently(path: Path, count: int, *, probed: bool = False) -> list[str]:
     """Open the same database from ``count`` real, concurrent processes."""
-    script = (
+    script = (INSTALL if probed else "") + (
         "import sys, pathlib\n"
         "from repoatlas.storage.sqlite.database import open_database\n"
         "from repoatlas.storage.sqlite.migrator import application_id\n"
@@ -1125,12 +1133,12 @@ def test_concurrent_first_opens_of_a_new_database_all_agree(tmp_path: Path) -> N
 def test_concurrent_openers_of_a_legacy_database_all_upgrade_cleanly(tmp_path: Path) -> None:
     """§38's second half: identity adoption under contention."""
     path = tmp_path / "legacy-race.db"
-    historical(path, 3).close()
+    historical(path, CURRENT).close()
 
-    results = open_concurrently(path, 6)
+    results = open_concurrently(path, 6, probed=True)
 
     assert all(r.startswith("OK") for r in results), results
-    assert {r.split()[1] for r in results} == {str(SCHEMA_VERSION)}
+    assert {r.split()[1] for r in results} == {str(PROBED)}
     assert {r.split()[2] for r in results} == {str(APPLICATION_ID)}
     assert marker(path) == APPLICATION_ID
 
@@ -1173,6 +1181,7 @@ def kill_during(path: Path, script: str, sig: int) -> None:
     victim.wait(timeout=30)
 
 
+@pytest.mark.usefixtures("probed")
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGKILL])
 def test_a_kill_during_a_legacy_migration_never_leaves_a_false_claim(
     tmp_path: Path, sig: int
@@ -1181,15 +1190,15 @@ def test_a_kill_during_a_legacy_migration_never_leaves_a_false_claim(
     database that claims to be a RepoAtlas index while holding a schema no
     migration produced. Either both landed, or neither did."""
     path = tmp_path / f"crash{sig}.db"
-    historical(path, 4).close()
+    historical(path, CURRENT).close()
 
     kill_during(
         path,
         "import sys, pathlib, sqlite3, time\n"
-        "from repoatlas.storage.sqlite.migrator import load_migrations, stamp_application_id\n"
+        "from repoatlas.storage.sqlite.migrator import stamp_application_id\n"
+        "from tests.adversarial.migration_probe import PROBE as m\n"
         "c = sqlite3.connect(sys.argv[1], isolation_level='DEFERRED')\n"
         "c.execute('PRAGMA journal_mode = WAL')\n"
-        "m = [m for m in load_migrations() if m.version == 5][0]\n"
         "c.execute('BEGIN IMMEDIATE')\n"
         "stamp_application_id(c)\n"
         "[c.execute(s) for s in m.statements]\n"
@@ -1198,12 +1207,12 @@ def test_a_kill_during_a_legacy_migration_never_leaves_a_false_claim(
         sig,
     )
 
-    assert stored_version(path) == 4
+    assert stored_version(path) == CURRENT
     assert marker(path) == 0, "identity outlived the transaction that was meant to carry it"
 
     database = open_database(path)
     try:
-        assert user_version(database.connection) == SCHEMA_VERSION
+        assert user_version(database.connection) == PROBED
         assert application_id(database.connection) == APPLICATION_ID
         assert database.connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     finally:

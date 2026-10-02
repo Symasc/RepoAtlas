@@ -197,8 +197,6 @@ def test_settings_round_trip(tmp_path: Path) -> None:
     save_settings(settings, path)
     loaded = load_settings(path)
     assert loaded.root == tmp_path / "repos"
-    assert loaded.embeddings.provider == "fastembed"
-    assert loaded.embeddings.model == "BAAI/bge-small-en-v1.5"
 
 
 def test_settings_default_when_absent(tmp_path: Path) -> None:
