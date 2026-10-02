@@ -307,13 +307,13 @@ def test_no_canary_reaches_a_chunk(vault: Workspace) -> None:
 
 def test_no_canary_is_searchable(vault: Workspace) -> None:
     for canary in CANARIES:
-        assert vault.search.search_literal(canary) == [], canary
+        assert vault.search.find_literal(canary).hits == [], canary
 
 
 def test_no_secret_path_is_searchable_by_filename(vault: Workspace) -> None:
     for secret in SECRET_FILES:
         name = PurePosixPath(secret).name
-        assert not [hit for hit in vault.search.search_literal(name) if hit.path in SECRET_FILES]
+        assert not [hit for hit in vault.search.find_literal(name).hits if hit.path in SECRET_FILES]
 
 
 def test_no_secret_file_becomes_an_entity(vault: Workspace) -> None:
@@ -480,7 +480,7 @@ def test_the_upgrade_sync_clears_chunks_and_fts(contaminated: Workspace, vault_r
     sync(contaminated, contaminated.resolver().resolve(vault_root))
     assert leaked_canaries(chunk_text(contaminated)) == []
     for canary in CANARIES:
-        assert contaminated.search.search_literal(canary) == [], canary
+        assert contaminated.search.find_literal(canary).hits == [], canary
 
 
 def test_no_secret_survives_the_upgrade_into_retrieval(

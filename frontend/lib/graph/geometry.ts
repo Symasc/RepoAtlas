@@ -31,7 +31,7 @@ export function centre(b: Box): Point {
 }
 
 /** Where a ray from `from` (inside `b`) towards `toward` leaves `b`, grown by `gap`. */
-export function exitPoint(b: Box, from: Point, toward: Point, gap = 0): Point {
+function exitPoint(b: Box, from: Point, toward: Point, gap = 0): Point {
   const dx = toward.x - from.x;
   const dy = toward.y - from.y;
   const x0 = b.x - gap;

@@ -94,10 +94,6 @@ class Repository(BaseModel):
     last_indexed_dirty: bool | None = None
     last_sync_status: SyncStatus = SyncStatus.NEVER
 
-    @property
-    def is_indexed(self) -> bool:
-        return self.last_indexed_at is not None
-
 
 class FileState(BaseModel):
     """The unit of the sync diff: what we recorded about a file last time.

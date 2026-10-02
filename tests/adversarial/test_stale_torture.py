@@ -64,7 +64,7 @@ def _equals_clean_index(
 
 
 def can_find(workspace: Workspace, text: str) -> bool:
-    return bool(workspace.search.search_literal(text))
+    return bool(workspace.search.find_literal(text).hits)
 
 
 def symbol_exists(workspace: Workspace, name: str) -> bool:
@@ -101,7 +101,7 @@ def test_a_deleted_function_stops_being_findable(
     # CONNECT_RETRIES is read in ts-service, configured in deployment and named in
     # this repository's own legacy notes, so it must vanish from the *file* that no
     # longer contains it — which is exactly what a stale fact would be.
-    hits = adversarial.search.search_literal("CONNECT_RETRIES")
+    hits = adversarial.search.find_literal("CONNECT_RETRIES").hits
     assert not [hit for hit in hits if hit.path == "src/config.py"]
 
 

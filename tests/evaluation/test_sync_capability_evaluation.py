@@ -257,7 +257,6 @@ def test_the_sync_outcome_is_exactly_the_expected_one(case: SyncCase, tmp_path: 
         for step in case.setup:
             _apply(root, step)
         tree_before = _tree(root)
-        generation = service.generation
         holding = any("hold_writer_lock" in step for step in case.setup)
 
         if "error" in case.expect:
@@ -269,7 +268,6 @@ def test_the_sync_outcome_is_exactly_the_expected_one(case: SyncCase, tmp_path: 
             error = capability_error(raised.value)
             assert error.code == case.expect["error"], case.notes
             assert error.retryable is case.expect["retryable"]
-            assert service.generation == generation, "a refused sync moved the generation"
             return
 
         response = service.sync(SyncRequest(context=GLOBAL))

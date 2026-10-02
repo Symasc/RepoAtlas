@@ -50,11 +50,11 @@ def test_exact_search_is_not_replaced_by_approximation(
     initialized: Workspace,
 ) -> None:
     """A literal that does not exist must return nothing, not a near match."""
-    assert initialized.search.search_literal("TOTALLY_ABSENT_IDENTIFIER") == []
+    assert initialized.search.find_literal("TOTALLY_ABSENT_IDENTIFIER").hits == []
 
 
 def test_literal_search_verifies_substring(initialized: Workspace) -> None:
-    hits = initialized.search.search_literal("SERVICE_HOST")
+    hits = initialized.search.find_literal("SERVICE_HOST").hits
     assert hits
     assert all("SERVICE_HOST" in hit.text for hit in hits)
 
@@ -66,7 +66,7 @@ def test_symbol_lookup_finds_a_definition(initialized: Workspace) -> None:
 
 def test_search_results_carry_line_provenance(initialized: Workspace) -> None:
     """Every fact must be citable as repo/path:line (V1_SPEC §11)."""
-    hits = initialized.search.search_literal("SERVICE_HOST")
+    hits = initialized.search.find_literal("SERVICE_HOST").hits
     for hit in hits:
         assert hit.line_start >= 1
         assert hit.line_end >= hit.line_start

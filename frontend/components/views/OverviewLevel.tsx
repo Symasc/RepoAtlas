@@ -240,7 +240,7 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
   );
 }
 
-export function RepositoryDetails({ repository: r }: { repository: RepositoryModel }) {
+function RepositoryDetails({ repository: r }: { repository: RepositoryModel }) {
   return (
     <dl className={inspectorClasses.details}>
       <dt>Branch</dt>

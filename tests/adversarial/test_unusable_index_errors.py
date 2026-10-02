@@ -603,7 +603,6 @@ def test_an_unusable_index_is_never_reported_as_a_model_failure(indexed: Harness
     for command in COMMANDS:
         result = indexed.run(*command)
         assert_clean_failure(result, ExitCode.NOT_INITIALIZED)
-        assert result.exit_code != ExitCode.LLM_UNAVAILABLE
 
 
 def test_writer_lock_contention_still_exits_5(indexed: Harness) -> None:

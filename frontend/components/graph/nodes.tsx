@@ -38,20 +38,20 @@ export interface NodeActions {
 
 type Common = { actions: NodeActions; selected?: boolean };
 
-export type RepositoryNodeData = Common & { repository: RepositoryModel; partners: number };
-export type HubNodeData = { repositories: number; files: number; note: string | null };
-export type GroupNodeData = { count: number };
+type RepositoryNodeData = Common & { repository: RepositoryModel; partners: number };
+type HubNodeData = { repositories: number; files: number; note: string | null };
+type GroupNodeData = { count: number };
 /** Out to a directory on the way here, `""` for the repository's root (see useClimb). */
-export type Climb = (at: string) => void;
+type Climb = (at: string) => void;
 
-export type FrameNodeData = { frame: FrameModel; repository: RepositoryModel; climb: Climb };
-export type DirectoryNodeData = Common & { card: DirectoryCard; repository: string };
-export type FilesNodeData = Common & { card: FilesCard; repository: string };
-export type SharedNodeData = Common & { node: SharedModel };
-export type PeerNodeData = Common & { node: PeerModel; hue: number | null };
-export type PlaceNodeData = Common & { node: PlaceModel; repository: string };
-export type MoreNodeData = Common & { node: MoreModel; noun: string };
-export type AnchorNodeData = Common & {
+type FrameNodeData = { frame: FrameModel; repository: RepositoryModel; climb: Climb };
+type DirectoryNodeData = Common & { card: DirectoryCard; repository: string };
+type FilesNodeData = Common & { card: FilesCard; repository: string };
+type SharedNodeData = Common & { node: SharedModel };
+type PeerNodeData = Common & { node: PeerModel; hue: number | null };
+type PlaceNodeData = Common & { node: PlaceModel; repository: string };
+type MoreNodeData = Common & { node: MoreModel; noun: string };
+type AnchorNodeData = Common & {
   name: string;
   path: string;
   repository: RepositoryModel;
@@ -60,7 +60,7 @@ export type AnchorNodeData = Common & {
   lines: number | null;
   climb: Climb;
 };
-export type NeighbourNodeData = Common & { node: Neighbour };
+type NeighbourNodeData = Common & { node: Neighbour };
 
 export type GraphNode =
   | Node<RepositoryNodeData, "repository">

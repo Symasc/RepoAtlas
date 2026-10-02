@@ -139,7 +139,7 @@ def test_the_index_survives_a_crash_and_a_retry_succeeds(
     try:
         report = sync(reopened, reopened.resolver().resolve(adversarial_root))
         assert report.repositories
-        assert reopened.search.search_literal("service_config")
+        assert reopened.search.find_literal("service_config").hits
         # The repository row records the outcome, so a later run can tell whether
         # it may trust the previous one.
         deployment = reopened.repositories.get_by_name("deployment")

@@ -36,7 +36,7 @@ from repoatlas.capabilities.ledger import (
     LedgerCapacityError,
     evidence_identity,
 )
-from repoatlas.capabilities.search import offered_lines, provable_line_span
+from repoatlas.capabilities.search import offered_lines
 from repoatlas.capabilities.service import CapabilityService
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.capability_io import EvidenceItem
@@ -54,6 +54,7 @@ from repoatlas.models.verification import (
     VerifyGroundingResponse,
 )
 from repoatlas.services.workspace import Workspace
+from tests.capabilities.spans import provable_line_span
 
 GLOBAL = CapabilityContext(scope=CapabilityScope.GLOBAL)
 

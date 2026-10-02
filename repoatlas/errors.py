@@ -17,13 +17,6 @@ class ExitCode:
     RUNTIME = 1
     CONTEXT = 2
     NOT_INITIALIZED = 3
-    #: Retired. V1's ``ask`` and ``debug`` returned this when no reasoning model
-    #: was reachable. RepoAtlas contains no model execution path, so nothing
-    #: raises it and no exception class maps to it. The number is reserved rather
-    #: than reused: a wrapper script still branching on 4 must never be handed a
-    #: different meaning, and the guard that an unusable index is not reported as
-    #: a model failure needs a name for the code it must not be.
-    LLM_UNAVAILABLE = 4
     #: Another process holds the writer lock. Distinct from RUNTIME so a wrapper
     #: script can retry contention without retrying a genuine failure.
     SYNC_LOCKED = 5

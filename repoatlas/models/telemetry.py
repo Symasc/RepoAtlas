@@ -14,7 +14,7 @@ from __future__ import annotations
 import time
 from types import TracebackType
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 
 class StageTiming(BaseModel):
@@ -27,10 +27,6 @@ class StageTiming(BaseModel):
     candidates_in: int = 0
     candidates_out: int = 0
     detail: str = ""
-
-    @property
-    def delta(self) -> int:
-        return self.candidates_out - self.candidates_in
 
 
 class RetrievalTrace(BaseModel):
@@ -151,18 +147,3 @@ class Stopwatch:
             candidates_out=self.candidates_out,
             detail=self.detail,
         )
-
-
-class TraceRecorder(BaseModel):
-    """Mutable accumulator, frozen into a :class:`RetrievalTrace` at the end."""
-
-    model_config = ConfigDict(frozen=False)
-
-    stages: list[StageTiming] = Field(default_factory=list)
-
-    def stage(self, name: str, *, candidates_in: int = 0) -> Stopwatch:
-        return Stopwatch(name, candidates_in=candidates_in)
-
-    def record(self, watch: Stopwatch) -> None:
-        if watch.recorded is not None:
-            self.stages.append(watch.recorded)

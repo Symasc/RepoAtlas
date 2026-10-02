@@ -660,9 +660,9 @@ def test_the_cap_boundary_decides_what_becomes_content(tmp_path: Path, mixed_rep
 def test_no_oversized_content_reaches_search_or_chunks(tmp_path: Path, mixed_repo: Path) -> None:
     space = _indexed(tmp_path, mixed_repo)
     try:
-        assert space.search.search_literal(f"{MARKER}_OVER") == []
-        assert space.search.search_literal(f"{MARKER}_SMALL") != []
-        assert space.search.search_literal(f"{MARKER}_EXACT") != []
+        assert space.search.find_literal(f"{MARKER}_OVER").hits == []
+        assert space.search.find_literal(f"{MARKER}_SMALL").hits != []
+        assert space.search.find_literal(f"{MARKER}_EXACT").hits != []
         texts = [
             str(r["text"]) for r in space.database.execute("SELECT text FROM chunks").fetchall()
         ]
@@ -714,7 +714,7 @@ def test_a_file_that_becomes_oversized_loses_every_fact_it_asserted(
 
     space = _indexed(tmp_path, root)
     try:
-        assert space.search.search_literal(STALE) != []
+        assert space.search.find_literal(STALE).hits != []
         before = _files(space)["app.py"]
         assert before["chunks"] > 0 and before["entities"] > 1
 
@@ -731,7 +731,7 @@ def test_a_file_that_becomes_oversized_loses_every_fact_it_asserted(
         assert after["chunks"] == 0, "chunks from the small version must be gone"
         assert after["entities"] == 1, "only the file-identity entity may remain"
         assert after["parser"] is None
-        assert space.search.search_literal(STALE) == [], "FTS must not still serve it"
+        assert space.search.find_literal(STALE).hits == [], "FTS must not still serve it"
         assert (
             space.database.execute(
                 "SELECT COUNT(*) AS n FROM chunks WHERE text IN "  # noqa: S608
@@ -766,7 +766,7 @@ def test_an_oversized_file_that_shrinks_becomes_indexable(tmp_path: Path) -> Non
         row = _files(space)["app.py"]
         assert row["chunks"] > 0
         assert row["parser"] == "python-ast"
-        assert space.search.search_literal(f"{MARKER}_SHRUNK") != []
+        assert space.search.find_literal(f"{MARKER}_SHRUNK").hits != []
     finally:
         space.close()
 
@@ -806,7 +806,7 @@ def test_a_file_that_grows_past_the_cap_between_scan_and_read(
         assert (repo / "grower.py").stat().st_size > CAP
         assert content_reads.bytes_for("grower.py") == 0
         assert _files(space)["grower.py"]["chunks"] == 0
-        assert space.search.search_literal(f"{MARKER}_GROWER") == []
+        assert space.search.find_literal(f"{MARKER}_GROWER").hits == []
         # The rest of the repository is unaffected: this is a per-file decision.
         assert _files(space)["other.py"]["chunks"] > 0
     finally:
@@ -859,7 +859,7 @@ def test_an_oversized_file_produces_no_partial_facts(tmp_path: Path) -> None:
         }
         assert names == {"big.py"}, names
         assert "visible_head" not in names
-        assert space.search.search_literal("visible_head") == []
+        assert space.search.find_literal("visible_head").hits == []
     finally:
         space.close()
 
@@ -883,7 +883,7 @@ def test_a_large_unicode_file_is_refused_without_a_decode_attempt(tmp_path: Path
         assert rows["uni.py"]["is_binary"] == 0
         # Unicode indexing is unaffected for files within the cap (Pass 3).
         assert rows["small_uni.py"]["chunks"] > 0
-        assert space.search.search_literal(f"créer_{MARKER}_UNI") != []
+        assert space.search.find_literal(f"créer_{MARKER}_UNI").hits != []
     finally:
         space.close()
 
@@ -1005,7 +1005,7 @@ def test_an_untracked_oversized_file_is_bounded_too(tmp_path: Path) -> None:
         rows = _files(space)
         assert "untracked_big.py" in rows, "untracked files are in scope"
         assert rows["untracked_big.py"]["chunks"] == 0
-        assert space.search.search_literal(f"{MARKER}_UNTRACKED") == []
+        assert space.search.find_literal(f"{MARKER}_UNTRACKED").hits == []
     finally:
         space.close()
 
@@ -1033,7 +1033,7 @@ def test_an_enormous_repoatlasignore_cannot_exhaust_memory_before_the_cap_applie
         assert content_reads.bytes_for(".repoatlasignore") == 0
         # An unreadable rule file means no rules, never partial rules: the rest of
         # the repository is still indexed.
-        assert space.search.search_literal(f"{MARKER}_IGNORE_OK") != []
+        assert space.search.find_literal(f"{MARKER}_IGNORE_OK").hits != []
     finally:
         space.close()
 
@@ -1050,8 +1050,8 @@ def test_a_normal_repoatlasignore_still_works(tmp_path: Path) -> None:
 
     space = _indexed(tmp_path, root)
     try:
-        assert space.search.search_literal(f"{MARKER}_KEPT") != []
-        assert space.search.search_literal(f"{MARKER}_EXCLUDED") == []
+        assert space.search.find_literal(f"{MARKER}_KEPT").hits != []
+        assert space.search.find_literal(f"{MARKER}_EXCLUDED").hits == []
         assert "vendor.py" not in _files(space)
     finally:
         space.close()

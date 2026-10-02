@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict
 
 from repoatlas.models.dependencies import DependencyPackage, DependencyRecord
 from repoatlas.models.parsing import EdgeDirection, EdgeType, EntityType, NeighborOrder
-from repoatlas.models.repository import FileState, IndexedFile, Repository
+from repoatlas.models.repository import Repository
 
 
 class EntityRecord(BaseModel):
@@ -129,7 +129,7 @@ class ChunkHit(BaseModel):
 class LiteralMatches(BaseModel):
     """What one exact text lookup returned, and whether it read everything it could.
 
-    ``hits`` is exactly what :meth:`SearchIndex.search_literal` returns.
+    ``hits`` are the chunks that literally contain the term.
     ``exhaustive`` is whether every indexed chunk that could contain the term was
     examined. A store that stops at its limit before it has verified what it read
     must say so here, and then an empty ``hits`` is not a proof that the term is
@@ -485,7 +485,6 @@ class NeighborRow(BaseModel):
     far_qualified_name: str | None = None
     far_repo_id: int | None = None
     #: The far entity's own file and span, when it is file-scoped.
-    far_file_id: int | None = None
     far_path: str | None = None
     far_line_start: int | None = None
     far_line_end: int | None = None
@@ -550,14 +549,6 @@ class RepositoryStore(Protocol):
     def mark_sync_started(self, repo_id: int) -> None: ...
     def mark_sync_failed(self, repo_id: int) -> None: ...
     def mark_many_synced(self, completions: Sequence[SyncCompletion]) -> None: ...
-
-
-class FileStore(Protocol):
-    def list_states(self, repo_id: int) -> dict[str, FileState]: ...
-    def states_for(self, repo_id: int, rel_paths: Sequence[str]) -> dict[str, FileState]: ...
-    def upsert(self, repo_id: int, file: IndexedFile) -> int: ...
-    def delete_many(self, file_ids: Sequence[int]) -> None: ...
-    def count_outdated(self, repo_id: int, parser_version: str) -> int: ...
 
 
 class KnowledgeStore(Protocol):
@@ -774,59 +765,6 @@ class StoredEdge(BaseModel):
     resolution: str | None = None
 
 
-class TopologyStore(Protocol):
-    """Set-based reads for the topology capabilities: one statement per question.
-
-    None of these runs a query per row it returns, so what a topology answer costs
-    in statements does not grow with the size of the repository it describes.
-    """
-
-    def crossing_edges(
-        self, *, exclude: Sequence[EdgeType], limit: int
-    ) -> list[CrossingEdgeRow]: ...
-    def stored_edges(self, edge_ids: Sequence[int]) -> list[StoredEdge]: ...
-    def stored_edges_from(
-        self, src_ids: Sequence[int], edge_type: EdgeType
-    ) -> list[StoredEdge]: ...
-    def file_at(self, repo_id: int, path: str) -> TopologyFileRow | None: ...
-    def files_under(self, repo_id: int, prefix: str) -> list[TopologyFileRow]: ...
-    def declaration_counts(self, file_ids: Sequence[int]) -> dict[int, int]: ...
-    def declarations_in(self, file_id: int) -> list[TopologyDeclarationRow]: ...
-    def edges_under(
-        self,
-        repo_id: int,
-        *,
-        prefix: str | None,
-        file_id: int | None,
-        outgoing: bool,
-        exclude: Sequence[EdgeType],
-        limit: int,
-    ) -> list[LinkEdgeRow]: ...
-    def repository_edges_under(
-        self,
-        repo_id: int,
-        *,
-        prefix: str | None,
-        file_id: int | None,
-        exclude: Sequence[EdgeType],
-        limit: int,
-    ) -> list[LinkEdgeRow]: ...
-    def files_matching(
-        self, repo_ids: Sequence[int], terms: Sequence[str], *, limit: int
-    ) -> list[FileMatchRow]: ...
-    def names_matching(
-        self,
-        repo_ids: Sequence[int],
-        terms: Sequence[str],
-        *,
-        types: Sequence[EntityType],
-        limit: int,
-    ) -> list[NameMatchRow]: ...
-    def references_in(
-        self, file_id: int, *, exclude: Sequence[EdgeType], limit: int
-    ) -> list[ReferenceRow]: ...
-
-
 class SearchIndex(Protocol):
     """Exact and lexical lookups over the index.
 
@@ -839,14 +777,6 @@ class SearchIndex(Protocol):
     def search_text(
         self,
         query: str,
-        repo_ids: Sequence[int] | None,
-        limit: int,
-        *,
-        path_prefix: str | None = None,
-    ) -> list[ChunkHit]: ...
-    def search_literal(
-        self,
-        term: str,
         repo_ids: Sequence[int] | None,
         limit: int,
         *,

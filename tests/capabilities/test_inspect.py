@@ -59,10 +59,6 @@ def _repo(slug: str = SERVICE) -> CapabilityContext:
     return CapabilityContext(scope=CapabilityScope.REPOSITORY, repository=slug)
 
 
-def _inspect(service: CapabilityService, **kwargs: object) -> object:
-    return service.inspect(InspectRequest(**kwargs))  # type: ignore[arg-type]
-
-
 def _symbol_key(workspace: Workspace, needle: str = "") -> str:
     rows = workspace.database.execute(
         "SELECT key FROM entities WHERE key LIKE 'sym:%' ORDER BY key"
@@ -456,7 +452,7 @@ def test_inspection_runs_no_retrieval_stage(
     monkeypatch.setattr(Retriever, "retrieve", explode)
     monkeypatch.setattr(Retriever, "retrieve_detailed", explode)
     monkeypatch.setattr(SqliteSearchIndex, "search_text", explode)
-    monkeypatch.setattr(SqliteSearchIndex, "search_literal", explode)
+    monkeypatch.setattr(SqliteSearchIndex, "find_literal", explode)
     monkeypatch.setattr(SqliteSearchIndex, "find_files_by_path", explode)
     monkeypatch.setattr(SqliteSearchIndex, "find_entities_by_name", explode)
     monkeypatch.setattr(SqliteSearchIndex, "search_entities", explode)

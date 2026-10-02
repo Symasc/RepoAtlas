@@ -17,7 +17,6 @@ from repoatlas.services.workspace import Workspace, open_workspace
 from tests.conftest import init_git_repository
 
 ADVERSARIAL_ROOT = Path(__file__).parent / "fixtures" / "repos"
-GROUND_TRUTH = Path(__file__).parent / "fixtures" / "GROUND_TRUTH.md"
 
 #: Every repository in the ecosystem. All are managed.
 REPOSITORIES = (
@@ -44,14 +43,6 @@ IGNORED_MARKERS = (
     "BUILD_MARKER_MUST_NOT_BE_INDEXED",
     "CACHE_MARKER_MUST_NOT_BE_INDEXED",
 )
-
-#: Identifiers that appear nowhere in the ecosystem, by construction.
-ABSENT_IDENTIFIERS = (
-    "ZZZ_NO_SUCH_TOKEN_918273",
-    "nonexistent_function_918273",
-    "@company/absent-918273",
-)
-
 
 #: Fixture files written when the ecosystem is materialized rather than stored
 #: on disk. `python-service/.gitignore` excludes `gitignored/`, and git applies a

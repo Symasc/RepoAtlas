@@ -794,7 +794,7 @@ def test_relationships_runs_no_retrieval_stage(
 
     monkeypatch.setattr(Retriever, "retrieve", forbidden)
     monkeypatch.setattr(Retriever, "retrieve_detailed", forbidden)
-    stages = ("search_literal", "find_files_by_path", "find_entities_by_name", "search_entities")
+    stages = ("find_literal", "find_files_by_path", "find_entities_by_name", "search_entities")
     for name in stages:
         monkeypatch.setattr(SqliteSearchIndex, name, forbidden)
 

@@ -18,7 +18,7 @@ same invariants hold on real retrieved evidence.
 from __future__ import annotations
 
 import pytest
-from repoatlas.capabilities.search import provable_line_span, shape_candidates
+from repoatlas.capabilities.search import shape_candidates
 from repoatlas.capabilities.service import CapabilityService
 from repoatlas.indexing.chunking import chunk_hash
 from repoatlas.models.capability import (
@@ -31,6 +31,7 @@ from repoatlas.models.capability import (
 from repoatlas.models.evidence import EvidenceCandidate, EvidenceSource, EvidenceTier, MatchClass
 from repoatlas.models.search import SearchRequest
 from repoatlas.services.workspace import Workspace
+from tests.capabilities.spans import provable_line_span
 
 GLOBAL = CapabilityContext(scope=CapabilityScope.GLOBAL)
 

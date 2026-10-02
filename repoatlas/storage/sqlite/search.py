@@ -6,7 +6,7 @@ term has been found in the chunk text.
 
 Two things exact search must never depend on, and both were once true here:
 
-* **the tokenizer** — hence :meth:`search_literal`, which verifies by substring;
+* **the tokenizer** — hence :meth:`find_literal`, which verifies by substring;
 * **the chunk boundary** — hence its seam pass. Chunk size is an evidence-sizing
   decision, and for a while it silently decided discoverability too: a literal
   straddling the character cap existed in no single chunk, so a file the index was
@@ -324,15 +324,16 @@ class SqliteSearchIndex:
         hits.sort(key=lambda h: h.score, reverse=True)
         return hits
 
-    def search_literal(
+    def find_literal(
         self,
         term: str,
         repo_ids: Sequence[int] | None = None,
         limit: int = 50,
         *,
         path_prefix: str | None = None,
-    ) -> list[ChunkHit]:
-        """Chunks that literally contain ``term``.
+    ) -> LiteralMatches:
+        """Chunks that literally contain ``term``, and whether an empty answer is a proof
+        of absence.
 
         Guarantees exactness where the tokenizer cannot: used for quoted strings and
         environment-variable names, which must never be approximated.
@@ -343,18 +344,6 @@ class SqliteSearchIndex:
         was cut into pieces. Without the second pass the cap decided what was
         findable: a marker straddling offset 8000 lived in no single chunk, and
         exact search reported it absent from a file that contained it.
-        """
-        return self.find_literal(term, repo_ids, limit, path_prefix=path_prefix).hits
-
-    def find_literal(
-        self,
-        term: str,
-        repo_ids: Sequence[int] | None = None,
-        limit: int = 50,
-        *,
-        path_prefix: str | None = None,
-    ) -> LiteralMatches:
-        """:meth:`search_literal`, and whether an empty answer is a proof of absence.
 
         The direct pass bounds with ``LIMIT`` only rows that already contain the
         term exactly, so it stops early only once it has found as many as the

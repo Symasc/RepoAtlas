@@ -100,4 +100,4 @@ def test_a_minified_bundle_stays_retrievable_after_splitting(
     adversarial: Workspace, adversarial_root: Path
 ) -> None:
     """Splitting must not lose the content: the marker sits inside the one line."""
-    assert adversarial.search.search_literal("MINIFIED_MARKER")
+    assert adversarial.search.find_literal("MINIFIED_MARKER").hits

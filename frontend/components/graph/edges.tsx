@@ -27,7 +27,7 @@ export type Emphasis = "rest" | "lit" | "dim" | "selected";
 /** `float`: border to border; `side`: side to side; `lane`: side to side, met by a frame as a lane. */
 export type RouteKind = "float" | "side" | "lane";
 
-export type LinkEdgeData = {
+type LinkEdgeData = {
   /** What this line draws: the whole link, or the part of it of one relationship. */
   link: LinkData;
   /** The relationship it is, which picks its colour. */
@@ -75,7 +75,7 @@ const RELATION_NOUN: Record<Relation, string> = {
   config: "configuration",
 };
 
-export function describeLink(link: LinkData, relation?: Relation): string {
+function describeLink(link: LinkData, relation?: Relation): string {
   const types = link.types.map((t) => `${t.type.toLowerCase().replace(/_/g, " ")} ${formatCount(t.count)}`);
   const packages = link.packages.length > 0 ? `; packages: ${link.packages.slice(0, 5).join(", ")}` : "";
   const noun = relation ? RELATION_NOUN[relation] : FAMILY_NOUN[link.family];

@@ -38,7 +38,7 @@ back the bytes, because they were deliberately never stored.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -54,11 +54,6 @@ from repoatlas.models.investigation import (
     ProposedEvidence,
     format_evidence_id,
 )
-
-#: Statuses a grounding projection includes unless the caller says otherwise.
-#: Stale evidence is excluded by default: it described the index accurately once,
-#: and a citation to it now asserts something about content that has moved.
-GROUNDABLE_STATUSES: tuple[EvidenceStatus, ...] = (EvidenceStatus.VALID,)
 
 #: The span, then the entity a declaration declares (``None`` for text read from
 #: the file). Scopes supersession; see :func:`evidence_identity`.
@@ -196,18 +191,6 @@ class EvidenceLedger:
     def entries(self) -> tuple[LedgerEntry, ...]:
         """Every entry, superseded ones included, in allocation order."""
         return tuple(self._entries.values())
-
-    def entries_for_grounding(
-        self, statuses: Collection[EvidenceStatus] = GROUNDABLE_STATUSES
-    ) -> tuple[LedgerEntry, ...]:
-        """The entries a grounding check may treat as supplied, in allocation order.
-
-        A pure projection. It selects and orders; it does not verify anything, and
-        it deliberately knows nothing about how an evidence set is built — that
-        belongs with the capability that performs the check.
-        """
-        wanted = set(statuses)
-        return tuple(entry for entry in self._entries.values() if entry.status in wanted)
 
     def summary(self, changed: Sequence[EvidenceTransition] = ()) -> LedgerSummary:
         """Counts and headroom. ``changed`` describes the operation just performed."""
