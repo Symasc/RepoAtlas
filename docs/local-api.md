@@ -2,7 +2,9 @@
 
 `repoatlas serve` makes the RepoAtlas capabilities available over HTTP on loopback, for a local app's
 **server** process, such as the RepoAtlas frontend's Next.js server. That process holds the token and calls
-this API on its browser's behalf. The browser never holds the token and never talks to this port.
+this API on its browser's behalf. The browser never holds the token and never talks to this port. The one
+exception is an installed release's `repoatlas ui`, where this server sends the explorer itself and answers its
+pages at a door of its own ([below](#an-installed-release-one-server)); the browser still never holds the token.
 
 It is a second transport beside `repoatlas mcp`, and like that one it only carries requests and responses.
 Every answer comes from the same capability service over the same local index.
@@ -33,7 +35,41 @@ sequenceDiagram
 repoatlas ui [--port 7318] [--no-open] [--dev] [--rebuild] [--prepare] [--frontend DIR]
 ```
 
-starts this API and the explorer together, which is the launcher this contract was written to allow:
+starts this API and the explorer together, which is the launcher this contract was written to allow. How
+depends on which explorer it finds (see **Where the explorer is** below).
+
+### An installed release: one server
+
+A release carries the explorer exported as static files (`pnpm build:static`), in the package at
+`repoatlas/ui/explorer/`. `repoatlas ui` then starts this API on `127.0.0.1:7318` with those files, and nothing
+else: no Node.js, no child process.
+
+```mermaid
+flowchart LR
+    ui["repoatlas ui"] -->|"in this process"| api["the local API<br/>127.0.0.1:7318"]
+    browser["your browser"] -->|"the pages, GET"| api
+    browser -->|"POST /api/ra/&lt;name&gt;, no token"| api
+    api -->|"/v1, with the token"| clients["other local clients"]
+```
+
+- **The pages.** `GET` and `HEAD` of any path outside `/v1` and `/api/ra/` send a file from the export: `/` and
+  a directory are their `index.html`, a name with no suffix is its `.html` page, and anything else is the
+  export's `404.html` with status 404. A path segment of `..`, `.` or nothing, a backslash or a NUL is refused
+  before the disk is read, and a file a link resolves to outside the export is not sent. `/_next/static/` files
+  are named by their content and may be cached for a year; everything else is `no-cache`.
+- **The door.** `POST /api/ra/<name>` answers the pages' calls without the token, with the same checks and the
+  same refusals as the explorer's own server (`frontend/lib/server/proxy.ts`): a loopback `Host` naming this
+  port (403 `HOST_NOT_ALLOWED`); no `Sec-Fetch-Site` other than `same-origin` or
+  `none`, and no `Origin` other than `http://` and that `Host` (403 `CROSS_SITE_REQUEST`); a name the contract
+  serves (404 `UNKNOWN_ENDPOINT`); then the body rules of `/v1` (415, 411, 413, 400). The answer is the
+  capability's, as `/v1` gives it.
+- **`/v1` is unchanged**, token and all, and the connection file is written as always, so another local client
+  can use the same server.
+- Every answer from the pages or the door also carries `X-Frame-Options: DENY` and `Referrer-Policy:
+  no-referrer`, as the explorer's own server sends them.
+
+### A checkout: the explorer's own server
+
 
 ```mermaid
 flowchart LR
@@ -58,11 +94,18 @@ flowchart LR
 - **Stopping.** Ctrl-C or SIGTERM stops the API and then the explorer's whole process group. If the explorer
   stops on its own, or never starts listening, the API is stopped too and the command exits 1. A taken port, a
   Node.js older than 22, or no explorer directory exits 2 before anything starts.
-- **Where the explorer is.** `frontend/` in the checkout RepoAtlas is installed from, or `--frontend`, or
-  `REPOATLAS_FRONTEND_DIR`. A wheel installation carries no explorer.
 
 `--dev` runs the explorer's development server instead, with hot reload, against the same API. Next.js telemetry
 is turned off in both modes.
+
+### Where the explorer is
+
+`--frontend` or `REPOATLAS_FRONTEND_DIR` when given, which may name the explorer's sources (a `frontend/` with its
+`package.json` and `next.config.ts`) or an export of them (an `index.html` and `_next/`, such as `frontend/out`).
+Otherwise the `frontend/` of the checkout RepoAtlas runs from, and failing that the export installed in the
+package. A checkout's sources win over an export, so a developer always runs the explorer they are editing.
+`--dev`, `--rebuild` and `--prepare` are for sources; with an export, `--prepare` has nothing to do and `--dev`
+is refused. A RepoAtlas built without the explorer exits 2 and says so.
 
 ## Starting it on its own
 
@@ -113,8 +156,9 @@ Content-Length: <n>
   DNS rebinding.
 - **Body:** at most 1 MiB, sent with `Content-Length`; chunked bodies are refused. The body is validated by
   the capability's own request model, and is passed on unchanged.
-- **Connections:** one request per connection (HTTP/1.0). Requests are answered one at a time, in arrival
-  order, on the single thread that owns the index connection. A connection silent for 30 seconds is dropped.
+- **Connections:** one request per connection (HTTP/1.0), each read on a thread of its own. Capability calls
+  run one at a time, in the order they arrive, on the single thread that owns the index connection. A
+  connection silent for 30 seconds is dropped.
 
 `GET /v1` answers with the contract and the served names.
 

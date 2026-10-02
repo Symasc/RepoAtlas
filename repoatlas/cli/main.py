@@ -298,7 +298,10 @@ def ui(
         bool, typer.Option("--open/--no-open", help="Open the explorer in a browser.")
     ] = True,
     dev: Annotated[
-        bool, typer.Option("--dev", help="Run the explorer's development server (hot reload).")
+        bool,
+        typer.Option(
+            "--dev", help="Run the explorer's development server (hot reload; a checkout only)."
+        ),
     ] = False,
     rebuild: Annotated[
         bool, typer.Option("--rebuild", help="Rebuild the explorer even if it looks current.")
@@ -306,24 +309,29 @@ def ui(
     prepare: Annotated[
         bool,
         typer.Option(
-            "--prepare", help="Install and build the explorer, then exit without starting it."
+            "--prepare",
+            help="Install and build a checkout's explorer, then exit without starting it.",
         ),
     ] = False,
     frontend: Annotated[
         Path | None,
         typer.Option(
             "--frontend",
-            help="The explorer's directory; defaults to the checkout's frontend/.",
+            help=(
+                "The explorer: its sources (a checkout's frontend/) or an exported build "
+                "(frontend/out). Defaults to the checkout's, else the one installed."
+            ),
             file_okay=False,
         ),
     ] = None,
 ) -> None:
     """Open the graph explorer: the local API and the web app, started together.
 
-    Serves the index over the local API on a free loopback port, runs the
-    explorer against it at http://127.0.0.1:PORT, and opens it in a browser.
-    The first run installs the explorer's packages and builds it, which needs
-    Node.js 22 and pnpm. Ctrl-C stops both. See docs/local-api.md.
+    Serves the index and the explorer at http://127.0.0.1:PORT and opens it in
+    a browser. An installed release carries the explorer ready to serve, and
+    needs nothing else. In a checkout, the first run installs the explorer's
+    packages and builds it, which needs Node.js 22 and pnpm. Ctrl-C stops it.
+    See docs/local-api.md.
 
     The import is local for the same reason as ``mcp``'s.
     """

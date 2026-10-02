@@ -76,7 +76,7 @@ A test walks the AST of every module and asserts the import graph respects this 
 review. The diagram itself is checked too: every package it names must exist.
 
 `ui/` is the one module above the transports. It starts the local API in its own process and the explorer
-beside it (§12, "Processes RepoAtlas starts"), so it may import `api/`, and nothing but `cli/` may import it.
+beside it, or has the API serve an exported explorer (§12, "Processes RepoAtlas starts"), so it may import `api/`, and nothing but `cli/` may import it.
 It never reaches the capability layer directly, and neither transport knows it exists.
 
 ---
@@ -4067,6 +4067,16 @@ flowchart LR
 - **No network of its own.** Next.js telemetry is turned off. Installing the explorer's packages is the one step
   that downloads, as installing RepoAtlas is: `pnpm install --frozen-lockfile`, once, and again only when the
   lockfile changes.
+
+**An installed release starts nothing.** Its explorer is the app exported as static files, in the package at
+`ui/explorer/`, and `repoatlas ui` serves it from the local API itself: no Node, no child process, one port. The
+API then also answers the pages at `/api/ra/<name>` without the token, so that door carries the `/api/ra`
+route's own checks: a loopback `Host` naming the port, no cross-site `Sec-Fetch-Site` or `Origin`, a JSON body,
+an endpoint the contract lists. Files are sent from inside the export only, by segment checks before the disk is
+read and a containment check after links are resolved. `/v1` keeps its token. A checkout's `frontend/` wins over
+an export, so the process model above is what a developer runs. The API reads each connection on its own thread,
+because a browser opens spare connections it may never send on, and still makes every capability call on the
+one thread that owns the index connection.
 
 ### Container posture
 
