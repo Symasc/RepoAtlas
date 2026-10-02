@@ -88,10 +88,6 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
   const nodes = useMemo<GraphNode[]>(() => {
     if (!ready) return [];
     const out: GraphNode[] = [];
-    for (const ring of shape.rings) {
-      const box = layout.get(ring.id);
-      if (box) out.push(place({ id: ring.id, type: "orbit", data: {}, zIndex: -2, selectable: false }, box, { pointerEvents: "none" }));
-    }
     if (shape.group) {
       out.push(
         place(

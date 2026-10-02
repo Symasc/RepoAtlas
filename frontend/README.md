@@ -127,16 +127,16 @@ colour. The legend lists what the
 level draws. Where code is summed (a card's tally, a family's heading in the
 inspector) its mark shows blue, green and violet together. Each connection in
 the inspector lists its relationships with their colours.
-Each kind of node carries its own icon, drawn in the colour of the line that
-reaches it (modules blue, commands green, packages magenta, configuration and
-environment variables amber, HTTP teal), and a shared node is washed in that
-colour too; the outline tells kinds apart as well as the colour.
 
-The canvas is a map. A faint grid squares it and moves with it. Each repository
-has its own colour, like a country on a political map: a small square beside its
-name wherever it appears, and a light wash over its card on the overview. Inside
-a repository, a directory is a solid card a step lighter than the canvas, with a
-clear outline (its card, and its node when another directory links to it).
+Everything a line joins is one quiet card, as a transit map draws one station
+for every stop: a solid fill a step lighter than the canvas, with a clear
+outline. Kinds are told apart by their icon and title, not by fill; a shared
+thing's icon is drawn in the colour of the line that reaches it (modules blue,
+commands green, packages magenta, configuration and environment variables
+amber, HTTP teal). An opened directory is a district: a plain region a half
+step above the canvas, its name set large like a place on a map. Each
+repository has its own colour, shown as a solid square beside its name wherever
+it appears. A faint grid squares the canvas and moves with it.
 
 Each view has a toolbar above the canvas, saying where you are and what the
 level holds. Below the canvas, a status bar holds the zoom and the key to the
@@ -145,9 +145,9 @@ lines; its ⓘ button names the marks.
 The chrome is deliberately plain, so the colour on the canvas carries meaning.
 It uses IBM Plex Sans and Plex Mono, served from the app itself, and warm
 neutrals in both themes. The accent marks only what is selected, focused or
-pressed next, and there are three corner radii (2, 4 and 6 px). The colour tokens are in `lib/theme/tokens.ts`; every text
-tone keeps 4.5:1 contrast on the backgrounds it sits on, a repository's wash
-included.
+pressed next, and there are three corner radii (2, 4 and 6 px). The colour
+tokens are in `lib/theme/tokens.ts`; every text tone keeps 4.5:1 contrast on
+the backgrounds it sits on.
 
 HTTP has three kinds of shared node, each in its own group: **HTTP routes**
 (a method and path some code serves or calls), **HTTP endpoints** (a route at a
