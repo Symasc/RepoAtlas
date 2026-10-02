@@ -240,7 +240,7 @@ def test_the_capability_reimplements_no_retrieval_stage() -> None:
 
     source = Path("repoatlas/capabilities/search.py").read_text(encoding="utf-8")
     service = Path("repoatlas/capabilities/service.py").read_text(encoding="utf-8")
-    for marker in ("search_literal", "search_text", "fuse(", "deduplicate", "enforce_precedence"):
+    for marker in ("find_literal", "search_text", "fuse(", "deduplicate", "enforce_precedence"):
         assert marker not in source, f"search.py reimplements {marker}"
         assert marker not in service, f"service.py reimplements {marker}"
 

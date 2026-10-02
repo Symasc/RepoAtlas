@@ -25,11 +25,9 @@ that looks free ends up running a command per call.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 from repoatlas.discovery.reconcile import RepositorySetPlan, plan_repository_set
-from repoatlas.freshness import index_freshness, repository_freshness
-from repoatlas.models.freshness import FreshnessDepth, IndexFreshness, RepositoryFreshness
+from repoatlas.freshness import repository_freshness
+from repoatlas.models.freshness import FreshnessDepth, RepositoryFreshness
 from repoatlas.models.repository import Repository
 from repoatlas.services.workspace import Workspace
 from repoatlas.sync.planner import facts_version
@@ -91,33 +89,3 @@ def repository_set_drift(workspace: Workspace) -> RepositorySetPlan | None:
         workspace.settings.discovery,
         workspace.repositories.list_all(),
     )
-
-
-def index_freshness_for(
-    workspace: Workspace,
-    repositories: Sequence[Repository],
-    *,
-    depth: FreshnessDepth,
-    include_repository_set_drift: bool = False,
-) -> IndexFreshness:
-    """Freshness across a scope, at one depth, with drift detection opt-in.
-
-    Drift is a claim about the managed root rather than about any repository in
-    it: a directory the root holds and the index does not is exactly the case
-    where "every repository is current" is true and "the index is current" is not
-    (V1_SPEC §12). It costs a discovery walk, so it is asked for rather than
-    assumed, and ``repository_set_drifted`` stays ``None`` when nobody asked.
-    """
-    version = current_facts_version(workspace)
-    per_repo = [
-        repository_freshness_for(workspace, repo, depth=depth, facts=version)
-        for repo in repositories
-    ]
-
-    drifted: bool | None = None
-    if include_repository_set_drift:
-        plan = repository_set_drift(workspace)
-        if plan is not None:
-            drifted = plan.drifted
-
-    return index_freshness(per_repo, depth=depth, repository_set_drifted=drifted)

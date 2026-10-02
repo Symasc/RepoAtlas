@@ -942,7 +942,7 @@ def test_an_assignment_does_not_make_a_script_look_executed(tmp_path: Path) -> N
         # The text is still there, so retrieval still finds the file — what must
         # not exist is the graph edge that would let an answer say "run.sh
         # executes rollback.sh".
-        assert space.search.search_literal("rollback.sh")
+        assert space.search.find_literal("rollback.sh").hits
         context = space.resolver().resolve(root, command="locate")
         evidence = locate(space, "What executes rollback.sh?", context)
         assert evidence.candidates

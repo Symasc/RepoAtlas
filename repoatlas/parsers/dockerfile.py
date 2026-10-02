@@ -644,8 +644,3 @@ class DockerfileParser:
             )
 
     _add = _copy
-
-    def _workdir(
-        self, instruction: _Instruction, references: list[ParsedReference], stage: str | None
-    ) -> None:
-        return None

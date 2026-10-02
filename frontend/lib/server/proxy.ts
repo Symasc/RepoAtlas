@@ -16,7 +16,7 @@ import { ConnectionError, readConnection, type Environment } from "./connection"
 
 /** The API's own body ceiling (docs/local-api.md). */
 export const MAX_BODY = 1 << 20;
-export const UPSTREAM_TIMEOUT_MS = 120_000;
+const UPSTREAM_TIMEOUT_MS = 120_000;
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const ENDPOINTS: ReadonlySet<string> = new Set(ENDPOINT_NAMES);
@@ -30,7 +30,7 @@ export interface ProxyOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-export function isEndpoint(name: string): name is EndpointName {
+function isEndpoint(name: string): name is EndpointName {
   return ENDPOINTS.has(name);
 }
 

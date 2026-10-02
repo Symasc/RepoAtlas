@@ -246,7 +246,7 @@ def test_json_output_is_machine_readable_for_every_command(cli, adversarial_root
 
 
 def test_the_reasoning_command_is_not_part_of_the_product(cli, adversarial_root: Path) -> None:
-    """``ask`` used to exit 4 here, having found no model. There is no command.
+    """There is no ``ask`` command.
 
     Through the real console script, in an environment that sets no model
     variable --- which is the environment every other test in this file runs in,
@@ -255,7 +255,6 @@ def test_the_reasoning_command_is_not_part_of_the_product(cli, adversarial_root:
     assert cli(adversarial_root, "init", str(adversarial_root)).exit_code == ExitCode.OK
     result = cli(adversarial_root / "python-service", "ask", "why does startup fail")
     assert result.exit_code != ExitCode.OK, result
-    assert result.exit_code != ExitCode.LLM_UNAVAILABLE, result
 
 
 def test_an_injected_instruction_does_not_change_cli_output(cli, adversarial_root: Path) -> None:

@@ -120,7 +120,7 @@ def test_an_exact_occurrence_behind_more_near_misses_than_the_limit_is_found(
     found = near.search.find_literal("API_KEY", ids, LIMIT)
     assert [hit.path for hit in found.hits] == ["zzz/NOTES.md"]
     assert found.exhaustive
-    assert [hit.path for hit in near.search.search_literal("API_KEY", ids, LIMIT)] == [
+    assert [hit.path for hit in near.search.find_literal("API_KEY", ids, LIMIT).hits] == [
         "zzz/NOTES.md"
     ]
 
@@ -146,11 +146,11 @@ def test_a_term_with_more_matches_than_the_limit_fills_it_in_path_order(near: Wo
 
 
 def test_the_repository_scope_applies_before_the_limit(near: Workspace) -> None:
-    unscoped = near.search.search_literal("API_KEY", None, LIMIT)
+    unscoped = near.search.find_literal("API_KEY", None, LIMIT).hits
     assert len(unscoped) == LIMIT
     assert {hit.repository_slug for hit in unscoped} == {NOISE}, "the bound must be full of noise"
 
-    scoped = near.search.search_literal("API_KEY", _repo_ids(near, REPO), LIMIT)
+    scoped = near.search.find_literal("API_KEY", _repo_ids(near, REPO), LIMIT).hits
     assert [(hit.repository_slug, hit.path) for hit in scoped] == [(REPO, "zzz/NOTES.md")]
 
 
@@ -173,9 +173,9 @@ def test_the_path_scope_applies_before_the_limit(
 
 def test_a_path_scope_reaches_a_match_the_unscoped_limit_cuts_off(near: Workspace) -> None:
     ids = _repo_ids(near, REPO)
-    unscoped = near.search.search_literal("api_key", ids, LIMIT)
+    unscoped = near.search.find_literal("api_key", ids, LIMIT).hits
     assert "aaa/pkg-34/index.ts" not in {hit.path for hit in unscoped}
-    scoped = near.search.search_literal("api_key", ids, LIMIT, path_prefix="aaa/pkg-34")
+    scoped = near.search.find_literal("api_key", ids, LIMIT, path_prefix="aaa/pkg-34").hits
     assert [hit.path for hit in scoped] == ["aaa/pkg-34/index.ts"]
 
 
@@ -297,7 +297,7 @@ def test_exact_text_lookup_is_the_substring_contract(specials: Workspace, term: 
 def test_text_after_an_embedded_nul_is_found(specials: Workspace) -> None:
     ids = _repo_ids(specials, REPO)
     assert any("\x00" in text for _, _, text in _chunks(specials, ids)), "the NUL must be indexed"
-    assert [hit.path for hit in specials.search.search_literal("NUL_TAIL_MARKER", ids)] == [
+    assert [hit.path for hit in specials.search.find_literal("NUL_TAIL_MARKER", ids).hits] == [
         "notes/tail.txt"
     ]
 

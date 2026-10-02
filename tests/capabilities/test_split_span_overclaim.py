@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import pytest
 from repoatlas.capabilities.evidence_shaping import provable_span, supply
-from repoatlas.capabilities.search import provable_line_span, shape_candidates
+from repoatlas.capabilities.search import shape_candidates
 from repoatlas.models.capability import (
     AppliedBudget,
     CapabilityContext,
@@ -36,6 +36,7 @@ from repoatlas.models.capability import (
     RetrievalBreadth,
 )
 from repoatlas.models.evidence import EvidenceCandidate, EvidenceSource, EvidenceTier, MatchClass
+from tests.capabilities.spans import provable_line_span
 
 GLOBAL = CapabilityContext(scope=CapabilityScope.GLOBAL)
 

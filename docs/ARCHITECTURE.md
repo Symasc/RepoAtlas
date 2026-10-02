@@ -133,7 +133,7 @@ RepoAtlas/
 │   │   ├── uses*.py, py_*.py, modules.py, packages.py   declaration uses, module and package resolution
 │   │   ├── http_claims.py, http_crossings.py   HTTP routes matched within and across repositories
 │   │   └── impact.py, traversal.py, neighbourhood.py   the change-impact walk and bounded expansion
-│   ├── retrieval/      query analysis, exact/lexical/graph retrievers, fusion, reranker seam
+│   ├── retrieval/      query analysis, exact/lexical/graph retrievers, fusion, precedence
 │   ├── grounding.py    citation verification — deterministic, and the whole of §11
 │   ├── freshness.py    the index-freshness state machine, shared by services and capabilities
 │   ├── containment.py  the filesystem containment boundary: bounded, contained content reads (§12)
@@ -873,11 +873,9 @@ without touching callers. Each has exactly one owning package in §2:
 
 | Protocol | Owner |
 |---|---|
-| `RepositoryStore`, `FileStore`, `KnowledgeStore`, `SearchIndex` | `storage/` |
+| `RepositoryStore`, `KnowledgeStore`, `SearchIndex` | `storage/` |
 | `LanguageParser` | `parsers/base.py` |
 | `DependencyParser` | `dependencies/` |
-| `Reranker` | `retrieval/` |
-| `Renderer` | `rendering/` |
 
 ### Storage
 
@@ -888,12 +886,6 @@ class RepositoryStore(Protocol):
     def get_by_path(self, path: Path) -> Repository | None: ...
     def list_all(self) -> list[Repository]: ...
     def delete(self, repo_id: int) -> None: ...
-
-
-class FileStore(Protocol):
-    def list_states(self, repo_id: int) -> dict[str, FileState]: ...  # rel_path → stat+hash
-    def upsert(self, repo_id: int, file: IndexedFile) -> int: ...
-    def delete_many(self, file_ids: Sequence[int]) -> None: ...  # cascades to all facts
 
 
 class KnowledgeStore(Protocol):
@@ -1017,20 +1009,7 @@ registry returns nothing for them and the sync spine takes its ordinary no-parse
   `GRAMMARS`, write the parser against the shipped loader, and characterize its output before trusting a fact from
   it. `tests/test_grammar_loader.py` fails if a Ruby grammar is declared without that work.
 
-### Ranking and rendering
-
-```python
-class Reranker(Protocol):
-    def rerank(self, question: str, candidates: list[Candidate]) -> list[Candidate]: ...
-
-
-class Renderer(Protocol):
-    def render_evidence(self, evidence: EvidenceSet) -> str: ...
-    def render_status(self, status: StatusReport) -> str: ...
-    def render_repos(self, repos: list[Repository]) -> str: ...
-```
-
-`Reranker` ships as `NoopReranker` — the explicit V2 slot (§14).
+### Models
 
 RepoAtlas runs no model of any kind. There were two: a `ReasoningModel` behind the old `ask` and `debug` commands,
 and an `EmbeddingModel` for an optional semantic retrieval stage. Both are gone. An agent reasons over the evidence
@@ -2225,7 +2204,7 @@ enumerate       gitstate: git ls-files --cached --others --exclude-standard
    ↓
 diff            FileState comparison → unchanged / changed / new / deleted   (§9)
    ↓
-delete          FileStore.delete_many(deleted) → cascade removes entities, edges,
+delete          SqliteFileStore.delete_many(deleted) → cascade removes entities, edges,
                 chunks, FTS rows, unresolved_refs
    ↓
 parse           registry dispatch → LanguageParser.parse(path, content)     (pure, no I/O)
@@ -2654,7 +2633,7 @@ signal that a repository nobody has touched is nonetheless out of date.
 
 ### Deletion
 
-Files present in storage but absent from the enumeration are deleted through `FileStore.delete_many`, cascading to
+Files present in storage but absent from the enumeration are deleted through `SqliteFileStore.delete_many`, cascading to
 entities, edges, chunks, FTS rows and unresolved references. Because provenance is on the fact row
 (§3), this is exact — a fact cannot outlive its source file.
 
@@ -2943,7 +2922,7 @@ question + RepositoryContext
    ├─ 7. fusion         tier, then path specificity, then reciprocal-rank fusion
    │                    + primary-repository boost (inside a tier and specificity)
    ├─ 8. dedup          drop spans that repeat a higher-ranked one
-   ├─ 9. rerank         Reranker (NoopReranker in V1)
+   ├─ 9. precedence     tier, then path specificity, re-imposed before the budget
    └─ 10. budget        hard caps on candidate count and total tokens
          ↓
       EvidenceSet (+ RetrievalTrace)
@@ -3010,7 +2989,7 @@ file-level candidate covers no lines, so it neither hides a span nor is hidden b
 
 #### Exact content search does not depend on chunk boundaries
 
-`search_literal` runs two passes. The first finds the term inside a stored chunk. The second finds it across a
+`find_literal` runs two passes. The first finds the term inside a stored chunk. The second finds it across a
 **seam** — the point where a span too large for the character cap was cut (§6).
 
 The seam window is derived from the query, not from a constant: an occurrence of a term of length *L* that begins
@@ -3044,19 +3023,19 @@ retrievers takes its best tier: found deterministically once means deterministic
 
 The primary-repository boost is additive on the score, so it competes inside a tier and never promotes across one.
 
-**The rule is re-imposed at the boundary, not only inside `fuse`.** Between fusion and the caller sit deduplication,
-the `Reranker` seam and two hard budgets. `enforce_precedence` — a stable partition by tier and then by path
-specificity — is applied to whatever the reranker returns, before budgeting. Two things make that worth doing
-rather than documenting:
+**The rule is re-imposed at the boundary, not only inside `fuse`.** Between fusion and the caller sit deduplication
+and two hard budgets. `enforce_precedence` — a stable partition by tier and then by path specificity — is applied
+after deduplication, before budgeting (the `precedence` stage). Two things make that worth doing rather than
+documenting:
 
-- a V2 cross-encoder that reordered across tiers would silently undo the rule the rest of the funnel is built on,
-  and it is exactly the kind of component whose ranking is opaque;
+- deduplication can drop the candidate that anchored a file's position, and any stage that reordered across tiers
+  would silently undo the rule the rest of the funnel is built on;
 - the budget is spent immediately afterwards, so an order that put associative evidence first would **starve
   deterministic evidence out of the answer** just as effectively as ranking it lower.
 
-When the order is corrected the stage trace says so (`NoopReranker (tier order restored)`, or
-`(path specificity restored)`), because a silent correction is one nobody can audit. Tests assert the guarantee against the returned
-`EvidenceSet` — including with a reranker that deliberately inverts the tiers — rather than against `fuse` alone.
+When the order is corrected the stage trace says so (`tier order restored`, or `path specificity restored`), because
+a silent correction is one nobody can audit. Tests assert the guarantee against the returned `EvidenceSet` —
+including with the tiers deliberately inverted before the boundary — rather than against `fuse` alone.
 
 ### Match specificity
 
@@ -3072,7 +3051,7 @@ When the order is corrected the stage trace says so (`NoopReranker (tier order r
 
 > **Invariant.** Exact complete path identity remains stronger than suffix-path identity.
 
-> **Invariant.** Fusion and reranking may order candidates within a specificity class but may not erase the class
+> **Invariant.** Fusion and every later stage may order candidates within a specificity class but may not erase the class
 > itself.
 
 > **Invariant.** Explicit repository/path qualification outranks inferred primary-repository bias.
@@ -3266,7 +3245,7 @@ Python substring test against the stored chunk text.
 `remove_diacritics 2` folds diacritics *and* case, so FTS genuinely matches `creer_utilisateur` and `Unicode`
 against `créer_utilisateur` and `Ünïcode` — verified directly against SQLite. That is legitimate recall and enters
 as `ASSOCIATIVE`. It is never promoted to `DETERMINISTIC`, because the deterministic tier is produced by
-`search_literal`'s Python substring test and by SQL equality on stored entity names, neither of which folds
+`find_literal`'s Python substring test and by SQL equality on stored entity names, neither of which folds
 anything. The distinction is what stops "we found something spelled almost like this" being reported as "the source
 contains this".
 
@@ -3425,7 +3404,7 @@ have improved the fixture set and told us nothing about a real one:
   applies to it as much as to source. A question whose answer is structural can therefore find the narrative first.
   Nothing here is *wrong* — every candidate contains what was asked about, and provenance says exactly what each
   one is — but rank 1 may be a paragraph rather than a definition. Demoting a file type by extension is precisely
-  the kind of arbitrary bonus V1_SPEC §14 keeps out of the funnel; a reranker (§14 seam) is the honest fix.
+  the kind of arbitrary bonus V1_SPEC §14 keeps out of the funnel; a reranker would be the honest fix.
 - **A span is represented by one chunk.** When several chunks of one span match, the strongest is kept and the rest
   are dropped as redundant. For a file with no line breaks — where the whole file is one span — this means the
   evidence quotes one window of it, not every matching window. The citation stays true and the file is still found;
@@ -4093,7 +4072,7 @@ Every deferred capability (V1_SPEC §22) has a place to land that requires no re
 
 | V2 capability | Seam |
 |---|---|
-| Advanced reranking | `Reranker` protocol, stage 9 of §10. Swap `NoopReranker` for a cross-encoder. The tier rule and the path-specificity boundary are **re-imposed on whatever it returns** by `enforce_precedence`, so a reranker may reorder within a tier and cannot cross one — or drop the file the user named by its full path — even by mistake; the correction is recorded in the stage trace rather than applied silently |
+| Advanced reranking | A stage between `dedup` and `precedence` in §10. The tier rule and the path-specificity boundary are **re-imposed on whatever it returns** by `enforce_precedence`, so a reranker may reorder within a tier and cannot cross one — or drop the file the user named by its full path — even by mistake; the correction is recorded in the stage trace rather than applied silently |
 | Version-specific documentation retrieval | A `DocumentationSource` protocol fed by `ResolvedDependency`. The retrieval funnel gains a source at stage 3; fusion and budgeting are unchanged |
 | Internet research / web provenance | `Evidence` gains an optional origin discriminator; the citation verifier (§11) extends to verify web citations against the fetched set, with the same drop-and-demote logic |
 | Git-history debugging, regression introduction | The provenance columns already pin every fact to `repo/file/lines`; history analysis joins against them without schema change |
@@ -4154,7 +4133,7 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | Cross-file symbol references resolved only through a written import | Resolve on name equality within the repository | Name equality is not evidence (V1_SPEC §2). The import is the proof, and it is already in the file, so requiring it costs nothing and removes a whole class of wrong edges |
 | `salt://` sources resolved at confidence < 1.0 | Resolve at full confidence, or not at all | `file_roots` is not readable, so no `salt://` mapping is ever proven. Refusing to resolve would lose a genuinely useful link; resolving silently at 1.0 would overstate it. The confidence value carries the distinction |
 | `unresolved_refs` retained after a successful resolution | Delete rows once resolved | The row is the file's durable claim, not a work queue. Keeping it is what makes the global pass rebuildable and what lets a repository added later gain its edges without a reparse |
-| A tier order re-imposed after the reranker | Document the rule and trust implementations | The `Reranker` is a seam for code that does not exist yet. A guarantee that holds only while every future implementation remembers it is not a guarantee, and the budget is spent immediately after — so a hostile order would also starve deterministic evidence out of the answer (§10) |
+| A tier order re-imposed before the budget | Document the rule and trust fusion to have kept it | Deduplication sits between fusion and the budget and can drop the candidate that anchored a file. A guarantee that holds only while every stage remembers it is not a guarantee, and the budget is spent immediately after — so a wrong order would also starve deterministic evidence out of the answer (§10) |
 | Diagnostic and symbol line numbers clamped to the file | Report the parser's raw mark | A YAML end-of-stream mark sits one line past the last line. A citation to a line that does not exist is a fabrication, however small, and §11 makes provenance a guarantee rather than a best effort |
 | An empty Salt requisite target yields no reference | Record it and let the linker fail to resolve | `- pkg:` with nothing after it names no state. An edge to the empty string is a relationship RepoAtlas cannot support with evidence (§2) |
 | Performance asserted as shape, with generous wall-clock ceilings | Benchmark thresholds tuned to this machine | The §20 rules are shape properties — what was scanned, what was reparsed, what was re-embedded — and those are exactly reproducible. A millisecond threshold fails on a loaded CI box and teaches people to ignore the suite |

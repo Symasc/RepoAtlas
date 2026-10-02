@@ -475,7 +475,7 @@ def _apply_one(
     except sqlite3.OperationalError as error:
         if is_index_condition(error):
             raise
-        raise _contention(migration, error) from error
+        raise _contention(migration) from error
 
     try:
         # Re-read *inside* the write transaction. Between the check above and the
@@ -504,7 +504,7 @@ def _apply_one(
         # substring test also matches failures that merely mention the word,
         # which would report a defect as a transient wait.
         if is_contention(error):
-            raise _contention(migration, error) from error
+            raise _contention(migration) from error
         # A database that cannot be written at all did not fail *this migration*;
         # saying so would send the reader after a defect in a `.sql` file when
         # the fault is a file mode. The storage boundary describes it truthfully.
@@ -520,7 +520,7 @@ def _apply_one(
     connection.commit()
 
 
-def _contention(migration: Migration, error: Exception) -> MigrationError:
+def _contention(migration: Migration) -> MigrationError:
     return MigrationContentionError(
         "Timed out waiting for another process to finish upgrading the database.",
         detail=(

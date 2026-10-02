@@ -3,7 +3,7 @@ import type { SymbolSpan } from "@/lib/model/symbols";
 import { isComment, isString, type CodeToken } from "./highlight";
 
 /** A piece of one line: its text, its colour, and the symbol it belongs to, if any. */
-export interface Fragment {
+interface Fragment {
   text: string;
   color?: string;
   italic?: boolean;

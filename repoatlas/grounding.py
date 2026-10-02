@@ -126,10 +126,6 @@ class GroundingReport:
     demoted_findings: int = 0
     unsupported: tuple[str, ...] = field(default=())
 
-    @property
-    def modified(self) -> bool:
-        return bool(self.dropped_citations or self.clamped_citations or self.demoted_findings)
-
 
 @dataclass(frozen=True, slots=True)
 class SuppliedEvidence:

@@ -80,10 +80,6 @@ SOURCE_UNRESOLVED = "http-deployment-source-unresolved"
 #: local source establishes: the chain stops at the deployment binding.
 BINDING_UNRESOLVED = "http-deployment-binding-unresolved"
 
-#: The roles this join reads; every other pending fact is someone else's.
-ROLES = frozenset(
-    {HTTP_EXPOSED_ENDPOINT, HTTP_CLIENT_CALL, HTTP_UNSOURCED_IDENTITY, HTTP_UNRESOLVED_PATTERN}
-)
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 #: What a pattern's hole may stand for in a host the request states (already a valid
 #: hostname): part of one label, or whole labels with the dots between them.

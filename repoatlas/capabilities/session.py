@@ -28,7 +28,7 @@ from __future__ import annotations
 import secrets
 from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from repoatlas.capabilities.ledger import EvidenceLedger
@@ -73,16 +73,7 @@ class InvestigationSession:
 
     id: str
     ledger: EvidenceLedger
-    created_at: datetime
     last_used_at: datetime
-    #: An optimisation hint, and **never** evidence validity.
-    #:
-    #: A service may stamp the index generation it last revalidated against so it
-    #: can skip repeated work within one unchanged generation. It may not treat a
-    #: matching generation as proof that evidence is current: a concurrent
-    #: ``repoatlas sync`` in another process changes the index without touching
-    #: this counter. Verification always compares real file state (V1_SPEC §12).
-    validated_generation: int | None = field(default=None)
 
     def touch(self, now: datetime) -> None:
         """Mark the investigation as used, deferring its expiry."""
@@ -141,7 +132,6 @@ class SessionRegistry:
         session = InvestigationSession(
             id=investigation_id,
             ledger=EvidenceLedger(investigation_id, capacity=self._ledger_capacity),
-            created_at=now,
             last_used_at=now,
         )
         self._sessions[investigation_id] = session

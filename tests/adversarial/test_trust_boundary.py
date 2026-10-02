@@ -40,15 +40,6 @@ from repoatlas.services.workspace import Workspace
 
 pytestmark = pytest.mark.adversarial
 
-INJECTION_MARKERS = (
-    "REPOATLAS_INJECTION_CANARY_PY",
-    "REPOATLAS_INJECTION_CANARY_TS",
-    "REPOATLAS_INJECTION_CANARY_SALT",
-    "REPOATLAS_INJECTION_CANARY_YAML",
-    "REPOATLAS_INJECTION_CANARY_BASH",
-    "REPOATLAS_INJECTION_CANARY_README",
-)
-
 
 def candidate(repository: str, path: str, start: int = 1, end: int = 10, text: str = "x"):
     return EvidenceCandidate(
@@ -76,7 +67,7 @@ def test_injected_instructions_are_indexed_as_ordinary_text(
 ) -> None:
     """The payloads must be *findable*: pretending they are not there would be its
     own kind of dishonesty, and a user asking about that file deserves to see it."""
-    assert adversarial.search.search_literal("REPOATLAS_INJECTION_CANARY_PY")
+    assert adversarial.search.find_literal("REPOATLAS_INJECTION_CANARY_PY").hits
 
 
 def test_an_injected_instruction_does_not_change_what_is_retrieved(
