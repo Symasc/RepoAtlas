@@ -160,6 +160,19 @@ def test_each_form_of_use_is_recorded_with_its_syntax() -> None:
     ]
 
 
+def test_deeply_nested_expression_does_not_overflow_the_parser() -> None:
+    source = (
+        "export const target = 1;\n"
+        "export const result = "
+        + "(" * 1100
+        + "target"
+        + ")" * 1100
+        + ";\n"
+    )
+
+    assert parsed_uses(source) == [("result", "target", "value", "read")]
+
+
 def test_forms_merge_into_the_first_occurrence_and_are_counted() -> None:
     parsed = TypeScriptParser().parse(
         Path("a.ts"), "const K = 1;\nexport function f() {\n  return K + K + [K];\n}\n"

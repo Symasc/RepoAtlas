@@ -437,39 +437,66 @@ class UseAnalysis:
     # -- scopes and uses -------------------------------------------------------
 
     def _visit(self, node: Node, field: str | None, parent: Node, *, typeof: bool) -> None:
-        kind = node.type
-        if kind in _SKIP:
-            return
-        if kind in USE_NODES:
-            self._use(node, node, field, parent, typeof=typeof)
-            return
-        if kind == "nested_identifier":
-            # `A.B`: one use of A reaching member B, read in the nested name's own context.
-            parts = [
-                c for c in node.named_children if c.type in {"identifier", "property_identifier"}
-            ]
-            if parts and parts[0].type == "identifier":
-                member = self._text(parts[1]) if len(parts) > 1 else None
-                self._use(parts[0], node, field, parent, typeof=typeof, member=member)
-            return
-        if kind == "export_statement":
-            self._export_uses(node, typeof=typeof)
-            return
-        bound = self._bound_here(node) if kind in _SCOPES else set()
-        for name in bound:
-            self._depth[name] += 1
-        inner = typeof or kind == "type_query"
-        for index, child in enumerate(node.children):
-            self._visit(child, node.field_name_for_child(index), node, typeof=inner)
-        for name in bound:
-            self._depth[name] -= 1
-
-    def _export_uses(self, node: Node, *, typeof: bool) -> None:
-        """Visit what an export statement declares or computes, never what it only names."""
-        for index, child in enumerate(node.children):
-            if child.type in {"export_clause", "namespace_export", "identifier", "string"}:
+        pending: list[tuple[Node, str | None, Node, bool, set[str] | None]] = [
+            (node, field, parent, typeof, None)
+        ]
+        while pending:
+            current, current_field, current_parent, current_typeof, exiting = pending.pop()
+            if exiting is not None:
+                for name in exiting:
+                    self._depth[name] -= 1
                 continue
-            self._visit(child, node.field_name_for_child(index), node, typeof=typeof)
+
+            kind = current.type
+            if kind in _SKIP:
+                continue
+            if kind in USE_NODES:
+                self._use(
+                    current, current, current_field, current_parent, typeof=current_typeof
+                )
+                continue
+            if kind == "nested_identifier":
+                # `A.B`: one use of A reaching member B, read in the nested name's own context.
+                parts = [
+                    c
+                    for c in current.named_children
+                    if c.type in {"identifier", "property_identifier"}
+                ]
+                if parts and parts[0].type == "identifier":
+                    member = self._text(parts[1]) if len(parts) > 1 else None
+                    self._use(
+                        parts[0], current, current_field, current_parent,
+                        typeof=current_typeof, member=member,
+                    )
+                continue
+
+            if kind == "export_statement":
+                excluded = {"export_clause", "namespace_export", "identifier", "string"}
+                for index in range(len(current.children) - 1, -1, -1):
+                    child = current.children[index]
+                    if child.type not in excluded:
+                        pending.append(
+                            (
+                                child,
+                                current.field_name_for_child(index),
+                                current,
+                                current_typeof,
+                                None,
+                            )
+                        )
+                continue
+
+            bound = self._bound_here(current) if kind in _SCOPES else set()
+            for name in bound:
+                self._depth[name] += 1
+            inner = current_typeof or kind == "type_query"
+            if bound:
+                pending.append((current, current_field, current_parent, inner, bound))
+            for index in range(len(current.children) - 1, -1, -1):
+                child = current.children[index]
+                pending.append(
+                    (child, current.field_name_for_child(index), current, inner, None)
+                )
 
     def _use(
         self,
