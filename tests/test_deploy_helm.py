@@ -415,7 +415,7 @@ def test_a_specification_document_is_not_a_second_application(cluster: Workspace
 
 def test_only_literal_releases_without_values_files_give_identities(cluster: Workspace) -> None:
     plan = ReferenceLinker(cluster.knowledge).prepare_global().http
-    assert {json.loads(e.meta_json)["deployment"] for e in plan.exposed} == {
+    assert {json.loads(e.meta_json or "{}")["deployment"] for e in plan.exposed} == {
         "http://devices",
         "http://devices:80",
         "http://devices-edge",

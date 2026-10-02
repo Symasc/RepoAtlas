@@ -100,13 +100,21 @@ _INSTALL_VERBS = frozenset({"install", "add"})
 
 
 class _Instruction:
-    __slots__ = ("arguments", "keyword", "line_end", "line_start")
+    __slots__ = ("_operands", "arguments", "keyword", "line_end", "line_start")
 
     def __init__(self, keyword: str, arguments: str, line_start: int, line_end: int) -> None:
         self.keyword = keyword
         self.arguments = arguments
         self.line_start = line_start
         self.line_end = line_end
+        self._operands: tuple[SourceDomain, list[Word]] | None = None
+
+    def operands(self) -> tuple[SourceDomain, list[Word]]:
+        """A ``COPY``/``ADD``'s source domain and words: one flag scan, however many
+        readers ask."""
+        if self._operands is None:
+            self._operands = _operands(self.arguments)
+        return self._operands
 
 
 def _logical_lines(content: str) -> list[_Instruction]:
@@ -156,6 +164,19 @@ def _has_heredoc(words: list[Word]) -> bool:
     return any(word.raw.startswith("<<") for word in words)
 
 
+def _operands(arguments: str) -> tuple[SourceDomain, list[Word]]:
+    """A ``COPY``/``ADD``'s source domain and its words, sources then destination: one
+    flag scan per instruction, shared by every reader of it."""
+    flags, rest = split_flags(arguments)
+    argv = exec_form(rest)
+    words = (
+        [expanded(element) for element in argv]
+        if argv is not None
+        else [word for word in split_words(rest) if not word.raw.startswith("--")]
+    )
+    return source_domain(flags), words
+
+
 class _Runs:
     """What one stage says about the program its image runs, for deployment identities.
 
@@ -175,7 +196,7 @@ class _Runs:
         #: The line of the last instruction read here: where a claim without a command sits.
         self.last = 0
 
-    def read(self, instruction: _Instruction) -> None:
+    def observe(self, instruction: _Instruction) -> None:
         keyword = instruction.keyword
         if keyword in {"WORKDIR", "COPY", "ADD", "CMD", "ENTRYPOINT"}:
             self.last = instruction.line_start
@@ -193,7 +214,7 @@ class _Runs:
                     else None
                 )
         elif keyword in {"COPY", "ADD"}:
-            self.copies.append(self._copy(instruction))
+            self.copies.append(self._copy(instruction, *instruction.operands()))
         elif keyword in {"CMD", "ENTRYPOINT"}:
             argv = exec_form(instruction.arguments)
             form = "exec"
@@ -213,14 +234,9 @@ class _Runs:
             else:
                 self.entrypoint = recorded
 
-    def _copy(self, instruction: _Instruction) -> list[object]:
-        flags, rest = split_flags(instruction.arguments)
-        argv = exec_form(rest)
-        words = (
-            [expanded(element) for element in argv]
-            if argv is not None
-            else [word for word in split_words(rest) if not word.raw.startswith("--")]
-        )
+    def _copy(
+        self, instruction: _Instruction, domain: SourceDomain, words: list[Word]
+    ) -> list[object]:
         destination = words[-1].literal if len(words) >= 2 else None
         if destination is not None and not destination.startswith("/"):
             destination = (
@@ -231,7 +247,7 @@ class _Runs:
             destination = posixpath.normpath(destination)
         sources = [word.literal for word in words[:-1]]
         foreign = (
-            source_domain(flags) is SourceDomain.FOREIGN
+            domain is SourceDomain.FOREIGN
             or not sources
             or any(
                 source is None or "://" in source or any(c in source for c in "*?[")
@@ -242,8 +258,12 @@ class _Runs:
         return [literal, destination, instruction.line_start, foreign, into]
 
     def claim(self) -> ParsedReference | None:
-        # Kept without a command too: a compose service's ``command`` may supply it.
-        if self.cmd is None and self.entrypoint is None and not self.copies and not self.workdir:
+        # Kept without a command too, since a compose service's ``command`` may supply
+        # it -- but only when the stage states something literal: a stage whose every
+        # value is computed, empty or malformed names nothing, and records nothing.
+        commands = [found for found in (self.cmd, self.entrypoint) if found and found["argv"]]
+        copied = [copy for copy in self.copies if not copy[3]]
+        if not commands and not copied and self.workdir is None:
             return None
         meta = {
             "copies": json.dumps(self.copies),
@@ -278,7 +298,9 @@ class DockerfileParser:
     #    ordinary `sync` reparse it and drop the edge (V1_SPEC §12).
     # 5: the final stage's working directory, copies and command, as a claim for
     #    deployment identities (repoatlas.graph.deploy_identity).
-    version = "5"
+    # 6: no such claim for a stage that states nothing literal (every value
+    #    computed, empty or malformed).
+    version = "6"
     language = "Dockerfile"
 
     def supports(self, path: Path) -> bool:
@@ -302,7 +324,7 @@ class DockerfileParser:
                     stages.add(stage)
                 runs = _Runs()
                 continue
-            runs.read(instruction)
+            runs.observe(instruction)
             if handler is not None:
                 handler(instruction, references, stage)
         command = runs.claim()
@@ -575,7 +597,10 @@ class DockerfileParser:
             index = cursor
 
     def _copy(
-        self, instruction: _Instruction, references: list[ParsedReference], stage: str | None
+        self,
+        instruction: _Instruction,
+        references: list[ParsedReference],
+        stage: str | None,
     ) -> None:
         """``COPY``/``ADD`` sources, when the build context proves which files they are.
 
@@ -600,15 +625,9 @@ class DockerfileParser:
         chunked and still retrievable as text; what it no longer does is claim a
         file it never named.
         """
-        flags, rest = split_flags(instruction.arguments)
-        if source_domain(flags) is SourceDomain.FOREIGN:
+        domain, words = instruction.operands()
+        if domain is SourceDomain.FOREIGN:
             return None
-        argv = exec_form(rest)
-        words = (
-            [expanded(element) for element in argv]
-            if argv is not None
-            else [word for word in split_words(rest) if not word.raw.startswith("--")]
-        )
         for source in words[:-1]:
             if source.literal is None:
                 continue

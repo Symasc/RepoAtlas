@@ -435,5 +435,6 @@ def test_options_are_followed_through_three_functions_and_never_around_a_cycle(
         "GET {base}/unstated",
     ]
     unstated = next(r for r in plan.http.injected if r.target_key == "GET {base}/unstated")
-    assert json.loads(unstated.meta_json)["base"] == "unknown"
-    assert "origin" not in json.loads(unstated.meta_json)
+    meta = json.loads(unstated.meta_json or "{}")
+    assert meta["base"] == "unknown"
+    assert "origin" not in meta
