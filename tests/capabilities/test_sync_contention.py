@@ -146,25 +146,34 @@ def test_the_index_stays_usable_and_the_retry_succeeds(initialized: Workspace) -
     assert _sync(service).status is SyncStatus.COMPLETED
 
 
-@pytest.mark.timing
-def test_the_wait_is_v1s_own_timeout_and_no_longer(initialized: Workspace) -> None:
+def test_the_wait_is_v1s_own_timeout_and_no_longer(
+    initialized: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The capability passes V1's configured timeout through and adds none."""
-    import time
+    from repoatlas.services import workspace as workspace_module
 
     initialized.settings = initialized.settings.model_copy(
         update={
             "storage": initialized.settings.storage.model_copy(update={"lock_timeout_seconds": 0.4})
         }
     )
+    requested: list[float] = []
+
+    def spying(database: Path, *, timeout: float):
+        requested.append(timeout)
+        return writer_lock(database, timeout=timeout)
+
+    monkeypatch.setattr(workspace_module, "writer_lock", spying)
     service = CapabilityService(initialized)
 
-    with writer_lock(Path(initialized.database.path), timeout=0.0):
-        started = time.monotonic()
-        with pytest.raises(SyncInProgressError):
-            _sync(service)
-        waited = time.monotonic() - started
+    with (
+        writer_lock(Path(initialized.database.path), timeout=0.0),
+        pytest.raises(SyncInProgressError),
+    ):
+        _sync(service)
 
-    assert 0.3 <= waited < 3.0, waited
+    # One attempt at V1's own timeout: no retry and no wait of the capability's own.
+    assert requested == [0.4]
 
 
 # ---------------------------------------------------------------------------
