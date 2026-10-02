@@ -16,7 +16,13 @@ import textwrap
 from pathlib import Path, PurePosixPath
 
 import pytest
-from repoatlas.graph.deploy_identity import BACKEND_UNMATCHED, NOT_RENDERED, NOTHING_SERVED
+from repoatlas.graph.deploy_identity import (
+    BACKEND_UNMATCHED,
+    BINDING_UNRESOLVED,
+    NOT_RENDERED,
+    NOTHING_SERVED,
+    RENDERED,
+)
 from repoatlas.graph.linker import ReferenceLinker
 from repoatlas.parsers.deploy_helm import ingress_references
 from repoatlas.parsers.http_facts import HELM_INGRESS, HTTP_UNRESOLVED_PATTERN, PENDING_FACT
@@ -435,6 +441,35 @@ def test_an_http_listener_gives_an_http_origin(workspace: Workspace, tmp_path: P
     )
     assert {caller for caller, *_ in links(built)} == {"plain_item"}
     assert _decisions(built)["dev_item"] == ["http-service-unmatched"]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "linked", "binding"),
+    [
+        # A scalar: the value at its path, and the host renders with it.
+        (["stage=prd"], {"prd_item"}, RENDERED),
+        # An object: everything under its path goes with it, `ingress.enabled` included.
+        (["stage=dev", "ingress=off"], set(), NOT_RENDERED),
+        # A list: its items go, so the `range` has nothing to iterate.
+        (["stage=dev", "ingress.groups=none"], set(), BINDING_UNRESOLVED),
+        # A path under a scalar: the scalar goes, so the host's `stage` reads nothing.
+        (["stage.name=dev"], set(), BINDING_UNRESOLVED),
+        # Index syntax is not read, so neither is the release.
+        (["stage=dev", "ingress.groups[0].host=example.org"], set(), BINDING_UNRESOLVED),
+    ],
+)
+def test_a_release_s_setting_replaces_what_the_values_held_at_above_and_under_its_path(
+    workspace: Workspace, tmp_path: Path, overrides: list[str], linked: set[str], binding: str
+) -> None:
+    files = {
+        **chart(enabled=None),
+        "Tiltfile": f"k8s_yaml(helm('charts/devices', name='devices', set={overrides!r}))\n",
+    }
+    built = build(workspace, tmp_path, {"devices": {**APP, **files}, "caller": CALLER})
+    assert {caller for caller, *_ in links(built)} == linked
+    [(decision, evidence)] = decided(built, "caller")["dev_item"]
+    assert decision == "http-deployment-binding-unresolved"
+    assert evidence["binding_outcome"] == binding
 
 
 def test_enabling_the_ingress_links_as_a_fresh_index_does(
