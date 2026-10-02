@@ -79,6 +79,7 @@ def test_name_shaped_edges_may_not_cross_a_repository_boundary() -> None:
     """
     assert EdgeType.CALLS not in CROSS_REPOSITORY_EDGES
     assert EdgeType.DEFINES not in CROSS_REPOSITORY_EDGES
+    assert EdgeType.GENERATES in CROSS_REPOSITORY_EDGES
 
 
 # -- the bounds ------------------------------------------------------------------

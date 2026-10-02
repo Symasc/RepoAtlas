@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import contextlib
 import os
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 APP_NAME = "repoatlas"
 
@@ -127,6 +127,49 @@ class StorageSettings(BaseModel):
     lock_timeout_seconds: float = 30.0
 
 
+class SaltFileSettings(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    repository: str
+    path: str
+
+    @field_validator("path")
+    @classmethod
+    def relative_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if path.is_absolute() or ".." in path.parts or not value:
+            raise ValueError("Salt file paths must be non-empty repository-relative paths")
+        return path.as_posix()
+
+
+class SaltRootSettings(SaltFileSettings):
+    role: Literal["state", "pillar"]
+    environment: str
+    salt_path: str
+
+    @field_validator("salt_path")
+    @classmethod
+    def absolute_salt_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if not path.is_absolute() or ".." in path.parts or "$" in value or "{" in value:
+            raise ValueError("Salt root paths must be absolute and statically declared")
+        return path.as_posix()
+
+
+class SaltInstallationSettings(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    master_config: SaltFileSettings | None = None
+    roots: tuple[SaltRootSettings, ...] = ()
+
+
+class SaltSettings(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    installations: tuple[SaltInstallationSettings, ...] = ()
+
+
 class RetrievalSettings(BaseModel):
     """Bounds and biases of the retrieval funnel (ARCHITECTURE.md §10)."""
 
@@ -162,6 +205,7 @@ class Settings(BaseModel):
     indexing: IndexingSettings = Field(default_factory=IndexingSettings)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    salt: SaltSettings = Field(default_factory=SaltSettings)
 
     @property
     def root(self) -> Path | None:
