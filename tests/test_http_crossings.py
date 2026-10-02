@@ -102,11 +102,14 @@ def test_the_joins_are_exactly_the_pre_registered_ones(joined: Workspace) -> Non
     assert links(joined) == LINKS
 
 
-def test_a_request_the_source_does_not_state_makes_no_claim(joined: Workspace) -> None:
-    """H7: a parameter, an environment variable, an imported and a shadowed base."""
+def test_a_request_the_source_does_not_state_is_counted_and_never_joined(
+    joined: Workspace,
+) -> None:
+    """H7: a parameter, an environment variable, an imported and a shadowed base (D2)."""
     stated = decisions(joined)
-    assert {"dynamic", "from_env", "shared"}.isdisjoint(stated)
-    assert decisions(joined, "shadow.py") == {}
+    assert {stated[name] for name in ("dynamic", "from_env", "shared")} == {"http-base-unknown"}
+    assert decisions(joined, "shadow.py") == {"load": "http-base-unknown"}
+    assert {caller for caller, *_ in links(joined)}.isdisjoint({"dynamic", "from_env", "shared"})
 
 
 def test_a_join_is_provenanced_by_the_request_and_made_by_the_global_pass(

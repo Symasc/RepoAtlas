@@ -17,9 +17,11 @@ options from where the source states them to where a request uses them:
 
 Each request becomes an ``http-client-call`` claim of the request's own call -- its
 file, lines and caller -- with the URL read under superagent's ``http`` default, and
-records where it was injected and where its base is written. Anything unknown on the
-way reaches no request; an empty base names no origin. Everything is relative imports
-inside one repository, so a repository's requests are decided by its claims alone.
+records where it was injected and where its base is written. An unknown transport
+reaches no request. A request whose transport is superagent but whose base no source
+states -- unknown, empty (``?? ''``) or computed -- keeps its path and no origin (D2):
+counted and listed, never joined. Everything is relative imports inside one
+repository, so a repository's requests are decided by its claims alone.
 """
 
 from __future__ import annotations
@@ -33,13 +35,14 @@ from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.parsers.http_facts import (
+    BASE_UNKNOWN,
     HTTP_CLIENT_CALL,
     PENDING_FACT,
     TS_FUNCTION,
     TS_INJECTED_REQUEST,
     TS_INJECTION,
 )
-from repoatlas.parsers.http_typescript import client_url
+from repoatlas.parsers.http_typescript import ClientUrl, client_url
 from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
 
 #: Functions an options object is followed through, counted from the root's callee.
@@ -159,33 +162,49 @@ def _derive(
     transport = _get(bound, meta.get("transport", ""))
     if transport is None or transport.get("superagent") is not True:
         return None
+    value: str | None = None
+    line: object = None
+    file_id: object = None
     if "base_option" in meta:
         base = _get(bound, meta["base_option"])
-        if base is None or not isinstance(base.get("string"), str):
-            return None
-        value, line, file_id = base["string"], base.get("line"), base.get("file")
-    else:
+        if base is not None and isinstance(base.get("string"), str):
+            value, line, file_id = base["string"], base.get("line"), base.get("file")
+    elif meta.get("base_unknown") != "true":
         value, line, file_id = meta.get("base", ""), meta.get("base_at"), request.file_id
     parts = json.loads(meta.get("rest", "[]"))
-    head = value
-    while parts and parts[0][0] == http.TEMPLATE_LITERAL:
-        text = parts.pop(0)[1]
-        if head is value and not value.endswith("/") and not text.startswith("/"):
-            return None  # glued to the next text: the host itself would change
-        head += text
-    read = client_url(head, parts, default_scheme=_SCHEME, library=SOURCE)
+    if not value:
+        # A base no source states, or one stated empty (D2): the path alone, never joined.
+        template = http.route_template(parts)
+        if isinstance(template, str) or not template.segments:
+            return None
+        read = ClientUrl(None, template.segments, request.target_key.partition(" ")[2])
+        line = file_id = None
+    else:
+        head = value
+        while parts and parts[0][0] == http.TEMPLATE_LITERAL:
+            text = parts.pop(0)[1]
+            if head is value and not value.endswith("/") and not text.startswith("/"):
+                return None  # glued to the next text: the host itself would change
+            head += text
+        found = client_url(head, parts, default_scheme=_SCHEME, library=SOURCE)
+        if found is None:
+            return None
+        read = found
     consumer, root_file = by_id.get(request.file_id), by_id.get(root.file_id)
-    base_file = by_id.get(int(file_id)) if file_id is not None else None
-    if read is None or consumer is None or root_file is None:
+    base_file = by_id.get(int(str(file_id))) if file_id is not None else None
+    if consumer is None or root_file is None:
         return None
     claim_meta: dict[str, str] = {
         PENDING_FACT: HTTP_CLIENT_CALL,
         "method": meta.get("method", ""),
-        "origin": read.origin,
         "segments": json.dumps(list(read.segments)),
         "source": SOURCE,
         "injected_at": f"{root_file.rel_path}:{root.line_start}",
     }
+    if read.origin is None:
+        claim_meta["base"] = BASE_UNKNOWN
+    else:
+        claim_meta["origin"] = read.origin
     if base_file is not None and line is not None:
         claim_meta["base_in"] = f"{base_file.rel_path}:{line}"
     if read.scheme_from is not None:

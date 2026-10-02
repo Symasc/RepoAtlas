@@ -1795,7 +1795,9 @@ Until the pass proves one, it stays a pending claim that records the declaration
   literal.
 - **requests and httpx**: module-level functions with absolute URLs only. For the cross-repository join (below) a
   request is also read through a module constant holding a URL, or an f-string on a literal or constant origin whose
-  placeholders each fill one whole segment; that reading adds a join claim and no per-file fact.
+  placeholders each fill one whole segment; that reading adds a join claim and no per-file fact. An environment
+  default, `os.environ.get("X", "<url>")` or `os.getenv("X", "<url>")` (inline, or a module constant bound once to
+  one), is read as that whole URL or base for requests only: never for a route's path.
 - **axios**: the default export's method aliases with absolute URLs only. A relative axios URL is combined with a
   `baseURL` any file may set.
 - **superagent**: `superagent.<verb>(url)` on the default import (or `require`), or on a module-level
@@ -1811,6 +1813,12 @@ Until the pass proves one, it stays a pending claim that records the declaration
     substitution must fill one whole segment.
   - A URL with no scheme names no origin, except under superagent, whose Node client requests it over `http`. Such
     a claim is marked `scheme_from: superagent`.
+- **A request on a base the source does not state** (Python, superagent, fetch, and injected superagent requests)
+  keeps its path: a claim with `base: unknown` and no origin, which the join decides as `http-base-unknown` and never
+  links. The URL starts with an unread host part (a value, a value after a literal scheme, a base stated empty, or a
+  computed one), the text after it starts with `/`, and every later value fills one whole segment. A base the source
+  does state, refused for another reason (glued to the next text, say), stays unread, and so does a URL that is
+  wholly a value.
   - **A transport and a base injected in options objects** (`repoatlas/parsers/http_ts_injection.py`,
     `repoatlas/graph/ts_injection.py`). A request `fetcher.<verb>(`${base}/…`)` on names a module-level function
     destructures from its first parameter (bound once in its own scope) is a claim with no origin yet. A call to a
@@ -1915,8 +1923,9 @@ carries the lines that prove them. The exposure claim names the kind of source t
 (`identity_source`) and nothing more specific, so another source-backed extractor would produce the same claim and
 the join would not change. The global pass decides every request claim together and never reads its own output:
 `linked`, `http-provider-ambiguous` (two handlers or two repositories agree; nothing is chosen), `same-repository`
-(the route rules above already cover it), `http-route-unmatched` (the service is published, the operation is not)
-or `http-service-unmatched`. A link is one `CALLS_HTTP_HANDLER` edge, *consumer caller → provider handler*,
+(the route rules above already cover it), `http-route-unmatched` (the service is published, the operation is not),
+`http-service-unmatched`, or `http-base-unknown` (the path is read, the host is not: counted and listed, never
+joined). A link is one `CALLS_HTTP_HANDLER` edge, *consumer caller → provider handler*,
 provenanced by the request's own file and lines, whose resolution records under `http` the method, the URL as
 written, the endpoint, the deployment, both repositories, and `called_at`, `base_at`, `served_at`, `identity_at`
 and `bound_at`. That record is the evidence that lets the change-impact walk (`repoatlas/graph/impact.py`) cross it, inward only: a handler's

@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedReference
 from repoatlas.parsers.http_facts import (
+    BASE_UNKNOWN,
     HTTP_CLIENT_CALL,
     PENDING_FACT,
     TRANSPORT_FETCH,
@@ -793,7 +794,8 @@ _MAX_SHOWN = 60
 class ClientUrl:
     """A request's origin and path shape, as far as the source states them."""
 
-    origin: str
+    #: ``None`` for a base the source does not state (D2): the path is read, the host not.
+    origin: str | None
     #: Each path segment's literal text, or ``None`` where one value fills it.
     segments: tuple[str | None, ...]
     #: The URL as written, a placeholder shown as ``{expression}``: display only.
@@ -849,6 +851,23 @@ def client_url(
     )
 
 
+def unknown_base_url(base_shown: str, rest: Sequence[Sequence[str]]) -> ClientUrl | None:
+    """A request whose path the template states after a base it does not (D2).
+
+    ``rest`` is the template after the base: it must start with literal ``/`` and every
+    substitution in it must fill one whole segment, as for any claim. ``None`` otherwise.
+    """
+    template = http.route_template(rest)
+    if isinstance(template, str) or not template.segments:
+        return None
+    expressions = iter(template.expressions)
+    display = "/".join(
+        segment if segment is not None else "{" + next(expressions, "")[:_MAX_SHOWN] + "}"
+        for segment in template.segments
+    )
+    return ClientUrl(None, template.segments, f"{{{base_shown[:_MAX_SHOWN]}}}/{display}")
+
+
 def client_claim(
     read: ClientUrl,
     method: str,
@@ -862,10 +881,13 @@ def client_claim(
     side, in exactly the shape the Python parser records it."""
     meta = {
         "method": method,
-        "origin": read.origin,
         "segments": json.dumps(list(read.segments)),
         "source": source,
     }
+    if read.origin is None:
+        meta["base"] = BASE_UNKNOWN
+    else:
+        meta["origin"] = read.origin
     if read.base_at is not None:
         meta["base_at"] = str(read.base_at)
     if read.scheme_from is not None:

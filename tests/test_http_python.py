@@ -332,7 +332,20 @@ def test_a_dynamic_base_url_proves_no_route_and_no_endpoint() -> None:
     def get_me(base):
         return requests.get(f"{base}/hello/me").json()
     """
-    assert _http(source) == []
+    assert [r for r in _http(source) if PENDING_FACT not in r.meta] == []
+    # Counted for the join, never joined: the path is read, the host is not (D2).
+    [claim] = _http(source)
+    assert claim.meta["base"] == "unknown" and "origin" not in claim.meta
+
+
+@pytest.mark.parametrize(
+    "call",
+    ["requests.get(os.environ['API'] + '/x')", "requests.get(config.base_url + '/x')"],
+)
+def test_a_known_suffix_on_an_unstated_base_is_only_a_base_unknown_claim(call: str) -> None:
+    references = _http(f"import os\nimport requests\ndef f():\n    return {call}\n")
+    assert [r.meta.get("base") for r in references] == ["unknown"]
+    assert all(PENDING_FACT in r.meta for r in references)
 
 
 @pytest.mark.parametrize(
@@ -343,8 +356,6 @@ def test_a_dynamic_base_url_proves_no_route_and_no_endpoint() -> None:
         "requests.get('https://x.example/{}'.format(p))",
         "requests.get('https://x.example/%s' % p)",
         "requests.get(get_url())",
-        "requests.get(os.environ['API'] + '/x')",
-        "requests.get(config.base_url + '/x')",
         "requests.get('/relative/path')",
         "requests.get('https://user:pw@x.example/a')",
         "requests.request(method, 'https://x.example/a')",

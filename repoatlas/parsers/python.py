@@ -364,10 +364,13 @@ class PythonParser:
     #    naming an imported constant; a mount of an imported router or from inside an
     #    application factory; the module's receivers and path-like constants: claims the
     #    global pass serves routes from (repoatlas.graph.py_routes).
+    # 12: a request on an environment default (os.environ.get / os.getenv with a literal
+    #    URL) is read as that URL, and one whose path is read but whose host is not
+    #    records a claim with no origin (D2: counted, never joined).
     # +pyX.Y: `ast` is the running interpreter's, and what it accepts moves with the
     #    interpreter (repoatlas.parsers.interpreter), so facts parsed by another one
     #    are never kept.
-    version = f"11+{interpreter_tag()}"
+    version = f"12+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:

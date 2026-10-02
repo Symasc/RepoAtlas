@@ -75,7 +75,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -103,6 +103,7 @@ from repoatlas.parsers.http_typescript import (
     plain_object,
     static_string,
     template_spec,
+    unknown_base_url,
 )
 from repoatlas.parsers.treesitter import line_range, node_text, string_literal, walk
 
@@ -534,6 +535,9 @@ class FetchWrappers:
             inner = next((c for c in content[0].named_children if c.type != "comment"), None)
             base = self.literal_node(inner) if inner is not None else None
             value = static_string(self._source, base) if base is not None else None
+            if inner is not None and (base is None or value is None or value == ""):
+                # A base the file does not state, or states empty (D2): the path alone.
+                return unknown_base_url(node_text(self._source, inner), self._parts(content[1:]))
             if base is None or value is None:
                 return None
             following = content[1] if len(content) > 1 else None
@@ -547,17 +551,25 @@ class FetchWrappers:
         while rest_at < len(content) and content[rest_at].type == "string_fragment":
             head += node_text(self._source, content[rest_at])
             rest_at += 1
-        rest: list[list[str]] = []
-        for child in content[rest_at:]:
+        return client_url(
+            head,
+            self._parts(content[rest_at:]),
+            base_at=base_at,
+            default_scheme=default_scheme,
+            library=library,
+        )
+
+    def _parts(self, content: Sequence[Node]) -> list[list[str]]:
+        """Template children as parser-neutral parts: literal text and substitutions."""
+        parts: list[list[str]] = []
+        for child in content:
             if child.type == "string_fragment":
-                rest.append([http.TEMPLATE_LITERAL, node_text(self._source, child)])
+                parts.append([http.TEMPLATE_LITERAL, node_text(self._source, child)])
             else:
                 inner = next((c for c in child.named_children if c.type != "comment"), None)
                 text = node_text(self._source, inner) if inner is not None else ""
-                rest.append([http.TEMPLATE_SUBSTITUTION, text])
-        return client_url(
-            head, rest, base_at=base_at, default_scheme=default_scheme, library=library
-        )
+                parts.append([http.TEMPLATE_SUBSTITUTION, text])
+        return parts
 
     def resolve_callee(self, call: Node) -> Wrapper | None:
         callee = call.child_by_field_name("function")

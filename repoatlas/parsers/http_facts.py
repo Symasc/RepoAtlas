@@ -74,7 +74,11 @@ HTTP_LOCAL_CALL = "http-local-call"
 HTTP_EXPOSED_ENDPOINT = "http-exposed-endpoint"
 #: A request whose origin and path shape the source states: a literal URL, a module
 #: constant, or an f-string on a literal or constant origin. The other side of the join.
+#: A request whose path is read but whose host is not carries ``base`` =
+#: :data:`BASE_UNKNOWN` and no ``origin``: counted, listed, never joined (D2).
 HTTP_CLIENT_CALL = "http-client-call"
+#: The ``base`` of an :data:`HTTP_CLIENT_CALL` whose host the source does not state.
+BASE_UNKNOWN = "unknown"
 
 #: A Python application, router or blueprint a module constructs: what it is, its own
 #: prefix, and where the same module mounts it. Routes and mounts elsewhere name it.
