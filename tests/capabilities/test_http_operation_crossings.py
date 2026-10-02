@@ -175,6 +175,43 @@ def test_two_injected_roots_are_two_crossings_of_one_row(
     assert _refs(_ask(built, "web")) == _stored(built, "web")
 
 
+WRAPPED = """\
+const API_BASE = 'https://accounts.example/api'
+
+async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, init)
+  return response.json() as Promise<T>
+}
+
+export const api = {
+  users: {
+    getOne: () => apiRequest<any>('/users/123'),
+    settings: () => apiRequest<any>('/users/7/settings'),
+    again: () => apiRequest<any>('/users/123'),
+  },
+}
+"""
+
+
+def test_a_request_a_wrapper_composes_is_crossed_on_its_composed_row(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """Its route row is its file's, with no lines, since the base is stated elsewhere: the
+    decision goes there, one to each such row in the order of the requests' lines, and
+    the request is not listed twice."""
+    web = {"package.json": '{"name": "web"}', "src/client.ts": WRAPPED}
+    built = build(workspace, tmp_path, {"accounts": ACCOUNTS, "web": web})
+    rows = _ask(built, "web").operations
+    assert [row.detail for row in rows if row.detail == "join_only"] == []
+    assert [
+        (row.route, [c.chain[0].provenance[0].line_start for c in row.crossings])
+        for row in rows
+        if row.line_start is None
+    ] == [("/api/users/123", [10]), ("/api/users/123", [12]), ("/api/users/7/settings", [11])]
+    assert all(c.status is CrossingStatus.LINKED for row in rows for c in row.crossings)
+    assert _refs(_ask(built, "web")) == _stored(built, "web")
+
+
 # -- filtering -----------------------------------------------------------------------------
 
 

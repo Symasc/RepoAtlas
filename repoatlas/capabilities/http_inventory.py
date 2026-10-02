@@ -426,23 +426,54 @@ def _crossed(
     """The caller rows with their crossings, and a row for each request only the join reads.
 
     A request's decisions go on the caller row written at its lines by its entity — the
-    first in order when two rows are — so each stored decision is listed exactly once.
+    first in order when two rows are. A request whose route a wrapper composed is a row
+    of its file with no lines (its base is stated elsewhere): a decision of that file's
+    requests with exactly its method and path goes there, one to each such row in the
+    order of the requests' lines. What neither places gets a ``join_only`` row, so each
+    stored decision is listed exactly once.
     """
     grouped: dict[tuple[str | None, int | None, int | None, str | None], list[HttpCrossing]] = {}
     for row in decisions:
         key = (row.path, row.line_start, row.line_end, row.src_key)
         grouped.setdefault(key, []).append(_crossing(row, entities, slugs))
-    by_key = {found.key: found for found in entities.values()}
-    placed: list[Draft] = []
-    for draft in sorted(drafts, key=lambda d: d.sort_key):
+    ordered_drafts = sorted(drafts, key=lambda d: d.sort_key)
+    attached: dict[int, list[HttpCrossing]] = {}
+    for index, draft in enumerate(ordered_drafts):
         row = draft.operation
-        crossings = grouped.pop((row.path, row.line_start, row.line_end, row.entity), None)
+        found = grouped.pop((row.path, row.line_start, row.line_end, row.entity), None)
+        if found is not None:
+            attached.setdefault(index, []).extend(found)
+    # Each composed row is one request, and rows alike in all they say are told apart
+    # by the order of the requests' lines.
+    composed: dict[tuple[str | None, str | None, str], list[int]] = {}
+    for index, draft in enumerate(ordered_drafts):
+        row = draft.operation
+        if row.role == "caller" and row.line_start is None:
+            composed.setdefault((row.path, row.method, row.route), []).append(index)
+    meeting: dict[tuple[str | None, str | None, str], list[HttpCrossing]] = {}
+    alone: dict[tuple[str | None, int | None, int | None, str | None], list[HttpCrossing]] = {}
+    for key, crossings in grouped.items():
+        for crossing in crossings:
+            route = (key[0], crossing.method, _path_of(crossing.url))
+            if route in composed:
+                meeting.setdefault(route, []).append(crossing)
+            else:
+                alone.setdefault(key, []).append(crossing)
+    for route, crossings in meeting.items():
+        rows = composed[route]
+        for order, crossing in enumerate(sorted(crossings, key=_called)):
+            attached.setdefault(rows[min(order, len(rows) - 1)], []).append(crossing)
+    placed: list[Draft] = []
+    for index, draft in enumerate(ordered_drafts):
+        crossings = attached.get(index)
         if crossings is None:
             placed.append(draft)
             continue
         ordered = tuple(sorted(crossings, key=lambda c: c.decision_ref))
-        placed.append(replace(draft, operation=row.model_copy(update={"crossings": ordered})))
-    for (path, line_start, line_end, entity), crossings in grouped.items():
+        row = draft.operation.model_copy(update={"crossings": ordered})
+        placed.append(replace(draft, operation=row))
+    by_key = {found.key: found for found in entities.values()}
+    for (path, line_start, line_end, entity), crossings in alone.items():
         ordered = tuple(sorted(crossings, key=lambda c: c.decision_ref))
         first = ordered[0]
         owner = by_key.get(entity) if entity is not None else None
@@ -465,6 +496,13 @@ def _crossed(
             )
         )
     return placed
+
+
+def _called(crossing: HttpCrossing) -> tuple[int, str]:
+    """A crossing's order among a file's requests: its caller's line, then its ref."""
+    places = crossing.chain[0].provenance if crossing.chain else ()
+    line = places[0].line_start if places and places[0].line_start is not None else 0
+    return (line, crossing.decision_ref)
 
 
 def handler_ids(decisions: Sequence[HttpCallDecisionRow]) -> set[int]:
