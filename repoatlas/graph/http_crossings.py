@@ -47,6 +47,7 @@ from repoatlas.parsers.http_facts import (
     BASE_UNKNOWN,
     HTTP_CLIENT_CALL,
     HTTP_EXPOSED_ENDPOINT,
+    HTTP_UNRESOLVED_PATTERN,
     HTTP_UNSOURCED_IDENTITY,
     PENDING_FACT,
 )
@@ -67,9 +68,19 @@ UNREAD = "http-claim-unread"
 #: A request whose origin is an identity a deployment resolves, but which reaches no code:
 #: the chain stops at the source tie.
 SOURCE_UNRESOLVED = "http-deployment-source-unresolved"
+#: A request whose origin fits the hosts an Ingress template gives under a deployment no
+#: local source establishes: the chain stops at the deployment binding.
+BINDING_UNRESOLVED = "http-deployment-binding-unresolved"
 
 #: The roles this join reads; every other pending fact is someone else's.
-ROLES = frozenset({HTTP_EXPOSED_ENDPOINT, HTTP_CLIENT_CALL, HTTP_UNSOURCED_IDENTITY})
+ROLES = frozenset(
+    {HTTP_EXPOSED_ENDPOINT, HTTP_CLIENT_CALL, HTTP_UNSOURCED_IDENTITY, HTTP_UNRESOLVED_PATTERN}
+)
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+#: What a pattern's hole may stand for in a host the request states (already a valid
+#: hostname): part of one label, or whole labels with the dots between them.
+_IN_LABEL = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-_")
+_ACROSS_LABELS = _IN_LABEL | {"."}
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +104,56 @@ class _Request:
     segments: tuple[str | None, ...]
     display: str
     meta: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class _Pattern:
+    claim: UnresolvedRefRecord
+    scheme: str
+    port: int
+    #: One token per host character: a literal character, or the characters a hole's
+    #: next character may be; :attr:`repeats` marks the tokens a hole may repeat.
+    tokens: tuple[str | frozenset[str], ...]
+    repeats: frozenset[int]
+    scope: str
+
+    def fits(self, origin: str) -> bool:
+        scheme, _, authority = origin.partition("://")
+        host, colon, port = authority.partition(":")
+        if host.startswith("[") or scheme != self.scheme:
+            return False
+        number = int(port) if colon else _DEFAULT_PORTS.get(scheme)
+        return number == self.port and self._matches(host)
+
+    def _matches(self, host: str) -> bool:
+        """Whether the host fits, by stepping every position the pattern could be at
+        together: time linear in the host times the pattern, whatever the holes."""
+        states = self._close({0})
+        for char in host:
+            moved = {
+                index if index in self.repeats else index + 1
+                for index in states
+                if index < len(self.tokens)
+                and (
+                    char == self.tokens[index]
+                    if isinstance(self.tokens[index], str)
+                    else char in self.tokens[index]
+                )
+            }
+            if not moved:
+                return False
+            states = self._close(moved)
+        return len(self.tokens) in states
+
+    def _close(self, states: set[int]) -> set[int]:
+        """Add the positions a repeat may be skipped to."""
+        found, pending = set(states), list(states)
+        while pending:
+            index = pending.pop()
+            if index in self.repeats and index + 1 not in found:
+                found.add(index + 1)
+                pending.append(index + 1)
+        return found
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +241,31 @@ def _request(claim: UnresolvedRefRecord, meta: dict[str, str]) -> _Request | Non
     return _Request(claim, method, origin.origin, segments, display, meta)
 
 
+def _pattern(claim: UnresolvedRefRecord, meta: dict[str, str]) -> _Pattern | None:
+    """An Ingress host pattern: a hole is one character of its kind, then any more."""
+    port = meta.get("port", "")
+    try:
+        parts = json.loads(meta.get("host", "[]"))
+    except json.JSONDecodeError:
+        return None
+    if meta.get("scheme") not in _DEFAULT_PORTS or not port.isdigit() or not parts:
+        return None
+    tokens: list[str | frozenset[str]] = []
+    repeats: set[int] = set()
+    for kind, value in parts:
+        if kind == "text":
+            tokens.extend(str(value))
+        elif kind in {"label", "labels"}:
+            chars = _IN_LABEL if kind == "label" else _ACROSS_LABELS
+            tokens.extend((chars, chars))
+            repeats.add(len(tokens) - 1)
+        else:
+            return None
+    return _Pattern(
+        claim, meta["scheme"], int(port), tuple(tokens), frozenset(repeats), meta.get("scope", "")
+    )
+
+
 def _covers(exposure: _Exposure, request: _Request) -> bool:
     """Whether the request is addressed to the service the exposure publishes."""
     prefix = request.segments[: len(exposure.base)]
@@ -199,6 +285,7 @@ def plan_http_crossings(
     served: list[_Exposure] = []
     #: Origin → the identities resolved to it that reach no code.
     unsourced: dict[str, list[UnresolvedRefRecord]] = defaultdict(list)
+    patterns: list[_Pattern] = []
     requests: list[_Request] = []
     decisions: dict[int, str] = {}
     evidence: dict[int, dict[str, str]] = {}
@@ -214,6 +301,10 @@ def plan_http_crossings(
             target = http.client_target(meta.get("deployment", "") + "/")
             if target is not None and target.origin is not None and claim.file_id in by_file:
                 unsourced[target.origin].append(claim)
+        elif role == HTTP_UNRESOLVED_PATTERN:
+            pattern = _pattern(claim, meta)
+            if pattern is not None and claim.file_id in by_file:
+                patterns.append(pattern)
         elif role == HTTP_CLIENT_CALL:
             if meta.get("base") == BASE_UNKNOWN and "origin" not in meta:
                 if claim.id is not None:
@@ -240,15 +331,21 @@ def plan_http_crossings(
         # An identity resolved to this origin that reaches no code: the request may be
         # meant for it, so no handler found elsewhere can be the one it reaches.
         rivals = unsourced.get(request.origin, [])
+        # The hosts an Ingress gives under a deployment no local source establishes.
+        fitting = [p for p in patterns if p.fits(request.origin)]
         found = _called(request.claim, request.meta, by_file)
         if len(distinct) > 1:
             decision = PROVIDER_AMBIGUOUS
             found.update(_identities([e.claim for e in distinct.values()], by_file))
         elif distinct:
             exposure = next(iter(distinct.values()))
-            if rivals:
+            # A pattern of the chart whose rendering made this exposure is that same
+            # service under other values; another chart's pattern is a rival.
+            scope = exposure.meta.get("scope", "")
+            unbound = [p.claim for p in fitting if p.scope != scope]
+            if rivals or unbound:
                 decision = PROVIDER_AMBIGUOUS
-                found.update(_identities([exposure.claim, *rivals], by_file))
+                found.update(_identities([exposure.claim, *rivals, *unbound], by_file))
             else:
                 # Inside its own repository too: an identity the source proves says which
                 # handler the request reaches, as route shape alone cannot.
@@ -260,6 +357,9 @@ def plan_http_crossings(
         elif rivals:
             decision = SOURCE_UNRESOLVED
             found.update(_identities(rivals, by_file))
+        elif fitting:
+            decision = BINDING_UNRESOLVED
+            found.update(_identities([p.claim for p in fitting], by_file))
         elif covering := [e for e in served if _covers(e, request)]:
             decision = ROUTE_UNMATCHED
             found.update(_identities([e.claim for e in covering], by_file))
@@ -293,7 +393,7 @@ def _edge(
         if key in request.meta:
             record[key] = request.meta[key]
     # An identity a deployment declares, in its own file: where, and what binds it to code.
-    for key in ("identity_in", "bound_in"):
+    for key in ("identity_in", "bound_in", "scheme_in", "backend_in"):
         if key in exposure.meta:
             record[key] = exposure.meta[key]
     for key, line in (
@@ -335,20 +435,29 @@ def _called(
 
 
 def _identities(claims: list[UnresolvedRefRecord], by_file: dict[int, FileRow]) -> dict[str, str]:
-    """The identities a decision rests on, each by its deployment and the lines that
-    declare and bind it; several are joined with ``; `` in a stable order."""
+    """The identities and patterns a decision rests on, each by its deployment or pattern
+    and the lines that declare and bind it, with what is unresolved; several are joined
+    with ``; `` in a stable order."""
     rows: dict[str, list[str]] = defaultdict(list)
     for claim in sorted(claims, key=lambda c: (c.repo_id, c.file_id, c.line_start, c.target_key)):
         meta = _meta(claim)
         provider = by_file.get(claim.file_id)
         values = {
-            "deployment": meta.get("deployment", ""),
-            "identity_source": meta.get("identity_source", ""),
-            "identity_in": meta.get("identity_in", ""),
-            "bound_in": meta.get("bound_in", ""),
-            "source_outcome": meta.get("source_outcome", ""),
-            "provider": provider.repo_slug if provider is not None else "",
+            key: meta.get(key, "")
+            for key in (
+                "deployment",
+                "pattern",
+                "identity_source",
+                "identity_in",
+                "scheme_in",
+                "backend_in",
+                "unresolved",
+                "bound_in",
+                "binding_outcome",
+                "source_outcome",
+            )
         }
+        values["provider"] = provider.repo_slug if provider is not None else ""
         for key, value in values.items():
             if value and value not in rows[key]:
                 rows[key].append(value)

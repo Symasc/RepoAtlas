@@ -1930,17 +1930,20 @@ the join would not change. The global pass decides every request claim together 
 - `linked`: in another repository or the request's own. Route shape alone cannot tell one service's `/health` from
   another's; the identity can.
 - `http-provider-ambiguous`: two handlers or two repositories agree, or the one handler's origin is also an identity
-  that reaches no code. Nothing is chosen.
+  that reaches no code, or fits another chart's unresolved Ingress pattern (below). Nothing is chosen.
 - `http-deployment-source-unresolved`: the origin is an identity a deployment resolves (a compose service, a bound
-  Helm Service) that reaches no code.
+  Helm Service, a rendered Ingress host) that reaches no code.
+- `http-deployment-binding-unresolved`: the origin fits an Ingress host pattern that no locally established
+  deployment resolves.
 - `http-route-unmatched`: the service is published, the operation is not.
 - `http-service-unmatched`.
 - `http-base-unknown`: the path is read, the host is not. Counted and listed, never joined.
 
 The order between them is the chain's: an absent or ambiguous hop removes the link rather than being filled. Each
 decision keeps, per request claim, the hops it rests on (`evidence`): the request's own `called_at` and `base_at`,
-and the identities matched, with their deployment, `identity_in`, `bound_in`, source outcome and provider. A
-refusal thus says how far its chain got.
+and the identities or patterns matched, with their deployment or pattern, `identity_in`, `scheme_in`, `backend_in`,
+`bound_in`, the values left unresolved, the binding and source outcomes, and the provider. A refusal thus says how
+far its chain got.
 
 A link is one `CALLS_HTTP_HANDLER` edge, *consumer caller → provider handler*,
 provenanced by the request's own file and lines, whose resolution records under `http` the method, the URL as
@@ -1970,7 +1973,7 @@ A Kubernetes Service in a Helm chart (`repoatlas/parsers/deploy_helm.py`) is rea
 `http://<name>` too for port 80. Its name is rarely written out: Helm renders it from the chart, its values and the
 release name the deployment picks. Nothing renders a template. Each file records what it literally states:
 - `Chart.yaml` records the chart's name;
-- the chart's `values.yaml` records its literal scalar leaves, capped;
+- the chart's `values.yaml` records its literal scalar leaves, capped, a list's items as `a.b[0].c`;
 - a `kind: Service` template records its `metadata.name` and each `spec.ports[].port` as written. The template is
   read by lines, since it is not YAML until rendered;
 - a `.tpl` file records which `<chart>.name` and `<chart>.fullname` helpers match the `helm create` scaffold
@@ -1997,6 +2000,33 @@ A chart reaches code only when its repository's served routes all come from one 
 module. Every route of a NestJS controller, which has no such module, makes that false. Routes in several applications
 make it false too, as does a repository that serves no routes. The Service then exposes all of those routes
 (`identity_source: kubernetes-service`), citing the Service's name line and the release binding.
+
+A `kind: Ingress` template is read only in a narrow static subset, as text, never rendered. Otherwise it is recorded
+as unread, with the reason:
+- **control:** none, or one `if .Values.<path>` around one `range .Values.<path>`, each closed once; no `else`,
+  `with`, nesting, `define`, `template` or `block` anywhere in the file;
+- **host:** each `spec.rules[].host` is literal lowercase text plus `$.Chart.Name`, `$.Values.<path>` (or `.Chart.Name`
+  and `.Values.<path>` outside the `range`) and the range item's `.<key>`, with no pipeline or function;
+- **scheme:** the literal JSON `alb.ingress.kubernetes.io/listen-ports` annotation: `HTTPS` 443 gives `https://host`,
+  `HTTP` 80 `http://host`, any other port `scheme://host:port`;
+- **paths:** only `/*` (`ImplementationSpecific`) or `/` (`Prefix`), with no rewrite or action annotation;
+- **backend:** the Service name and port number must be written as the chart's own unconditional Service writes
+  them, `$` read as `.`. Any other rule field, or an action standing alone where it could add one of these fields,
+  leaves the document unread.
+
+The global pass renders a read Ingress under each release a Tiltfile binds, with `values.yaml` and the release's `set`:
+a falsy or absent `if` value means it is not rendered; a missing list or a values file cut at the cap leaves it
+unresolved; each host substitution must read a literal value. A rendered host is an identity tied as the chart's
+Service is (`identity_source: kubernetes-ingress`, citing the host, `listen-ports`, backend and release lines), or an
+identity that reaches no code. No CI job binds a release: a CircleCI orb's parameters mean what the orb says, and the
+orb is not in any repository.
+
+Every read Ingress also yields a host pattern per rule and scheme, for the deployments no local source establishes:
+the literal text and the chart's name match exactly, and each value or item substitution is a hole. A hole bounded by
+dots or the host's ends matches one or more DNS labels; any other matches part of one label. A pattern with neither
+the chart's name nor a whole literal label would fit any host and is not used. Patterns never link. They only say
+which hop a refused request failed, and a pattern of a chart other than the one a link's exposure came from makes
+that link ambiguous.
 
 **Security.** HTTP extraction reads only files the sync already admitted, so an excluded `.env` holding `API_URL`
 declares nothing and is not cross-resolved. Nothing resolves DNS, fetches a specification or `$ref`, probes an

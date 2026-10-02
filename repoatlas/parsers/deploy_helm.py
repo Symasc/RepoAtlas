@@ -9,14 +9,21 @@ Each file records what it states, as claims for the global pass
 literal:
 
 * ``Chart.yaml`` -- the chart's ``name`` (:data:`~repoatlas.parsers.http_facts.HELM_CHART`);
-* a chart's ``values.yaml`` -- its literal scalar leaves by dotted path, capped
-  (:data:`~repoatlas.parsers.http_facts.HELM_VALUES`);
+* a chart's ``values.yaml`` -- its literal scalar leaves by dotted path, list items as
+  ``a.b[0].c``, capped (:data:`~repoatlas.parsers.http_facts.HELM_VALUES`);
 * a template under ``templates/`` declaring ``kind: Service`` -- the raw text of its
   ``metadata.name`` and of each ``spec.ports[].port``, with their lines
   (:data:`~repoatlas.parsers.http_facts.HELM_SERVICE`). It is read by lines and
   indentation, because a template is not YAML until rendered; a document holding any
   control action (``if``, ``range``, ``with``, ``define``, ``template``, ``block``) is
   recorded as such and read no further, since it may render differently;
+* a template declaring ``kind: Ingress`` -- in a narrow static subset only
+  (:data:`~repoatlas.parsers.http_facts.HELM_INGRESS`): no control, or one
+  ``if .Values.<path>`` around one ``range .Values.<path>``; each rule's host as literal
+  text and the substitutions ``$.Chart.Name``, ``$.Values.<path>`` and the range item's
+  ``.<key>``; the scheme from a literal ALB ``listen-ports`` annotation; each path ``/*``
+  or ``/`` with no rewrite; and the backend's Service name and port as written. Anything
+  else in what it reads makes the document unread, with the reason;
 * a ``.tpl`` file under ``templates/`` -- which ``<x>.name`` and ``<x>.fullname`` helpers
   it defines *exactly* as ``helm create`` scaffolds them: the sequence of template
   actions, comments and whitespace aside, must be the scaffold's
@@ -36,6 +43,7 @@ import ast
 import json
 import posixpath
 import re
+from collections import defaultdict
 from pathlib import Path, PurePosixPath
 
 import yaml
@@ -50,6 +58,7 @@ from repoatlas.models.parsing import (
 from repoatlas.parsers.http_facts import (
     HELM_CHART,
     HELM_HELPER,
+    HELM_INGRESS,
     HELM_RELEASE,
     HELM_SERVICE,
     HELM_VALUES,
@@ -65,6 +74,29 @@ _COMMENT = re.compile(r"\{\{-?\s*/\*.*?\*/\s*-?\}\}", re.DOTALL)
 _CONTROL = re.compile(r"\{\{-?\s*(if|else|range|with|end|define|template|block)\b")
 _KEY = re.compile(r"^(\s*)(-\s+)?([A-Za-z_][\w.-]*):(.*)$")
 _SPACE = re.compile(r"\s+")
+_CONTROL_ACTION = re.compile(r"(if|else|range|with|end|define|template|block)\b")
+_VALUES_PATH = re.compile(r"\.Values((?:\.[A-Za-z_][\w-]*)+)")
+#: A block mapping key -- annotation keys hold dots and slashes -- and its value, if any.
+_FIELD = re.compile(r"""^(\s*)(-\s+)?("[^"]*"|'[^']*'|[A-Za-z0-9_][\w./-]*):(?:\s+(.*))?$""")
+_HOST_TEXT = re.compile(r"[a-z0-9.-]*")
+_ITEM_KEY = re.compile(r"\.([a-z_][\w-]*(?:\.[A-Za-z_][\w-]*)*)")
+_LISTEN_PORTS = "alb.ingress.kubernetes.io/listen-ports"
+#: Annotations that rewrite a path, or act on a request, before it reaches the backend.
+_REWRITES = re.compile(r"[^/]+/(.*rewrite.*|actions\..+|conditions\..+|app-root|use-regex)")
+_INGRESS_PATHS = frozenset({("/*", "ImplementationSpecific"), ("/", "Prefix")})
+#: The fields of an Ingress rule this reads, relative to the rule; ``True`` for a leaf.
+_RULE_FIELDS: dict[tuple[str, ...], bool] = {
+    ("host",): True,
+    ("http",): False,
+    ("http", "paths"): False,
+    ("http", "paths", "[]", "path"): True,
+    ("http", "paths", "[]", "pathType"): True,
+    ("http", "paths", "[]", "backend"): False,
+    ("http", "paths", "[]", "backend", "service"): False,
+    ("http", "paths", "[]", "backend", "service", "name"): True,
+    ("http", "paths", "[]", "backend", "service", "port"): False,
+    ("http", "paths", "[]", "backend", "service", "port", "number"): True,
+}
 
 #: The ``helm create`` scaffold's helpers, as their action sequences; ``{chart}`` is the
 #: helper's own prefix.
@@ -127,7 +159,8 @@ def chart_references(path: PurePosixPath, documents: list[yaml.Node]) -> list[Pa
 
 
 def values_references(path: PurePosixPath, documents: list[yaml.Node]) -> list[ParsedReference]:
-    """A chart's ``values.yaml``: its literal scalar leaves, by dotted path."""
+    """A chart's ``values.yaml``: its literal scalar leaves, by dotted path; a list's items
+    by index, as ``a.b[0].c``."""
     if path.name != "values.yaml" or not documents or documents[0] is None:
         return []
     leaves: dict[str, str] = {}
@@ -140,6 +173,9 @@ def values_references(path: PurePosixPath, documents: list[yaml.Node]) -> list[P
                 name = _scalar(key)
                 if name is not None and "." not in name:
                     stack.append((f"{prefix}.{name}" if prefix else name, value))
+        elif isinstance(node, yaml.SequenceNode) and prefix:
+            for index in reversed(range(len(node.value))):
+                stack.append((f"{prefix}[{index}]", node.value[index]))
         elif isinstance(node, yaml.ScalarNode) and prefix:
             value = _scalar(node)
             if value is not None:
@@ -222,6 +258,261 @@ def service_references(path: PurePosixPath, content: str) -> list[ParsedReferenc
                 name[1],
                 name[1],
                 role=HELM_SERVICE,
+                **meta,
+            )
+        )
+    return found
+
+
+def _body(action: str) -> str:
+    """An action's text, its trim markers and outer spacing dropped."""
+    return action.strip().removeprefix("-").removesuffix("-").strip()
+
+
+def _wrapper(content: str) -> tuple[str, str, int, int] | str | None:
+    """The ``if`` path, ``range`` path, ``range`` line and first ``end`` line of a template
+    wrapped in exactly one ``if .Values.<path>`` around one ``range .Values.<path>``;
+    ``None`` with no control at all; otherwise why it is not read."""
+    blanked = _COMMENT.sub(lambda m: "\n" * m.group(0).count("\n"), content)
+    controls: list[tuple[str, str, int]] = []
+    line, cursor = 1, 0
+    for match in _ACTION.finditer(blanked):
+        body = _body(match.group(1))
+        keyword = _CONTROL_ACTION.match(body)
+        if keyword is not None:
+            if len(controls) == 4:
+                return "its control is not one `if` around one `range`"
+            line += blanked.count("\n", cursor, match.start())
+            cursor = match.start()
+            controls.append((keyword.group(1), body[keyword.end() :].strip(), line))
+    if not controls:
+        return None
+    if [keyword for keyword, _, _ in controls] != ["if", "range", "end", "end"]:
+        return "its control is not one `if` around one `range`"
+    condition = _VALUES_PATH.fullmatch(controls[0][1])
+    iterable = _VALUES_PATH.fullmatch(controls[1][1])
+    if condition is None or iterable is None or controls[2][1] or controls[3][1]:
+        return "its `if` or `range` does not read one value directly"
+    return condition.group(1)[1:], iterable.group(1)[1:], controls[1][2], controls[2][2]
+
+
+def _host(text: str, ranged: bool) -> list[list[str]] | None:
+    """A host as parts: ``["text", t]``, ``["chart", ""]``, ``["value", path]`` or
+    ``["item", key]``; ``None`` when any action is not one of these, or the text is not
+    lowercase host characters."""
+    parts: list[list[str]] = []
+    cursor = 0
+    for match in _ACTION.finditer(text):
+        parts.append(["text", text[cursor : match.start()]])
+        cursor = match.end()
+        body = _body(match.group(1))
+        value = _VALUES_PATH.fullmatch(body.removeprefix("$")) if body[:1] in "$." else None
+        item = _ITEM_KEY.fullmatch(body) if ranged else None
+        if body == "$.Chart.Name" or (body == ".Chart.Name" and not ranged):
+            parts.append(["chart", ""])
+        elif value is not None and (body.startswith("$") or not ranged):
+            parts.append(["value", value.group(1)[1:]])
+        elif item is not None:
+            parts.append(["item", item.group(1)])
+        else:
+            return None
+    parts.append(["text", text[cursor:]])
+    parts = [part for part in parts if part != ["text", ""]]
+    if not parts or any(k == "text" and not _HOST_TEXT.fullmatch(v) for k, v in parts):
+        return None
+    return parts
+
+
+def _fields(
+    document: list[str], start: int
+) -> tuple[list[tuple[tuple[str, ...], str, int]], list[tuple[tuple[str, ...], str, int]]]:
+    """A template document's block mapping keys, each by its path from the root (a list
+    item as ``[n]``) with its value as written and its line; and every other non-blank
+    line, by the path of the key enclosing it. Read by indentation, since a template is
+    not YAML until rendered."""
+    fields: list[tuple[tuple[str, ...], str, int]] = []
+    other: list[tuple[tuple[str, ...], str, int]] = []
+    stack: list[tuple[int, str]] = []
+    items: dict[tuple[str, ...], int] = defaultdict(int)
+    for offset, line in enumerate(document):
+        stripped = line.strip()
+        number = start + offset + 1
+        if not stripped or stripped.startswith("#") or stripped == "---":
+            continue
+        match = _FIELD.match(line)
+        if match is None:
+            column = len(line) - len(line.lstrip())
+            while stack and stack[-1][0] >= column:
+                stack.pop()
+            other.append((tuple(name for _, name in stack), stripped, number))
+            continue
+        lead = len(match.group(1))
+        if match.group(2):
+            # A new item: of the sequence under the key it is indented beneath, or at
+            # that key's own indentation.
+            while stack and stack[-1][0] > lead:
+                stack.pop()
+            if stack and stack[-1][0] == lead and stack[-1][1].startswith("["):
+                stack.pop()
+            parent = tuple(name for _, name in stack)
+            stack.append((lead, f"[{items[parent]}]"))
+            items[parent] += 1
+            column = lead + len(match.group(2))
+        else:
+            column = lead
+            while stack and stack[-1][0] >= column:
+                stack.pop()
+        key = match.group(3)
+        if key[:1] in "\"'":
+            key = key[1:-1]
+        stack.append((column, key))
+        fields.append((tuple(name for _, name in stack), _value(match.group(4) or ""), number))
+    return fields, other
+
+
+def _abstract(path: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple("[]" if name.startswith("[") else name for name in path)
+
+
+def _ingress(
+    document: list[str], start: int, wrapper: tuple[str, str, int, int] | None
+) -> dict[str, str] | str:
+    """What an Ingress document states that this reads, or why it is not read."""
+    fields, other = _fields(document, start)
+    if wrapper is not None and not all(wrapper[2] < line < wrapper[3] for _, _, line in fields):
+        return "its `if` and `range` do not enclose it"
+    for path, text, _ in other:
+        # A line that is not a key can add a field this reads where it stands; elsewhere
+        # (labels, tls) it changes nothing read. The wrapper's own lines are read above.
+        alone = re.fullmatch(r"\{\{(.*?)\}\}", text)
+        if alone is not None and _CONTROL_ACTION.match(_body(alone.group(1))):
+            continue
+        if path in {(), ("metadata",), ("spec",)} or path[:2] in {
+            ("metadata", "annotations"),
+            ("spec", "rules"),
+        }:
+            return "an action stands where it may add a field this reads"
+    ranged = wrapper is not None
+    listen: list[list[object]] | None = None
+    scheme_at = 0
+    rules: dict[str, tuple[str, int] | None] = {}
+    paths: dict[tuple[str, str], dict[str, tuple[str, int]]] = defaultdict(dict)
+    for path, text, line in fields:
+        if path[:2] == ("metadata", "annotations"):
+            if len(path) == 2:
+                if text:
+                    return "its annotations are not a block of literal keys"
+                continue
+            key = path[2]
+            if _REWRITES.fullmatch(key):
+                return f"its annotation `{key}` rewrites or acts on a request"
+            if key == _LISTEN_PORTS and len(path) == 3:
+                listen, scheme_at = _listen(text), line
+                if listen is None:
+                    return "its listen-ports annotation is not literal JSON of HTTP or HTTPS ports"
+            continue
+        if path[:2] != ("spec", "rules"):
+            continue
+        if len(path) == 2:
+            if text:
+                return "its rules are not a block list"
+            continue
+        rule, shape = path[2], _abstract(path[3:])
+        leaf = _RULE_FIELDS.get(shape)
+        if leaf is None or leaf != bool(text):
+            return f"its rule field `{'.'.join(shape)}` is not one this reads"
+        rules.setdefault(rule, None)
+        if shape == ("host",):
+            rules[rule] = (text, line)
+        elif leaf:
+            paths[(rule, path[5])][shape[-1]] = (text, line)
+    if listen is None:
+        return "it has no listen-ports annotation, so its scheme is not read"
+    if not rules:
+        return "it has no rules"
+    hosts: list[list[object]] = []
+    backends: list[list[object]] = []
+    for rule, host in rules.items():
+        if host is None:
+            return "a rule without a host answers any host"
+        text, line = host
+        parts = _host(text, ranged)
+        if parts is None:
+            return "a host is not literal text and the substitutions this reads"
+        hosts.append([parts, line])
+        served = [fields for (owner, _), fields in paths.items() if owner == rule]
+        if not served:
+            return "a rule serves no path"
+        for path_fields in served:
+            shape = (path_fields.get("path", ("", 0))[0], path_fields.get("pathType", ("", 0))[0])
+            if shape not in _INGRESS_PATHS:
+                return "a path is not `/*` (ImplementationSpecific) or `/` (Prefix)"
+            if "name" not in path_fields or "number" not in path_fields:
+                return "a backend is not a Service by name and port number"
+            backend = [path_fields["name"][0], path_fields["number"][0], path_fields["name"][1]]
+            if backend not in backends:
+                backends.append(backend)
+    meta = {
+        "hosts": json.dumps(hosts),
+        "listen": json.dumps(listen),
+        "scheme_at": str(scheme_at),
+        "backends": json.dumps(backends),
+    }
+    if wrapper is not None:
+        meta["if"], meta["range"] = wrapper[0], wrapper[1]
+    return meta
+
+
+def _listen(text: str) -> list[list[object]] | None:
+    """An ALB ``listen-ports`` annotation's ``[scheme, port]`` pairs, when literal."""
+    try:
+        decoded = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(decoded, list) or not decoded:
+        return None
+    found: list[list[object]] = []
+    for entry in decoded:
+        if not isinstance(entry, dict) or len(entry) != 1:
+            return None
+        ((scheme, port),) = entry.items()
+        if scheme not in {"HTTP", "HTTPS"} or type(port) is not int or not 0 < port < 65536:
+            return None
+        found.append([scheme.lower(), port])
+    return found
+
+
+def ingress_references(path: PurePosixPath, content: str) -> list[ParsedReference]:
+    """Each ``kind: Ingress`` document of a chart template: what it states in the subset
+    this reads, or why it is not read."""
+    if path.parent.name != "templates" or path.suffix not in {".yaml", ".yml"}:
+        return []
+    lines = content.splitlines()
+    starts = [0] + [index + 1 for index, line in enumerate(lines) if line.strip() == "---"]
+    ends = [index for index, line in enumerate(lines) if line.strip() == "---"] + [len(lines)]
+    wrapper: tuple[str, str, int, int] | str | None = None
+    found: list[ParsedReference] = []
+    for start, end in zip(starts, ends, strict=True):
+        document = lines[start:end]
+        kind = next(
+            (i for i, line in enumerate(document) if re.fullmatch(r"kind:\s*Ingress\s*", line)),
+            None,
+        )
+        if kind is None:
+            continue
+        if not found:
+            wrapper = _wrapper(content)
+        read = wrapper if isinstance(wrapper, str) else _ingress(document, start, wrapper)
+        meta = {"unread": read} if isinstance(read, str) else read
+        found.append(
+            pending_reference(
+                EdgeType.REFERENCES,
+                EntityType.CONFIG,
+                "Ingress",
+                start + kind + 1,
+                start + kind + 1,
+                role=HELM_INGRESS,
+                chart=_directory(PurePosixPath(_directory(path))),
                 **meta,
             )
         )

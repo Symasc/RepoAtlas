@@ -30,6 +30,7 @@ from repoatlas.models.parsing import (
 from repoatlas.parsers.deploy_compose import compose_references, is_compose_file
 from repoatlas.parsers.deploy_helm import (
     chart_references,
+    ingress_references,
     service_references,
     values_references,
 )
@@ -140,7 +141,9 @@ class StructuredParser:
     #    and command, for deployment identities (repoatlas.parsers.deploy_compose).
     # 6: a Helm chart's Chart.yaml, values.yaml and Service templates record what Service
     #    names and ports they state (repoatlas.parsers.deploy_helm).
-    version = "6"
+    # 7: a chart's Ingress templates record their hosts, scheme and backend in a narrow
+    #    static subset, or why not; values.yaml also records list items as a.b[0].c.
+    version = "7"
     language = "YAML"
 
     def supports(self, path: Path) -> bool:
@@ -156,7 +159,11 @@ class StructuredParser:
         # and a chart template is not YAML until Helm renders it.
         resolution = module_facts(path.name, content)
         posix = PurePosixPath(path.as_posix())
-        resolution = [*resolution, *service_references(posix, content)]
+        resolution = [
+            *resolution,
+            *service_references(posix, content),
+            *ingress_references(posix, content),
+        ]
 
         text = content
         if language == "JSON":
