@@ -29,7 +29,6 @@ import signal
 import sqlite3
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -607,8 +606,22 @@ def test_a_waiting_opener_observes_the_finished_migration(tmp_path: Path) -> Non
     for statement in PROBE.statements:
         holder.execute(statement)
 
+    # The waiter announces the first statement it blocks on. SQLite's trace
+    # callback fires as a statement starts, before it asks for the lock the holder
+    # has, so the announcement means the waiter is queued: no head start to guess at.
     script = INSTALL + (
-        "import sys, pathlib, time\n"
+        "import sys, pathlib, sqlite3\n"
+        "real = sqlite3.connect\n"
+        "announced = []\n"
+        "def trace(sql):\n"
+        "    if sql.startswith('BEGIN IMMEDIATE') and not announced:\n"
+        "        announced.append(sql)\n"
+        "        print('WAITING', flush=True)\n"
+        "def connect(*args, **kwargs):\n"
+        "    c = real(*args, **kwargs)\n"
+        "    c.set_trace_callback(trace)\n"
+        "    return c\n"
+        "sqlite3.connect = connect\n"
         "from repoatlas.storage.sqlite.database import open_database\n"
         "d = open_database(pathlib.Path(sys.argv[1]))\n"
         "print('OK', d.connection.execute('PRAGMA user_version').fetchone()[0])\n"
@@ -622,7 +635,9 @@ def test_a_waiting_opener_observes_the_finished_migration(tmp_path: Path) -> Non
         text=True,
         env=env,
     )
-    time.sleep(0.4)
+    assert waiter.stdout is not None
+    announced = waiter.stdout.readline().strip()
+    assert announced == "WAITING", announced
     assert waiter.poll() is None, "the second opener should still be waiting"
 
     holder.execute(f"PRAGMA user_version = {PROBED}")
@@ -633,10 +648,11 @@ def test_a_waiting_opener_observes_the_finished_migration(tmp_path: Path) -> Non
     assert out == f"OK {PROBED}", out
 
 
-@pytest.mark.timing
 def test_a_reader_of_a_current_database_is_not_blocked_by_a_writer(tmp_path: Path) -> None:
     """Migrations must not be serialized behind the sync writer lock: readers
-    open the database too, and `locate` must not queue behind a `sync`."""
+    open the database too, and `locate` must not queue behind a `sync`. The
+    writer holds on until the opener is done, so an open that needed its lock
+    would fail."""
     path = tmp_path / "current.db"
     open_database(path).close()
 
@@ -644,14 +660,11 @@ def test_a_reader_of_a_current_database_is_not_blocked_by_a_writer(tmp_path: Pat
     writer.execute("BEGIN IMMEDIATE")
     writer.execute("INSERT INTO meta (key, value) VALUES ('held', '1')")
 
-    started = time.perf_counter()
     results = run_openers(path, 1)
-    elapsed = time.perf_counter() - started
     writer.rollback()
     writer.close()
 
     assert results[0].startswith("OK"), results
-    assert elapsed < 5.0, f"an up-to-date open waited {elapsed:.1f}s behind a writer"
 
 
 # == 7. process death ========================================================
