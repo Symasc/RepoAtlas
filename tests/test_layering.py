@@ -94,7 +94,6 @@ _FORBIDDEN: dict[str, set[str]] = {
         "gitstate",
         "parsers",
         "dependencies",
-        "embeddings",
         "llm",
         "rendering",
         "cli",

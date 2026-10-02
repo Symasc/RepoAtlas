@@ -6,10 +6,9 @@ index, the honest answer is that it does not exist. Returning spans that merely
 share a word with the question presents a guess as evidence for a literal, which
 is the failure §2 exists to prevent.
 
-This applies to *every* associative source, not only to embeddings. FTS recall on
-`@company` and an entity coincidentally named `retries` are the same mistake as a
-cosine neighbour: they answer a question the user did not ask, and they do it with
-whatever tier the stage happens to assign.
+This applies to *every* associative source. FTS recall on `@company` and an entity
+coincidentally named `retries` are the same mistake: they answer a question the
+user did not ask, and they do it with whatever tier the stage happens to assign.
 """
 
 from __future__ import annotations
@@ -83,9 +82,8 @@ def test_the_suppression_is_recorded_so_it_can_be_audited(
     evidence = _locate(adversarial, adversarial_root, "python-service", "ZZZ_NO_SUCH_TOKEN_918273")
     assert evidence.trace is not None
     assert evidence.trace.literal_terms
-    assert not evidence.trace.semantic_used
     suppressed = [s for s in evidence.trace.stages if "suppressed" in s.detail]
-    assert {s.name for s in suppressed} >= {"lexical", "symbol", "semantic"}
+    assert {s.name for s in suppressed} >= {"lexical", "symbol"}
 
 
 # -- the converse: suppression must not silence real questions ---------------

@@ -157,7 +157,7 @@ class Rig:
             return []
         return [json.loads(line) for line in self.log.read_text().splitlines()]
 
-    def start(self, *flags: str, **env: str) -> Running:
+    def start(self, *flags: str, frontend: Path | None = None, **env: str) -> Running:
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -169,7 +169,7 @@ class Rig:
                 "--port",
                 str(self.port),
                 "--frontend",
-                str(self.frontend),
+                str(frontend or self.frontend),
             ],
             env={**self.env, **env},
             stdout=subprocess.DEVNULL,
@@ -332,6 +332,50 @@ def test_prepare_installs_and_builds_then_exits_without_serving(tmp_path: Path) 
     assert not rig.connection.exists()
 
 
+def _exported(directory: Path) -> Path:
+    """The layout ``pnpm build:static`` writes, as far as the launcher looks."""
+    (directory / "_next" / "static").mkdir(parents=True)
+    (directory / "index.html").write_text("<!doctype html><title>explorer</title>")
+    return directory
+
+
+def test_ui_serves_an_exported_explorer_itself_and_runs_no_node(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    running = rig.start(frontend=_exported(tmp_path / "out"))
+    running.wait_for("RepoAtlas explorer at")
+    with urllib.request.urlopen(f"http://127.0.0.1:{rig.port}/", timeout=30) as page:
+        assert page.read() == b"<!doctype html><title>explorer</title>"
+    # A call as the page makes one: same origin, no token.
+    call = urllib.request.Request(
+        f"http://127.0.0.1:{rig.port}/api/ra/repositories",
+        data=json.dumps({"context": {"scope": "global"}}).encode(),
+        headers={"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{rig.port}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(call, timeout=30) as answer:  # noqa: S310 - loopback http, above
+        assert json.loads(answer.read())["ok"] is True
+    assert rig.connection.exists()
+
+    running.process.send_signal(signal.SIGINT)
+    assert running.finish() == 0, running.output
+    assert not _listening(rig.port)
+    assert not rig.connection.exists()
+    assert rig.calls() == [], "node or pnpm ran"
+    assert "t" * 40 not in running.output
+
+
+def test_an_exported_explorer_needs_no_preparing_and_cannot_hot_reload(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    out = _exported(tmp_path / "out")
+    prepared = rig.start("--prepare", frontend=out)
+    assert prepared.finish() == 0, prepared.output
+    assert "Start it with `repoatlas ui`" in prepared.output
+    dev = rig.start("--dev", frontend=out)
+    assert dev.finish() == ExitCode.CONTEXT, dev.output
+    assert "is not the RepoAtlas explorer" in dev.output
+    assert rig.calls() == []
+
+
 # ---------------------------------------------------------------------------
 # The launcher's own decisions
 # ---------------------------------------------------------------------------
@@ -360,6 +404,31 @@ def test_an_installation_without_the_explorer_says_how_to_get_it(
         launcher.locate_frontend(None, {})
     assert "not part of this installation" in refused.value.message
     assert refused.value.detail is not None and "--frontend" in refused.value.detail
+
+
+def test_an_installed_explorer_is_used_when_there_is_no_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "site" / "repoatlas" / "ui"
+    monkeypatch.setattr(launcher, "__file__", str(package / "launcher.py"))
+    installed = _exported(package / launcher.PACKAGED_DIR)
+    assert launcher.locate_frontend(None, {}) == installed
+    with pytest.raises(UiError) as refused:
+        launcher.locate_frontend(None, {}, sources_only=True)
+    assert "sources are not part of this installation" in refused.value.message
+
+
+def test_a_checkouts_explorer_wins_over_an_exported_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "repoatlas" / "ui"
+    monkeypatch.setattr(launcher, "__file__", str(package / "launcher.py"))
+    _exported(package / launcher.PACKAGED_DIR)
+    sources = tmp_path / "frontend"
+    sources.mkdir()
+    for name in ("package.json", "next.config.ts"):
+        (sources / name).write_text("{}\n")
+    assert launcher.locate_frontend(None, {}) == sources
 
 
 def test_node_and_pnpm_are_required_with_a_way_to_get_them() -> None:

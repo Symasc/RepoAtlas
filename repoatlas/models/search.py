@@ -15,8 +15,8 @@ recorded here because search is where they first bite.
 **This query, not this investigation.** An :class:`EvidenceItem` describes how
 *this* retrieval run reached this span. The ledger separately accumulates the
 strongest metadata any run has ever established for it, and the two legitimately
-disagree: a span first proved by an exact path match and later returned again by a
-semantic neighbour is still proved, but the semantic run did not prove it. A
+disagree: a span first proved by an exact path match and later returned again by
+word-overlap recall is still proved, but the lexical run did not prove it. A
 response built by serializing ledger entries would report the historical strength
 as though this query had earned it, which is a claim about the search that is not
 true. So the item carries the current run's tier, match and reason, and the

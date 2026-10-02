@@ -22,7 +22,7 @@ the two can drift apart completely::
 ``git ls-files --cached`` still reports ``sub/passwd``. The object that path now
 names is ``/etc/passwd`` — an ordinary regular file, so ``Path.is_symlink()`` is
 ``False`` and ``Path.is_file()`` is ``True``. Checking the final component admits
-it, and foreign content is then read, chunked, embedded and cited under a
+it, and foreign content is then read, chunked, indexed and cited under a
 repository path that does not contain it. A tracked Git path is not proof that
 the corresponding working-tree object lives inside the repository.
 

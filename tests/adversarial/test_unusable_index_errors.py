@@ -630,10 +630,13 @@ def test_an_unusable_index_precedes_the_writer_lock(indexed: Harness) -> None:
 def test_context_resolution_still_exits_2_on_a_healthy_index(
     indexed: Harness, tmp_path: Path
 ) -> None:
-    """§29: exit 2 is not swallowed by a boundary that catches too much."""
+    """§29: exit 2 is not swallowed by a boundary that catches too much.
+
+    `status`, not `sync`: from outside every repository `sync` is the whole workspace.
+    """
     outside = tmp_path / "elsewhere"
     outside.mkdir()
-    result = indexed.run("sync", cwd=outside)
+    result = indexed.run("status", cwd=outside)
     assert result.exit_code == ExitCode.CONTEXT, result
     assert "Traceback (most recent call last)" not in result.output
 

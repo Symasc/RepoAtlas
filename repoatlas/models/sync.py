@@ -57,8 +57,7 @@ class SyncRequest(BaseModel):
     ``full`` is the one option V1 exposes and safely supports: rehash every file
     rather than trusting size and modification time. It reads more; it never
     reaches further. Nothing that would touch the network, the working tree or a
-    package manager is offered, and embedding-model download in particular is not,
-    because fetching a model is a network operation a sync must never start.
+    package manager is offered.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -236,8 +235,6 @@ class SyncResponse(BaseModel):
     linked_references: int = 0
     unresolved_references: int = 0
     cross_repository_edges: int = 0
-    embedded_chunks: int = 0
-    pending_embeddings: int = 0
     evidence_revalidation: EvidenceRevalidationSummary
     #: How the index stands against the working trees afterwards. Not "current"
     #: merely because the sync succeeded: a file edited a moment later is already

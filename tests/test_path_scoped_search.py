@@ -153,19 +153,6 @@ def test_file_identity_lookup_is_confined(indexed: Workspace) -> None:
     assert [hit.path for hit in scoped] == [IN_PATH]
 
 
-def test_vector_search_scores_only_chunks_inside_the_path(indexed: Workspace) -> None:
-    ids = [_repo_id(indexed)]
-    model = indexed.embeddings()
-    assert model is not None
-    # A desktop test's own text: its siblings are the nearest neighbours there are.
-    vector = model.embed_query(_noise(7))
-    unscoped = indexed.vectors.query(vector, model.id, ids, 5, -1.0)
-    assert unscoped and all(not _in_scope(hit.path) for hit in unscoped)
-
-    scoped = indexed.vectors.query(vector, model.id, ids, 5, -1.0, path_prefix=SCOPE)
-    assert scoped and {hit.path for hit in scoped} == {IN_PATH}
-
-
 def test_described_entities_are_confined(indexed: Workspace) -> None:
     ids = [_repo_id(indexed)]
     everything = [

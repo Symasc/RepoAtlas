@@ -65,7 +65,6 @@ def at_depth(root: Path, depth: int, name: str) -> Path:
 def settings_for(base: Path, **overrides: object) -> Settings:
     payload: dict[str, object] = {
         "storage": {"database": str(base / "state" / "atlas.db")},
-        "embeddings": {"provider": "hashing", "dim": 128},
     }
     payload.update(overrides)
     return Settings.model_validate(payload)
@@ -493,20 +492,6 @@ def test_a_new_repository_resolves_an_older_reference_in_the_same_sync(
         managed.close()
 
 
-# --- 19. embeddings ------------------------------------------------------------
-
-
-def test_a_newly_discovered_repository_is_embedded_in_the_same_sync(
-    managed: Managed,
-) -> None:
-    make_repo(managed.root / "service-b", BETA)
-
-    report = managed.sync()
-
-    assert report.embedded_chunks >= 1, report.embedding_detail
-    assert report.pending_embeddings == 0, report.embedding_detail
-
-
 # --- 20. incremental == clean --------------------------------------------------
 
 
@@ -580,7 +565,6 @@ def test_sync_still_refuses_when_the_writer_lock_is_held(
     settings = Settings.model_validate(
         {
             "storage": {"database": env["REPOATLAS_DB"], "lock_timeout_seconds": 0.0},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     holder = open_workspace(settings=settings, require_root=False)

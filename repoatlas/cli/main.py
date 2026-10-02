@@ -131,13 +131,6 @@ def sync(
     repository: Annotated[str | None, typer.Argument(help="Repository to sync.")] = None,
     repo: _RepoOption = None,
     full: Annotated[bool, typer.Option("--full", help="Rehash every file.")] = False,
-    embed: Annotated[
-        bool,
-        typer.Option(
-            "--embed",
-            help="Download the embedding model if needed, then embed pending chunks.",
-        ),
-    ] = False,
     json_output: _JsonOption = False,
     verbose: _VerboseOption = False,
 ) -> None:
@@ -146,16 +139,6 @@ def sync(
     Inside a managed repository, that repository; anywhere else, the whole workspace.
     """
     workspace = _open()
-    if embed:
-        # Fetching the model is an explicit act, never a silent stall inside an
-        # ordinary sync (ARCHITECTURE.md §10).
-        workspace.settings = workspace.settings.model_copy(
-            update={
-                "embeddings": workspace.settings.embeddings.model_copy(
-                    update={"allow_download": True}
-                )
-            }
-        )
     try:
         context = _resolve(workspace, repo or repository, "sync", verbose, anywhere=True)
         with _progress() as progress:
@@ -298,7 +281,10 @@ def ui(
         bool, typer.Option("--open/--no-open", help="Open the explorer in a browser.")
     ] = True,
     dev: Annotated[
-        bool, typer.Option("--dev", help="Run the explorer's development server (hot reload).")
+        bool,
+        typer.Option(
+            "--dev", help="Run the explorer's development server (hot reload; a checkout only)."
+        ),
     ] = False,
     rebuild: Annotated[
         bool, typer.Option("--rebuild", help="Rebuild the explorer even if it looks current.")
@@ -306,24 +292,29 @@ def ui(
     prepare: Annotated[
         bool,
         typer.Option(
-            "--prepare", help="Install and build the explorer, then exit without starting it."
+            "--prepare",
+            help="Install and build a checkout's explorer, then exit without starting it.",
         ),
     ] = False,
     frontend: Annotated[
         Path | None,
         typer.Option(
             "--frontend",
-            help="The explorer's directory; defaults to the checkout's frontend/.",
+            help=(
+                "The explorer: its sources (a checkout's frontend/) or an exported build "
+                "(frontend/out). Defaults to the checkout's, else the one installed."
+            ),
             file_okay=False,
         ),
     ] = None,
 ) -> None:
-    """Open the graph explorer: the local API and the web app, started together.
+    """Open the graph explorer in a browser, with the local API it reads.
 
-    Serves the index over the local API on a free loopback port, runs the
-    explorer against it at http://127.0.0.1:PORT, and opens it in a browser.
-    The first run installs the explorer's packages and builds it, which needs
-    Node.js 22 and pnpm. Ctrl-C stops both. See docs/local-api.md.
+    Serves the index and the explorer at http://127.0.0.1:PORT and opens it in
+    a browser. An installed release carries the explorer ready to serve, and
+    needs nothing else. In a checkout, the first run installs the explorer's
+    packages and builds it, which needs Node.js 22 and pnpm. Ctrl-C stops it.
+    See docs/local-api.md.
 
     The import is local for the same reason as ``mcp``'s.
     """
@@ -365,7 +356,7 @@ def _progress() -> Iterator[TerminalProgress | None]:
 
 
 def _report_sync_telemetry(report: SyncReport) -> None:
-    """Stage costs of the global link and embedding passes (V1_SPEC §20)."""
+    """Stage costs of the global link pass (V1_SPEC §20)."""
     if report.link_trace is not None:
         trace = report.link_trace
         typer.echo(
@@ -387,12 +378,6 @@ def _report_sync_telemetry(report: SyncReport) -> None:
                 f"replaced by {work.edges_inserted}",
                 err=True,
             )
-    if report.embedding_detail:
-        typer.echo(
-            f"embeddings: {report.embedded_chunks} embedded, "
-            f"{report.pending_embeddings} pending ({report.embedding_detail})",
-            err=True,
-        )
 
 
 def _report_retrieval(evidence: EvidenceSet) -> None:

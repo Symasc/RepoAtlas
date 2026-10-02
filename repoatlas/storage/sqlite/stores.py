@@ -567,8 +567,8 @@ class SqliteKnowledgeStore:
                     """
                     INSERT INTO chunks (
                         file_id, repo_id, line_start, line_end, text,
-                        token_estimate, content_hash, span_index, split_index, split_total
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        token_estimate, span_index, split_index, split_total
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chunk.file_id,
@@ -577,7 +577,6 @@ class SqliteKnowledgeStore:
                         chunk.line_end,
                         chunk.text,
                         chunk.token_estimate,
-                        chunk.content_hash,
                         chunk.span_index,
                         chunk.split_index,
                         chunk.split_total,

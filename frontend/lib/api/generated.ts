@@ -223,12 +223,12 @@ export type DependencyRole = "declared" | "resolved" | "provided";
  * ``config.py`` is not an assertion about any one of the ten files that have it.
  *
  *
- * Serialized as an integer. Values, most specific first: 0 = exact_path (the query spelled this file's whole repository-relative path); 1 = exact_subpath (a trailing sub-path matched on segment boundaries, which may name several files); 2 = exact_basename (the file's basename, which says what it is called and not where); 3 = exact_name (an entity whose name, qualified name or key the query spelled exactly); 4 = exact_content (the query's literal text occurs in this span, verified by substring); 5 = related (reached by a graph edge from something the query named); 6 = lexical (word-overlap recall, from the full-text index or from an entity name the query did not spell exactly); 7 = similar (an embedding neighbour).
+ * Serialized as an integer. Values, most specific first: 0 = exact_path (the query spelled this file's whole repository-relative path); 1 = exact_subpath (a trailing sub-path matched on segment boundaries, which may name several files); 2 = exact_basename (the file's basename, which says what it is called and not where); 3 = exact_name (an entity whose name, qualified name or key the query spelled exactly); 4 = exact_content (the query's literal text occurs in this span, verified by substring); 5 = related (reached by a graph edge from something the query named); 6 = lexical (word-overlap recall, from the full-text index or from an entity name the query did not spell exactly).
  *
  * This interface was referenced by `ApiIndex`'s JSON-Schema
  * via the `definition` "MatchClass".
  */
-export type MatchClass = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
+export type MatchClass = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 /**
  * Whether an evidence record still corresponds to the current index.
  *
@@ -245,17 +245,17 @@ export type EvidenceStatus = "valid" | "stale" | "superseded" | "invalid" | "unv
  * Precedence class. **Lower wins, unconditionally.**
  *
  * This is the core retrieval principle of V1_SPEC §14 expressed as a type rather
- * than as a weight: *deterministic evidence outranks semantic similarity*. An
- * exact identifier, an exact error string, an exact symbol name, an environment
- * variable and a graph-supported relationship are all facts about the code. An
- * embedding neighbour is a guess about what the question meant.
+ * than as a weight: *deterministic evidence outranks association*. An exact
+ * identifier, an exact error string, an exact symbol name, an environment
+ * variable and a graph-supported relationship are all facts about the code.
+ * Word-overlap recall is a guess about what the question meant.
  *
- * Scores are only ever compared **within** a tier, so no amount of cosine
- * similarity can displace a deterministic match. A candidate found by several
+ * Scores are only ever compared **within** a tier, so no amount of word overlap
+ * can displace a deterministic match. A candidate found by several
  * retrievers takes its best (lowest) tier.
  *
  *
- * Serialized as an integer. Values, strongest first: 0 = deterministic (a fact about the code, established by exact lookup --- a path, a symbol or entity name, literal content, or a parsed relationship); 1 = associative (recall rather than an exact match --- an embedding neighbour, or word-overlap from the full-text index --- which is a guess about what the question meant and never outranks a deterministic result).
+ * Serialized as an integer. Values, strongest first: 0 = deterministic (a fact about the code, established by exact lookup --- a path, a symbol or entity name, literal content, or a parsed relationship); 1 = associative (recall rather than an exact match --- word overlap from the full-text index --- which is a guess about what the question meant and never outranks a deterministic result).
  *
  * This interface was referenced by `ApiIndex`'s JSON-Schema
  * via the `definition` "EvidenceTier".
@@ -1769,8 +1769,6 @@ export interface RetrievalTrace {
   literal_terms?: string[];
   named_paths?: string[];
   scoped_repositories?: number;
-  semantic_detail?: string;
-  semantic_used?: boolean;
   stages?: StageTiming[];
   suffix_paths?: string[];
   token_estimate?: number;

@@ -104,7 +104,6 @@ def sync(
             repositories,
             full=full,
             scope=str(context.scope),
-            embed_repo_ids=[r.id for r in repositories if r.id is not None],
             progress=listener,
         )
 

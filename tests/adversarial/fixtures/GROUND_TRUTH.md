@@ -167,7 +167,7 @@ Requisites present across the repository: `require`, `require_in`, `watch`,
 
 Every file below contains a unique sentinel beginning
 `REPOATLAS_FAKE_SECRET_SENTINEL_918273`. **No sentinel may appear anywhere
-downstream** — files, chunks, FTS, embeddings, entities, evidence, prompts, logs.
+downstream** — files, chunks, FTS, entities, evidence, prompts, logs.
 
 ```
 python-service/.env

@@ -20,11 +20,9 @@ environment variable and --- in the offline case --- no ability to open a socket
 at all. That is the claim worth making, and removing a subsystem is only correct
 if it still holds afterwards.
 
-One distinction runs through the whole file, because getting it wrong in either
-direction is a defect. An *embedding* model is deterministic retrieval
-infrastructure: FastEmbed, the vector index and the semantic stage stay, and
-CASE 18 asserts they do. A *reasoning* model generates prose. Only the second one
-was removed, and a field whose name contains ``model`` is not evidence of either.
+The embedding model went later, for a different reason: once identity-based
+stages answered, vector similarity added a download and no evidence. CASE 18
+asserts it is gone too, so no model of any kind sits in the retrieval path.
 """
 
 from __future__ import annotations
@@ -41,7 +39,7 @@ from pathlib import Path
 import pytest
 import yaml
 from repoatlas.capabilities.service import CapabilityService
-from repoatlas.config.settings import Settings, load_settings, save_settings
+from repoatlas.config.settings import RetrievalSettings, Settings, load_settings, save_settings
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.capability_io import RepositoriesRequest, StatusRequest
 from repoatlas.models.dependency_inventory import DependenciesRequest
@@ -283,9 +281,7 @@ def test_case_5_the_settings_model_has_no_reasoning_section() -> None:
     """CASE 5. Read from the model, so a field that exists but defaults to None
     cannot pass by being absent from a dump."""
     assert "llm" not in Settings.model_fields
-    # ...and the embedding half is untouched, which is the distinction that
-    # matters most in this file.
-    assert "embeddings" in Settings.model_fields
+    assert "embeddings" not in Settings.model_fields
     assert "retrieval" in Settings.model_fields
 
 
@@ -475,13 +471,8 @@ def test_case_9_search(service: CapabilityService) -> None:
     assert response.evidence
 
 
-def test_case_9_search_with_the_semantic_stage_engaged(service: CapabilityService) -> None:
-    """The one capability with any embedding in its path.
-
-    Embeddings are not reasoning --- they are a deterministic vector backend ---
-    but this is the stage where a model-shaped thing is nearest, so it is worth
-    naming rather than leaving to the general case above.
-    """
+def test_case_9_search_with_a_prose_question(service: CapabilityService) -> None:
+    """A question with no identifier in it, the kind a model once answered."""
     response = service.search(
         SearchRequest(context=GLOBAL, question="how does the service read its database settings")
     )
@@ -651,38 +642,24 @@ def test_case_16_no_schema_migration_was_required() -> None:
             assert marker not in text, f"{migration.name}: {marker}"
 
 
-def test_case_18_embedding_configuration_is_intact() -> None:
-    """CASE 18. The distinction this whole change turns on.
+def test_case_18_no_embedding_model_remains() -> None:
+    """CASE 18. Retrieval is deterministic end to end: no vector backend, no
+    embedding settings and no stage that ranks by similarity."""
+    import importlib.util
 
-    An embedding model is deterministic retrieval infrastructure. It was never
-    the local reasoner, it is not removed, and a change that had taken it out
-    would have deleted semantic retrieval while claiming to delete reasoning.
-    """
-    settings = Settings()
-
-    assert settings.embeddings.provider == "fastembed"
-    assert settings.embeddings.model == "BAAI/bge-small-en-v1.5"
-    assert settings.embeddings.dim > 0
-    assert settings.embeddings.enabled is True
-    assert settings.retrieval.semantic_limit > 0
-    assert settings.retrieval.semantic_floor >= 0
-
-    from repoatlas.embeddings.fastembed_backend import DEFAULT_MODEL, FastEmbedModel
-    from repoatlas.embeddings.hashing import HashingEmbedding
-
-    assert DEFAULT_MODEL == "BAAI/bge-small-en-v1.5"
-    assert FastEmbedModel is not None
-    # The offline provider the test suite and the evaluations run against.
-    assert HashingEmbedding is not None
+    assert "embeddings" not in Settings.model_fields
+    assert importlib.util.find_spec("repoatlas.embeddings") is None
+    for field in RetrievalSettings.model_fields:
+        assert "semantic" not in field, field
 
 
-def test_case_18_the_semantic_stage_still_runs(service: CapabilityService) -> None:
-    """CASE 18. Configuration surviving is not the same as the stage running."""
+def test_case_18_no_semantic_stage_runs(service: CapabilityService) -> None:
+    """CASE 18. Absent from configuration is not the same as absent from a run."""
     response = service.search(
         SearchRequest(context=GLOBAL, question="SERVICE_HOST", include_trace=True)
     )
     assert response.trace is not None
-    assert any(stage.name == "semantic" for stage in response.trace.stages)
+    assert "semantic" not in {stage.name for stage in response.trace.stages}
 
 
 # ---------------------------------------------------------------------------

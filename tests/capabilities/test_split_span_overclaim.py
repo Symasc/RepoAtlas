@@ -247,7 +247,7 @@ def test_the_provenance_survives_the_copy_fusion_makes() -> None:
     more than once — which is every interesting one.
     """
     copied = _candidate(split_total=24).model_copy(
-        update={"score": 0.5, "tier": EvidenceTier.ASSOCIATIVE, "match": MatchClass.SIMILAR}
+        update={"score": 0.5, "tier": EvidenceTier.ASSOCIATIVE, "match": MatchClass.LEXICAL}
     )
     assert copied.split_total == 24
     assert provable_line_span(copied) is None

@@ -96,7 +96,7 @@ def test_two_investigations_allocate_the_same_id_to_different_evidence(
     """The premise. Without this collision the isolation test proves nothing."""
     service = CapabilityService(initialized)
     first, first_evidence = _search(service)
-    second, second_evidence = _search(service, question="deploy")
+    second, second_evidence = _search(service, question="deploy.sh")
 
     assert first != second
     assert first_evidence[0].id == second_evidence[0].id == "E1"
@@ -115,7 +115,7 @@ def test_a_citation_can_only_reach_the_investigation_that_issued_it(
     """
     service = CapabilityService(initialized)
     first, first_evidence = _search(service)
-    second, second_evidence = _search(service, question="deploy")
+    second, second_evidence = _search(service, question="deploy.sh")
 
     under_first = _cite(service, first, "E1")
     under_second = _cite(service, second, "E1")
@@ -169,7 +169,7 @@ def test_one_investigations_verification_does_not_touch_anothers_ledger(
 ) -> None:
     service = CapabilityService(initialized)
     first, _ = _search(service)
-    second, _ = _search(service, question="deploy")
+    second, _ = _search(service, question="deploy.sh")
     other = service.sessions.get(second).ledger
     before = {entry.id: entry for entry in other.entries()}
 
