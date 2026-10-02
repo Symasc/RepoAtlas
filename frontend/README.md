@@ -121,8 +121,8 @@ side, keeping one gap through every bend:
 
 A dot marks where a line leaves and an arrowhead where it arrives. It has one
 of three weights by its count (a few, hundreds, thousands), a band of canvas
-beneath it so crossings stay legible, and it runs under the cards, never across
-them. One line of each link carries the link's total, on a tag filled in its
+beneath it so crossings stay legible. At rest it runs under the cards; when it
+is lit or selected it comes in front of them. One line of each link carries the link's total, on a tag filled in its
 colour. The legend lists what the
 level draws. Where code is summed (a card's tally, a family's heading in the
 inspector) its mark shows blue, green and violet together. Each connection in

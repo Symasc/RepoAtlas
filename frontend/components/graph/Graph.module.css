@@ -861,6 +861,8 @@
   /* a ring of canvas, so it sits on its line, not in it */
   outline: 2px solid var(--ra-canvas);
   pointer-events: none;
+  /* above the lines it labels, lit ones included (raised to 1000 in Graph.tsx) */
+  z-index: 1001;
 
   &[data-emphasis="selected"] {
     color: var(--ra-on-accent);

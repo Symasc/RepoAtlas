@@ -174,8 +174,9 @@ function Canvas({
     [nodes, related, focus, selected],
   );
 
-  // every line stays under the cards, as a transit line runs under its
-  // stations; what is lit or selected is drawn last, so it crosses the rest
+  // a line at rest runs under the cards; what is lit or selected comes in
+  // front of them, its casing cutting it clean across what it passes over, and
+  // is drawn last, so it crosses the rest
   const shownEdges = useMemo<GraphEdge[]>(
     () =>
       edges
@@ -194,7 +195,8 @@ function Canvas({
             emphasis = "selected";
             hidden = false;
           }
-          return { ...edge, hidden, zIndex: 0, data: { ...edge.data!, emphasis } };
+          const raised = emphasis === "lit" || emphasis === "selected";
+          return { ...edge, hidden, zIndex: raised ? 1000 : 0, data: { ...edge.data!, emphasis } };
         })
         .sort((a, b) => RAISE[a.data!.emphasis] - RAISE[b.data!.emphasis]),
     [edges, focus, selectedEdge],
