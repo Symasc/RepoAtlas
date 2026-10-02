@@ -178,40 +178,7 @@ def test_odd_but_parseable_configuration_falls_back_to_defaults(
     except Exception as error:
         assert "Traceback" not in str(error)
         return
-    assert settings.embeddings.provider
-
-
-def test_an_unavailable_embedding_model_leaves_retrieval_working(
-    adversarial: Workspace, adversarial_root: Path
-) -> None:
-    """Semantic search is the aid; exact search is the mandatory half (§14)."""
-
-    class _Unavailable:
-        id = "unavailable-model"
-        dim = 8
-
-        def embed(self, texts):
-            raise AssertionError("must not be called")
-
-        def embed_query(self, text):
-            raise AssertionError("must not be called")
-
-        def available(self) -> bool:
-            return False
-
-        def availability_detail(self) -> str:
-            return "deliberately unavailable"
-
-    engine = adversarial.sync_engine()
-    adversarial.vectors.delete_model("hashing-128")
-    engine._embeddings = _Unavailable()
-    result = engine.embed_pending(None)
-    assert result.embedded == 0
-    assert "unavailable" in result.detail.lower()
-
-    context = adversarial.resolver().resolve(adversarial_root / "python-service")
-    evidence = adversarial.retriever().retrieve("SERVICE_HOST", context)
-    assert evidence.candidates
+    assert settings.retrieval.final
 
 
 # -- concurrency -------------------------------------------------------------

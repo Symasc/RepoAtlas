@@ -385,7 +385,7 @@ def test_sync_touches_no_surviving_investigations_clock_or_order(initialized: Wo
     service, now = _clocked(initialized, ttl=3600)
     first, _ = _search(service)
     now[0] += timedelta(seconds=1)
-    second, _ = _search(service, "deploy")
+    second, _ = _search(service, "deploy.sh")
     order = list(service.sessions._sessions)
     used = {key: session.last_used_at for key, session in service.sessions._sessions.items()}
     now[0] += timedelta(minutes=10)
@@ -523,7 +523,7 @@ def test_sync_allocates_no_evidence_and_rewrites_no_history(
     """CASE 23. Statuses may move. Nothing else about any record may."""
     service = CapabilityService(initialized)
     first, evidence = _search(service)
-    second, _ = _search(service, "deploy")
+    second, _ = _search(service, "deploy.sh")
     before = {first: _structure(service, first), second: _structure(service, second)}
     _append(workspace_root, evidence[0].ref)
 

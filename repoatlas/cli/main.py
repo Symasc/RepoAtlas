@@ -131,13 +131,6 @@ def sync(
     repository: Annotated[str | None, typer.Argument(help="Repository to sync.")] = None,
     repo: _RepoOption = None,
     full: Annotated[bool, typer.Option("--full", help="Rehash every file.")] = False,
-    embed: Annotated[
-        bool,
-        typer.Option(
-            "--embed",
-            help="Download the embedding model if needed, then embed pending chunks.",
-        ),
-    ] = False,
     json_output: _JsonOption = False,
     verbose: _VerboseOption = False,
 ) -> None:
@@ -146,16 +139,6 @@ def sync(
     Inside a managed repository, that repository; anywhere else, the whole workspace.
     """
     workspace = _open()
-    if embed:
-        # Fetching the model is an explicit act, never a silent stall inside an
-        # ordinary sync (ARCHITECTURE.md §10).
-        workspace.settings = workspace.settings.model_copy(
-            update={
-                "embeddings": workspace.settings.embeddings.model_copy(
-                    update={"allow_download": True}
-                )
-            }
-        )
     try:
         context = _resolve(workspace, repo or repository, "sync", verbose, anywhere=True)
         with _progress() as progress:
@@ -373,7 +356,7 @@ def _progress() -> Iterator[TerminalProgress | None]:
 
 
 def _report_sync_telemetry(report: SyncReport) -> None:
-    """Stage costs of the global link and embedding passes (V1_SPEC §20)."""
+    """Stage costs of the global link pass (V1_SPEC §20)."""
     if report.link_trace is not None:
         trace = report.link_trace
         typer.echo(
@@ -395,12 +378,6 @@ def _report_sync_telemetry(report: SyncReport) -> None:
                 f"replaced by {work.edges_inserted}",
                 err=True,
             )
-    if report.embedding_detail:
-        typer.echo(
-            f"embeddings: {report.embedded_chunks} embedded, "
-            f"{report.pending_embeddings} pending ({report.embedding_detail})",
-            err=True,
-        )
 
 
 def _report_retrieval(evidence: EvidenceSet) -> None:

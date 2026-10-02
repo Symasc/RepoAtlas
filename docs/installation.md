@@ -141,17 +141,6 @@ For a client configured with JSON, that is usually:
 Then give the agent the five skills in [`skills/`](../skills/), one directory each: GitHub Copilot (VS Code and
 CLI) reads `~/.agents/skills/`. See [agent integration](agent-integration.md) for what the server offers.
 
-### Docker
-
-The image runs the CLI and the MCP server, not the explorer:
-
-```bash
-REPOS_DIR=/path/to/your/repos docker compose up -d
-REPOS_DIR=/path/to/your/repos docker compose run --rm repoatlas init /repos
-```
-
-Repositories are mounted read-only and the index lives on a separate volume.
-
 ## Updating
 
 From PyPI: `uv tool upgrade symasc-repoatlas`. From a checkout:

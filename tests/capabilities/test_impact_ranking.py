@@ -49,7 +49,6 @@ def _open(root: Path) -> Workspace:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(root / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     return open_workspace(settings=settings, require_root=False)

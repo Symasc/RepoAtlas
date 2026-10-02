@@ -90,9 +90,6 @@ class TerminalProgress:
             f"link:{stage}", "Linking", (position - 1, total), f"{label} ({position}/{total})"
         )
 
-    def embedding(self, done: int, total: int) -> None:
-        self._show("embed", "Embedding", (done, total), f"{done:,}/{total:,} chunks")
-
     def close(self) -> None:
         """Erase the line, so the next thing printed starts on a clean one."""
         if self._visible:

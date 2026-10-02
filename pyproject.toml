@@ -47,8 +47,6 @@ dependencies = [
     "tree-sitter-bash==0.25.1",
     "tree-sitter-javascript==0.25.0",
     "tree-sitter-typescript==0.23.2",
-    "numpy>=2.0",
-    "fastembed>=0.5",
     # The official Model Context Protocol SDK, for the stdio transport adapter
     # only. Pinned below 2.0: that line swaps `httpx` for a second HTTP client
     # (`httpx2`) and adds an OpenTelemetry dependency, neither of which a local
@@ -199,7 +197,7 @@ reportMissingTypeStubs = false
 testpaths = ["tests"]
 addopts = "-q --strict-markers -m 'not slow and not scale'"
 markers = [
-    "slow: exercises a real model download or network access; deselected by default",
+    "slow: a long-running check, such as indexing from a freshly installed wheel; deselected by default",
     "adversarial: adversarial validation; runs by default, selectable with -m adversarial",
     "scale: builds a large synthetic tree; deselected by default",
     "timing: asserts elapsed wall-clock time; a parallel run excludes it (-m 'not timing') and runs it alone afterwards",

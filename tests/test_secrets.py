@@ -3,8 +3,8 @@
 The guarantee is structural, not a filter applied late: secret files are dropped
 **at enumeration**, so nothing downstream ever sees the path, let alone the
 content. These tests assert that separately at each stage the content could
-otherwise reach — files, chunks, the FTS index, embeddings, evidence and
-operator-visible output — because a single choke point is only a guarantee if
+otherwise reach — files, chunks, the FTS index, evidence and operator-visible
+output — because a single choke point is only a guarantee if
 the stages behind it really do depend on it.
 
 A stage is missing from that list. V1 also handed evidence to a local model, and
@@ -95,18 +95,6 @@ def test_no_secret_content_is_searchable(with_secrets: Workspace) -> None:
     for canary in CANARIES:
         assert with_secrets.search.search_literal(f"canary{canary}") == []
     assert with_secrets.search.search_literal("SECRET_TOKEN") == []
-
-
-def test_no_secret_content_is_embedded(with_secrets: Workspace) -> None:
-    """Vectors are keyed by chunk hash, so a chunk that never existed has none.
-
-    Asserted against the stored text rather than the vectors themselves, because
-    an embedding is not reversible and its absence must be shown at the source.
-    """
-    rows = with_secrets.database.execute(
-        "SELECT c.text FROM chunks c JOIN embeddings e ON e.content_hash = c.content_hash"
-    ).fetchall()
-    assert _leaks("\n".join(row["text"] for row in rows)) == []
 
 
 def test_no_secret_becomes_an_entity(with_secrets: Workspace) -> None:

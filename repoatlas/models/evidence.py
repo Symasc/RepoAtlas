@@ -39,7 +39,6 @@ class EvidenceSource(enum.StrEnum):
     FILE = "file"
     LEXICAL = "lexical"
     SYMBOL = "symbol"
-    SEMANTIC = "semantic"
     GRAPH = "graph"
     #: Addressed directly by the caller, not retrieved. Never ranked.
     INSPECT = "inspect"
@@ -63,13 +62,13 @@ class EvidenceTier(enum.IntEnum):
     """Precedence class. **Lower wins, unconditionally.**
 
     This is the core retrieval principle of V1_SPEC §14 expressed as a type rather
-    than as a weight: *deterministic evidence outranks semantic similarity*. An
-    exact identifier, an exact error string, an exact symbol name, an environment
-    variable and a graph-supported relationship are all facts about the code. An
-    embedding neighbour is a guess about what the question meant.
+    than as a weight: *deterministic evidence outranks association*. An exact
+    identifier, an exact error string, an exact symbol name, an environment
+    variable and a graph-supported relationship are all facts about the code.
+    Word-overlap recall is a guess about what the question meant.
 
-    Scores are only ever compared **within** a tier, so no amount of cosine
-    similarity can displace a deterministic match. A candidate found by several
+    Scores are only ever compared **within** a tier, so no amount of word overlap
+    can displace a deterministic match. A candidate found by several
     retrievers takes its best (lowest) tier.
     """
 
@@ -132,8 +131,6 @@ class MatchClass(enum.IntEnum):
     RELATED = 5
     #: Word-overlap recall from the full-text index.
     LEXICAL = 6
-    #: An embedding neighbour.
-    SIMILAR = 7
 
 
 #: What each tier means to a client reading the number.
@@ -154,9 +151,9 @@ TIER_MEANINGS: dict[EvidenceTier, str] = {
         "or entity name, literal content, or a parsed relationship"
     ),
     EvidenceTier.ASSOCIATIVE: (
-        "recall rather than an exact match --- an embedding neighbour, or "
-        "word-overlap from the full-text index --- which is a guess about what "
-        "the question meant and never outranks a deterministic result"
+        "recall rather than an exact match --- word overlap from the full-text "
+        "index --- which is a guess about what the question meant and never "
+        "outranks a deterministic result"
     ),
 }
 
@@ -179,7 +176,6 @@ MATCH_MEANINGS: dict[MatchClass, str] = {
         "word-overlap recall, from the full-text index or from an entity name the "
         "query did not spell exactly"
     ),
-    MatchClass.SIMILAR: "an embedding neighbour",
 }
 
 
@@ -217,8 +213,8 @@ TierField = Annotated[
     EvidenceTier,
     Field(
         description=(
-            "Precedence class: whether this is a fact about the code or an "
-            "embedding neighbour. Lower wins unconditionally, and scores are only "
+            "Precedence class: whether this is a fact about the code or "
+            "word-overlap recall. Lower wins unconditionally, and scores are only "
             "compared within a tier. Distinct from `match`. See the EvidenceTier "
             "definition for the meaning of each value."
         )
@@ -229,7 +225,7 @@ MatchField = Annotated[
     Field(
         description=(
             "How precisely the query named this candidate, from a whole path down "
-            "to an embedding neighbour. Lower is more specific. Distinct from "
+            "to word-overlap recall. Lower is more specific. Distinct from "
             "`tier`: two candidates can share a tier and still have been asked "
             "for in different ways. See the MatchClass definition for the meaning "
             "of each value."

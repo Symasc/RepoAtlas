@@ -28,8 +28,7 @@ not an optimization — it is what makes "a user cannot re-admit a secret"
 structural rather than a happy accident of ordering (ARCHITECTURE.md §12).
 
 Every check runs on the path **before any content is read**, so an excluded file
-is never opened, parsed, chunked, embedded, retrieved, serialized into a prompt,
-or logged.
+is never opened, parsed, chunked, retrieved, serialized into a prompt, or logged.
 """
 
 from __future__ import annotations

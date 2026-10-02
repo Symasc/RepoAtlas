@@ -248,7 +248,7 @@ def test_every_ledger_is_rechecked_against_one_generation(
     """
     service = CapabilityService(initialized)
     _search(service)
-    _search(service, "deploy")
+    _search(service, "deploy.sh")
     database_path = Path(initialized.database.path)
     real = CapabilityService._ledger_snapshot
     calls = {"n": 0}

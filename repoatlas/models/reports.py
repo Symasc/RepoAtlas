@@ -59,9 +59,6 @@ class SyncReport(BaseModel):
     linked_references: int = 0
     unresolved_references: int = 0
     cross_repository_edges: int = 0
-    embedded_chunks: int = 0
-    pending_embeddings: int = 0
-    embedding_detail: str = ""
     link_trace: LinkTrace | None = None
     #: Canonical identities of repositories this run discovered and registered for
     #: the first time. Empty on an ordinary run; non-empty is the machine-readable

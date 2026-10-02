@@ -221,12 +221,12 @@ def test_one_batch_repeating_identical_evidence_allocates_once() -> None:
 # -- metadata strengthening -----------------------------------------------------
 
 
-def _semantic() -> ProposedEvidence:
+def _lexical() -> ProposedEvidence:
     return _proposed(
         tier=EvidenceTier.ASSOCIATIVE,
-        match=MatchClass.SIMILAR,
-        origin=EvidenceSource.SEMANTIC,
-        reason="semantically similar",
+        match=MatchClass.LEXICAL,
+        origin=EvidenceSource.LEXICAL,
+        reason="mentions load_config",
     )
 
 
@@ -242,9 +242,9 @@ def _exact() -> ProposedEvidence:
 def test_a_stronger_route_strengthens_the_entry_without_a_new_id() -> None:
     """The bytes did not change, so the evidence did not. Only the metadata did."""
     ledger = _ledger()
-    (weak,) = ledger.record([_semantic()])
+    (weak,) = ledger.record([_lexical()])
     assert weak.tier is EvidenceTier.ASSOCIATIVE
-    assert weak.match is MatchClass.SIMILAR
+    assert weak.match is MatchClass.LEXICAL
 
     (strong,) = ledger.record([_exact()])
     assert strong.id == weak.id
@@ -256,12 +256,12 @@ def test_a_stronger_route_strengthens_the_entry_without_a_new_id() -> None:
 def test_discovery_order_does_not_change_the_final_entry() -> None:
     """min over both precedence enums and a sorted set union: order cannot matter."""
     forwards = _ledger()
-    forwards.record([_semantic()])
+    forwards.record([_lexical()])
     forwards.record([_exact()])
 
     backwards = _ledger()
     backwards.record([_exact()])
-    backwards.record([_semantic()])
+    backwards.record([_lexical()])
 
     (a,) = forwards.entries()
     (b,) = backwards.entries()
@@ -270,10 +270,10 @@ def test_discovery_order_does_not_change_the_final_entry() -> None:
 
 def test_every_route_that_found_the_evidence_is_kept() -> None:
     ledger = _ledger()
-    ledger.record([_semantic()])
+    ledger.record([_lexical()])
     (entry,) = ledger.record([_exact()])
-    assert set(entry.origins) == {EvidenceSource.SEMANTIC, EvidenceSource.SYMBOL}
-    assert set(entry.reasons) == {"semantically similar", "defines load_config"}
+    assert set(entry.origins) == {EvidenceSource.LEXICAL, EvidenceSource.SYMBOL}
+    assert set(entry.reasons) == {"mentions load_config", "defines load_config"}
     assert list(entry.origins) == sorted(entry.origins, key=str)
     assert list(entry.reasons) == sorted(entry.reasons)
 
@@ -282,7 +282,7 @@ def test_a_later_weak_result_never_weakens_a_strong_entry() -> None:
     """An embedding neighbour adds a route, not a doubt."""
     ledger = _ledger()
     (strong,) = ledger.record([_exact()])
-    (after,) = ledger.record([_semantic()])
+    (after,) = ledger.record([_lexical()])
     assert after.id == strong.id
     assert after.tier is EvidenceTier.DETERMINISTIC
     assert after.match is MatchClass.EXACT_NAME
@@ -290,7 +290,7 @@ def test_a_later_weak_result_never_weakens_a_strong_entry() -> None:
 
 def test_strengthening_does_not_move_the_immutable_fields() -> None:
     ledger = _ledger()
-    (first,) = ledger.record([_semantic()])
+    (first,) = ledger.record([_lexical()])
     (second,) = ledger.record([_exact()])
     assert second.id == first.id
     assert second.ref == first.ref
@@ -340,7 +340,7 @@ def test_three_needed_with_two_free_records_nothing_at_all() -> None:
 def test_a_refused_batch_performs_no_metadata_merge_either() -> None:
     """Atomicity covers strengthening, not only allocation."""
     ledger = _ledger(capacity=2)
-    ledger.record([_semantic(), _proposed(start=99, end=99, digest="other")])
+    ledger.record([_lexical(), _proposed(start=99, end=99, digest="other")])
     assert ledger.full is True
 
     before = _snapshot(ledger)
@@ -351,7 +351,7 @@ def test_a_refused_batch_performs_no_metadata_merge_either() -> None:
     assert _snapshot(ledger) == before
     (entry, _other) = ledger.entries()
     assert entry.tier is EvidenceTier.ASSOCIATIVE
-    assert entry.match is MatchClass.SIMILAR
+    assert entry.match is MatchClass.LEXICAL
 
 
 def test_re_supplying_known_evidence_succeeds_at_full_capacity() -> None:
@@ -371,7 +371,7 @@ def test_re_supplying_known_evidence_succeeds_at_full_capacity() -> None:
 
 def test_metadata_strengthening_alone_succeeds_at_full_capacity() -> None:
     ledger = _ledger(capacity=1)
-    (weak,) = ledger.record([_semantic()])
+    (weak,) = ledger.record([_lexical()])
     assert ledger.full is True
 
     (strong,) = ledger.record([_exact()])

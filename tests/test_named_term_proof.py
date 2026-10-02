@@ -53,13 +53,12 @@ ABSENT_QUALIFIED = "AbsentService.missingDetail"
 
 #: Every stage the funnel reports, in order. Pinned here as well as in
 #: ``tests/test_retrieval_ranking.py`` because moving the exact-name lookup earlier
-#: is precisely the change that could have added an eleventh.
+#: is precisely the change that could have added a tenth.
 STAGE_NAMES = (
     "exact",
     "file",
     "lexical",
     "symbol",
-    "semantic",
     "graph",
     "fuse",
     "dedup",
@@ -68,7 +67,7 @@ STAGE_NAMES = (
 )
 
 #: Stages that go silent under suppression and render its sentence.
-SUPPRESSIBLE = frozenset({"lexical", "symbol", "semantic"})
+SUPPRESSIBLE = frozenset({"lexical", "symbol"})
 
 LEARNING_SERVICE = '''"""Course reads for the learning surface."""
 
@@ -139,7 +138,6 @@ def ecosystem(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Worksp
     settings = Settings.model_validate(
         {
             "storage": {"database": str(base / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     workspace = open_workspace(settings=settings, require_root=False)
@@ -308,8 +306,8 @@ def test_the_same_symbol_resolves_when_its_own_repository_is_the_scope(
 # -- the trace still describes the funnel that exists ---------------------------
 
 
-def test_the_funnel_still_reports_exactly_ten_stages(workspace: Workspace, root: Path) -> None:
-    """Moving the exact-name lookup earlier must not add an eleventh stage."""
+def test_the_funnel_still_reports_exactly_nine_stages(workspace: Workspace, root: Path) -> None:
+    """Moving the exact-name lookup earlier must not add a tenth stage."""
     outcome = ask(workspace, root, f"What does {QUALIFIED} return?")
     assert outcome.evidence.trace is not None
     assert tuple(stage.name for stage in outcome.evidence.trace.stages) == STAGE_NAMES

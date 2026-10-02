@@ -219,7 +219,7 @@ def test_verbose_reports_the_retrieval_stages_to_stderr(repoatlas, workspace_roo
     assert run(workspace_root, "init", str(workspace_root)).exit_code == ExitCode.OK
     result = run(workspace_root, "locate", "SERVICE_HOST", "--verbose")
     assert result.exit_code == ExitCode.OK, result
-    for stage in ("exact", "lexical", "symbol", "semantic", "graph", "fuse", "budget"):
+    for stage in ("exact", "lexical", "symbol", "graph", "fuse", "budget"):
         assert stage in result.output
     # Machine-readable output stays clean: diagnostics go to stderr.
     machine = run(workspace_root, "locate", "SERVICE_HOST", "--json", "--verbose")
