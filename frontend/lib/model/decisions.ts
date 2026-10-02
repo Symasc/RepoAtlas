@@ -37,7 +37,7 @@ export const HOP_KINDS = [
 ] as const;
 export type HopKind = (typeof HOP_KINDS)[number];
 
-export const HOP_LABELS: Readonly<Record<HopKind, string>> = {
+const HOP_LABELS: Readonly<Record<HopKind, string>> = {
   caller: "Caller",
   origin: "Origin",
   service_identity: "Service identity",
@@ -47,7 +47,7 @@ export const HOP_LABELS: Readonly<Record<HopKind, string>> = {
   handler: "Handler",
 };
 
-export const HOP_STATES = ["proven", "unresolved", "ambiguous", "not_reached"] as const;
+const HOP_STATES = ["proven", "unresolved", "ambiguous", "not_reached"] as const;
 export type HopState = (typeof HOP_STATES)[number];
 
 /** Every decision the join stores, in the contract's order: the link first. */
@@ -130,7 +130,7 @@ export class ShapeError extends Error {
   }
 }
 
-export const DECISION_REF = /^hcd1-[0-9a-f]{20}$/;
+const DECISION_REF = /^hcd1-[0-9a-f]{20}$/;
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -194,9 +194,9 @@ export const SHOWN_STATUSES = [
 ] as const satisfies readonly OperationStatus[];
 
 /** Requests only the join reads: queryable, out of the default presentation. */
-export const HIDDEN_STATUS = "join_only" satisfies OperationStatus;
+const HIDDEN_STATUS = "join_only" satisfies OperationStatus;
 
-export const REQUESTS_PAGE = 100;
+const REQUESTS_PAGE = 100;
 
 /** Where a Requests view is: a repository, and a directory or file in it ("" for all of it). */
 export interface RequestsScope {
@@ -284,7 +284,7 @@ export function decisionCounts(
  * How much a station is drawn: in full up to and including the first hop that is
  * not proven, plainly after it, and subdued where the join never got.
  */
-export type Tone = "emphasis" | "plain" | "subdued";
+type Tone = "emphasis" | "plain" | "subdued";
 
 export interface Station {
   kind: HopKind;

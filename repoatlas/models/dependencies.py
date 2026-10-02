@@ -272,8 +272,3 @@ class DependencyPackage(BaseModel):
     @property
     def resolution_agreement(self) -> Agreement:
         return _agreement(tuple(o.value for o in self.resolutions))
-
-    @property
-    def is_ambiguous(self) -> bool:
-        """Whether no single answer exists for this package in this repository."""
-        return Agreement.DIVERGENT in (self.declaration_agreement, self.resolution_agreement)

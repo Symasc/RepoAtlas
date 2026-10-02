@@ -15,7 +15,6 @@ from typing import Any
 
 import pytest
 from repoatlas.config.settings import Settings
-from repoatlas.graph.linker import GLOBAL_PARSER
 from repoatlas.graph.modules import ModuleResolver
 from repoatlas.graph.packages import PackageLink, PackageLinks
 from repoatlas.graph.resolution import ResolutionIndex
@@ -186,11 +185,7 @@ def test_xr5_repositories_that_share_only_a_name_share_no_edge(indexed: Workspac
 def _links(workspace: Workspace) -> tuple[PackageLinks, ResolutionIndex]:
     knowledge = workspace.knowledge
     index = ResolutionIndex.build(knowledge.list_file_rows(), knowledge.list_symbols())
-    modules = ModuleResolver(
-        index,
-        knowledge.list_unresolved_refs(),
-        knowledge.list_exported_names(exclude_parser=GLOBAL_PARSER),
-    )
+    modules = ModuleResolver(index, knowledge.list_unresolved_refs())
     return PackageLinks(modules, index, workspace.dependencies.list_for_repos(None)), index
 
 

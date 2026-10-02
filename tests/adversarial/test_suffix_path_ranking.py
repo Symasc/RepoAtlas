@@ -550,12 +550,11 @@ def test_a_file_reached_as_both_exact_and_suffix_takes_the_stronger_anchor() -> 
     assert fused[0].identity == ("svc", "services/api/config.py")
 
 
-def test_a_reranker_cannot_erase_suffix_specificity() -> None:
-    """The seam: a cross-encoder that adores the README must not undo the class."""
+def test_a_reordering_cannot_erase_suffix_specificity() -> None:
+    """The boundary: an order that puts a high-scoring README first must not undo the class."""
     readme = candidate("docs/README.md", MatchClass.EXACT_CONTENT, line=1, score=99.0)
     suffix = candidate("services/api/config.py", MatchClass.EXACT_SUBPATH)
-    reranked = [readme, suffix]  # what an opaque V2 reranker might return
-    restored = enforce_precedence(reranked)
+    restored = enforce_precedence([readme, suffix])
     assert restored[0].path == "services/api/config.py"
 
 
@@ -564,8 +563,8 @@ def test_enforce_precedence_keeps_exact_above_suffix_above_the_rest() -> None:
 
     Only the anchored classes are positions; `EXACT_BASENAME` and `EXACT_CONTENT`
     share the unanchored one, and the sort is stable, so their incoming order is
-    preserved deliberately — that is what lets a reranker order *within* a class
-    while being unable to erase the class.
+    preserved deliberately — an earlier stage may order *within* a class while
+    being unable to erase the class.
     """
     exact = candidate("services/api/config.py", MatchClass.EXACT_PATH)
     suffix = candidate("legacy/api/config.py", MatchClass.EXACT_SUBPATH)

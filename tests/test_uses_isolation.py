@@ -199,7 +199,6 @@ def test_uses_is_nameable_never_expanded_and_never_crossing() -> None:
 REVIEWED_EDGE_READS = {
     "replace_file_facts": "maintenance: deletes one file's facts",
     "delete_edges_by_parser": "maintenance: deletes one producer's edges",
-    "list_exported_names": "typed: EXPORTS",
     "list_served_routes": "typed: SERVES_HTTP_ROUTE",
     "list_route_servers": "typed: SERVES_HTTP_ROUTE, the routes deployment identities expose",
     "list_http_edges": "typed: the HTTP edge types",

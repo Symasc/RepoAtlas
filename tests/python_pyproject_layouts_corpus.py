@@ -12,7 +12,7 @@ names (:func:`~tests.python_legacy_corpus.pick`).
 
 from __future__ import annotations
 
-from tests.python_legacy_corpus import AUTH_MODELS, consumer
+from tests.python_legacy_corpus import consumer
 from tests.python_setuptools_corpus import FLAT, SRC
 
 #: ``[project] name`` on line 2 of every provider's pyproject.
@@ -139,10 +139,4 @@ PYPROJECT_LAYOUTS: dict[str, dict[str, str]] = {
     },
     # P4's second provider of the same distribution and module
     "only-include-twin": {"pyproject.toml": PROJECT + HATCHLING + ONLY, **FLAT},
-}
-
-#: For the incremental cases: a metadata-less repository holding fixture_auth at its root.
-COPY = {
-    "fixture_auth/__init__.py": "from .models import User, make\n",
-    "fixture_auth/models.py": AUTH_MODELS,
 }

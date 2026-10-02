@@ -19,7 +19,7 @@ import { SEED_ID, type TraceCard, type TraceGraph } from "@/lib/model/trace";
  * is checked for overlap in unit tests.
  */
 
-export const SIZE = {
+const SIZE = {
   repository: { width: 288, height: 84 },
   hub: { width: 184, height: 184 },
   card: { width: 236 },
@@ -32,7 +32,7 @@ export const SIZE = {
 } as const;
 
 export const CARD = { header: 44, row: 26, padding: 8, footer: 30 } as const;
-export const FRAME = { header: 64, padding: 24 } as const;
+const FRAME = { header: 64, padding: 24 } as const;
 export const HUB_ID = "hub";
 export const GROUP_ID = "group:unlinked";
 
@@ -58,7 +58,7 @@ export function bounds(boxes: Iterable<Box>): Box | null {
 
 // -- the overview: a constellation around an anchor ---------------------------------
 
-export interface Ring {
+interface Ring {
   id: string;
   /** Radii of the ellipse through the centres of this ring's nodes. */
   rx: number;
@@ -136,7 +136,7 @@ function weights(edges: readonly ViewEdge[]): Map<string, Map<string, number>> {
 }
 
 /** The repository with the most partners (then the most links): the natural centre. */
-export function mostConnected(ids: readonly string[], w: Map<string, Map<string, number>>): string | null {
+function mostConnected(ids: readonly string[], w: Map<string, Map<string, number>>): string | null {
   let best: string | null = null;
   let score: [number, number] = [-1, -1];
   for (const id of [...ids].sort()) {
@@ -399,7 +399,7 @@ export function constellation(
 const GAP = { column: 24, row: 28, side: 150, stack: 14 } as const;
 const MAX_COLUMNS = 5;
 
-export function hasSummary(summary: FamilyCounts): boolean {
+function hasSummary(summary: FamilyCounts): boolean {
   return Object.values(summary).some((n) => (n ?? 0) > 0);
 }
 
@@ -491,7 +491,7 @@ export function layoutFile(graph: FileGraph): Layout {
 
 // -- a trace: the seed, then a column per step ----------------------------------------
 
-export const TRACE = {
+const TRACE = {
   seed: { width: 320, height: 168 },
   card: { width: 300, header: 50, row: 30, more: 28, padding: 10 },
   frame: { header: 38, padding: 12 },

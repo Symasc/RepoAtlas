@@ -18,7 +18,8 @@ from repoatlas.models.evidence import (
     EvidenceSource,
     EvidenceTier,
 )
-from repoatlas.retrieval.ranking import NoopReranker, apply_budget, deduplicate, fuse
+from repoatlas.retrieval import retriever as retriever_module
+from repoatlas.retrieval.ranking import apply_budget, deduplicate, fuse
 from repoatlas.retrieval.retriever import RetrievalLimits, Retriever
 from repoatlas.services.retrieval_service import locate
 from repoatlas.services.workspace import Workspace
@@ -227,36 +228,6 @@ def test_nothing_is_truncated_when_everything_fits() -> None:
     assert not truncated
 
 
-# --- the reranker seam ----------------------------------------------------------
-
-
-def test_the_noop_reranker_preserves_order() -> None:
-    given = [candidate("a.py"), candidate("b.py")]
-    assert NoopReranker().rerank("question", given) == given
-
-
-def test_a_custom_reranker_is_used_without_changing_a_caller(initialized: Workspace) -> None:
-    """The V2 slot: swapping the reranker touches nothing else (ARCHITECTURE §14)."""
-
-    class _Reverser:
-        def rerank(
-            self, question: str, candidates: list[EvidenceCandidate]
-        ) -> list[EvidenceCandidate]:
-            return list(reversed(candidates))
-
-    context = initialized.resolver().resolve(initialized.root or Path())
-    plain = initialized.retriever().retrieve("SERVICE_HOST", context)
-    reversed_retriever = Retriever(
-        search=initialized.search,
-        knowledge=initialized.knowledge,
-        reranker=_Reverser(),
-        limits=RetrievalLimits.from_settings(initialized.settings.retrieval),
-    )
-    flipped = reversed_retriever.retrieve("SERVICE_HOST", context)
-    assert plain.candidates and flipped.candidates
-    assert plain.candidates[0].location != flipped.candidates[0].location
-
-
 # --- limits ---------------------------------------------------------------------
 
 
@@ -374,7 +345,7 @@ def test_every_stage_is_instrumented(initialized: Workspace) -> None:
         "graph",
         "fuse",
         "dedup",
-        "rerank",
+        "precedence",
         "budget",
     ]
     assert trace.total_ms >= 0.0
@@ -424,8 +395,8 @@ def test_the_global_link_pass_is_instrumented(initialized: Workspace) -> None:
 # The tests above prove that `fuse` orders by tier. These prove the property that
 # actually matters: whatever any stage does, an `EvidenceSet` handed to a caller
 # never places associative evidence above deterministic evidence. Between fusion
-# and the caller sit deduplication, the reranker seam and two hard budgets, and a
-# guarantee that lives inside one function is not a guarantee about the system.
+# and the caller sit deduplication and two hard budgets, and a guarantee that
+# lives inside one function is not a guarantee about the system.
 
 QUESTIONS = (
     "SERVICE_HOST",
@@ -451,20 +422,22 @@ def assert_deterministic_first(evidence: EvidenceSet) -> None:
     ]
 
 
-class _TierInverter:
-    """A reranker that deliberately violates the rule it is asked to respect."""
+def inverted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the stage before the boundary hand it the tiers deliberately inverted."""
 
-    def rerank(self, question: str, candidates: list[EvidenceCandidate]) -> list[EvidenceCandidate]:
-        associative = [c for c in candidates if c.tier is EvidenceTier.ASSOCIATIVE]
-        deterministic = [c for c in candidates if c.tier is EvidenceTier.DETERMINISTIC]
+    def invert(candidates: list[EvidenceCandidate]) -> list[EvidenceCandidate]:
+        kept = deduplicate(candidates)
+        associative = [c for c in kept if c.tier is EvidenceTier.ASSOCIATIVE]
+        deterministic = [c for c in kept if c.tier is EvidenceTier.DETERMINISTIC]
         return [*associative, *deterministic]
+
+    monkeypatch.setattr(retriever_module, "deduplicate", invert)
 
 
 def _retriever(workspace: Workspace, **overrides) -> Retriever:
     return Retriever(
         search=workspace.search,
         knowledge=workspace.knowledge,
-        reranker=overrides.pop("reranker", NoopReranker()),
         limits=overrides.pop("limits", RetrievalLimits.from_settings(workspace.settings.retrieval)),
     )
 
@@ -485,19 +458,22 @@ def test_the_returned_evidence_set_is_always_tier_ordered(
 MIXED = "load_config service"
 
 
-def test_a_reranker_that_inverts_the_tiers_is_corrected(initialized: Workspace) -> None:
-    """The V2 seam cannot break the V1 guarantee, even deliberately."""
+def test_an_inverted_order_is_corrected(
+    initialized: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No stage before the boundary can break the V1 guarantee, even deliberately."""
     context = initialized.resolver().resolve(initialized.root or Path())
     honest = initialized.retriever().retrieve(MIXED, context)
     assert honest.deterministic and len(honest.candidates) > len(honest.deterministic)
 
-    hostile = _retriever(initialized, reranker=_TierInverter()).retrieve(MIXED, context)
+    inverted(monkeypatch)
+    hostile = _retriever(initialized).retrieve(MIXED, context)
     assert_deterministic_first(hostile)
     assert {c.location for c in hostile.deterministic} == {c.location for c in honest.deterministic}
 
 
-def test_a_hostile_reranker_cannot_spend_the_budget_on_associative_evidence(
-    initialized: Workspace,
+def test_an_inverted_order_cannot_spend_the_budget_on_associative_evidence(
+    initialized: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Starving the deterministic half out of a hard budget would displace it just
     as effectively as ranking it lower."""
@@ -506,9 +482,8 @@ def test_a_hostile_reranker_cannot_spend_the_budget_on_associative_evidence(
         initialized.settings.retrieval.model_copy(update={"final": 3})
     )
     honest = initialized.retriever().retrieve(MIXED, context)
-    hostile = _retriever(initialized, reranker=_TierInverter(), limits=limits).retrieve(
-        MIXED, context
-    )
+    inverted(monkeypatch)
+    hostile = _retriever(initialized, limits=limits).retrieve(MIXED, context)
     assert len(hostile.candidates) == 3
 
     # Every deterministic candidate that fits still fits. A hostile order would
@@ -519,13 +494,16 @@ def test_a_hostile_reranker_cannot_spend_the_budget_on_associative_evidence(
     assert_deterministic_first(hostile)
 
 
-def test_the_trace_records_that_the_order_was_restored(initialized: Workspace) -> None:
+def test_the_trace_records_that_the_order_was_restored(
+    initialized: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A silent correction is a correction nobody can audit."""
     context = initialized.resolver().resolve(initialized.root or Path())
-    evidence = _retriever(initialized, reranker=_TierInverter()).retrieve(MIXED, context)
+    inverted(monkeypatch)
+    evidence = _retriever(initialized).retrieve(MIXED, context)
     assert evidence.trace is not None
-    rerank = next(stage for stage in evidence.trace.stages if stage.name == "rerank")
-    assert "tier order restored" in rerank.detail
+    stage = next(stage for stage in evidence.trace.stages if stage.name == "precedence")
+    assert "tier order restored" in stage.detail
 
 
 def test_locate_exposes_the_same_ordering_as_the_retriever(initialized: Workspace) -> None:

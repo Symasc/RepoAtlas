@@ -98,7 +98,7 @@ def test_the_repository_recovers_once_the_file_is_readable_again(
         pillar.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
     _sync(adversarial, adversarial_root, "deployment")
-    assert adversarial.search.search_literal("recovered.example")
+    assert adversarial.search.find_literal("recovered.example").hits
 
 
 def test_a_tracked_file_removed_from_the_working_tree_is_handled(
@@ -138,4 +138,4 @@ def test_a_dangling_symlink_does_not_abort_the_sync(
     git(repo, "add", "-A")
     report = _sync(adversarial, adversarial_root, "scripts")
     assert report.repositories
-    assert adversarial.search.search_literal("deploy_helper")
+    assert adversarial.search.find_literal("deploy_helper").hits

@@ -139,7 +139,7 @@ function When({ freshness, indexedAt }: { freshness: FreshnessModel; indexedAt: 
   );
 }
 
-export function State({ tone, label }: { tone: FreshnessTone; label: string }) {
+function State({ tone, label }: { tone: FreshnessTone; label: string }) {
   return (
     <span className={classes.state} data-tone={tone}>
       <span className={classes.dot} aria-hidden />

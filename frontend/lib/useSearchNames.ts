@@ -7,7 +7,7 @@ import { useSyncExternalStore } from "react";
  * repositories and files. The reader's choice, remembered in this browser; off
  * until it is made.
  */
-export const NAMES_KEY = "ra-search-names";
+const NAMES_KEY = "ra-search-names";
 
 const CHANGED = "ra-search-names-change";
 /** The choice made on this page, for a browser that refuses to store it. */

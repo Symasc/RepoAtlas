@@ -79,11 +79,9 @@ def test_every_call_reuses_the_same_workspace(
     service.repositories(RepositoriesRequest(context=GLOBAL))
 
 
-def test_the_service_holds_one_registry_and_one_ceiling(initialized: Workspace) -> None:
+def test_the_service_holds_one_registry(initialized: Workspace) -> None:
     service = _service(initialized)
     assert service.sessions is service.sessions
-    assert service.budget_ceiling is service.budget_ceiling
-    assert service.budget_ceiling.max_items > 0
 
 
 # ---------------------------------------------------------------------------
@@ -332,13 +330,3 @@ def test_the_service_captures_no_working_directory(initialized: Workspace) -> No
     service = _service(initialized)
     values = [value for value in vars(service).values() if isinstance(value, Path)]
     assert not values, f"the service holds a path that could become an ambient default: {values}"
-
-
-def test_the_generation_counter_is_a_stable_in_process_hint(initialized: Workspace) -> None:
-    """Read capabilities never move it — and it never proves anything about
-    freshness even when sync does."""
-    service = _service(initialized)
-    before = service.generation
-    service.repositories(RepositoriesRequest(context=GLOBAL))
-    service.status(StatusRequest(context=GLOBAL))
-    assert service.generation == before

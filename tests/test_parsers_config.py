@@ -7,7 +7,7 @@ from pathlib import Path
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedFile, Severity
 from repoatlas.parsers.base import LanguageParser
 from repoatlas.parsers.dockerfile import DockerfileParser
-from repoatlas.parsers.jinja import JinjaParser, has_jinja, neutralize
+from repoatlas.parsers.jinja import JinjaParser, neutralize
 from repoatlas.parsers.salt import SaltParser
 from repoatlas.parsers.structured import StructuredParser
 
@@ -39,13 +39,6 @@ def test_neutralized_expressions_survive_as_yaml_scalars() -> None:
 
     document = yaml.safe_load(neutralize("host: {{ pillar['service']['host'] }}\n"))
     assert set(document) == {"host"}
-
-
-def test_has_jinja_detects_all_three_delimiters() -> None:
-    assert has_jinja("{{ x }}")
-    assert has_jinja("{% if x %}")
-    assert has_jinja("{# c #}")
-    assert not has_jinja("plain: yaml")
 
 
 # --- Jinja parser ------------------------------------------------------------

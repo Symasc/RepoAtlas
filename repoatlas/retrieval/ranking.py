@@ -59,7 +59,6 @@ anything, so a document *about* the file outranked the file. See :func:`fuse`.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Protocol
 
 from repoatlas.models.evidence import EvidenceCandidate, EvidenceTier, MatchClass
 
@@ -77,26 +76,6 @@ _OVERLAP_THRESHOLD = 0.5
 #: A file-level candidate carries no line range, so ``None`` is part of the key
 #: rather than a value to fill in.
 _Key = tuple[str, str, int | None, int | None]
-
-
-class Reranker(Protocol):
-    """The V2 seam. ``NoopReranker`` is what V1 ships."""
-
-    def rerank(
-        self, question: str, candidates: list[EvidenceCandidate]
-    ) -> list[EvidenceCandidate]: ...
-
-
-class NoopReranker:
-    """Preserves fusion order. Replaced by a cross-encoder in V2.
-
-    A V2 reranker must respect the tier boundary the same way fusion does: it may
-    reorder within a tier, never across one, or it would reintroduce exactly the
-    displacement V1_SPEC §14 forbids.
-    """
-
-    def rerank(self, question: str, candidates: list[EvidenceCandidate]) -> list[EvidenceCandidate]:
-        return candidates
 
 
 #: Ordering positions for the specificity key. Three values, not eight: see the
@@ -292,24 +271,20 @@ def _anchored_files(matches: Mapping[_Key, MatchClass]) -> dict[tuple[str, str],
 def enforce_precedence(candidates: Sequence[EvidenceCandidate]) -> list[EvidenceCandidate]:
     """Partition by tier and then by path specificity, preserving order inside each.
 
-    Fusion already orders by both, so on the V1 path this changes nothing. It
-    exists because the guarantees of V1_SPEC §14 must hold at the **boundary**, not
-    merely inside one function: between fusion and the caller sits the ``Reranker``
-    seam, and a V2 cross-encoder is exactly the kind of component whose ranking is
-    opaque. One that reordered across tiers would silently undo the rule the rest
-    of the funnel is built on; one that reordered *within* a tier — which it is
-    explicitly allowed to do — could just as silently drop a file the user named by
-    path below one that merely shares its basename or quotes it. Both anchored
-    positions are restored here, not only the exact-path one: a cross-encoder that
-    loves a README is exactly the component that would otherwise undo the suffix
-    boundary.
+    Fusion already orders by both, so usually this changes nothing. It exists
+    because the guarantees of V1_SPEC §14 must hold at the **boundary**, not merely
+    inside one function: deduplication sits between fusion and the budget and may
+    drop the very candidate that anchored a file, and any later reordering would be
+    exactly the kind of change that silently undoes the rule the rest of the funnel
+    is built on. Both anchored positions are restored here, not only the exact-path
+    one.
 
     Applying it before budgeting matters as much as applying it before returning:
     a hard token budget spent on lexical matches would starve deterministic
     evidence out of the answer just as effectively as ranking it lower.
 
-    ``sorted`` is stable, so within a tier and a specificity the incoming order —
-    including whatever a reranker decided — is preserved exactly.
+    ``sorted`` is stable, so within a tier and a specificity the incoming order is
+    preserved exactly.
     """
     anchored: dict[tuple[str, str], int] = {}
     for candidate in candidates:

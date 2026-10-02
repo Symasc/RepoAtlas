@@ -158,15 +158,6 @@ def walk(node: Node) -> Iterator[Node]:
         stack.extend(reversed(current.children))
 
 
-def named_child(node: Node, field: str) -> Node | None:
-    return node.child_by_field_name(field)
-
-
-def field_text(source: bytes, node: Node, field: str) -> str | None:
-    child = node.child_by_field_name(field)
-    return None if child is None else node_text(source, child)
-
-
 def string_literal(source: bytes, node: Node) -> str | None:
     """Contents of a quoted string node, or ``None`` when it is not a literal.
 

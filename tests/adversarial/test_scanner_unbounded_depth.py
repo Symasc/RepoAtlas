@@ -43,7 +43,7 @@ from pathlib import Path
 import pytest
 from repoatlas.config.settings import DiscoverySettings, ReposSettings, Settings
 from repoatlas.containment import RepositoryBoundary
-from repoatlas.gitstate.client import FileListing, GitClient
+from repoatlas.gitstate.client import GitClient
 from repoatlas.models.parsing import Severity
 from repoatlas.services.init_service import initialize
 from repoatlas.services.status_service import status
@@ -64,22 +64,6 @@ pytestmark = pytest.mark.adversarial
 #: admits, so standing in for `ls-files` with one silently indexed ignored content
 #: (see `EnumerationUnavailable`).
 NO_GIT = "/nonexistent/git-binary-for-tests"
-
-
-class EnumerationUnavailableGit(GitClient):
-    """Git works, except that it cannot enumerate.
-
-    The narrower of the two seams. A missing binary takes out working-tree *state*
-    as well, so `status` then answers "unknown" for a reason that has nothing to do
-    with enumeration. Overriding `list_files` alone makes enumeration refuse and
-    leaves every other question answerable, which is what isolates the property
-    under test — and is the shape of a real corrupt-`.git` or unreadable-index
-    failure, where the binary is present and one command still cannot answer.
-    """
-
-    def list_files(self, repo_path: Path) -> FileListing | None:
-        del repo_path
-        return None
 
 
 # --- harness ------------------------------------------------------------------

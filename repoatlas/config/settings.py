@@ -146,41 +146,13 @@ class RetrievalSettings(BaseModel):
     primary_boost: float = 0.5
 
 
-class OutputSettings(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    verbosity: str = "concise"
-    max_evidence: int = 12
-
-
-class GroundingSettings(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    require_evidence: bool = True
-
-
 class Settings(BaseModel):
     """The whole of RepoAtlas configuration.
 
-    ``extra="ignore"`` is stated rather than inherited. It is the same value
-    Pydantic defaults to, so nothing about how a config file loads changes here
-    --- but it is a **compatibility policy**, and a policy that exists only as a
-    framework default is one nobody decided and a dependency upgrade can revoke.
-
-    The policy: an unknown top-level key is ignored rather than refused, so a
-    configuration file written by an older RepoAtlas still starts this one. A V1
-    file carries a top-level ``llm:`` section configuring an embedded reasoner
-    that no longer exists; refusing it would stop a deterministic V2 from
-    starting over a section it does not read, which makes upgrading a migration
-    exercise instead of an install. The obsolete keys are ignored on load and
-    absent on save --- :func:`save_settings` writes this model, so a
-    round-trip drops them without anything having to know their names.
-
-    What this is not is validation: tolerance at the top level means a
-    misspelled section is ignored as silently as a retired one. Nested models
-    are unchanged by this and inherit the same default (see
-    :func:`load_settings`); tightening them is a behaviour change, not a
-    statement of existing policy, and is deliberately not made here.
+    An unknown top-level key is ignored rather than refused, and absent on save:
+    :func:`save_settings` writes this model, so a round-trip drops it. That is
+    tolerance, not validation --- a misspelled section is ignored as silently as
+    a retired one.
     """
 
     model_config = ConfigDict(frozen=True, extra="ignore")
@@ -190,8 +162,6 @@ class Settings(BaseModel):
     indexing: IndexingSettings = Field(default_factory=IndexingSettings)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
-    output: OutputSettings = Field(default_factory=OutputSettings)
-    grounding: GroundingSettings = Field(default_factory=GroundingSettings)
 
     @property
     def root(self) -> Path | None:
@@ -201,16 +171,9 @@ class Settings(BaseModel):
 def _env_overrides(settings: Settings) -> Settings:
     """Apply the few settings a container must be able to set without a file.
 
-    Deliberately narrow. Configuration lives in YAML; this exists because the
-    value differs between running on a workstation and running as a compose
-    service (V1_SPEC §18). ``REPOATLAS_CONFIG`` and ``REPOATLAS_DB`` are handled
-    at path resolution for the same reason.
-
-    There used to be a second one. ``REPOATLAS_LLM_BASE_URL`` pointed the
-    embedded reasoner at a sibling model container instead of ``localhost``;
-    there is no embedded reasoner and no variable. Deleted rather than left
-    reading into nothing, so that setting it is visibly a no-op rather than
-    quietly one.
+    Deliberately narrow. Configuration lives in YAML; this exists for a process
+    that has no config file to edit. ``REPOATLAS_CONFIG`` and ``REPOATLAS_DB`` are
+    handled at path resolution for the same reason.
     """
     updates: dict[str, Any] = {}
 

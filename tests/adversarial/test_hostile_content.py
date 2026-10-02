@@ -81,7 +81,7 @@ def test_the_sentinel_reaches_no_stored_column(
 
 
 def test_the_sentinel_is_not_searchable_by_any_route(adversarial: Workspace) -> None:
-    assert adversarial.search.search_literal(SECRET_SENTINEL) == []
+    assert adversarial.search.find_literal(SECRET_SENTINEL).hits == []
     assert adversarial.search.search_text(SECRET_SENTINEL, None, 20) == []
     assert adversarial.search.find_entities_by_name([SECRET_SENTINEL], None, 20) == []
 
@@ -93,7 +93,7 @@ def test_a_secret_created_after_the_first_index_is_still_excluded(
     late.write_text(f"-----BEGIN CERTIFICATE-----\n{SECRET_SENTINEL}_LATE\n")
     _sync(adversarial, adversarial_root, "deployment")
     assert "runtime.pem" not in indexed_paths(adversarial, "deployment")
-    assert adversarial.search.search_literal(f"{SECRET_SENTINEL}_LATE") == []
+    assert adversarial.search.find_literal(f"{SECRET_SENTINEL}_LATE").hits == []
 
 
 def test_a_file_that_becomes_a_secret_by_rename_loses_its_facts(
@@ -103,11 +103,11 @@ def test_a_file_that_becomes_a_secret_by_rename_loses_its_facts(
     ordinary = adversarial_root / "deployment" / "settings.yaml"
     ordinary.write_text("marker: RENAMED_TO_SECRET_MARKER\n")
     _sync(adversarial, adversarial_root, "deployment")
-    assert adversarial.search.search_literal("RENAMED_TO_SECRET_MARKER")
+    assert adversarial.search.find_literal("RENAMED_TO_SECRET_MARKER").hits
 
     ordinary.rename(adversarial_root / "deployment" / "settings.pem")
     _sync(adversarial, adversarial_root, "deployment")
-    assert adversarial.search.search_literal("RENAMED_TO_SECRET_MARKER") == []
+    assert adversarial.search.find_literal("RENAMED_TO_SECRET_MARKER").hits == []
     paths = indexed_paths(adversarial, "deployment")
     assert "settings.yaml" not in paths and "settings.pem" not in paths
 
@@ -117,7 +117,7 @@ def test_a_file_that_becomes_a_secret_by_rename_loses_its_facts(
 
 @pytest.mark.parametrize("marker", IGNORED_MARKERS)
 def test_ignored_content_is_never_searchable(adversarial: Workspace, marker: str) -> None:
-    assert adversarial.search.search_literal(marker) == []
+    assert adversarial.search.find_literal(marker).hits == []
 
 
 def test_an_ignore_rule_added_later_removes_the_facts_it_now_covers(
@@ -127,11 +127,11 @@ def test_an_ignore_rule_added_later_removes_the_facts_it_now_covers(
     repo = adversarial_root / "python-service"
     (repo / "temporary.py").write_text("BECOMES_IGNORED_MARKER = 1\n")
     _sync(adversarial, adversarial_root, "python-service")
-    assert adversarial.search.search_literal("BECOMES_IGNORED_MARKER")
+    assert adversarial.search.find_literal("BECOMES_IGNORED_MARKER").hits
 
     (repo / ".repoatlasignore").write_text("generated/\n*.generated.json\ntemporary.py\n")
     _sync(adversarial, adversarial_root, "python-service")
-    assert adversarial.search.search_literal("BECOMES_IGNORED_MARKER") == []
+    assert adversarial.search.find_literal("BECOMES_IGNORED_MARKER").hits == []
     assert "temporary.py" not in indexed_paths(adversarial, "python-service")
 
 
@@ -139,18 +139,18 @@ def test_removing_an_ignore_rule_indexes_what_it_was_hiding(
     adversarial: Workspace, adversarial_root: Path
 ) -> None:
     repo = adversarial_root / "python-service"
-    assert adversarial.search.search_literal("IGNORED_MARKER_MUST_NOT_BE_INDEXED") == []
+    assert adversarial.search.find_literal("IGNORED_MARKER_MUST_NOT_BE_INDEXED").hits == []
 
     (repo / ".repoatlasignore").write_text("*.generated.json\n")
     _sync(adversarial, adversarial_root, "python-service")
-    assert adversarial.search.search_literal("IGNORED_MARKER_MUST_NOT_BE_INDEXED")
+    assert adversarial.search.find_literal("IGNORED_MARKER_MUST_NOT_BE_INDEXED").hits
 
 
 def test_a_gitignored_file_is_not_indexed_even_though_it_is_on_disk(
     adversarial: Workspace, adversarial_root: Path
 ) -> None:
     assert (adversarial_root / "python-service" / "gitignored" / "g.py").exists()
-    assert adversarial.search.search_literal("GITIGNORED_MARKER_MUST_NOT_BE_INDEXED") == []
+    assert adversarial.search.find_literal("GITIGNORED_MARKER_MUST_NOT_BE_INDEXED").hits == []
 
 
 def test_secrets_win_over_a_permissive_ignore_file(
@@ -161,7 +161,7 @@ def test_secrets_win_over_a_permissive_ignore_file(
     (repo / ".repoatlasignore").write_text("!.env\n!*.pem\n")
     _sync(adversarial, adversarial_root, "python-service")
     assert ".env" not in indexed_paths(adversarial, "python-service")
-    assert adversarial.search.search_literal(SECRET_SENTINEL) == []
+    assert adversarial.search.find_literal(SECRET_SENTINEL).hits == []
 
 
 # -- pathological files ------------------------------------------------------
@@ -185,8 +185,8 @@ def test_binary_files_are_not_treated_as_source(adversarial: Workspace) -> None:
         ).fetchall()
         if rows:
             assert rows[0]["is_binary"], name
-    assert adversarial.search.search_literal("BINARY_MARKER_NOT_SOURCE") == []
-    assert adversarial.search.search_literal("PNG_MARKER_NOT_SOURCE") == []
+    assert adversarial.search.find_literal("BINARY_MARKER_NOT_SOURCE").hits == []
+    assert adversarial.search.find_literal("PNG_MARKER_NOT_SOURCE").hits == []
 
 
 def test_undecodable_bytes_do_not_abort_the_repository(adversarial: Workspace) -> None:
@@ -255,4 +255,4 @@ def test_a_file_growing_past_the_size_cap_is_recorded_but_not_read(
     huge.write_text("marker: OVERSIZED_FILE_MARKER\n" + ("padding: x\n" * 200_000))
     assert huge.stat().st_size > adversarial.settings.indexing.max_file_bytes
     _sync(adversarial, adversarial_root, "deployment")
-    assert adversarial.search.search_literal("OVERSIZED_FILE_MARKER") == []
+    assert adversarial.search.find_literal("OVERSIZED_FILE_MARKER").hits == []

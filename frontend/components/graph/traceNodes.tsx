@@ -25,19 +25,19 @@ export interface TraceActions extends NodeActions {
   pick: (row: string) => void;
 }
 
-export interface SnippetLine {
+interface SnippetLine {
   number: number;
   text: string;
 }
 
-export type TraceSeedData = {
+type TraceSeedData = {
   seed: TraceSeedView;
   hue: number | null;
   snippet: SnippetLine[] | null;
   actions: TraceActions;
   selected?: boolean;
 };
-export type TraceCardData = {
+type TraceCardData = {
   card: TraceCard;
   hue: number | null;
   /** The row chosen in this card, if one is. */
@@ -47,8 +47,8 @@ export type TraceCardData = {
   actions: TraceActions;
   selected?: boolean;
 };
-export type TraceFrameData = { repository: string; hue: number | null; home: boolean };
-export type TraceLabelData = { text: string; detail?: string };
+type TraceFrameData = { repository: string; hue: number | null; home: boolean };
+type TraceLabelData = { text: string; detail?: string };
 
 export type TraceNode =
   | Node<TraceSeedData, "traceSeed">

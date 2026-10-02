@@ -75,10 +75,6 @@ def neutralize(content: str) -> str:
     return _EXPRESSION.sub(lambda m: _filler(m.group(0), "_"), without_statements)
 
 
-def has_jinja(content: str) -> bool:
-    return "{{" in content or "{%" in content or "{#" in content
-
-
 def extract_references(content: str, *, source_symbol: str | None = None) -> list[ParsedReference]:
     """Every relationship the template text states outright.
 

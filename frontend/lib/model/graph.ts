@@ -174,7 +174,7 @@ export interface Connection {
   link: LinkData;
 }
 
-export type PartnerKind = "repository" | "directory" | "file" | "shared" | "place" | "more";
+type PartnerKind = "repository" | "directory" | "file" | "shared" | "place" | "more";
 
 export interface Partner {
   kind: PartnerKind;
@@ -190,7 +190,7 @@ export interface Partner {
 const FAMILY_ORDER: Record<Family, number> = { code: 0, http: 1, dependency: 2, config: 3 };
 
 /** Strongest first within a family, families in reading order. */
-export function byStrength(a: Connection, b: Connection): number {
+function byStrength(a: Connection, b: Connection): number {
   return (
     FAMILY_ORDER[a.link.family] - FAMILY_ORDER[b.link.family] ||
     b.link.count - a.link.count ||

@@ -169,7 +169,7 @@ def test_a_failed_parse_still_records_a_diagnostic(adversarial: Workspace) -> No
 
 def test_a_broken_file_is_still_searchable_as_text(adversarial: Workspace) -> None:
     """Failing to parse costs the structure, not the content."""
-    assert adversarial.search.search_literal("recoverable_state")
+    assert adversarial.search.find_literal("recoverable_state").hits
 
 
 # -- computed targets never resolve ------------------------------------------

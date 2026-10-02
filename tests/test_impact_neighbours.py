@@ -256,51 +256,50 @@ def test_every_bounded_query_equals_the_brute_force(
     checked = 0
     for confinement in confinements(mixed, HOMES[corpus]):
         for rule in rules(kinds):
-            if True:
-                counts = knowledge.impact_counts(nodes, rule, confinement)
-                for near in nodes:
-                    expected = brute(edges, near, rule, confinement, uses_from)
-                    if not expected:
-                        assert near not in counts
-                        continue
-                    checked += 1
-                    count = counts[near]
-                    assert count.far == len({f["far"] for f in expected})
-                    assert count.relationships == len(
-                        {
-                            (f["far"], f["type"], f["file_id"], f["line_start"], f["line_end"])
-                            for f in expected
-                        }
-                    )
-                    # pages of two, followed by cursor, are the brute force in order
-                    paged: list[NeighborRow] = []
-                    after = None
-                    while True:
-                        page = knowledge.impact_page(near, rule, confinement, after=after, limit=2)
-                        paged.extend(page)
-                        if len(page) < 2:
-                            break
-                        after = page[-1].cursor
-                    assert [r.edge_id for r in paged] == [f["id"] for f in expected]
-                    # every far file is one group, and together they hold every far entity
-                    groups, partial = knowledge.impact_distribution(
-                        near, rule, confinement, max_groups=1000
-                    )
-                    by_file: dict[tuple[int | None, str | None], set[int]] = {}
-                    for f in expected:
-                        by_file.setdefault((f["far_repo"], f["far_path"]), set()).add(f["far"])
-                    assert not partial
-                    assert {(g.repo_id, g.path): g.far for g in groups} == {
-                        k: len(v) for k, v in by_file.items()
+            counts = knowledge.impact_counts(nodes, rule, confinement)
+            for near in nodes:
+                expected = brute(edges, near, rule, confinement, uses_from)
+                if not expected:
+                    assert near not in counts
+                    continue
+                checked += 1
+                count = counts[near]
+                assert count.far == len({f["far"] for f in expected})
+                assert count.relationships == len(
+                    {
+                        (f["far"], f["type"], f["file_id"], f["line_start"], f["line_end"])
+                        for f in expected
                     }
-                    # one representative per file: the first of that file in natural order
-                    firsts = knowledge.impact_rows_for(
-                        near, rule, confinement, groups=list(by_file), per_group=1
-                    )
-                    first_of: dict[tuple[int | None, str | None], int] = {}
-                    for f in expected:
-                        first_of.setdefault((f["far_repo"], f["far_path"]), f["id"])
-                    assert sorted(r.edge_id for r in firsts) == sorted(first_of.values())
+                )
+                # pages of two, followed by cursor, are the brute force in order
+                paged: list[NeighborRow] = []
+                after = None
+                while True:
+                    page = knowledge.impact_page(near, rule, confinement, after=after, limit=2)
+                    paged.extend(page)
+                    if len(page) < 2:
+                        break
+                    after = page[-1].cursor
+                assert [r.edge_id for r in paged] == [f["id"] for f in expected]
+                # every far file is one group, and together they hold every far entity
+                groups, partial = knowledge.impact_distribution(
+                    near, rule, confinement, max_groups=1000
+                )
+                by_file: dict[tuple[int | None, str | None], set[int]] = {}
+                for f in expected:
+                    by_file.setdefault((f["far_repo"], f["far_path"]), set()).add(f["far"])
+                assert not partial
+                assert {(g.repo_id, g.path): g.far for g in groups} == {
+                    k: len(v) for k, v in by_file.items()
+                }
+                # one representative per file: the first of that file in natural order
+                firsts = knowledge.impact_rows_for(
+                    near, rule, confinement, groups=list(by_file), per_group=1
+                )
+                first_of: dict[tuple[int | None, str | None], int] = {}
+                for f in expected:
+                    first_of.setdefault((f["far_repo"], f["far_path"]), f["id"])
+                assert sorted(r.edge_id for r in firsts) == sorted(first_of.values())
     assert checked > 100
 
 
