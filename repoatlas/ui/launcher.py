@@ -19,6 +19,13 @@ The two live and die together. When the explorer stops, the API is stopped; when
 the API stops --- Ctrl-C, SIGTERM, or a failure --- the explorer's whole process
 group is stopped, so nothing is left listening.
 
+An installed RepoAtlas runs no Node at all. Its release build exports the
+explorer as files into the package (``repoatlas/ui/explorer``), and the local API
+sends them itself, answering the pages' calls at the door the explorer's server
+would have kept (:mod:`repoatlas.api.server`). One process, one port, and the
+browser still never holds the token. A checkout's own ``frontend/`` wins over an
+exported copy, so a developer always runs the explorer they are editing.
+
 What it executes
 ----------------
 Node, pnpm and the commands that open a browser: never a repository's code, and
@@ -27,6 +34,7 @@ installed package in a checkout, or named by ``--frontend`` or
 ``REPOATLAS_FRONTEND_DIR``. Its packages are installed and its production build
 made the first time they are needed, and again only when its lockfile or sources
 change; installation is the one step that downloads anything, here as everywhere.
+An exported explorer is files the API sends, and runs nothing.
 
 The MCP server knows nothing of any of this. Neither transport imports this
 module, and nothing it starts is an agent tool.
@@ -56,6 +64,8 @@ DEFAULT_PORT = 7318
 HOST = "127.0.0.1"
 #: Names the explorer's directory when it is not the checkout's ``frontend/``.
 FRONTEND_ENV = "REPOATLAS_FRONTEND_DIR"
+#: Where a release build puts the exported explorer, beside this module.
+PACKAGED_DIR = "explorer"
 MIN_NODE_MAJOR = 22
 #: Where ``repoatlas ui`` keeps its production build. Its own directory, so it
 #: never disturbs ``pnpm dev`` (``.next/dev``) or the end-to-end build (``.next-e2e``).
@@ -113,33 +123,67 @@ class UiError(RepoAtlasError):
 # ---------------------------------------------------------------------------
 
 
-def locate_frontend(explicit: Path | None, environ: Mapping[str, str]) -> Path:
-    """The explorer's directory: ``--frontend``, else the variable, else the checkout's."""
+def locate_frontend(
+    explicit: Path | None, environ: Mapping[str, str], *, sources_only: bool = False
+) -> Path:
+    """The explorer's directory: ``--frontend``, else the variable, else the
+    checkout's ``frontend/``, else the exported copy installed with RepoAtlas.
+
+    Either the explorer's sources (:func:`is_sources`) or an export of them
+    (:func:`is_exported`), which ``sources_only`` refuses: only sources build or
+    hot-reload.
+    """
     if explicit is not None:
         chosen, source = explicit, "--frontend"
     elif environ.get(FRONTEND_ENV):
         chosen, source = Path(environ[FRONTEND_ENV]), FRONTEND_ENV
     else:
-        chosen, source = Path(__file__).resolve().parents[2] / "frontend", None
+        here = Path(__file__).resolve().parent
+        chosen, source = here.parents[1] / "frontend", None
+        if not is_sources(chosen) and not sources_only and is_exported(here / PACKAGED_DIR):
+            chosen = here / PACKAGED_DIR
     chosen = chosen.expanduser().resolve()
-    if (chosen / "package.json").is_file() and (chosen / "next.config.ts").is_file():
+    if is_sources(chosen) or (is_exported(chosen) and not sources_only):
         return chosen
     if source is not None:
+        needs = "package.json and next.config.ts"
         raise UiError(
             f"{chosen} is not the RepoAtlas explorer (named by {source})",
-            detail="It needs the explorer's package.json and next.config.ts.",
+            detail=(
+                f"It needs the explorer's {needs}"
+                + ("." if sources_only else ", or an exported explorer's index.html and _next/.")
+            ),
+            setup=True,
+        )
+    if sources_only:
+        raise UiError(
+            "the explorer's sources are not part of this installation",
+            detail=(
+                "`--dev` runs them with Node. Run it from a RepoAtlas checkout (see "
+                "docs/installation.md), or name the checkout's frontend/ with --frontend "
+                f"or {FRONTEND_ENV}."
+            ),
             setup=True,
         )
     raise UiError(
         "the explorer is not part of this installation",
         detail=(
-            "`repoatlas ui` runs the explorer from a RepoAtlas checkout's frontend/ "
-            "directory, and this RepoAtlas was installed without one. Install from a "
-            f"checkout (see docs/installation.md), or name the directory with --frontend "
-            f"or {FRONTEND_ENV}."
+            "A release of RepoAtlas includes the explorer; this one was built without it. "
+            "Install a release (`uv tool install symasc-repoatlas`), run from a checkout "
+            f"(see docs/installation.md), or name the explorer with --frontend or {FRONTEND_ENV}."
         ),
         setup=True,
     )
+
+
+def is_sources(directory: Path) -> bool:
+    """Whether ``directory`` is the explorer's sources, which Node builds and runs."""
+    return (directory / "package.json").is_file() and (directory / "next.config.ts").is_file()
+
+
+def is_exported(directory: Path) -> bool:
+    """Whether ``directory`` is the explorer exported as files (``pnpm build:static``)."""
+    return (directory / "index.html").is_file() and (directory / "_next").is_dir()
 
 
 def find_node(which: Callable[[str], str | None] = shutil.which) -> str:
@@ -372,7 +416,7 @@ def prepare(
 ) -> Explorer:
     """Check the machine, install and build what is missing, and say how to start it."""
     environment = os.environ if environ is None else environ
-    directory = locate_frontend(frontend, environment)
+    directory = locate_frontend(frontend, environment, sources_only=True)
     node = find_node()
     if check_port:
         ensure_port_free(port)
@@ -523,6 +567,35 @@ def run(
         raise UiError(failures[0], detail="Its output is above.")
 
 
+def serve_exported(
+    directory: Path,
+    *,
+    port: int,
+    settings: Settings,
+    connection: Path,
+    announce: Callable[[str], None],
+    open_url: Callable[[str], bool] | None = None,
+) -> None:
+    """The exported explorer and the API it reads, from one server here, until stopped.
+
+    Returns when stopped by Ctrl-C or SIGTERM. Nothing else is started.
+    """
+
+    def ready(serving: api.Serving) -> None:
+        announce(f"RepoAtlas explorer at {serving.url}  (Ctrl-C stops it)")
+        if open_url is not None and not open_url(serving.url):
+            announce("Open that address in your browser.")
+
+    api.serve(
+        host=HOST,
+        port=port,
+        settings=settings,
+        connection_file=connection,
+        ready=ready,
+        explorer=directory,
+    )
+
+
 def launch(
     *,
     port: int = DEFAULT_PORT,
@@ -536,31 +609,48 @@ def launch(
     """``repoatlas ui``: prepare the explorer, then run it and the API until stopped.
 
     With ``prepare_only``, stop once it is installed and built: what an installer
-    runs, so the first ``repoatlas ui`` starts at once.
+    runs, so the first ``repoatlas ui`` starts at once. An exported explorer
+    needs neither, and is served by the API itself.
     """
     settings = load_settings()
     connection = connection_file(settings, os.environ)
-    explorer = prepare(
-        port=port,
-        dev=dev and not prepare_only,
-        rebuild=rebuild,
-        frontend=frontend,
-        connection=connection,
-        announce=announce,
-        check_port=not prepare_only,
-    )
+    directory = locate_frontend(frontend, os.environ, sources_only=dev and not prepare_only)
+    explorer: Explorer | None = None
+    if is_sources(directory):
+        explorer = prepare(
+            port=port,
+            dev=dev and not prepare_only,
+            rebuild=rebuild,
+            frontend=directory,
+            connection=connection,
+            announce=announce,
+            check_port=not prepare_only,
+        )
+    elif not prepare_only:
+        ensure_port_free(port)
     if prepare_only:
-        announce(f"The explorer is ready in {explorer.cwd}. Start it with `repoatlas ui`.")
+        announce(f"The explorer is ready in {directory}. Start it with `repoatlas ui`.")
         return
     if settings.root is None:
         announce(
             "No workspace is indexed yet. Run `repoatlas init <directory>`; "
             "the explorer shows it once there is one."
         )
-    run(
-        explorer,
-        settings=settings,
-        connection=connection,
-        announce=announce,
-        open_url=open_browser if open_in_browser else None,
-    )
+    open_url = open_browser if open_in_browser else None
+    if explorer is None:
+        serve_exported(
+            directory,
+            port=port,
+            settings=settings,
+            connection=connection,
+            announce=announce,
+            open_url=open_url,
+        )
+    else:
+        run(
+            explorer,
+            settings=settings,
+            connection=connection,
+            announce=announce,
+            open_url=open_url,
+        )

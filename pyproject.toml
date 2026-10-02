@@ -1,10 +1,24 @@
 [project]
-name = "repoatlas"
+# The distribution is `symasc-repoatlas`: `repoatlas` on PyPI is another project's.
+# The import package and the command stay `repoatlas`.
+name = "symasc-repoatlas"
 version = "0.1.0"
 description = "Local multi-repository engineering intelligence system"
 readme = "README.md"
 requires-python = ">=3.13"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "AbdelrahmanSayed" }]
+keywords = ["code-intelligence", "mcp", "repositories", "static-analysis", "agents"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+]
 
 dependencies = [
     "typer>=0.15",
@@ -47,6 +61,11 @@ dependencies = [
     "mcp>=1.30,<2",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Symasc/RepoAtlas"
+Repository = "https://github.com/Symasc/RepoAtlas"
+Issues = "https://github.com/Symasc/RepoAtlas/issues"
+
 [project.scripts]
 repoatlas = "repoatlas.cli.main:run"
 
@@ -62,6 +81,15 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# The graph explorer, exported as files (`pnpm build:static` in frontend/), so an
+# installed RepoAtlas serves it with no Node. The release workflow stages the export
+# here before building. Git ignores the directory, since it is build output, so it
+# is named as an artifact, and the sdist carries it so a wheel built from the sdist
+# has it too. A build without it is a RepoAtlas without the explorer, and
+# `repoatlas ui` says so.
+[tool.hatch.build]
+artifacts = ["/repoatlas/ui/explorer/**"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["repoatlas"]

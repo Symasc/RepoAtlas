@@ -31,9 +31,26 @@ runs rebuild only when a source has changed. It needs Node.js 22 and pnpm 11
 | `--dev` | run `next dev` instead, with hot reload: for working on the explorer |
 | `--rebuild` | rebuild even if the build looks current |
 | `--prepare` | install and build, then exit (what `install.sh` runs) |
-| `--frontend DIR` | run the explorer from another directory |
+| `--frontend DIR` | run the explorer from another directory, or serve an export (`out/`) |
 
 How the launcher works is in [docs/local-api.md](../docs/local-api.md#the-usual-way-repoatlas-ui).
+
+### As shipped: a static export
+
+A released RepoAtlas does not run this app's server. The release build exports
+the app as plain files and puts them in the Python package:
+
+```sh
+pnpm build:static        # RA_EXPORT=1 next build: writes out/
+```
+
+The export leaves out the one server route, `app/api/ra/[...path]/route.ts`
+(`pageExtensions` keeps `.tsx` only). The local API sends the files and answers
+`/api/ra/<name>` itself, with this route's checks (`lib/server/proxy.ts`), so
+the browser code is the same in both. To try an export from a checkout:
+`repoatlas ui --frontend frontend/out`. Keep anything that needs a server out of
+the pages: an export has no server, and `pnpm build:static` fails on a page
+that would need one.
 
 ### By hand, in two terminals
 

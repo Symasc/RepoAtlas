@@ -13,13 +13,22 @@ file, holds the token, and calls this API on its browser's behalf; the browser
 never holds the token and never talks to this port. ``docs/local-api.md`` is the
 contract.
 
-Why one thread
---------------
+An installed RepoAtlas has no frontend server: it ships the explorer as exported
+files, and ``repoatlas ui`` starts this server with them. Then this server is the
+explorer's server too. It sends the pages, and it answers the pages' calls at
+``/api/ra/<name>`` without the token, admitting exactly what the frontend's own
+server admits there (``frontend/lib/server/proxy.ts``). ``/v1`` is unchanged.
+
+Why one index thread
+--------------------
 The index's database connection is bound to the thread that opened it, and V2 was
-designed around one service driven sequentially. So the service is opened on the
-thread that serves, and requests are answered one at a time, in arrival order, by
-a single-threaded stdlib server. Every connection carries a socket timeout, so one
-stalled client cannot hold the port.
+designed around one service driven sequentially. So the service is opened, called
+and closed on one thread of its own, and capability calls run there one at a
+time, in the order they are handed over. Connections are read on threads of their
+own: a browser opens spare connections it may never send on, and a server that
+read one connection at a time would wait on such a connection instead of
+answering. Every connection carries a socket timeout, so a stalled client holds
+only its own thread, and only for so long.
 
 Why a token and a Host check on loopback
 ----------------------------------------
@@ -49,11 +58,13 @@ import sys
 import tempfile
 import threading
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
+from urllib.parse import unquote
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -107,6 +118,8 @@ CONNECTION_FILE_MODE = 0o600
 #: The most of a connection file read back before removing it; a record is ~150 bytes.
 CONNECTION_FILE_CEILING = 4096
 PREFIX = "/v1"
+#: Where the explorer's pages call the API when this server sends them.
+EXPLORER_API = "/api/ra/"
 
 #: The names a server may be started on, and the address each one binds.
 _LOOPBACK = {"127.0.0.1": "127.0.0.1", "localhost": "127.0.0.1", "::1": "::1"}
@@ -220,17 +233,65 @@ class Headers(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class Page:
+    """One of the explorer's files, sent as it is."""
+
+    content: bytes
+    media: str
+    cache: str
+
+
+@dataclass(frozen=True, slots=True)
 class Answer:
     status: int
     payload: dict[str, Any]
     headers: tuple[tuple[str, str], ...] = ()
+    #: Sent instead of ``payload`` when set.
+    page: Page | None = None
+
+
+class IndexThread:
+    """The capability service, opened, called and closed on one thread of its own.
+
+    The service cannot move between threads (V1 binds its SQLite connection to
+    the thread that opened it), while connections are read on threads of their
+    own. So every call is handed to this one thread and runs there, one at a
+    time, in the order the calls are handed over.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self._thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="repoatlas-index")
+        try:
+            self._service = self._thread.submit(
+                CapabilityService.open, settings=settings, require_root=False
+            ).result()
+        except BaseException:
+            self._thread.shutdown()
+            raise
+
+    def call(self, endpoint: Endpoint, request: BaseModel) -> dict[str, Any]:
+        """The capability's presented answer; its refusal is raised here as it was there."""
+
+        def answer() -> dict[str, Any]:
+            return present(request, getattr(self._service, endpoint.capability)(request))
+
+        return self._thread.submit(answer).result()
+
+    def close(self) -> None:
+        """After every call already handed over; a later call is refused."""
+        try:
+            self._thread.submit(self._service.close).result()
+        finally:
+            self._thread.shutdown()
 
 
 @dataclass(frozen=True, slots=True)
 class ServerState:
-    service: CapabilityService
+    index: IndexThread
     token: bytes
     hosts: frozenset[str]
+    #: The exported explorer this server also sends, resolved; ``None`` serves ``/v1`` only.
+    explorer: Path | None = None
 
 
 class _Refusal(Exception):
@@ -265,7 +326,10 @@ def respond(
     headers: Headers,
     read: Callable[[int], bytes],
 ) -> Answer:
-    """One request, answered by one capability call or by one refusal."""
+    """One request, answered by one capability call, one explorer file, or one refusal."""
+    path = target.split("?", 1)[0]
+    if state.explorer is not None and path != PREFIX and not path.startswith(f"{PREFIX}/"):
+        return _explorer(state, state.explorer, method, path, headers, read)
     try:
         endpoint = _admit(state, method, target, headers)
         if endpoint is None:
@@ -274,6 +338,10 @@ def respond(
         arguments = _arguments(headers, read)
     except _Refusal as refusal:
         return _failure(refusal.status, refusal.error, refusal.headers)
+    return _call(state, endpoint, arguments)
+
+
+def _call(state: ServerState, endpoint: Endpoint, arguments: dict[str, Any]) -> Answer:
     try:
         request = endpoint.request.model_validate(arguments)
     except ValidationError as exc:
@@ -282,7 +350,7 @@ def respond(
         # The arguments reach the capability exactly as they arrived: an
         # investigation_id is the caller's, and nothing here starts, ends or
         # rewrites one.
-        payload = present(request, getattr(state.service, endpoint.capability)(request))
+        payload = state.index.call(endpoint, request)
     except Exception as exc:  # every refusal crosses the wire as data, never as a raise
         error = capability_error(exc)
         return _failure(STATUS_BY_CATEGORY[error.category], error)
@@ -296,13 +364,7 @@ def _admit(state: ServerState, method: str, target: str, headers: Headers) -> En
     server's own name learns nothing, and one without the token cannot tell a
     served path from an unserved one.
     """
-    host = (headers.get("Host") or "").strip().lower()
-    if host not in state.hosts:
-        raise _Refusal(
-            403,
-            "HOST_NOT_ALLOWED",
-            "the Host header does not name this server's loopback address",
-        )
+    _host(state, headers)
     if not _authorized(state.token, headers.get("Authorization")):
         raise _Refusal(
             401,
@@ -325,6 +387,18 @@ def _admit(state: ServerState, method: str, target: str, headers: Headers) -> En
     if method != "POST":
         raise _method_not_allowed("POST")
     return endpoint
+
+
+def _host(state: ServerState, headers: Headers) -> str:
+    """The Host header, when it names this server's loopback address, lowercased."""
+    host = (headers.get("Host") or "").strip().lower()
+    if host not in state.hosts:
+        raise _Refusal(
+            403,
+            "HOST_NOT_ALLOWED",
+            "the Host header does not name this server's loopback address",
+        )
+    return host
 
 
 def _authorized(token: bytes, header: str | None) -> bool:
@@ -401,6 +475,125 @@ def _failure(
 
 
 # ---------------------------------------------------------------------------
+# The explorer, when this server sends it
+# ---------------------------------------------------------------------------
+
+#: What the frontend's own server sends with every answer (``frontend/next.config.ts``).
+_EXPLORER_HEADERS = (("X-Frame-Options", "DENY"), ("Referrer-Policy", "no-referrer"))
+#: The file types an exported explorer holds. Anything else is sent as bytes.
+_MEDIA = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    # A page's React Server Components payload, which Next's export reads as text.
+    ".txt": "text/plain; charset=utf-8",
+    ".json": "application/json",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+}
+#: Next names every file under ``/_next/static/`` after its content.
+_IMMUTABLE = "public, max-age=31536000, immutable"
+_SAME_SITE = frozenset({"same-origin", "none"})
+
+
+def _explorer(
+    state: ServerState,
+    explorer: Path,
+    method: str,
+    path: str,
+    headers: Headers,
+    read: Callable[[int], bytes],
+) -> Answer:
+    """One explorer file, or one call through the explorer's door to the API.
+
+    The door is the API without the token, so it answers only what a page sent
+    from here could send: this server's loopback Host (a rebound DNS name arrives
+    with the attacker's), no cross-site request, a JSON body, an endpoint the
+    contract lists. These are the frontend server's checks, with its refusals.
+    """
+    try:
+        host = _host(state, headers)
+        if path.startswith(EXPLORER_API):
+            endpoint = _door(method, path, headers, host)
+            answer = _call(state, endpoint, _arguments(headers, read))
+        elif method in ("GET", "HEAD"):
+            answer = _page(explorer, path)
+        else:
+            raise _method_not_allowed("GET, HEAD")
+    except _Refusal as refusal:
+        answer = _failure(refusal.status, refusal.error, refusal.headers)
+    return replace(answer, headers=answer.headers + _EXPLORER_HEADERS)
+
+
+def _door(method: str, path: str, headers: Headers, host: str) -> Endpoint:
+    if method != "POST":
+        raise _method_not_allowed("POST")
+    site = headers.get("Sec-Fetch-Site")
+    origin = headers.get("Origin")
+    if (site is not None and site not in _SAME_SITE) or (
+        origin is not None and origin.strip().lower() != f"http://{host}"
+    ):
+        raise _Refusal(
+            403,
+            "CROSS_SITE_REQUEST",
+            "the explorer answers only its own pages, and this request came from another site",
+        )
+    endpoint = ENDPOINTS_BY_PATH.get(f"{PREFIX}/{path.removeprefix(EXPLORER_API)}")
+    if endpoint is None:
+        raise _Refusal(
+            404,
+            "UNKNOWN_ENDPOINT",
+            "no such endpoint",
+            context={"available": [e.name for e in ENDPOINTS]},
+        )
+    return endpoint
+
+
+def _page(explorer: Path, path: str) -> Answer:
+    """The file ``path`` names in the export, or the export's own 404 page."""
+    found = _file(explorer, path)
+    if found is not None:
+        cache = _IMMUTABLE if path.startswith("/_next/static/") else "no-cache"
+        media = _MEDIA.get(found.suffix, "application/octet-stream")
+        return Answer(200, {}, page=Page(found.read_bytes(), media, cache))
+    missing = explorer / "404.html"
+    if missing.is_file():
+        return Answer(404, {}, page=Page(missing.read_bytes(), _MEDIA[".html"], "no-cache"))
+    raise _Refusal(404, "NOT_FOUND", "the explorer has no such file")
+
+
+def _file(explorer: Path, path: str) -> Path | None:
+    """A file under ``explorer`` and nowhere else, as an export lays its pages out.
+
+    A segment that could step anywhere (``..``, ``.``, empty, a backslash, NUL) is
+    refused before the disk is asked, and what is found must still lie inside
+    once links are resolved. ``/`` and a directory mean its ``index.html``; a
+    name with no suffix means its ``.html`` page, as ``/_not-found`` does.
+    """
+    relative = unquote(path).removeprefix("/")
+    if relative == "" or relative.endswith("/"):
+        relative += "index.html"
+    parts = relative.split("/")
+    if not path.startswith("/") or any(
+        part in ("", ".", "..") or "\\" in part or "\0" in part for part in parts
+    ):
+        return None
+    candidate = explorer.joinpath(*parts)
+    if candidate.is_dir():
+        candidate /= "index.html"
+    elif not candidate.suffix and not candidate.exists():
+        candidate = candidate.with_name(f"{candidate.name}.html")
+    try:
+        found = candidate.resolve(strict=True)
+    except OSError:
+        return None
+    return found if found.is_relative_to(explorer) and found.is_file() else None
+
+
+# ---------------------------------------------------------------------------
 # The server
 # ---------------------------------------------------------------------------
 
@@ -430,11 +623,15 @@ class _Handler(BaseHTTPRequestHandler):
         """Silent: requests carry repository text, and the operator's terminal is not a log."""
 
     def _write(self, answer: Answer) -> None:
-        body = json.dumps(answer.payload, separators=(",", ":"), ensure_ascii=False).encode()
+        if answer.page is None:
+            body = json.dumps(answer.payload, separators=(",", ":"), ensure_ascii=False).encode()
+            media, cache = "application/json; charset=utf-8", "no-store"
+        else:
+            body, media, cache = answer.page.content, answer.page.media, answer.page.cache
         self.send_response(answer.status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", media)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         self.send_header("X-Content-Type-Options", "nosniff")
         for name, value in answer.headers:
             self.send_header(name, value)
@@ -443,8 +640,14 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
 
-class _Server(HTTPServer):
+class _Server(socketserver.ThreadingMixIn, HTTPServer):
+    """Each connection read on its own thread; every capability call on the index's."""
+
     state: ServerState
+    #: A connection still open at shutdown is the client's to lose, not a reason to wait.
+    daemon_threads = True
+    #: A page asks for its scripts, styles and fonts at once.
+    request_queue_size = 64
 
     def __init__(self, address: tuple[str, int], family: socket.AddressFamily) -> None:
         self.address_family = family
@@ -557,19 +760,27 @@ def serve(
     connection_file: Path | None = None,
     ready: Callable[[Serving], None] | None = None,
     environ: Mapping[str, str] | None = None,
+    explorer: Path | None = None,
 ) -> None:
     """Serve the capabilities on loopback until stopped, then clean up once.
 
     Everything that could refuse to start is checked before anything is opened:
-    the host, then the token. The port is bound before the index is opened, so a
-    taken port touches nothing. The service is opened on this thread and every
-    request is answered on it. On the way out, in reverse: SIGTERM restored, the
-    connection file removed if it is still ours, the service closed, the socket
-    closed.
+    the host, the token, then the explorer when one is to be sent. The port is
+    bound before the index is opened, so a taken port touches nothing. The
+    service is opened on the index's thread and every capability call runs there.
+    On the way out, in reverse: SIGTERM restored, the connection file removed if
+    it is still ours, the service closed, the socket closed.
     """
     environment = os.environ if environ is None else environ
     address = loopback_address(host)
     secret = checked_token(token) if token is not None else resolve_token(environment)
+    if explorer is not None:
+        explorer = explorer.resolve()
+        if not (explorer / "index.html").is_file():
+            raise ApiConfigurationError(
+                f"{explorer} is not an exported explorer: it has no index.html",
+                detail="Build one with `pnpm build:static` in frontend/; it is written to out/.",
+            )
     resolved = settings if settings is not None else load_settings()
     target = connection_file or connection_file_path(resolved, environment)
     family = socket.AF_INET6 if ":" in address else socket.AF_INET
@@ -582,13 +793,14 @@ def serve(
                 f"cannot listen on {host} port {port}", detail=str(exc)
             ) from exc
         cleanup.callback(server.server_close)
-        service = CapabilityService.open(settings=resolved, require_root=False)
-        cleanup.callback(service.close)
+        index = IndexThread(resolved)
+        cleanup.callback(index.close)
         bound = server.server_port
         server.state = ServerState(
-            service=service,
+            index=index,
             token=secret.encode("ascii"),
             hosts=frozenset({f"127.0.0.1:{bound}", f"localhost:{bound}", f"[::1]:{bound}"}),
+            explorer=explorer,
         )
         authority = f"[{address}]" if family is socket.AF_INET6 else address
         url = f"http://{authority}:{bound}"

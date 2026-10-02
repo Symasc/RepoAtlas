@@ -81,22 +81,43 @@ reason to look, not a verdict that something will break.
 
 ## Install
 
-You need `git` and [uv](https://docs.astral.sh/uv/); the installer offers to install uv, and uv brings Python
-3.13. The graph explorer also needs Node.js 22 or later.
+From PyPI. You need `git` and [uv](https://docs.astral.sh/uv/), which brings its own Python 3.13 and keeps
+RepoAtlas in an environment of its own, apart from your projects' environments:
 
 ```bash
-git clone <this repository> RepoAtlas && cd RepoAtlas
+uv tool install symasc-repoatlas
+claude mcp add --scope user repoatlas -- repoatlas mcp   # connect Claude Code
+repoatlas init                                           # index every Git repository under your home directory
+```
+
+The package is `symasc-repoatlas`; the command is `repoatlas`. It is not affiliated with the `repoatlas` package
+on PyPI or with repoatlas.com. Update with `uv tool upgrade symasc-repoatlas`.
+
+The five agent skills ship inside the package. To give them to Claude Code:
+
+```bash
+mkdir -p ~/.claude/skills
+cp -r "$(uv tool dir)"/symasc-repoatlas/lib/python3*/site-packages/repoatlas/skills/repoatlas-* ~/.claude/skills/
+```
+
+The graph explorer comes in the package too: `repoatlas ui` opens it, with nothing else to install.
+
+To work on RepoAtlas itself, install from a checkout instead. Building the explorer from source there needs
+Node.js 22 or later:
+
+```bash
+git clone https://github.com/Symasc/RepoAtlas && cd RepoAtlas
 ./install.sh --root ~/work/repos     # install, then index every Git repository under ~/work/repos
 ```
 
 The installer puts `repoatlas` on your PATH, installs and builds the explorer, registers the MCP server with
 Claude Code and links the five skills. It skips any step that is already done, so after a `git pull` you can run
 it again to update. What each step does, how to do them by hand and how to connect another agent are in
-[`docs/installation.md`](docs/installation.md).
+[`docs/installation.md`](https://github.com/Symasc/RepoAtlas/blob/master/docs/installation.md).
 
-RepoAtlas serves its tools to an agent over the Model Context Protocol on stdio, with `repoatlas mcp`. The
-installer registers that command for Claude Code; for any other client, register the absolute path to
-`.venv/bin/repoatlas` with the argument `mcp`. [`docs/agent-integration.md`](docs/agent-integration.md) covers
+RepoAtlas serves its tools to an agent over the Model Context Protocol on stdio, with `repoatlas mcp`. For any
+other client, register the `repoatlas` command (from a checkout, the absolute path to `.venv/bin/repoatlas`) with
+the argument `mcp`. [`docs/agent-integration.md`](https://github.com/Symasc/RepoAtlas/blob/master/docs/agent-integration.md) covers
 what the agent gets.
 
 The index does not refresh itself. After you change code, run `repoatlas sync`.
@@ -107,14 +128,14 @@ The MCP server exposes ten tools. Five skills teach an agent which tools to use 
 
 | Skill | For |
 |---|---|
-| [`repoatlas-change-impact`](skills/repoatlas-change-impact/SKILL.md) | what a proposed change may affect |
-| [`repoatlas-code-trace`](skills/repoatlas-code-trace/SKILL.md) | where something is defined, what calls or uses it, and how code connects across files, services and repositories |
-| [`repoatlas-dependencies`](skills/repoatlas-dependencies/SKILL.md) | which packages are declared, resolved and provided, and by whom |
-| [`repoatlas-http`](skills/repoatlas-http/SKILL.md) | which code calls a route, and what serves it |
-| [`repoatlas-index`](skills/repoatlas-index/SKILL.md) | what is indexed, how current it is, and updating it |
+| [`repoatlas-change-impact`](https://github.com/Symasc/RepoAtlas/blob/master/skills/repoatlas-change-impact/SKILL.md) | what a proposed change may affect |
+| [`repoatlas-code-trace`](https://github.com/Symasc/RepoAtlas/blob/master/skills/repoatlas-code-trace/SKILL.md) | where something is defined, what calls or uses it, and how code connects across files, services and repositories |
+| [`repoatlas-dependencies`](https://github.com/Symasc/RepoAtlas/blob/master/skills/repoatlas-dependencies/SKILL.md) | which packages are declared, resolved and provided, and by whom |
+| [`repoatlas-http`](https://github.com/Symasc/RepoAtlas/blob/master/skills/repoatlas-http/SKILL.md) | which code calls a route, and what serves it |
+| [`repoatlas-index`](https://github.com/Symasc/RepoAtlas/blob/master/skills/repoatlas-index/SKILL.md) | what is indexed, how current it is, and updating it |
 
 The skills are vendor-neutral and ship inside the installed package. The detailed contract they share is
-[`skills/repoatlas-code-trace/references/contracts.md`](skills/repoatlas-code-trace/references/contracts.md).
+[`skills/repoatlas-code-trace/references/contracts.md`](https://github.com/Symasc/RepoAtlas/blob/master/skills/repoatlas-code-trace/references/contracts.md).
 
 ## The graph explorer
 
@@ -126,11 +147,12 @@ This opens a local web app in your browser that draws the index. It shows the re
 them, then directories, files and the names declared in them. A file opens on its code. Select a name to trace
 everything connected to it, or a directory to see what a change there may reach.
 
-`repoatlas ui` starts two things and stops both on Ctrl-C: the local API, on a free loopback port, and the
-explorer's server, at <http://127.0.0.1:7318>. The first run installs the explorer's packages and builds it, and
-later runs rebuild it only when its sources change. Options: `--port`, `--no-open`, `--dev` (hot reload, for
-working on the explorer) and `--rebuild`. The MCP server knows nothing of it: the explorer is for you, and the
-tools are for the agent. See [`frontend/README.md`](frontend/README.md).
+`repoatlas ui` serves the explorer at <http://127.0.0.1:7318> and stops on Ctrl-C. An installed release carries
+the explorer already built, and the local API serves it, so there is no Node.js and no second server. From a
+checkout, it runs the explorer's own server beside the local API instead: the first run installs the explorer's
+packages and builds it, and later runs rebuild it only when its sources change. Options: `--port`, `--no-open`,
+and in a checkout `--dev` (hot reload, for working on the explorer) and `--rebuild`. The MCP server knows
+nothing of it: the explorer is for you, and the tools are for the agent. See [`frontend/README.md`](https://github.com/Symasc/RepoAtlas/blob/master/frontend/README.md).
 
 ## Command line
 
@@ -148,7 +170,8 @@ repoatlas serve                    # the local HTTP API alone (see docs/local-ap
 ```
 
 Inside a repository, `sync` and `status` apply to that repository; at the configured root, they apply to all of
-them. From anywhere else, name the repository: `repoatlas sync service-a`. The commands that report accept
+them. From anywhere else, `sync` updates every repository and `status` asks you to name one:
+`repoatlas status service-a`. The commands that report accept
 `--json`.
 
 On a terminal, `init` and `sync` show how far they have got:
@@ -177,7 +200,7 @@ and uses it from then on. Until you run it, semantic retrieval is off and nothin
 
 Across repositories, RepoAtlas links code through the packages one repository provides and another declares,
 and through HTTP where a service's own source states where it is published. What each extractor reads, and what
-it does not, is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+it does not, is in [`docs/ARCHITECTURE.md`](https://github.com/Symasc/RepoAtlas/blob/master/docs/ARCHITECTURE.md).
 
 ## Safety
 
@@ -186,11 +209,13 @@ it does not, is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 - Secret files (`.env`, `*.pem`, `*.key`, `id_rsa`, `id_ed25519`) are excluded before any content is read.
 - Installation is the only step that downloads anything. The parser grammars are pinned, hash-verified package
   dependencies, so indexing needs no network. Their licenses are in
-  [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+  [`THIRD_PARTY_NOTICES.md`](https://github.com/Symasc/RepoAtlas/blob/master/THIRD_PARTY_NOTICES.md).
 - `repoatlas sync` changes the index only, never your source, and nothing syncs on its own.
-- `repoatlas ui` runs Node.js on RepoAtlas's own explorer, never on repository code. Both of its servers listen
-  on loopback only, the explorer's telemetry is off, and the API's token reaches the explorer through a file only
-  you can read, never through its arguments or environment.
+- `repoatlas ui` never runs repository code. An installed release runs no Node.js at all; from a checkout it
+  runs Node.js on RepoAtlas's own explorer, with its telemetry off. It listens on loopback only and answers the
+  explorer's calls only from the explorer's own pages. The browser never holds the API's token, and in a
+  checkout the token reaches the explorer's server through a file only you can read, never through its arguments
+  or environment.
 
 ## Docker
 
@@ -205,14 +230,15 @@ the explorer.
 
 ## Documentation
 
-- [`docs/installation.md`](docs/installation.md): installing, updating, uninstalling and troubleshooting
-- [`docs/agent-integration.md`](docs/agent-integration.md): connecting an agent over MCP
-- [`skills/`](skills/): the agent skills
-- [`frontend/README.md`](frontend/README.md): the graph explorer
-- [`docs/local-api.md`](docs/local-api.md): the loopback HTTP API the explorer reads
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): how RepoAtlas is built
-- [`docs/agent-efficiency.md`](docs/agent-efficiency.md): request changes and their evaluation
-- [`docs/V1_SPEC.md`](docs/V1_SPEC.md): the original specification, kept as the record of V1
+- [`docs/installation.md`](https://github.com/Symasc/RepoAtlas/blob/master/docs/installation.md): installing, updating, uninstalling and troubleshooting
+- [`docs/agent-integration.md`](https://github.com/Symasc/RepoAtlas/blob/master/docs/agent-integration.md): connecting an agent over MCP
+- [`skills/`](https://github.com/Symasc/RepoAtlas/blob/master/skills/): the agent skills
+- [`frontend/README.md`](https://github.com/Symasc/RepoAtlas/blob/master/frontend/README.md): the graph explorer
+- [`docs/local-api.md`](https://github.com/Symasc/RepoAtlas/blob/master/docs/local-api.md): the loopback HTTP API the explorer reads
+- [`docs/ARCHITECTURE.md`](https://github.com/Symasc/RepoAtlas/blob/master/docs/ARCHITECTURE.md): how RepoAtlas is built
+- [`docs/agent-efficiency.md`](https://github.com/Symasc/RepoAtlas/blob/master/docs/agent-efficiency.md): request changes and their evaluation
+- [`docs/releasing.md`](https://github.com/Symasc/RepoAtlas/blob/master/docs/releasing.md): publishing a release to PyPI from a version tag
+- [`docs/V1_SPEC.md`](https://github.com/Symasc/RepoAtlas/blob/master/docs/V1_SPEC.md): the original specification, kept as the record of V1
 
 ## Development
 
@@ -226,5 +252,5 @@ uv run pyright
 ```
 
 The explorer has its own checks (`cd frontend && pnpm check`, and `pnpm e2e` against a real API); see
-[`frontend/README.md`](frontend/README.md#checks). For working on it, `repoatlas ui --dev` runs its development
+[`frontend/README.md`](https://github.com/Symasc/RepoAtlas/blob/master/frontend/README.md#checks). For working on it, `repoatlas ui --dev` runs its development
 server against the live index, with hot reload.

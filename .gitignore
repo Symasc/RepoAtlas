@@ -30,6 +30,8 @@ frontend/.next/
 frontend/.next-e2e/
 frontend/.next-ui/
 frontend/out/
+# The export staged into the package by a release build (see pyproject.toml).
+repoatlas/ui/explorer/
 frontend/next-env.d.ts
 frontend/*.tsbuildinfo
 frontend/.env*.local
@@ -38,3 +40,6 @@ frontend/playwright-report/
 
 # Playwright MCP output
 .playwright-mcp/
+
+# A developer's own Claude Code settings (settings.local.json is personal by design)
+.claude/settings.local.json
