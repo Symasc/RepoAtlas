@@ -11,6 +11,14 @@ apart, because answering one is not answering another:
 * **ownership** — which service owns the data behind a route. Nothing static
   establishes it, and nothing here claims it.
 
+A caller row's **crossings** are a fourth thing, apart from its status: the workspace
+join's stored decisions for the request (``http_call_decisions``), each with the chain
+of hops it rests on. A ``linked`` crossing says the source proves a deployment identity
+from the request's origin to one handler; it does not say the request is sent, or that
+the deployment runs. Under repository scope, what another repository proves is
+withheld unless ``cross_repository`` asks for it, and its lines are evidence only under
+global scope.
+
 Every status describes **indexed static facts in this repository**. A caller with
 ``no_indexed_handler`` is not a caller whose backend has no implementation: the
 handler may be in another repository, in syntax RepoAtlas does not extract, behind
@@ -84,6 +92,27 @@ class OperationStatus(enum.StrEnum):
     DECLARED = "declared"
 
 
+class CrossingStatus(enum.StrEnum):
+    """The workspace join's decision for one request, as the global link pass stored it."""
+
+    #: Every hop proven, to exactly one handler.
+    LINKED = "linked"
+    #: Two handlers, two identities, or a rival identity or pattern fit the origin.
+    PROVIDER_AMBIGUOUS = "http-provider-ambiguous"
+    #: A deployment resolves the origin's identity, and the identity reaches no code.
+    DEPLOYMENT_SOURCE_UNRESOLVED = "http-deployment-source-unresolved"
+    #: The origin fits an Ingress host no locally established deployment resolves.
+    DEPLOYMENT_BINDING_UNRESOLVED = "http-deployment-binding-unresolved"
+    #: The service is published; the operation is not.
+    ROUTE_UNMATCHED = "http-route-unmatched"
+    #: No identity, pattern or published service has the origin.
+    SERVICE_UNMATCHED = "http-service-unmatched"
+    #: The path is read, the host is not: counted and listed, never joined.
+    BASE_UNKNOWN = "http-base-unknown"
+    #: The request is not read.
+    CLAIM_UNREAD = "http-claim-unread"
+
+
 class HttpOperationsRequest(BaseModel):
     """List the HTTP operations one repository's indexed source makes or serves."""
 
@@ -94,8 +123,9 @@ class HttpOperationsRequest(BaseModel):
         default=False,
         description="With global scope and a non-root route_prefix, discover "
         "compatible operations across repositories. Rows retain repository-local "
-        "statuses and source identity; compatibility does not prove deployment "
-        "identity or a runtime dependency. Results are paginated.",
+        "statuses and source identity; compatibility does not prove a deployment "
+        "identity or a runtime dependency, which only a row's crossings state. "
+        "Results are paginated.",
     )
     role: OperationRole = Field(
         default=OperationRole.BOTH,
@@ -122,6 +152,19 @@ class HttpOperationsRequest(BaseModel):
     )
     status: tuple[OperationStatus, ...] = Field(
         default=(), description="Return only these statuses. Empty means every status."
+    )
+    crossing: tuple[CrossingStatus, ...] = Field(
+        default=(),
+        description="Return only callers with a crossing of these decisions, and of each "
+        "only those crossings. `http-base-unknown` lists the requests whose host the source "
+        "does not state. Empty means every row and every crossing.",
+    )
+    cross_repository: bool = Field(
+        default=False,
+        description="Under repository scope, show what another repository proves in each "
+        "crossing: its repository, path and lines, the handler and the provider. Off, they "
+        "are withheld and each hop keeps its status. Lines in another repository are "
+        "supplied as evidence only under global scope.",
     )
     limit: int | None = Field(default=None, gt=0)
     #: Opaque continuation from a previous page. Never constructed by a caller.
@@ -192,6 +235,13 @@ class HttpOperationsRequest(BaseModel):
             raise ValueError("status must name each status at most once")
         return value
 
+    @field_validator("crossing")
+    @classmethod
+    def _each_crossing_once(cls, value: tuple[CrossingStatus, ...]) -> tuple[CrossingStatus, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("crossing must name each decision at most once")
+        return value
+
     @field_validator("cursor")
     @classmethod
     def _cursor_is_not_blank(cls, value: str | None) -> str | None:
@@ -243,6 +293,80 @@ class DeclaredMatch(BaseModel):
         return _lean(handler(self), frozenset({"route", "entity"}))
 
 
+class HopPlace(BaseModel):
+    """One place the source proves a hop: lines of a file, or a whole file."""
+
+    model_config = ConfigDict(frozen=True)
+
+    repository: str
+    path: str
+    #: ``None`` for a hop a file proves as a whole; such a place is never evidence.
+    line_start: int | None = None
+    line_end: int | None = None
+    #: What the place is, as the join names it (``called_at``, ``identity_in``, …).
+    role: str
+    evidence_id: EvidenceId | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        return _lean(handler(self), frozenset({"repository", "path", "role"}))
+
+
+class CrossingHop(BaseModel):
+    """One hop of a crossing's chain: caller, origin, service identity, deployment
+    binding, source binding, route, handler — in that order."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: str
+    #: ``proven``, ``unresolved``, ``ambiguous`` or ``not_reached``. A hop not reached
+    #: cites nothing.
+    status: str
+    provenance: tuple[HopPlace, ...] = ()
+    #: A stable reason code, for an unresolved or ambiguous hop, and its text.
+    reason: str = ""
+    note: str = ""
+    #: What the source says at this hop: a deployment, a pattern, the unresolved values.
+    detail: str = ""
+    #: The handler's entity key, on a proven handler hop.
+    handler: str | None = None
+    #: Something another repository proves here is not shown under this scope.
+    withheld: bool = False
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        return _lean(handler(self), frozenset({"kind", "status"}))
+
+
+class HttpCrossing(BaseModel):
+    """The workspace join's stored decision for one request this row makes.
+
+    One per request: a request whose base is a literal alternative, or that an injected
+    transport makes from several roots, has one crossing each, none overwriting another.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: Opaque and deterministic; the same request has the same ref after any sync.
+    decision_ref: str
+    status: CrossingStatus
+    method: str
+    #: The request as the join read it, origin included when stated.
+    url: str
+    #: ``alternative:<line>`` or ``root:<options>|<base>``; empty for a plain request.
+    variant: str = ""
+    chain: tuple[CrossingHop, ...] = ()
+    #: A link's handler entity and provider repository, when this scope shows them.
+    handler: str | None = None
+    provider: str | None = None
+    #: A link's shared endpoint node: in every scope, the way to continue from it.
+    endpoint: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        return _lean(handler(self), frozenset({"decision_ref", "status", "chain"}))
+
+
 class HttpOperation(BaseModel):
     """One request the source makes or one route it serves or declares."""
 
@@ -282,10 +406,29 @@ class HttpOperation(BaseModel):
     #: parameter spelling. Its evidence shows the lines as written, not those parts.
     composed: bool = False
     evidence_id: EvidenceId | None = None
+    #: The workspace join's decisions for the requests this caller row makes, by
+    #: ``decision_ref``. Its ``status`` is unchanged by them.
+    crossings: tuple[HttpCrossing, ...] = ()
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         return _lean(handler(self), frozenset({"role", "status", "route"}))
+
+
+class CrossingBasis(BaseModel):
+    """What every crossing rests on, and how much of another repository this answer shows."""
+
+    model_config = ConfigDict(frozen=True)
+
+    #: Read from the decisions the last global link pass stored, never recomputed here.
+    source: Literal["stored_link_pass"] = "stored_link_pass"
+    #: Whether any global link pass has stored decisions in this index.
+    built: bool
+    establishes: tuple[str, ...] = ("source_backed_deployment_identity_chain",)
+    does_not_establish: tuple[str, ...] = ("runtime_reachability", "deployment_runs")
+    #: ``own_repository``: another repository's places, handler and provider withheld;
+    #: ``cross_repository``: shown, its lines never evidence; ``global``: everything.
+    projection: Literal["own_repository", "cross_repository", "global"]
 
 
 class OperationBasis(BaseModel):
@@ -300,11 +443,8 @@ class OperationBasis(BaseModel):
     #: repository's index, never source-wide absence.
     negative_statuses: Literal["indexed_absence_only"] = "indexed_absence_only"
     establishes: tuple[str, ...] = ("route_compatibility",)
-    does_not_establish: tuple[str, ...] = (
-        "service_configuration",
-        "deployment_identity",
-        "data_ownership",
-    )
+    does_not_establish: tuple[str, ...] = ("service_configuration", "data_ownership")
+    crossings: CrossingBasis
 
 
 class DiscoveryBasis(BaseModel):
@@ -323,9 +463,9 @@ class DiscoveryBasis(BaseModel):
     does_not_establish: tuple[str, ...] = (
         "runtime_dependency",
         "service_configuration",
-        "deployment_identity",
         "data_ownership",
     )
+    crossings: CrossingBasis
 
 
 class OperationSummary(BaseModel):
@@ -336,6 +476,8 @@ class OperationSummary(BaseModel):
     total: int = 0
     by_status: dict[str, int] = Field(default_factory=dict)
     by_role: dict[str, int] = Field(default_factory=dict)
+    #: Crossings by decision, over the same rows.
+    by_crossing: dict[str, int] = Field(default_factory=dict)
 
 
 class CoverageLimitation(BaseModel):

@@ -270,11 +270,8 @@ def test_the_basis_block_states_the_reading_every_status_rests_on(
     assert (basis.extraction, basis.scope, basis.repository) == ("static", "repository", COURSES)
     assert basis.negative_statuses == "indexed_absence_only"
     assert basis.establishes == ("route_compatibility",)
-    assert basis.does_not_establish == (
-        "service_configuration",
-        "deployment_identity",
-        "data_ownership",
-    )
+    # A deployment identity is a crossing's to state, never a status's.
+    assert basis.does_not_establish == ("service_configuration", "data_ownership")
 
 
 def test_a_call_whose_shape_is_served_here_is_matched_and_names_what_it_reaches(

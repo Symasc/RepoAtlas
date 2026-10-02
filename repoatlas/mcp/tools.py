@@ -192,11 +192,15 @@ HTTP_OPERATIONS = ToolSpec(
         "only: no_indexed_handler and no_indexed_caller are not proof that no "
         "implementation or caller exists, and other repositories, unsupported syntax, "
         "unproven mounts and unrecorded constructs are reported under coverage. A "
-        "route match shows route compatibility only, never service configuration, "
-        "deployment identity or data ownership. Reads the local index; paged, with "
-        "optional evidence. For workspace discovery, use global scope, discover true "
-        "and a non-root route_prefix. Rows retain source repository identity and local "
-        "statuses; compatible candidates do not establish runtime dependencies."
+        "route match shows route compatibility only, never service configuration or "
+        "data ownership. A caller's crossings are the workspace join's stored "
+        "decisions, each with the source-backed chain from its origin to a deployment "
+        "and a handler, or the hop that failed; filter them with crossing. Another "
+        "repository's part of a chain is withheld unless cross_repository is true. "
+        "Reads the local index; paged, with optional evidence. For workspace "
+        "discovery, use global scope, discover true and a non-root route_prefix. Rows "
+        "retain source repository identity and local statuses; compatible candidates "
+        "do not establish runtime dependencies."
     ),
     request=HttpOperationsRequest,
     capability="http_operations",

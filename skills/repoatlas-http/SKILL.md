@@ -13,7 +13,7 @@ description: Use for HTTP API questions across RepoAtlas-indexed repositories, i
 |---|---|---|
 | Route compatibility | method and path shape agree (`matched`, or a shared `http-route:` node) | which host, deployment or service a caller reaches |
 | Shared declared endpoint | both sides statically name one method and full URL (`http-endpoint:`) | that the deployment is live or current |
-| Source-backed handler link | `CALLS_HTTP_HANDLER`: the service's own source publishes its host, the request names the same origin, method and route, and exactly one handler agrees | that the request is sent at run time or reaches that deployment |
+| Source-backed handler link | `CALLS_HTTP_HANDLER`, a caller's `linked` crossing: the source states a deployment identity for the request's origin (a published host, a compose service, a Helm Service) tied to code, and exactly one handler serves its method and route | that the request is sent at run time or reaches that deployment |
 
 None of these proves runtime reachability. Do not invent a deployment, a public host or an owner that the source does not state.
 
@@ -33,6 +33,12 @@ None of these proves runtime reachability. Do not invent a deployment, a public 
 - `called` / `no_indexed_caller` apply the same rule on the provider side. `declared` means no proven application mounts the route.
 - A literal never matches a parameter: `/users/42` selects neither `/users/{id}` nor `/users/${id}`.
 - Several providers for one route are all candidates. Name them all.
+
+## Reading crossings
+
+- A caller's `crossings` are the workspace join's decisions, one per request (each literal alternative and injected root has its own), with a chain `caller → origin → service_identity → deployment_binding → source_binding → route → handler`. The first hop that is not `proven` says where and why it stopped; `not_reached` hops cite nothing.
+- `crossing: ["http-base-unknown"]` lists requests whose host the source does not state. A `join_only` row is a request only the join reads; its status is not a route match.
+- Under repository scope another repository's hops are `withheld`. Pass `cross_repository: true` to see them; their lines are evidence only under global scope.
 
 Stop when each link you report is labelled with its strength and you have read both sides' lines.
 

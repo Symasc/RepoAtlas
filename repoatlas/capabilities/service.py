@@ -43,9 +43,9 @@ the wrong place.
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
@@ -227,8 +227,8 @@ from repoatlas.models.dependency_inventory import (
 from repoatlas.models.evidence import EvidenceCandidate, EvidenceSource, EvidenceTier, MatchClass
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
 from repoatlas.models.http_inventory import (
+    CrossingBasis,
     DiscoveryBasis,
-    HttpOperation,
     HttpOperationsRequest,
     HttpOperationsResponse,
     OperationBasis,
@@ -1198,9 +1198,16 @@ class CapabilityService:
         Filters narrow the rows returned, never what is known: the whole repository
         is planned first, so a path filter cannot make a call look unhandled by
         hiding the route it matches.
+
+        A caller row's crossings are the workspace join's decisions, read as the last
+        global link pass stored them, since the join needs every repository. Under
+        repository scope, what another repository proves in them is withheld unless
+        ``cross_repository`` asks for it, and is never supplied as evidence outside
+        global scope.
         """
         with self._operation():
             registered = self._workspace.repositories.list_all()
+            slugs = {repo.id: repo.slug for repo in registered if repo.id is not None}
             # Before any investigation exists, so a rejected context or a
             # malformed request leaves no session behind.
             resolution = resolve_context(request.context, registered)
@@ -1239,10 +1246,11 @@ class CapabilityService:
                     ):
                         raise FileNotIndexedError("no indexed file stands at or beneath that path")
                     if repository is not None:
-                        inventory = self._http_inventory(repository)
+                        inventory = self._http_inventory(repository, slugs)
                     else:
                         inventories = [
-                            (repo, self._http_inventory(repo)) for repo in resolution.repositories
+                            (repo, self._http_inventory(repo, slugs))
+                            for repo in resolution.repositories
                         ]
                         inventory = http_inventory.Inventory(
                             drafts=[
@@ -1262,6 +1270,7 @@ class CapabilityService:
                                 for path, parser in local.parsers.items()
                             },
                             stale_graph=any(local.stale_graph for _, local in inventories),
+                            crossings_built=self._workspace.knowledge.http_call_decisions_built(),
                         )
                     chosen = http_inventory.selected(inventory.drafts, request, prefix)
                     page = http_inventory.cut_page(
@@ -1273,22 +1282,29 @@ class CapabilityService:
                         inventory=http_inventory.inventory_digest(chosen),
                         limits=limits,
                     )
-                    supplies = (
-                        [
-                            supply
-                            for repo in resolution.repositories
-                            for supply in self._http_operation_supplies(
-                                repo,
-                                [
-                                    row
-                                    for row in page.rows
-                                    if (row.repository or repo.slug) == repo.slug
-                                ],
-                            )
-                        ]
-                        if request.include_provenance
-                        else []
+                    home = repository.slug if repository is not None else None
+                    page = replace(
+                        page,
+                        rows=[
+                            http_inventory.project(row, home, request.cross_repository)
+                            for row in page.rows
+                        ],
                     )
+                    supplies: list[ProvenanceSupply] = []
+                    if request.include_provenance:
+                        spans = http_inventory.evidence_spans(
+                            page.rows,
+                            home,
+                            everywhere=resolution.scope is CapabilityScope.GLOBAL,
+                        )
+                        by_slug = {repo.slug: repo for repo in registered}
+                        order = [repo.slug for repo in resolution.repositories]
+                        order += sorted(set(spans) - set(order))
+                        for slug in order:
+                            if slug in spans and slug in by_slug:
+                                supplies.extend(
+                                    self._http_operation_supplies(by_slug[slug], spans[slug])
+                                )
                 # The single atomic point. A capacity refusal raises here having
                 # allocated nothing and strengthened nothing.
                 entries = session.ledger.record([supply.proposed for supply in supplies])
@@ -1302,6 +1318,7 @@ class CapabilityService:
             return self._http_operations_response(
                 request=request,
                 resolution=resolution,
+                registered=registered,
                 session=session,
                 repository=repository,
                 inventory=inventory,
@@ -2311,13 +2328,21 @@ class CapabilityService:
             ledger=session.ledger.summary(),
         )
 
-    def _http_inventory(self, repository: Repository) -> http_inventory.Inventory:
+    def _http_inventory(
+        self, repository: Repository, slugs: Mapping[int, str] | None = None
+    ) -> http_inventory.Inventory:
         """Replan one repository and read what its rows need. Inside the snapshot."""
         assert repository.id is not None
+        if slugs is None:
+            registered = self._workspace.repositories.list_all()
+            slugs = {repo.id: repo.slug for repo in registered if repo.id is not None}
         knowledge = self._workspace.knowledge
         planned = plan_repository_http(knowledge, repository.id)
         edges = knowledge.list_http_edges(repository.id)
+        decisions = knowledge.list_http_call_decisions(repository.id)
         wanted = {claim.src_id for claim in planned.claims}
+        wanted.update(row.src_id for row in decisions)
+        wanted.update(http_inventory.handler_ids(decisions))
         return http_inventory.build_inventory(
             plan=planned.plan,
             claims=planned.claims,
@@ -2326,35 +2351,28 @@ class CapabilityService:
             index=planned.index,
             edges=edges,
             parsers=dict(knowledge.list_file_parsers(repository.id)),
+            joined=decisions,
+            slugs=slugs,
+            crossings_built=knowledge.http_call_decisions_built(),
         )
 
     def _http_operation_supplies(
-        self, repository: Repository, rows: Sequence[HttpOperation]
+        self, repository: Repository, spans: Mapping[tuple[str, int, int], http_inventory.Span]
     ) -> list[ProvenanceSupply]:
-        """Supply each returned row's own lines, whole or not at all.
+        """Supply each span of one repository, whole or not at all.
 
-        The lines where the request is written or the route declared, reconstructed
-        from indexed chunks and never from the working tree, because the row was
-        planned from the indexed snapshot. A span the chunks do not cover in full
-        is not quoted: a prefix of a call could cut off the very path it names.
-        What the lines do not show — a helper default, a prefix, the server's
-        spelling — is not in them, and the row's ``composed`` says so.
+        A row's own lines, where the request is written or the route declared, and
+        the lines a crossing's proven hop cites, reconstructed from indexed chunks and
+        never from the working tree, because the row was planned from the indexed
+        snapshot. A span the chunks do not cover in full is not quoted: a prefix of a
+        call could cut off the very path it names. What the lines do not show — a
+        helper default, a prefix, the server's spelling — is not in them, and the
+        row's ``composed`` says so.
         """
         assert repository.id is not None
         wanted: dict[str, list[tuple[int, int]]] = {}
-        # Which operations each span was supplied for. One span may state two
-        # rows, and grounding later asks what this investigation was shown, not
-        # which row asked for it first.
-        named: dict[tuple[str, int, int], set[str]] = {}
-        for row in rows:
-            if row.path is None or row.line_start is None or row.line_end is None:
-                continue
-            spans = wanted.setdefault(row.path, [])
-            if (row.line_start, row.line_end) not in spans:
-                spans.append((row.line_start, row.line_end))
-            if row.route:
-                operation = f"{row.method} {row.route}" if row.method else row.route
-                named.setdefault((row.path, row.line_start, row.line_end), set()).add(operation)
+        for path, line_start, line_end in spans:
+            wanted.setdefault(path, []).append((line_start, line_end))
         supplies: list[ProvenanceSupply] = []
         states = self._workspace.files.states_for(repository.id, sorted(wanted))
         for path in sorted(wanted):
@@ -2368,6 +2386,11 @@ class CapabilityService:
                 if line_end < line_start or any(n not in available for n in numbers):
                     continue
                 text = LINE_SEPARATOR.join(available[number] for number in numbers)
+                # Which operations the span was supplied for. One span may state two
+                # rows, and grounding later asks what this investigation was shown,
+                # not which row asked for it first.
+                span = spans[(path, line_start, line_end)]
+                written = "HTTP operation as written" if span.written else "HTTP crossing hop"
                 supplies.append(
                     ProvenanceSupply(
                         proposed=ProposedEvidence(
@@ -2387,11 +2410,10 @@ class CapabilityService:
                             match=MatchClass.RELATED,
                             origin=EvidenceSource.HTTP_OPERATION,
                             reason=(
-                                f"HTTP operation as written at "
-                                f"{repository.slug}/{path}:{line_start}-{line_end}"
+                                f"{written} at {repository.slug}/{path}:{line_start}-{line_end}"
                             ),
                             text_length=len(text),
-                            routes=tuple(sorted(named.get((path, line_start, line_end), ()))),
+                            routes=tuple(sorted(span.routes)),
                         ),
                         text=text,
                     )
@@ -2403,6 +2425,7 @@ class CapabilityService:
         *,
         request: HttpOperationsRequest,
         resolution: ContextResolution,
+        registered: Sequence[Repository],
         session: InvestigationSession,
         repository: Repository | None,
         inventory: http_inventory.Inventory,
@@ -2435,31 +2458,31 @@ class CapabilityService:
                     status=entry.status,
                 )
             )
-        rows = [
-            row.model_copy(update={"evidence_id": evidence_id})
-            if row.path is not None
-            and row.line_start is not None
-            and row.line_end is not None
-            and (
-                evidence_id := ids.get(
-                    (
-                        row.repository or (repository.slug if repository else ""),
-                        row.path,
-                        row.line_start,
-                        row.line_end,
-                    )
-                )
-            )
-            else row
-            for row in page.rows
-        ]
+        home = repository.slug if repository else None
+        rows = [http_inventory.with_evidence(row, ids, home) for row in page.rows]
+        # Every repository the answer shows a fact of, not only the one named: a
+        # crossing shown across repositories rests on their index too.
+        drawn = list(resolution.repositories)
+        if request.cross_repository:
+            named = http_inventory.repositories_named(rows) - {repo.slug for repo in drawn}
+            drawn += [repo for repo in registered if repo.slug in named]
         facts = current_facts_version(self._workspace)
         freshness = index_freshness(
             [
                 repository_freshness_for(self._workspace, repo, depth=request.depth, facts=facts)
-                for repo in resolution.repositories
+                for repo in drawn
             ],
             depth=request.depth,
+        )
+        crossings = CrossingBasis(
+            built=inventory.crossings_built,
+            projection=(
+                "global"
+                if resolution.scope is CapabilityScope.GLOBAL
+                else "cross_repository"
+                if request.cross_repository
+                else "own_repository"
+            ),
         )
         return HttpOperationsResponse(
             investigation_id=session.id,
@@ -2471,12 +2494,13 @@ class CapabilityService:
                 reason=resolution.reason,
             ),
             basis=(
-                OperationBasis(repository=repository.slug)
+                OperationBasis(repository=repository.slug, crossings=crossings)
                 if repository
                 else DiscoveryBasis(
                     repositories=tuple(sorted(repo.slug for repo in resolution.repositories)),
                     repositories_examined=len(resolution.repositories),
                     operations_examined=len(inventory.drafts),
+                    crossings=crossings,
                 )
             ),
             summary=http_inventory.summarize(chosen),
