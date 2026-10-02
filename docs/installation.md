@@ -6,13 +6,13 @@ To use RepoAtlas, install the released package, in an environment of its own:
 
 ```bash
 uv tool install symasc-repoatlas
-claude mcp add --scope user repoatlas -- repoatlas mcp
 repoatlas init
 ```
 
 That is everything, the graph explorer included: `repoatlas ui` serves it with no Node.js. Update with
-`uv tool upgrade symasc-repoatlas`. The [README](../README.md#install) shows how to give Claude Code the skills
-from the installed package.
+`uv tool upgrade symasc-repoatlas`. Then connect your agent: RepoAtlas is the stdio MCP server `repoatlas mcp`. The
+[README](../README.md#connect-your-agent) has the command for GitHub Copilot (VS Code and CLI), Claude Code and any
+other MCP client, and where to put the five skills.
 
 ## From a checkout
 
@@ -24,8 +24,8 @@ git clone https://github.com/Symasc/RepoAtlas && cd RepoAtlas
 ./install.sh
 ```
 
-It installs RepoAtlas, puts `repoatlas` on your PATH, sets up the graph explorer, connects Claude Code, and
-offers to index a directory of repositories. Every step is skipped when it is already done, so running it again
+It installs RepoAtlas, puts `repoatlas` on your PATH, sets up the graph explorer, connects Claude Code if it finds
+it, and offers to index a directory of repositories. For any other agent, see [Other agents](#other-agents). Every step is skipped when it is already done, so running it again
 after a `git pull` is how you update.
 
 ## What you need
@@ -95,7 +95,7 @@ repoatlas ui                    # open the graph explorer
 repoatlas sync                  # update the index after you change code (from any directory)
 ```
 
-Restart Claude Code so it starts the MCP server and loads the skills. Then ask it something RepoAtlas answers,
+Restart your agent so it starts the MCP server and loads the skills. Then ask it something RepoAtlas answers,
 such as what a change to a function would affect.
 
 ## Installing by hand
@@ -118,7 +118,14 @@ an alias: it starts the server directly, with no shell. Always register the abso
 ### Other agents
 
 Any MCP client can run the server. Register a stdio server whose command is the absolute path to
-`.venv/bin/repoatlas` and whose single argument is `mcp`. For a client configured with JSON, that is usually:
+`.venv/bin/repoatlas` and whose single argument is `mcp`. For GitHub Copilot:
+
+```bash
+code --add-mcp '{"name":"repoatlas","command":"/absolute/path/to/RepoAtlas/.venv/bin/repoatlas","args":["mcp"]}'  # VS Code
+copilot mcp add repoatlas -- /absolute/path/to/RepoAtlas/.venv/bin/repoatlas mcp                                  # Copilot CLI
+```
+
+For a client configured with JSON, that is usually:
 
 ```json
 {
@@ -131,8 +138,8 @@ Any MCP client can run the server. Register a stdio server whose command is the 
 }
 ```
 
-Then give the agent the five skills in [`skills/`](../skills/), one directory each. See
-[agent integration](agent-integration.md) for what the server offers.
+Then give the agent the five skills in [`skills/`](../skills/), one directory each: GitHub Copilot (VS Code and
+CLI) reads `~/.agents/skills/`. See [agent integration](agent-integration.md) for what the server offers.
 
 ### Docker
 
@@ -147,6 +154,8 @@ Repositories are mounted read-only and the index lives on a separate volume.
 
 ## Updating
 
+From PyPI: `uv tool upgrade symasc-repoatlas`. From a checkout:
+
 ```bash
 git pull
 ./install.sh
@@ -157,14 +166,15 @@ its sources changed, and the next `repoatlas sync` re-reads whatever a new parse
 
 ## Uninstalling
 
+First remove the MCP server from your agent: `copilot mcp delete repoatlas` (Copilot CLI), **MCP: List Servers**
+then **Uninstall** (VS Code), or `claude mcp remove repoatlas --scope user` (Claude Code). Remove the skills you
+copied or linked, from `~/.agents/skills/` or `~/.claude/skills/`. Then:
+
 ```bash
-rm ~/.local/bin/repoatlas
-claude mcp remove repoatlas --scope user
-rm ~/.claude/skills/repoatlas-*               # the links, not the skills
+uv tool uninstall symasc-repoatlas                    # a PyPI installation
+rm ~/.local/bin/repoatlas                             # or, for a checkout, its link (then delete the checkout)
 rm -rf ~/.config/repoatlas ~/.local/share/repoatlas   # configuration and the index
 ```
-
-Then delete the checkout.
 
 ## Where things live
 
@@ -185,4 +195,4 @@ Then delete the checkout.
 | `repoatlas ui`: "port 7318 is already in use" | Another explorer, or a `pnpm dev`, holds it. Stop it or use `repoatlas ui --port 7320` |
 | `repoatlas ui`: "the explorer is not part of this installation" | This RepoAtlas was built without it. Install the release (`uv tool install symasc-repoatlas`), or pass `--frontend <checkout>/frontend` |
 | The explorer shows an old version | In a checkout, `repoatlas ui --rebuild`. A PyPI installation's explorer is the release's: `uv tool upgrade symasc-repoatlas` |
-| The agent does not see the tools | Restart the agent. `claude mcp get repoatlas` shows what Claude Code has registered |
+| The agent does not see the tools | Restart the agent, then check what it has registered: `copilot mcp get repoatlas`, **MCP: List Servers** in VS Code, or `claude mcp get repoatlas`. If it cannot start `repoatlas`, register the absolute path that `which repoatlas` prints |

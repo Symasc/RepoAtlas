@@ -94,7 +94,8 @@ RepoAtlas/
 │
 ├── repoatlas/
 │   ├── cli/            Typer app; argument parsing + rendering only
-│   ├── ui/             `repoatlas ui`: the local API and the explorer, started and stopped together (§12)
+│   ├── ui/             `repoatlas ui`: the local API and the explorer, started and stopped together (§12);
+│   │                   a release build adds `ui/explorer/`, the exported explorer the API serves
 │   ├── mcp/            stdio MCP transport: tool definitions and the server (docs/agent-integration.md)
 │   ├── api/            loopback HTTP transport for a local app, and its schema dump (docs/local-api.md)
 │   ├── capabilities/   the vendor-neutral capability service: search, inspect, relationships, impact,
@@ -1012,7 +1013,7 @@ deliberately absent.
 **The parser core is pinned the same way, at `tree-sitter==0.26.0`.** A grammar is compiled against a tree-sitter
 ABI, and the shipped JavaScript and Bash grammars are a newer ABI than the shipped TypeScript one: a core older than
 0.25 cannot load them at all. While this requirement was a `>=` range, RepoAtlas's own published metadata had a valid
-solution --- `pip install repoatlas "tree-sitter<0.25"` --- that installed cleanly and then degraded those two
+solution --- `pip install symasc-repoatlas "tree-sitter<0.25"` --- that installed cleanly and then degraded those two
 languages to `parser grammar unavailable`, with no download involved anywhere. An exact pin admits one solution, and
 it is the core this release characterized its parser output against.
 
@@ -3677,7 +3678,7 @@ Repositories are **untrusted input**. Static analysis only.
 | Git hooks / config | `core.hooksPath=/dev/null`, read-only plumbing allowlist (§8) |
 | Path traversal via symlinks | Every read goes through the containment boundary below: the *object opened*, not the path, is proven to be inside the root |
 | Zip-bomb / huge files | `max_file_bytes` enforced *by the reader*, on the descriptor it reads from, with a hard ceiling independent of any prior `stat` (below) |
-| The explorer launcher (`repoatlas ui`) | Runs Node on RepoAtlas's own `frontend/`, never on repository content and never git; both servers on loopback; the token passed by an owner-only file (below) |
+| The explorer launcher (`repoatlas ui`) | In a checkout, runs Node on RepoAtlas's own `frontend/`; an installed release runs no Node and the API serves the exported explorer. Never runs repository content or git; everything on loopback; the token passed by an owner-only file and never to the browser (below) |
 
 ### Bounded repository-content reads
 
@@ -4351,5 +4352,6 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | The progress line is erased, not kept | Leave one finished line per repository on screen | The report that follows already lists every repository, so a kept line would print each one twice; erasing keeps the command's output exactly what it was before (§6) |
 | `repoatlas ui` runs the API in-process and the explorer as a child | Two daemons; or a launcher that shells out to `repoatlas serve` | One process owns the API's lifetime and the explorer's, so stopping either stops both, and the connection file is written in the process that knows where it is. No pidfile, no daemon, nothing to clean up after a crash beyond a file the next start replaces (§12) |
 | The launcher has its own connection file (`ui-api.json`) | Reuse `api.json` | A `repoatlas serve` running beside it keeps working, and stopping one never removes the other's file |
-| The explorer is installed and built on first use, and again only when its inputs change | Ship a prebuilt explorer in the wheel; or build on every start | A wheel carrying Node output would tie the Python package to a Node build. Rebuilding every time costs a minute per start; comparing modification times costs a directory walk and reads no file (§12) |
+| A release ships the explorer as a static export in the wheel, served by the local API; a checkout installs and builds it on first use, and again only when its inputs change | Require Node.js wherever the explorer runs; or build on every start | An installed RepoAtlas should need nothing beyond Python, so the release workflow builds the export once and the API sends it, answering the pages at the door the explorer's own server keeps, with that server's checks. A checkout runs the sources a developer is editing: rebuilding every time would cost a minute per start, while comparing modification times costs a directory walk and reads no file (§12) |
+| The local API reads each connection on its own thread, and runs every capability call on one index thread | One thread for everything | A browser opens spare connections it may never send on; read one at a time, such a connection holds the server until its socket timeout. The index's connection is bound to the thread that opened it, so calls still run there, one at a time (§12, docs/local-api.md) |
 | `install.sh` reruns safely and replaces nothing it did not create | An installer that overwrites existing links and registrations | Running it again is how an installation is updated, and the operator's own `repoatlas` on PATH, their skills and their MCP registration are theirs (docs/installation.md) |
