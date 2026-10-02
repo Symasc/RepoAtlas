@@ -304,8 +304,24 @@ def test_ui_refuses_a_node_older_than_the_explorer_needs(tmp_path: Path) -> None
     rig = Rig(tmp_path)
     running = rig.start(FAKE_NODE_VERSION="v20.11.0")
     assert running.finish() == ExitCode.CONTEXT, running.output
-    assert "Node.js 22 or later" in running.output and "v20.11.0" in running.output
+    assert "Node.js 20.19 or later" in running.output and "v20.11.0" in running.output
     assert rig.calls() == []
+
+
+@pytest.mark.parametrize(
+    ("reported", "accepted"),
+    [("v19.99.0", False), ("v20.18.3", False), ("v20.19.0", True), ("v22.1.0", True)],
+)
+def test_the_node_floor_is_a_minor_version(tmp_path: Path, reported: str, accepted: bool) -> None:
+    """20.19, not 20: a major-only check would let 20.0-20.18 through."""
+    node = tmp_path / "node"
+    node.write_text(f"#!/bin/sh\necho {reported}\n")
+    node.chmod(0o755)
+    if accepted:
+        assert launcher.find_node(lambda _: str(node)) == str(node)
+    else:
+        with pytest.raises(UiError, match=r"Node\.js 20\.19 or later"):
+            launcher.find_node(lambda _: str(node))
 
 
 def test_ui_refuses_a_port_already_in_use(tmp_path: Path) -> None:

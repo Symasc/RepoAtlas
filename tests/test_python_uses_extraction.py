@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import json
 import symtable
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from repoatlas.models.parsing import USES_EXPORT_TABLE, EdgeType
 from repoatlas.parsers.py_uses import PythonUseAnalysis
 from repoatlas.parsers.python import PythonParser
 from repoatlas.parsers.ts_uses import USES_EXPORTS
+from tests.conftest import PEP_695, PEP_696
 
 REPOSITORY = Path(__file__).resolve().parent.parent
 
@@ -220,6 +222,7 @@ def test_a_string_is_read_as_an_annotation_only_where_it_is_one() -> None:
 # -- forms (P10) ---------------------------------------------------------------------------
 
 
+@PEP_695
 def test_type_value_and_call_forms() -> None:
     source = (
         "from typing import Annotated, TypeAlias\n"
@@ -251,6 +254,7 @@ def test_type_value_and_call_forms() -> None:
 # -- PEP 695 type-parameter scopes (P10-TP) --------------------------------------------------
 
 
+@PEP_695
 def test_tp_a_a_generic_functions_parameter_is_not_the_import() -> None:
     assert (
         targets("from provider import T\ndef f[T](x: T) -> T:\n    y: T = x\n    return y\n")
@@ -258,6 +262,7 @@ def test_tp_a_a_generic_functions_parameter_is_not_the_import() -> None:
     )
 
 
+@PEP_695
 def test_tp_b_a_generic_class_base_resolves_but_its_parameter_does_not() -> None:
     source = (
         "from provider import T, Base\n"
@@ -266,6 +271,7 @@ def test_tp_b_a_generic_class_base_resolves_but_its_parameter_does_not() -> None
     assert uses(source) == {("C", "Base", "value", "base")}
 
 
+@PEP_696
 def test_tp_c_bounds_and_defaults_resolve_while_the_parameter_stays_local() -> None:
     source = (
         "from provider import T, Bound, Fallback\n"
@@ -281,6 +287,7 @@ def test_tp_c_bounds_and_defaults_resolve_while_the_parameter_stays_local() -> N
     }
 
 
+@PEP_695
 def test_tp_d_a_generic_alias_parameter_is_not_the_import() -> None:
     # Apart, as they were when both were the file's; each alias now owns its own statement.
     assert uses("from provider import T\ntype Alias[T] = list[T]\n") == set()
@@ -289,6 +296,7 @@ def test_tp_d_a_generic_alias_parameter_is_not_the_import() -> None:
     }
 
 
+@PEP_695
 def test_tp_e_decorators_and_defaults_are_outside_the_scope() -> None:
     source = (
         "from provider import T, deco, DEFAULT\n"
@@ -304,6 +312,7 @@ def test_tp_e_decorators_and_defaults_are_outside_the_scope() -> None:
     }
 
 
+@PEP_695
 def test_tp_f_variadic_and_parameter_specs_are_local_too() -> None:
     source = (
         "from provider import Ts, P\n"
@@ -417,8 +426,9 @@ ORACLE_SOURCES = (
     "def c():\n    run()\n    def d():\n        return User\n    return d\n"
     "class K:\n    User = 1\n    def m(self):\n        return User\n"
     "def e():\n    from pkg import Thing\n    return Thing\n"
-    "def g[T](x: T) -> T:\n    return User\n"
-    "def h():\n    global User\n    return User\n"
+    # PEP 695 is 3.12 syntax; every other rule here holds on any supported Python.
+    + ("def g[T](x: T) -> T:\n    return User\n" if sys.version_info >= (3, 12) else "")
+    + "def h():\n    global User\n    return User\n"
     "def i():\n    return (lambda v: run(v))(User)\n",
 )
 
@@ -429,7 +439,7 @@ def _function_tables(table: symtable.SymbolTable) -> dict[tuple[int, str], symta
     counts: dict[tuple[int, str], int] = {}
     while pending:
         current = pending.pop()
-        if current.get_type() == symtable.SymbolTableType.FUNCTION:
+        if current.get_type() == "function":
             key = (current.get_lineno(), current.get_name())
             counts[key] = counts.get(key, 0) + 1
             found[key] = current

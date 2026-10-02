@@ -9,7 +9,7 @@ import json
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from repoatlas.models.dependencies import (
@@ -321,7 +321,7 @@ class SqliteRepositoryStore:
         """
         if not completions:
             return
-        finished = datetime.now(UTC).isoformat()
+        finished = datetime.now(timezone.utc).isoformat()
         with self._db.transaction() as conn:
             conn.executemany(
                 """
@@ -450,7 +450,7 @@ class SqliteFileStore:
                     file.parser,
                     file.parser_version,
                     int(file.is_binary),
-                    (file.indexed_at or datetime.now(UTC)).isoformat(),
+                    (file.indexed_at or datetime.now(timezone.utc)).isoformat(),
                 ),
             )
             row = conn.execute(

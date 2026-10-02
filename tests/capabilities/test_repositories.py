@@ -11,7 +11,7 @@ git unless asked. Three properties carry the suite:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -342,7 +342,7 @@ def test_a_repository_with_no_row_id_is_reported_without_counting(workspace: Wor
         name="pending",
         slug="pending",
         path=Path("/managed/pending"),
-        last_indexed_at=datetime(2026, 1, 1, tzinfo=UTC),
+        last_indexed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
     workspace.repositories.upsert(unsaved)
 

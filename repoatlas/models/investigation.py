@@ -24,12 +24,12 @@ the reindex that evidence has to be checked against.
 
 from __future__ import annotations
 
-import enum
 from datetime import datetime
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
+from repoatlas.compat import StrEnum
 from repoatlas.models.evidence import (
     EvidenceSource,
     EvidenceTier,
@@ -62,7 +62,7 @@ def format_evidence_id(number: int) -> str:
     return f"E{number}"
 
 
-class EvidenceStatus(enum.StrEnum):
+class EvidenceStatus(StrEnum):
     """Whether an evidence record still corresponds to the current index.
 
     A statement about the *index*, never about the record. The record is immutable

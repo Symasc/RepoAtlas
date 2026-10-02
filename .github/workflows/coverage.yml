@@ -24,6 +24,12 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # The oldest Python RepoAtlas supports and the one it is developed on: the two
+    # ends of `requires-python`, each with its own standard library to break on.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
 
     steps:
       - uses: actions/checkout@v7
@@ -33,9 +39,9 @@ jobs:
         # ref, so `@v10` does not resolve.
         uses: astral-sh/setup-uv@v10.0.1
         with:
-          # `requires-python = ">=3.13"`; pin the minor so a new release does not
-          # silently change what is being tested.
-          python-version: "3.13"
+          # Pinned minors, so a new release does not silently change what is
+          # being tested.
+          python-version: ${{ matrix.python-version }}
           enable-cache: true
 
       - name: Install dependencies
@@ -55,7 +61,7 @@ jobs:
         if: always()
         run: |
           {
-            echo '## Coverage'
+            echo '## Coverage (Python ${{ matrix.python-version }})'
             echo
             echo '```'
             uv run coverage report --skip-covered || true
@@ -66,7 +72,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: coverage-xml
+          name: coverage-xml-${{ matrix.python-version }}
           path: coverage.xml
           if-no-files-found: warn
           retention-days: 14

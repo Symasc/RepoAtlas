@@ -75,6 +75,7 @@ from repoatlas.storage.sqlite.migrator import (
     apply_migrations,
     load_migrations,
 )
+from tests.sqlite_codes import with_code
 
 pytestmark = pytest.mark.adversarial
 
@@ -656,9 +657,7 @@ def test_contention_is_never_reported_as_an_unusable_index(index: Path) -> None:
     it aside. A transient lock reported that way would send an operator to
     delete a database that is perfectly healthy and merely busy.
     """
-    busy = sqlite3.OperationalError("database is locked")
-    busy.sqlite_errorcode = sqlite3.SQLITE_BUSY
-    busy.sqlite_errorname = "SQLITE_BUSY"
+    busy = with_code(sqlite3.OperationalError("database is locked"), "SQLITE_BUSY")
     assert classify(busy, Path("/nonexistent")) is None
     assert MigrationContentionError("x").exit_code != ExitCode.NOT_INITIALIZED
 
@@ -683,9 +682,7 @@ def test_contention_is_never_reported_as_an_unusable_index(index: Path) -> None:
 )
 def test_only_lock_codes_are_retriable(name: str, contention: bool) -> None:
     """Codes, not prose. ``except OperationalError: retry`` would take all ten."""
-    error = sqlite3.OperationalError("synthetic")
-    error.sqlite_errorcode = getattr(sqlite3, name)
-    error.sqlite_errorname = name
+    error = with_code(sqlite3.OperationalError("synthetic"), name)
     assert is_contention(error) is contention
 
 
@@ -699,9 +696,7 @@ def test_only_lock_codes_are_retriable(name: str, contention: bool) -> None:
 )
 def test_extended_codes_reduce_to_their_primary(name: str, code: int, contention: bool) -> None:
     """Enumerating extended codes would be a list that grows with SQLite."""
-    error = sqlite3.OperationalError("synthetic")
-    error.sqlite_errorcode = code
-    error.sqlite_errorname = name
+    error = with_code(sqlite3.OperationalError("synthetic"), name, code)
     assert is_contention(error) is contention
 
 

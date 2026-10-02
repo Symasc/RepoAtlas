@@ -32,11 +32,11 @@ and may change with the ``er`` version prefix.
 
 from __future__ import annotations
 
-import enum
 from pathlib import PurePosixPath
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
+from repoatlas.compat import StrEnum
 from repoatlas.models.capability import CapabilityContext
 from repoatlas.models.capability_io import ContextView, EvidenceItem
 from repoatlas.models.dependency_inventory import AppliedPageLimits
@@ -83,7 +83,7 @@ NAME_TYPES: tuple[EntityType, ...] = (
 MAX_REFERENCES = 2000
 
 
-class LinkKind(enum.StrEnum):
+class LinkKind(StrEnum):
     """Which kind of fact a link aggregates. Never mixed within one link."""
 
     OBSERVED = "observed"
@@ -181,7 +181,7 @@ class TopologyOverviewResponse(BaseModel):
     policy: str = POLICY
 
 
-class EntryKind(enum.StrEnum):
+class EntryKind(StrEnum):
     DIRECTORY = "directory"
     FILE = "file"
     DECLARATION = "declaration"
@@ -212,7 +212,7 @@ class ChildEntry(BaseModel):
     line_end: int | None = None
 
 
-class PeerKind(enum.StrEnum):
+class PeerKind(StrEnum):
     #: Elsewhere in the same repository.
     LOCAL = "local"
     #: Another repository.

@@ -23,7 +23,7 @@ nothing else (see [As shipped](#as-shipped-a-static-export)). From a checkout, i
 starts the local API and this app together, opens <http://127.0.0.1:7318> in your
 browser, and stops both on Ctrl-C. The first run installs the packages and makes
 a production build (into `.next-ui/`); later runs rebuild only when a source has
-changed. A checkout needs Node.js 22 and pnpm 11 (or Node's corepack).
+changed. A checkout needs Node.js 20.19 or later and pnpm 10 (or Node's corepack).
 
 | Option | Effect |
 |---|---|

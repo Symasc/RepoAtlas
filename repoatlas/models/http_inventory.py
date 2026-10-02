@@ -29,7 +29,6 @@ so a reader cannot miss it by reading one row.
 
 from __future__ import annotations
 
-import enum
 from typing import Any, Literal
 
 from pydantic import (
@@ -42,6 +41,7 @@ from pydantic import (
     model_validator,
 )
 
+from repoatlas.compat import StrEnum
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.capability_io import ContextView, EvidenceItem
 from repoatlas.models.dependency_inventory import AppliedPageLimits
@@ -60,7 +60,7 @@ DEFAULT_PAGE_SIZE = 50
 MAX_COUNTERPARTS = 5
 
 
-class OperationRole(enum.StrEnum):
+class OperationRole(StrEnum):
     """Which side of HTTP to list."""
 
     CALLER = "caller"
@@ -68,7 +68,7 @@ class OperationRole(enum.StrEnum):
     BOTH = "both"
 
 
-class OperationStatus(enum.StrEnum):
+class OperationStatus(StrEnum):
     """What one row is, in indexed static facts of one repository.
 
     The first five are callers, the last three providers. None of them is a
@@ -96,7 +96,7 @@ class OperationStatus(enum.StrEnum):
     DECLARED = "declared"
 
 
-class CrossingStatus(enum.StrEnum):
+class CrossingStatus(StrEnum):
     """The workspace join's decision for one request, as the global link pass stored it."""
 
     #: Every hop proven, to exactly one handler.

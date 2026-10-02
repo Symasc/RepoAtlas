@@ -25,7 +25,7 @@ strengthens no metadata. It changes statuses and nothing else.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -362,7 +362,7 @@ def test_evidence_from_every_origin_is_revalidated_by_the_same_rule(
 
 def _clocked(workspace: Workspace, *, ttl: float) -> tuple[CapabilityService, list[datetime]]:
     service = CapabilityService(workspace, idle_ttl_seconds=ttl)  # type: ignore[arg-type]
-    now = [datetime(2026, 1, 1, 12, 0, tzinfo=UTC)]
+    now = [datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)]
     service.sessions._clock = lambda: now[0]
     return service, now
 

@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import ast
 import json
+import sys
 from collections import Counter
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
@@ -78,6 +79,8 @@ from repoatlas.parsers.ts_uses import USES_EXPORTS
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 _COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 _TYPING = frozenset({"typing", "typing_extensions"})
+#: ``try``, and from 3.11 ``try``/``except*``: one statement shape to this parser.
+_TRY = (ast.Try, ast.TryStar) if sys.version_info >= (3, 11) else (ast.Try,)
 #: Where a statement, an ``except`` handler or a ``case`` holds the statements inside it.
 _STATEMENT_LISTS = ("body", "orelse", "finalbody", "handlers", "cases")
 #: The longest forward reference read, and how deeply one may nest another.
@@ -201,7 +204,7 @@ class _Names:
             self.bind(node.name)
             for expr in node.decorator_list:
                 self._one(expr)
-            if not node.type_params:
+            if sys.version_info < (3, 12) or not node.type_params:
                 for expr in (*node.bases, *(k.value for k in node.keywords)):
                     self._one(expr)
             return
@@ -216,7 +219,7 @@ class _Names:
                 if isinstance(inner, ast.NamedExpr) and isinstance(inner.target, ast.Name):
                     self.bind(inner.target.id)
             return
-        if isinstance(node, ast.TypeAlias):
+        if sys.version_info >= (3, 12) and isinstance(node, ast.TypeAlias):
             if isinstance(node.name, ast.Name):
                 self.bind(node.name.id)
             return
@@ -302,20 +305,23 @@ def _from_binding(node: ast.ImportFrom, name: str, line: int, type_only: bool = 
     return Binding("import", module=module, imported=name, type_only=type_only, bound_at=line)
 
 
-def _type_params(params: Sequence[ast.type_param]) -> list[str]:
-    return [p.name for p in params if isinstance(p, ast.TypeVar | ast.ParamSpec | ast.TypeVarTuple)]
+if sys.version_info >= (3, 12):  # type parameters are 3.12 syntax; nothing older calls these
 
+    def _type_params(params: Sequence[ast.type_param]) -> list[str]:
+        return [
+            p.name for p in params if isinstance(p, ast.TypeVar | ast.ParamSpec | ast.TypeVarTuple)
+        ]
 
-def _type_param_exprs(params: Sequence[ast.type_param]) -> list[ast.expr]:
-    found: list[ast.expr] = []
-    for param in params:
-        bound = getattr(param, "bound", None)
-        if bound is not None:
-            found.append(bound)
-        default = getattr(param, "default_value", None)
-        if default is not None:
-            found.append(default)
-    return found
+    def _type_param_exprs(params: Sequence[ast.type_param]) -> list[ast.expr]:
+        found: list[ast.expr] = []
+        for param in params:
+            bound = getattr(param, "bound", None)
+            if bound is not None:
+                found.append(bound)
+            default = getattr(param, "default_value", None)
+            if default is not None:
+                found.append(default)
+        return found
 
 
 def _chain(node: ast.Attribute) -> tuple[ast.Name, list[str]] | None:
@@ -395,7 +401,7 @@ class PythonUseAnalysis:
     def _declaration(self, name: str, statement: ast.stmt) -> Declaration:
         """The declaration ``statement`` makes of ``name``: its lines, kind and signature."""
         kind, signature = "variable", name
-        if isinstance(statement, ast.TypeAlias):
+        if sys.version_info >= (3, 12) and isinstance(statement, ast.TypeAlias):
             kind, signature = "type-alias", f"type {name}{_type_params_text(statement)}"
         elif isinstance(statement, ast.AnnAssign):
             if statement.value is not None and self._typing(statement.annotation, "TypeAlias"):
@@ -516,7 +522,7 @@ class PythonUseAnalysis:
                 self._sites(statement.body, sites, conditional=True, type_only=guarded)
                 self._sites(statement.orelse, sites, conditional=True, type_only=False)
                 continue
-            if isinstance(statement, ast.Try | ast.TryStar):
+            if isinstance(statement, _TRY):
                 self._sites(statement.body, sites, conditional=True, type_only=type_only)
                 for handler in statement.handlers:
                     if handler.name:
@@ -612,7 +618,7 @@ class PythonUseAnalysis:
             self._function(node, stack, owner)
         elif isinstance(node, ast.ClassDef):
             self._class(node, stack, owner)
-        elif isinstance(node, ast.TypeAlias):
+        elif sys.version_info >= (3, 12) and isinstance(node, ast.TypeAlias):
             inner = stack
             if node.type_params:
                 inner = [*stack, _Scope("typeparams", frozenset(_type_params(node.type_params)))]
@@ -670,7 +676,7 @@ class PythonUseAnalysis:
         for default in _defaults(node.args):
             self._expr(default, stack, qualified, _Ctx(form="default"))
         inner = stack
-        if node.type_params:
+        if sys.version_info >= (3, 12) and node.type_params:
             inner = [*stack, _Scope("typeparams", frozenset(_type_params(node.type_params)))]
             for expr in _type_param_exprs(node.type_params):
                 self._expr(expr, inner, qualified, _Ctx(type=True, form="annotation"))
@@ -689,7 +695,7 @@ class PythonUseAnalysis:
         for decorator in node.decorator_list:
             self._expr(decorator, stack, qualified, _Ctx(form="decorator"))
         inner = stack
-        if node.type_params:
+        if sys.version_info >= (3, 12) and node.type_params:
             inner = [*stack, _Scope("typeparams", frozenset(_type_params(node.type_params)))]
             for expr in _type_param_exprs(node.type_params):
                 self._expr(expr, inner, qualified, _Ctx(type=True, form="annotation"))
@@ -942,16 +948,22 @@ def _declared(statement: ast.stmt) -> list[str]:
         return []
     if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
         return [statement.target.id]
-    if isinstance(statement, ast.TypeAlias) and isinstance(statement.name, ast.Name):
+    if (
+        sys.version_info >= (3, 12)
+        and isinstance(statement, ast.TypeAlias)
+        and isinstance(statement.name, ast.Name)
+    ):
         return [statement.name.id]
     return []
 
 
-def _type_params_text(statement: ast.TypeAlias) -> str:
-    """``[T, U: int]`` as a ``type`` statement spells its parameters, else nothing."""
-    if not statement.type_params:
-        return ""
-    return "[" + ", ".join(ast.unparse(param) for param in statement.type_params) + "]"
+if sys.version_info >= (3, 12):  # the ``type`` statement is 3.12 syntax
+
+    def _type_params_text(statement: ast.TypeAlias) -> str:
+        """``[T, U: int]`` as a ``type`` statement spells its parameters, else nothing."""
+        if not statement.type_params:
+            return ""
+        return "[" + ", ".join(ast.unparse(param) for param in statement.type_params) + "]"
 
 
 def _declaring_parts(statement: ast.stmt) -> list[ast.expr]:

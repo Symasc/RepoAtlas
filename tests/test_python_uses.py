@@ -7,6 +7,7 @@ fixtures are in :mod:`tests.python_corpus`.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -60,10 +61,17 @@ def test_every_python_use_and_no_other(pyfix: Workspace) -> None:
         (f"{R}/forms.py#Child", f"{R}/models.py#User", "type"),
         (f"{R}/forms.py#check", f"{R}/models.py#User", "value"),
         (f"{R}/forms.py#build", f"{R}/models.py#make", "call"),
-        # P10-TP: only the base, the bound and the non-generic alias
-        (f"{R}/generic.py#C", f"{R}/models.py#Base", "value"),
-        (f"{R}/generic.py#g", f"{R}/models.py#Bound", "type"),
-        (f"{R}/generic.py#Other", f"{R}/models.py#T", "type"),
+        # P10-TP: only the base, the bound and the non-generic alias. The file is 3.12
+        # syntax (PEP 695), so an older interpreter reads nothing from it.
+        *(
+            {
+                (f"{R}/generic.py#C", f"{R}/models.py#Base", "value"),
+                (f"{R}/generic.py#g", f"{R}/models.py#Bound", "type"),
+                (f"{R}/generic.py#Other", f"{R}/models.py#T", "type"),
+            }
+            if sys.version_info >= (3, 12)
+            else set()
+        ),
         # P11: the explicit re-export beside two stars, and the binding after a star
         (f"{R}/star_user.py#p11d", f"{R}/starpkg/things.py#Thing", "type"),
         (f"{R}/star_after.py#p11a", f"{R}/models.py#User", "type"),

@@ -112,7 +112,7 @@ def _entry(status: EvidenceStatus, *, evidence_id: str = "E1") -> LedgerEntry:
     names, so no entry can be absent from it — and the rule it earns is pinned
     here rather than left untested because the plumbing makes it rare.
     """
-    from datetime import UTC, datetime
+    from datetime import datetime, timezone
 
     return LedgerEntry(
         id=evidence_id,
@@ -130,7 +130,7 @@ def _entry(status: EvidenceStatus, *, evidence_id: str = "E1") -> LedgerEntry:
         match=MatchClass.EXACT_CONTENT,
         origins=(EvidenceSource.EXACT,),
         status=status,
-        allocated_at=datetime.now(UTC),
+        allocated_at=datetime.now(timezone.utc),
     )
 
 

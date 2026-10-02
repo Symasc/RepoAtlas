@@ -46,7 +46,7 @@ import threading
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
 
@@ -1830,7 +1830,7 @@ class CapabilityService:
                     depth=FreshnessDepth.STORED,
                 )
 
-            checked_at = datetime.now(UTC)
+            checked_at = datetime.now(timezone.utc)
             outcomes = self._resolve_citations(request.answer, session)
             # The routes this investigation was shown, which prose may name for
             # the same reason it may name a file this investigation was shown.
@@ -3668,7 +3668,7 @@ class CapabilityService:
                 ) from exc
 
             # The mutation committed.
-            completed_at = datetime.now(UTC)
+            completed_at = datetime.now(timezone.utc)
             revalidation = self._revalidate_live_investigations()
             return self._sync_response(
                 request=request,

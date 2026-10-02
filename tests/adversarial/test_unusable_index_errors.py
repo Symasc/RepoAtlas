@@ -40,9 +40,11 @@ from repoatlas.errors import (
     MigrationFailedError,
     UnrecognizedSchemaError,
 )
+from repoatlas.storage.sqlite import errors as sqlite_errors
 from repoatlas.storage.sqlite.database import SCHEMA_VERSION, open_database
 from repoatlas.storage.sqlite.errors import classify
 from repoatlas.storage.sqlite.migrator import load_migrations, schema_objects
+from tests.sqlite_codes import CODES
 
 CLI = Path(sys.executable).parent / "repoatlas"
 
@@ -728,14 +730,14 @@ def test_a_programmer_error_reaches_the_cli_as_an_internal_failure(indexed: Harn
 @pytest.mark.parametrize(
     "code",
     [
-        pytest.param(sqlite3.SQLITE_BUSY, id="SQLITE_BUSY"),
-        pytest.param(sqlite3.SQLITE_LOCKED, id="SQLITE_LOCKED"),
-        pytest.param(sqlite3.SQLITE_CONSTRAINT, id="SQLITE_CONSTRAINT"),
-        pytest.param(sqlite3.SQLITE_FULL, id="SQLITE_FULL"),
-        pytest.param(sqlite3.SQLITE_IOERR, id="SQLITE_IOERR"),
-        pytest.param(sqlite3.SQLITE_SCHEMA, id="SQLITE_SCHEMA"),
-        pytest.param(sqlite3.SQLITE_MISMATCH, id="SQLITE_MISMATCH"),
-        pytest.param(sqlite3.SQLITE_ERROR, id="SQLITE_ERROR"),
+        pytest.param(CODES["SQLITE_BUSY"], id="SQLITE_BUSY"),
+        pytest.param(CODES["SQLITE_LOCKED"], id="SQLITE_LOCKED"),
+        pytest.param(CODES["SQLITE_CONSTRAINT"], id="SQLITE_CONSTRAINT"),
+        pytest.param(CODES["SQLITE_FULL"], id="SQLITE_FULL"),
+        pytest.param(CODES["SQLITE_IOERR"], id="SQLITE_IOERR"),
+        pytest.param(CODES["SQLITE_SCHEMA"], id="SQLITE_SCHEMA"),
+        pytest.param(CODES["SQLITE_MISMATCH"], id="SQLITE_MISMATCH"),
+        pytest.param(CODES["SQLITE_ERROR"], id="SQLITE_ERROR"),
     ],
 )
 def test_an_unclassified_sqlite_code_is_not_rewritten_as_corruption(
@@ -755,16 +757,18 @@ def test_an_unclassified_sqlite_code_is_not_rewritten_as_corruption(
 @pytest.mark.parametrize(
     ("code", "expected"),
     [
-        pytest.param(sqlite3.SQLITE_NOTADB, IndexCorruptError, id="SQLITE_NOTADB"),
-        pytest.param(sqlite3.SQLITE_CORRUPT, IndexCorruptError, id="SQLITE_CORRUPT"),
-        pytest.param(sqlite3.SQLITE_CANTOPEN, IndexInaccessibleError, id="SQLITE_CANTOPEN"),
-        pytest.param(sqlite3.SQLITE_READONLY, IndexInaccessibleError, id="SQLITE_READONLY"),
-        pytest.param(sqlite3.SQLITE_PERM, IndexInaccessibleError, id="SQLITE_PERM"),
+        pytest.param(CODES["SQLITE_NOTADB"], IndexCorruptError, id="SQLITE_NOTADB"),
+        pytest.param(CODES["SQLITE_CORRUPT"], IndexCorruptError, id="SQLITE_CORRUPT"),
+        pytest.param(CODES["SQLITE_CANTOPEN"], IndexInaccessibleError, id="SQLITE_CANTOPEN"),
+        pytest.param(CODES["SQLITE_READONLY"], IndexInaccessibleError, id="SQLITE_READONLY"),
+        pytest.param(CODES["SQLITE_PERM"], IndexInaccessibleError, id="SQLITE_PERM"),
         pytest.param(
-            sqlite3.SQLITE_READONLY_DIRECTORY, IndexInaccessibleError, id="extended READONLY"
+            CODES["SQLITE_READONLY_DIRECTORY"], IndexInaccessibleError, id="extended READONLY"
         ),
-        pytest.param(sqlite3.SQLITE_CORRUPT_INDEX, IndexCorruptError, id="extended CORRUPT"),
-        pytest.param(sqlite3.SQLITE_CANTOPEN_ISDIR, IndexInaccessibleError, id="extended CANTOPEN"),
+        pytest.param(CODES["SQLITE_CORRUPT_INDEX"], IndexCorruptError, id="extended CORRUPT"),
+        pytest.param(
+            CODES["SQLITE_CANTOPEN_ISDIR"], IndexInaccessibleError, id="extended CANTOPEN"
+        ),
     ],
 )
 def test_every_classified_code_maps_to_one_category(
@@ -777,6 +781,97 @@ def test_every_classified_code_maps_to_one_category(
     assert isinstance(translated, IndexUnavailableError)
     assert translated.exit_code == ExitCode.NOT_INITIALIZED
     assert str(tmp_path / "atlas.db") in translated.render()
+
+
+def _busy(tmp: Path) -> None:
+    holder = sqlite3.connect(tmp / "busy.db", isolation_level=None)
+    holder.execute("CREATE TABLE t(x)")
+    holder.execute("BEGIN EXCLUSIVE")
+    sqlite3.connect(tmp / "busy.db", timeout=0).execute("SELECT * FROM t")
+
+
+def _locked(tmp: Path) -> None:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    connection.execute("CREATE TABLE t(x)")
+    connection.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
+    reading = connection.execute("SELECT * FROM t")
+    reading.fetchone()
+    connection.execute("DROP TABLE t")
+
+
+def _readonly(tmp: Path) -> None:
+    sqlite3.connect(tmp / "ro.db").execute("CREATE TABLE t(x)").connection.commit()
+    sqlite3.connect(f"file:{tmp / 'ro.db'}?mode=ro", uri=True).execute("INSERT INTO t VALUES (1)")
+
+
+def _cantopen(tmp: Path) -> None:
+    sqlite3.connect(tmp / "missing" / "atlas.db")
+
+
+def _notadb(tmp: Path) -> None:
+    (tmp / "junk.db").write_bytes(b"not sqlite\n" * 40)
+    sqlite3.connect(tmp / "junk.db").execute("SELECT * FROM sqlite_master")
+
+
+def _corrupt(tmp: Path) -> None:
+    built = sqlite3.connect(tmp / "bad.db")
+    built.execute("CREATE TABLE t(x)")
+    built.executemany("INSERT INTO t VALUES (?)", [(b"x" * 200,)] * 200)
+    built.commit()
+    built.close()
+    truncate_and_scramble(tmp / "bad.db")
+    sqlite3.connect(tmp / "bad.db").execute("SELECT count(*) FROM t").fetchall()
+
+
+def _missing(tmp: Path) -> None:
+    sqlite3.connect(":memory:").execute("SELECT * FROM no_such_object")
+
+
+@pytest.mark.parametrize(
+    ("provoke", "name"),
+    [
+        pytest.param(_busy, "SQLITE_BUSY", id="SQLITE_BUSY"),
+        pytest.param(_locked, "SQLITE_LOCKED", id="SQLITE_LOCKED"),
+        pytest.param(_readonly, "SQLITE_READONLY", id="SQLITE_READONLY"),
+        pytest.param(_cantopen, "SQLITE_CANTOPEN", id="SQLITE_CANTOPEN"),
+        pytest.param(_notadb, "SQLITE_NOTADB", id="SQLITE_NOTADB"),
+        pytest.param(_corrupt, "SQLITE_CORRUPT", id="SQLITE_CORRUPT"),
+        pytest.param(_missing, "SQLITE_ERROR", id="SQLITE_ERROR (missing object)"),
+    ],
+)
+def test_a_real_error_has_its_code_on_every_python(
+    tmp_path: Path, provoke: Callable[[Path], None], name: str
+) -> None:
+    """Python 3.10 gives no result code, so the classifier reads SQLite's message.
+
+    Each condition is provoked for real. On 3.11+ the error's own code checks the
+    message table; on 3.10 the table is all there is, and it must give the same.
+    """
+    with pytest.raises(sqlite3.Error) as caught:
+        provoke(tmp_path)
+    error = caught.value
+    assert getattr(error, "sqlite_errorcode", CODES[name]) & 0xFF == CODES[name]
+    assert sqlite_errors._primary(error) == CODES[name]
+    if name != "SQLITE_ERROR":
+        assert sqlite_errors._CODE_BY_MESSAGE[str(error)] == CODES[name]
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="sqlite3 names result codes from 3.11")
+def test_the_written_out_codes_are_sqlite3s() -> None:
+    """3.10 has no ``sqlite3.SQLITE_*``, so the classifier writes its codes out."""
+    for name in (
+        "SQLITE_ERROR",
+        "SQLITE_PERM",
+        "SQLITE_BUSY",
+        "SQLITE_LOCKED",
+        "SQLITE_READONLY",
+        "SQLITE_CORRUPT",
+        "SQLITE_CANTOPEN",
+        "SQLITE_NOTADB",
+    ):
+        assert getattr(sqlite_errors, name) == getattr(sqlite3, name), name
+    for name, code in CODES.items():
+        assert getattr(sqlite3, name) == code, name
 
 
 @pytest.mark.parametrize(

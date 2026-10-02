@@ -13,15 +13,15 @@ nobody runs the funnel twice to learn two things about one question.
 
 from __future__ import annotations
 
-import enum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from repoatlas.compat import StrEnum
 from repoatlas.models.evidence import EvidenceSet
 
 
-class TermLookup(enum.StrEnum):
+class TermLookup(StrEnum):
     """One exact lookup a named term can be put through.
 
     Each asks the indexed coverage searched — the repository scope and any
@@ -40,7 +40,7 @@ class TermLookup(enum.StrEnum):
     ENTITY_KEY = "entity_key"
 
 
-class LookupOutcome(enum.StrEnum):
+class LookupOutcome(StrEnum):
     """What one lookup established about one term."""
 
     #: An indexed entity, file or text matches the term exactly.
@@ -58,7 +58,7 @@ class LookupOutcome(enum.StrEnum):
     NOT_CHECKED = "not_checked"
 
 
-class TermState(enum.StrEnum):
+class TermState(StrEnum):
     """What the checks establish about one named term, as one word.
 
     Derived from :attr:`TermMatch.checks` and never from the evidence list, a

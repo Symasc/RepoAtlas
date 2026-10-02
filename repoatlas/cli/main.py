@@ -313,7 +313,7 @@ def ui(
     Serves the index and the explorer at http://127.0.0.1:PORT and opens it in
     a browser. An installed release carries the explorer ready to serve, and
     needs nothing else. In a checkout, the first run installs the explorer's
-    packages and builds it, which needs Node.js 22 and pnpm. Ctrl-C stops it.
+    packages and builds it, which needs Node.js 20.19 and pnpm. Ctrl-C stops it.
     See docs/local-api.md.
 
     The import is local for the same reason as ``mcp``'s.

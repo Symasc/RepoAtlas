@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import enum
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from repoatlas.compat import StrEnum
 from repoatlas.models.repository import Repository
 
 
-class ContextScope(enum.StrEnum):
+class ContextScope(StrEnum):
     """Resolved scope of a command.
 
     There are exactly two: one repository, or every managed repository. Anything

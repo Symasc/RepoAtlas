@@ -243,7 +243,8 @@ def raw_exchange(
         if isinstance(decoded, dict):
             awaiting.discard(decoded.get("id"))
 
-    process.stdin.close()
+    # End of input: ``communicate`` closes stdin itself. Closing it first breaks
+    # Python 3.10, whose ``communicate`` flushes stdin before checking it is open.
     try:
         remaining, _ = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:  # pragma: no cover - only on a hang

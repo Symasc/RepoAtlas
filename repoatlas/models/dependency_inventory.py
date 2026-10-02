@@ -30,10 +30,9 @@ which for two candidates is *nothing*.
 
 from __future__ import annotations
 
-import enum
-
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
+from repoatlas.compat import StrEnum
 from repoatlas.models.capability import CapabilityContext
 from repoatlas.models.capability_io import ContextView, EvidenceItem
 from repoatlas.models.dependencies import DependencyRole
@@ -47,7 +46,7 @@ MAX_PAGE_SIZE = 200
 DEFAULT_PAGE_SIZE = 50
 
 
-class Ecosystem(enum.StrEnum):
+class Ecosystem(StrEnum):
     """The package ecosystems the dependency layer parses.
 
     Closed on purpose: an ecosystem outside this set is a malformed request rather
@@ -63,7 +62,7 @@ class Ecosystem(enum.StrEnum):
     GEM = "gem"
 
 
-class ProviderResolution(enum.StrEnum):
+class ProviderResolution(StrEnum):
     """What the deterministic linker concluded about who provides a package.
 
     Not a ranking and not a recommendation. ``AMBIGUOUS`` is a complete answer: it

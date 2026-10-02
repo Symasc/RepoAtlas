@@ -16,10 +16,9 @@ Three things are established in this module and nothing else is:
 
 from __future__ import annotations
 
-import enum
-
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from repoatlas.compat import StrEnum
 from repoatlas.models.repository import Repository
 
 # ---------------------------------------------------------------------------
@@ -27,7 +26,7 @@ from repoatlas.models.repository import Repository
 # ---------------------------------------------------------------------------
 
 
-class CapabilityScope(enum.StrEnum):
+class CapabilityScope(StrEnum):
     """Which repositories a capability call applies to.
 
     The same two scopes V1 resolves to, named separately because the way they are
@@ -104,7 +103,7 @@ class ContextResolution(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class RetrievalBreadth(enum.StrEnum):
+class RetrievalBreadth(StrEnum):
     """How wide to cast, as a named profile rather than raw retrieval knobs.
 
     The funnel's real parameters — hop count, fan-out, seed count, the
@@ -174,7 +173,7 @@ class AppliedBudget(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class Presentation(enum.StrEnum):
+class Presentation(StrEnum):
     """How a response is written out, never what the capability does.
 
     The capability runs identically either way: the same retrieval, the same
@@ -207,7 +206,7 @@ PRESENTATION_DESCRIPTION = (
 # ---------------------------------------------------------------------------
 
 
-class ErrorCategory(enum.StrEnum):
+class ErrorCategory(StrEnum):
     """What kind of thing went wrong, for a caller deciding what to do next.
 
     Coarse on purpose. A category answers "should I fix my request, fix the

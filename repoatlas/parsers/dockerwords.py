@@ -42,10 +42,11 @@ syntax tree rather than from the text (ARCHITECTURE.md §5).
 
 from __future__ import annotations
 
-import enum
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+
+from repoatlas.compat import StrEnum
 
 __all__ = [
     "BUILDER_EXPANDED",
@@ -86,14 +87,14 @@ _NAME_BODY = _NAME_START | frozenset("0123456789")
 _DOUBLE_QUOTED_ESCAPES = frozenset('$`"\\\n')
 
 
-class Proof(enum.StrEnum):
+class Proof(StrEnum):
     """Whether the source fixes a value, or something else decides it later."""
 
     LITERAL = "literal"
     COMPUTED = "computed"
 
 
-class SourceDomain(enum.StrEnum):
+class SourceDomain(StrEnum):
     """Which filesystem a ``COPY``/``ADD`` source operand names.
 
     Static proof has a second half, and only the first was ever asked. ``COPY``

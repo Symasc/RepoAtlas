@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from repoatlas.models.evidence import EvidenceSource, EvidenceTier, MatchClass
 from repoatlas.models.investigation import (
@@ -229,7 +229,7 @@ class EvidenceLedger:
         because re-reading evidence allocates nothing and creates no new citable
         surface.
         """
-        moment = now or datetime.now(UTC)
+        moment = now or datetime.now(timezone.utc)
         plan = self._plan(proposed, moment)
 
         if plan.required > self.available:

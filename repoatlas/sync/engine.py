@@ -35,7 +35,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -510,7 +510,7 @@ class SyncEngine:
             parser=parser.name if parser else None,
             parser_version=self.facts_version,
             is_binary=is_binary,
-            indexed_at=datetime.now(UTC),
+            indexed_at=datetime.now(timezone.utc),
         )
 
         if is_binary:
@@ -688,7 +688,7 @@ class SyncEngine:
                 parser=None,
                 parser_version=self.facts_version,
                 is_binary=b"\0" in bytes(prefix),
-                indexed_at=datetime.now(UTC),
+                indexed_at=datetime.now(timezone.utc),
             ),
         )
         return _FileOutcome(

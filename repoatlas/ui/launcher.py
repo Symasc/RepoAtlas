@@ -66,7 +66,8 @@ HOST = "127.0.0.1"
 FRONTEND_ENV = "REPOATLAS_FRONTEND_DIR"
 #: Where a release build puts the exported explorer, beside this module.
 PACKAGED_DIR = "explorer"
-MIN_NODE_MAJOR = 22
+#: The oldest Node.js the explorer builds with: Next.js and pnpm 10 run on it.
+MIN_NODE = (20, 19)
 #: Where ``repoatlas ui`` keeps its production build. Its own directory, so it
 #: never disturbs ``pnpm dev`` (``.next/dev``) or the end-to-end build (``.next-e2e``).
 DIST_DIR = ".next-ui"
@@ -187,11 +188,11 @@ def is_exported(directory: Path) -> bool:
 
 
 def find_node(which: Callable[[str], str | None] = shutil.which) -> str:
-    """Node.js on PATH, at least version :data:`MIN_NODE_MAJOR`."""
+    """Node.js on PATH, at least version :data:`MIN_NODE`."""
     node = which("node")
     if node is None:
         raise UiError(
-            f"the explorer needs Node.js {MIN_NODE_MAJOR} or later, and `node` is not on PATH",
+            f"the explorer needs Node.js {_spelled(MIN_NODE)} or later, and `node` is not on PATH",
             detail="Install Node.js from https://nodejs.org (or with nvm), then run this again.",
             setup=True,
         )
@@ -201,19 +202,26 @@ def find_node(which: Callable[[str], str | None] = shutil.which) -> str:
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError) as exc:
         raise UiError(f"could not run {node}", detail=str(exc), setup=True) from exc
-    major = _major(reported)
-    if major is None or major < MIN_NODE_MAJOR:
+    version = _version(reported)
+    if version is None or version < MIN_NODE:
         raise UiError(
-            f"the explorer needs Node.js {MIN_NODE_MAJOR} or later; {node} is "
+            f"the explorer needs Node.js {_spelled(MIN_NODE)} or later; {node} is "
             f"{reported or 'of an unknown version'}",
             setup=True,
         )
     return node
 
 
-def _major(version: str) -> int | None:
-    head = version.removeprefix("v").split(".", 1)[0]
-    return int(head) if head.isdigit() else None
+def _version(reported: str) -> tuple[int, int] | None:
+    """``(major, minor)`` from ``node --version`` (``v20.19.0``)."""
+    parts = reported.removeprefix("v").split(".")
+    if len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
+        return None
+    return int(parts[0]), int(parts[1])
+
+
+def _spelled(version: tuple[int, int]) -> str:
+    return ".".join(map(str, version))
 
 
 def package_manager(which: Callable[[str], str | None] = shutil.which) -> list[str]:
@@ -227,7 +235,7 @@ def package_manager(which: Callable[[str], str | None] = shutil.which) -> list[s
     raise UiError(
         "the explorer's packages are installed with pnpm, and neither `pnpm` nor "
         "`corepack` is on PATH",
-        detail="Install it with `npm install -g pnpm@11` or `corepack enable`, then try again.",
+        detail="Install it with `npm install -g pnpm@10` or `corepack enable`, then try again.",
         setup=True,
     )
 

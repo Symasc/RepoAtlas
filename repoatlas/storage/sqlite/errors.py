@@ -20,6 +20,11 @@ code (``errorcode & 0xFF``): ``SQLITE_READONLY_DIRECTORY`` (1544) is a
 ``SQLITE_READONLY`` (8), and enumerating the extended variants would be a list
 that grows with SQLite rather than with RepoAtlas.
 
+**Python 3.10 has no codes.** Its exceptions carry only SQLite's message, so there,
+and only there, an error with no code is given one from the message SQLite itself
+words each code with (``sqlite3_errstr``), matched whole. A message SQLite words
+any other way is unrecognized, and falls open like an unenumerated code.
+
 **One exception, and it is bounded.** A database missing a table reports
 ``SQLITE_ERROR`` (1) — the same code as a typo in a query, which is the case that
 must *not* become exit 3. The code cannot separate them, so the name SQLite
@@ -52,18 +57,30 @@ __all__ = [
     "storage_errors",
 ]
 
+#: SQLite's primary result codes (https://sqlite.org/rescode.html). Python names
+#: them ``sqlite3.SQLITE_*`` from 3.11; they are fixed by SQLite's C API, so they
+#: are written out here for 3.10.
+SQLITE_ERROR = 1
+SQLITE_PERM = 3
+SQLITE_BUSY = 5
+SQLITE_LOCKED = 6
+SQLITE_READONLY = 8
+SQLITE_CORRUPT = 11
+SQLITE_CANTOPEN = 14
+SQLITE_NOTADB = 26
+
 #: Result codes whose meaning is "the bytes on disk are not a usable database".
 _CORRUPT = {
-    sqlite3.SQLITE_CORRUPT: "SQLITE_CORRUPT",
-    sqlite3.SQLITE_NOTADB: "SQLITE_NOTADB",
+    SQLITE_CORRUPT: "SQLITE_CORRUPT",
+    SQLITE_NOTADB: "SQLITE_NOTADB",
 }
 
 #: Result codes whose meaning is "the database could not be reached", which says
 #: nothing about whether its contents are sound.
 _INACCESSIBLE = {
-    sqlite3.SQLITE_CANTOPEN: "SQLITE_CANTOPEN",
-    sqlite3.SQLITE_READONLY: "SQLITE_READONLY",
-    sqlite3.SQLITE_PERM: "SQLITE_PERM",
+    SQLITE_CANTOPEN: "SQLITE_CANTOPEN",
+    SQLITE_READONLY: "SQLITE_READONLY",
+    SQLITE_PERM: "SQLITE_PERM",
 }
 
 #: Result codes whose meaning is "another connection holds a lock, try later".
@@ -72,7 +89,7 @@ _INACCESSIBLE = {
 #: be reported as an unusable index. ``SQLITE_LOCKED`` is included because a
 #: shared-cache or table-level conflict is the same transient thing from the
 #: caller's side; neither is a property of the bytes on disk.
-_CONTENTION = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
+_CONTENTION = frozenset({SQLITE_BUSY, SQLITE_LOCKED})
 
 #: ``errno`` values from the ``mkdir``/``stat`` work that precedes the connection.
 #: ``ENOSPC`` and ``EIO`` are absent on purpose: neither has been reproduced here,
@@ -84,11 +101,33 @@ _ACCESS_ERRNOS = frozenset(
 
 _MISSING_OBJECT = re.compile(r"^no such (table|column|index): ([A-Za-z0-9_.]+)$")
 
+#: Python 3.10 only: SQLite's own message for each code above (``sqlite3_errstr``).
+#: ``SQLITE_ERROR`` has none here: its message is a statement's, and only the
+#: missing-object messages (:data:`_MISSING_OBJECT`) are ever classified.
+_CODE_BY_MESSAGE = {
+    "access permission denied": SQLITE_PERM,
+    "database is locked": SQLITE_BUSY,
+    "database table is locked": SQLITE_LOCKED,
+    "attempt to write a readonly database": SQLITE_READONLY,
+    "database disk image is malformed": SQLITE_CORRUPT,
+    "unable to open database file": SQLITE_CANTOPEN,
+    "file is not a database": SQLITE_NOTADB,
+}
+
 
 def _primary(error: sqlite3.Error) -> int | None:
-    """SQLite's primary result code, with any extended bits removed."""
+    """SQLite's primary result code, with any extended bits removed.
+
+    On Python 3.10, which gives no code, the code SQLite's own wording of the
+    message names, if it is one of :data:`_CODE_BY_MESSAGE` or a missing object.
+    """
     code = getattr(error, "sqlite_errorcode", None)
-    return None if code is None else int(code) & 0xFF
+    if code is not None:
+        return int(code) & 0xFF
+    message = str(error)
+    if _MISSING_OBJECT.match(message):
+        return SQLITE_ERROR
+    return _CODE_BY_MESSAGE.get(message)
 
 
 def _corrupt(path: Path, name: str) -> IndexCorruptError:
@@ -151,13 +190,13 @@ def classify(error: BaseException, path: Path) -> IndexUnavailableError | None:
     """
     if isinstance(error, sqlite3.Error):
         code = _primary(error)
-        if code is None:  # pragma: no cover - every CPython 3.11+ error carries one
+        if code is None:
             return None
         if code in _CORRUPT:
             return _corrupt(path, _CORRUPT[code])
         if code in _INACCESSIBLE:
             return _inaccessible(path, _INACCESSIBLE[code])
-        if code == sqlite3.SQLITE_ERROR:
+        if code == SQLITE_ERROR:
             return _classify_missing_object(error, path)
         return None
     if isinstance(error, OSError) and error.errno in _ACCESS_ERRNOS:
@@ -202,7 +241,8 @@ def is_contention(error: BaseException) -> bool:
     The text is not a stable interface — it is shared by ``SQLITE_BUSY`` and
     ``SQLITE_BUSY_SNAPSHOT`` and has been reworded across SQLite releases —
     whereas the primary code is documented and has carried through
-    ``sqlite_errorcode`` since Python 3.11.
+    ``sqlite_errorcode`` since Python 3.11. Python 3.10 carries no code, so there
+    the message is all there is (:func:`_primary`).
     """
     return isinstance(error, sqlite3.Error) and _primary(error) in _CONTENTION
 

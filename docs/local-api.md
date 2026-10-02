@@ -93,7 +93,7 @@ flowchart LR
   `frontend/.next-ui/` when there is none or a source has changed since. `--prepare` does only this and exits.
 - **Stopping.** Ctrl-C or SIGTERM stops the API and then the explorer's whole process group. If the explorer
   stops on its own, or never starts listening, the API is stopped too and the command exits 1. A taken port, a
-  Node.js older than 22, or no explorer directory exits 2 before anything starts.
+  Node.js older than 20.19, or no explorer directory exits 2 before anything starts.
 
 `--dev` runs the explorer's development server instead, with hot reload, against the same API. Next.js telemetry
 is turned off in both modes.

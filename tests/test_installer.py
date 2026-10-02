@@ -179,7 +179,7 @@ def test_missing_optional_tools_are_explained_not_fatal(tmp_path: Path) -> None:
     sandbox = Sandbox(tmp_path, tools=("uv",))
     result = sandbox.run("--yes")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "needs Node.js 22 or later, and node is not on PATH" in result.stdout
+    assert "needs Node.js 20.19 or later, and node is not on PATH" in result.stdout
     assert f"command {sandbox.repoatlas}, argument: mcp" in result.stdout
     assert "repoatlas ui --prepare" not in sandbox.calls()
 

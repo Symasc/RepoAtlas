@@ -58,10 +58,10 @@ The file is ``tomllib``'s to read, so the parser's version carries the interpret
 from __future__ import annotations
 
 import json
-import tomllib
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from repoatlas.compat import tomllib
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedFile, ParsedReference
 from repoatlas.parsers.interpreter import interpreter_tag
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION, PYTHON_PROJECT

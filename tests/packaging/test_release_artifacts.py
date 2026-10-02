@@ -31,12 +31,12 @@ import re
 import shutil
 import subprocess
 import tarfile
-import tomllib
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from repoatlas.compat import tomllib
 from tests.test_grammar_loader import core_requirement
 
 ROOT = Path(__file__).resolve().parent.parent.parent

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from repoatlas.capabilities.ledger import EvidenceLedger
@@ -28,7 +28,7 @@ from repoatlas.capabilities.session import (
 from repoatlas.models.evidence import EvidenceSource, EvidenceTier, MatchClass
 from repoatlas.models.investigation import EvidenceRef, ProposedEvidence
 
-START = datetime(2026, 1, 1, tzinfo=UTC)
+START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 class _Clock:
