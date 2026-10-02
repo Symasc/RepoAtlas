@@ -402,6 +402,8 @@ def _tie(
             bound_in=bound_in,
             outcome=outcome,
             scope=scope,
+            # How far the source tie got: the command, where one was read.
+            extra={"source_in": bound_in} if bound_in else None,
         )
         return outcome
 
@@ -440,6 +442,8 @@ def _tie(
         bound_in=bound_in,
         kind="docker-compose",
         scope=scope,
+        # The compose file is the deployment; the command is what ties it to code.
+        extra={"source_in": bound_in},
     )
     return TIED
 
@@ -582,6 +586,7 @@ class _Charts:
                     bound_in=bound_in,
                     outcome=untied,
                     scope=scope,
+                    extra={"binding_in": bound_in},
                 )
                 continue
             _expose(
@@ -593,9 +598,17 @@ class _Charts:
                 bound_in=bound_in,
                 kind="kubernetes",
                 scope=scope,
+                extra={"binding_in": bound_in, "source_in": self._source_in(origin.repo_id)},
             )
             outcome = TIED
         return untied or outcome
+
+    def _source_in(self, repo_id: int) -> str:
+        """The module constructing the repository's one application: what ties a chart to
+        code. A whole file, since the tie is that every route comes from it."""
+        roots = sorted(self._roots[repo_id])
+        row = self._by_id.get(roots[0]) if len(roots) == 1 else None
+        return row.rel_path if row is not None else ""
 
     def _untied(self, repo_id: int) -> str | None:
         """Why the repository's code is not one application to tie a chart to, if it is not."""
@@ -657,7 +670,7 @@ class _Charts:
                         source=INGRESS,
                         outcome=untied,
                         scope=scope,
-                        extra=extra,
+                        extra={**extra, "binding_in": bound_in},
                         **identity,
                     )
                 else:
@@ -668,7 +681,11 @@ class _Charts:
                         source=INGRESS,
                         kind="kubernetes",
                         scope=scope,
-                        extra=extra,
+                        extra={
+                            **extra,
+                            "binding_in": bound_in,
+                            "source_in": self._source_in(origin.repo_id),
+                        },
                         **identity,
                     )
                 identified.add(untied or TIED)
@@ -692,9 +709,12 @@ class _Charts:
                         **extra,
                         "chart": chart.name,
                         "bound_in": "; ".join(bound for bound, _ in bindings if bound),
+                        # The releases that do not render it: how far the binding got.
+                        "binding_in": "; ".join(bound for bound, _ in bindings if bound),
                         "binding_outcome": "; ".join(dict.fromkeys(state for _, state in bindings))
                         or RELEASE_UNBOUND,
                         "source_outcome": untied or TIED,
+                        **({} if untied else {"source_in": self._source_in(origin.repo_id)}),
                         "scope": scope,
                     },
                 )

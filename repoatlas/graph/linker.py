@@ -43,7 +43,11 @@ from dataclasses import dataclass, field
 
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
 from repoatlas.graph.http_claims import HttpClaimPlan, plan_http_claims
-from repoatlas.graph.http_crossings import HttpCrossingPlan, plan_http_crossings
+from repoatlas.graph.http_crossings import (
+    HttpCrossingPlan,
+    decision_rows,
+    plan_http_crossings,
+)
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
 from repoatlas.graph.uses import use_resolution
@@ -603,6 +607,9 @@ class ReferenceLinker:
                 edges.extend(self._materialize(plan.dependencies))
                 edges.extend(self._materialize_http(plan.http))
                 self._knowledge.add_edges(edges)
+                # Every request's decision, links and refusals alike, replaced with the
+                # edges they account for.
+                self._knowledge.replace_http_call_decisions(decision_rows(plan.http_crossings))
                 applied = apply_uses(self._knowledge, uses, producer=GLOBAL_PARSER)
                 self._knowledge.gc_orphan_entities()
             watch.candidates_out = len(edges) + len(uses.edges)

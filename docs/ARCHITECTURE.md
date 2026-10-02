@@ -543,6 +543,12 @@ embeddings(
 )
 
 meta(key, value)   -- schema_version, parser_version, embedding_model, last_global_sync
+
+http_call_decisions(               -- derived: the HTTP join's output, rebuilt by every global commit (§5)
+  decision_ref PRIMARY KEY,        -- opaque, deterministic; never a row id
+  repo_id, file_id → files ON DELETE CASCADE, src_id → entities ON DELETE CASCADE,
+  line_start, line_end, method, url, variant, decision, evidence_json, chain_json
+)
 ```
 
 ### Repository identity, path and display name are three things
@@ -1945,10 +1951,30 @@ and the identities or patterns matched, with their deployment or pattern, `ident
 `bound_in`, the values left unresolved, the binding and source outcomes, and the provider. A refusal thus says how
 far its chain got.
 
+**Stored decisions** (`repoatlas/graph/http_chain.py`, table `http_call_decisions`, migration 008). The global commit
+writes one row per request decided — per request claim, per literal alternative of its base (`variant`
+`alternative:<base_at>`), and per injected root a transport's request is made from (`root:<injected_at>|<base_in>`;
+those requests share their claim's id) — in the same transaction as the edges, replacing every row. The rows are the
+linker's materialized output, never an input. Each row has a `decision_ref`: `hcd1-` and 20 hex digits of a hash over
+the caller's repository slug, path and lines, the request's target key and its variant, with an ordinal for exact
+duplicates. It holds no row or claim id, so the same request has the same ref after any sync and in a fresh index.
+Each row keeps its chain of seven hops — `caller`, `origin`, `service_identity`, `deployment_binding`,
+`source_binding`, `route`, `handler` — each `proven`, `unresolved`, `ambiguous` or `not_reached`. A proven hop cites
+the places that prove it; an unresolved or ambiguous hop a reason code and whatever partial places there are; a hop
+not reached cites nothing. The identity claims name those places under source-agnostic keys (`identity_in`,
+`binding_in`, `source_in`), so the chain never asks which kind of deployment stated them; a claim with no
+`binding_in` (a compose service, a specification's host) states its deployment where it states its identity.
+`source_in` may be a whole path with no line (the one application root a chart's repository serves), which names a
+file but grounds no span.
+
+> **Invariant.** Every `CALLS_HTTP_HANDLER` edge names, in its resolution, the `decision_ref` of exactly one stored
+> `linked` decision, and every stored `linked` decision is named by its edge. A refusal never has an edge.
+
 A link is one `CALLS_HTTP_HANDLER` edge, *consumer caller → provider handler*,
 provenanced by the request's own file and lines, whose resolution records under `http` the method, the URL as
-written, the endpoint, the deployment, both repositories, and `called_at`, `base_at`, `served_at`, `identity_at`
-and `bound_at` (or `identity_in` and `bound_in`, path and line, for an identity in another file). That record is the evidence that lets the change-impact walk (`repoatlas/graph/impact.py`) cross it, inward only: a handler's
+written, the endpoint, the deployment, both repositories, the `decision_ref` of its stored decision, and `called_at`,
+`base_at`, `served_at`, `identity_at` and `bound_at` (or `identity_in` and `bound_in`, path and line, for an identity
+in another file). That record is the evidence that lets the change-impact walk (`repoatlas/graph/impact.py`) cross it, inward only: a handler's
 change may reach the requests, a request's change never reaches the handler. It says the source on both sides names
 the same operation; it does not say the request is sent, or that it reaches this deployment.
 
@@ -2734,7 +2760,7 @@ transaction. `SyncEngine.run` is the boundary that guarantees old complete state
    published identity, needs no invalidation of its own. The join itself is rerun over those claims, which the pass
    already reads, on every sync; an ordinary body edit adds no invalidation anywhere.
 2. **`commit_global(plan)`** opens one transaction and, inside it, deletes every `linker:global` edge, interns the
-   planned endpoints, inserts the complete new set, and collects orphans.
+   planned endpoints, inserts the complete new set, replaces every stored HTTP call decision, and collects orphans.
 
 The delete and the insert are therefore one commit. Another connection observes the previous complete graph or the
 new complete graph, because no committed state exists between them.

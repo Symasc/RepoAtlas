@@ -342,6 +342,29 @@ class HttpEdgeRow(BaseModel):
     line_end: int | None = None
 
 
+class HttpCallDecisionRow(BaseModel):
+    """One stored decision of the HTTP join (``http_call_decisions``), with its caller's
+    file and entity for a reader to place it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    decision_ref: str
+    repo_id: int
+    file_id: int
+    src_id: int
+    line_start: int | None = None
+    line_end: int | None = None
+    method: str
+    url: str
+    variant: str
+    decision: str
+    evidence_json: str
+    chain_json: str
+    #: Read back with the row; ignored when one is written.
+    path: str | None = None
+    src_key: str | None = None
+
+
 class NeighborEdge(BaseModel):
     """An edge reached by graph expansion, with both endpoints' repositories."""
 
@@ -587,6 +610,9 @@ class KnowledgeStore(Protocol):
         self, *, exclude_parser: str, repo_id: int | None = None
     ) -> list[RouteServerRow]: ...
     def list_http_edges(self, repo_id: int) -> list[HttpEdgeRow]: ...
+    def replace_http_call_decisions(self, rows: Sequence[HttpCallDecisionRow]) -> None: ...
+    def list_http_call_decisions(self, repo_id: int | None = None) -> list[HttpCallDecisionRow]: ...
+    def http_call_decisions_built(self) -> bool: ...
     def list_file_parsers(self, repo_id: int) -> list[tuple[str, str | None]]: ...
     def neighbors(
         self,

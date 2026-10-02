@@ -20,7 +20,7 @@ from repoatlas.models.parsing import EdgeType, ParsedReference
 from repoatlas.parsers.http_facts import HTTP_CLIENT_CALL, PENDING_FACT
 from repoatlas.parsers.typescript import TypeScriptParser
 from repoatlas.services.workspace import Workspace
-from tests.http_crossing_corpus import ACCOUNTS, links
+from tests.http_crossing_corpus import ACCOUNTS, decision_of, links
 from tests.impact_corpus import build
 
 
@@ -278,5 +278,5 @@ def test_a_typescript_request_joins_a_python_handler_through_the_same_join(
         """,
         (f'%"{HTTP_CLIENT_CALL}"%',),
     ).fetchall()
-    decided = {row[1]: plan.decisions[row[0]] for row in rows}
+    decided = {row[1]: decision_of(plan, row[0]) for row in rows}
     assert decided["unknownService"] == "http-service-unmatched"

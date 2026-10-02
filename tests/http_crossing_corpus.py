@@ -280,20 +280,27 @@ def decided(workspace: Workspace, repository: str) -> dict[str, list[tuple[str, 
     """Every request claim one repository makes, by caller: its decision and the evidence
     the join kept for it, one entry per claim (literal alternatives are separate claims)."""
     from repoatlas.graph.linker import ReferenceLinker
-    from repoatlas.parsers.http_facts import HTTP_CLIENT_CALL
+    from repoatlas.parsers.http_facts import HTTP_CLIENT_CALL, TS_INJECTED_REQUEST
 
     plan = ReferenceLinker(workspace.knowledge).prepare_global().http_crossings
     rows = workspace.database.execute(
         """
         SELECT u.id, s.qualified_name FROM unresolved_refs u
         JOIN entities s ON s.id = u.src_id JOIN repositories r ON r.id = u.repo_id
-        WHERE r.slug = ? AND u.meta_json LIKE ?
+        WHERE r.slug = ? AND (u.meta_json LIKE ? OR u.meta_json LIKE ?)
         """,
-        (repository, f'%"{HTTP_CLIENT_CALL}"%'),
+        (repository, f'%"{HTTP_CLIENT_CALL}"%', f'%"{TS_INJECTED_REQUEST}"%'),
     ).fetchall()
+    names = {row["id"]: row["qualified_name"] for row in rows}
     found: dict[str, list[tuple[str, dict[str, str]]]] = {}
-    for row in rows:
-        found.setdefault(row["qualified_name"], []).append(
-            (plan.decisions[row["id"]], plan.evidence[row["id"]])
-        )
+    # One entry per decision: per claim, and per injected root a claim's request is made from.
+    for call in plan.calls:
+        if call.claim.id in names:
+            found.setdefault(names[call.claim.id], []).append((call.decision, call.evidence))
     return {caller: sorted(entries, key=str) for caller, entries in found.items()}
+
+
+def decision_of(plan: Any, claim_id: int) -> str:
+    """The one decision the join made for a request claim made from no injected root."""
+    [decision] = [call.decision for call in plan.calls if call.claim.id == claim_id]
+    return decision

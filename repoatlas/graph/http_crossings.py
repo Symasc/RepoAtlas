@@ -36,11 +36,14 @@ the edges with its other output, replaces them on every run, and never reads the
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
 
+from repoatlas.graph import http_chain as hops
+from repoatlas.graph.http_chain import Hop
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType
 from repoatlas.parsers.http_facts import (
@@ -51,7 +54,12 @@ from repoatlas.parsers.http_facts import (
     HTTP_UNSOURCED_IDENTITY,
     PENDING_FACT,
 )
-from repoatlas.storage.protocols import EdgeRecord, FileRow, UnresolvedRefRecord
+from repoatlas.storage.protocols import (
+    EdgeRecord,
+    FileRow,
+    HttpCallDecisionRow,
+    UnresolvedRefRecord,
+)
 
 #: The key of the evidence record in a ``CALLS_HTTP_HANDLER`` edge's resolution.
 HTTP_CROSSING = "http"
@@ -157,20 +165,43 @@ class _Pattern:
 
 
 @dataclass(frozen=True, slots=True)
+class HttpCallDecision:
+    """The join's decision for one request: one per request claim, and per injected root.
+
+    Literal alternatives of a base are claims of their own; the requests one injected
+    transport makes are derived per root and share their claim's id, so the ``variant``
+    tells them apart. None overwrites another.
+    """
+
+    #: Opaque and deterministic: the same request, written the same way, has the same ref
+    #: after any sync. Never a row or claim id.
+    ref: str
+    claim: UnresolvedRefRecord
+    #: ``""``, ``alternative:<base_at>`` or ``root:<injected_at>|<base_in>``.
+    variant: str
+    decision: str
+    #: The hops the decision rests on, flat, as M4 recorded them: every hop a link proves,
+    #: or for a refusal the hops proven before (and beside) the one that failed.
+    evidence: dict[str, str]
+    #: The same, as the ordered chain (:mod:`repoatlas.graph.http_chain`).
+    chain: tuple[Hop, ...]
+    #: The ``CALLS_HTTP_HANDLER`` edge a link emits, carrying this ref; ``None`` otherwise.
+    edge: EdgeRecord | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class HttpCrossingPlan:
     """What the join established, computed but not applied."""
 
     edges: tuple[EdgeRecord, ...] = ()
-    #: Request claim id → its decision. Diagnostics, never identity.
-    decisions: dict[int, str] = field(default_factory=dict)
-    #: Request claim id → the hops its decision rests on: every hop a link proves, or for a
-    #: refusal the hops proven before the one that failed. Diagnostics, never identity.
-    evidence: dict[int, dict[str, str]] = field(default_factory=dict)
+    #: Every request's decision, in a stable order. Materialized by the global commit
+    #: (``http_call_decisions``); diagnostics and surface, never identity.
+    calls: tuple[HttpCallDecision, ...] = ()
 
     @property
     def detail(self) -> str:
-        linked = sum(1 for decision in self.decisions.values() if decision == LINKED)
-        ambiguous = sum(1 for d in self.decisions.values() if d == PROVIDER_AMBIGUOUS)
+        linked = sum(1 for call in self.calls if call.decision == LINKED)
+        ambiguous = sum(1 for call in self.calls if call.decision == PROVIDER_AMBIGUOUS)
         return (
             f"{linked} request(s) joined to a handler in another repository, {ambiguous} ambiguous"
         )
@@ -279,16 +310,15 @@ def _line(value: str | None) -> int | None:
 def plan_http_crossings(
     claims: Iterable[UnresolvedRefRecord], files: Iterable[FileRow], *, producer: str
 ) -> HttpCrossingPlan:
-    """Join every request claim to at most one handler in another repository."""
+    """Decide every request claim: joined to at most one handler, or refused at a hop."""
     by_file = {row.file_id: row for row in files}
     exposures: dict[tuple[str, str], list[_Exposure]] = defaultdict(list)
     served: list[_Exposure] = []
     #: Origin → the identities resolved to it that reach no code.
     unsourced: dict[str, list[UnresolvedRefRecord]] = defaultdict(list)
     patterns: list[_Pattern] = []
-    requests: list[_Request] = []
-    decisions: dict[int, str] = {}
-    evidence: dict[int, dict[str, str]] = {}
+    #: Every request claim, with its meta and, when its origin is read, the request.
+    asked: list[tuple[UnresolvedRefRecord, dict[str, str], _Request | None]] = []
     for claim in claims:
         meta = _meta(claim)
         role = meta.get(PENDING_FACT)
@@ -306,21 +336,36 @@ def plan_http_crossings(
             if pattern is not None and claim.file_id in by_file:
                 patterns.append(pattern)
         elif role == HTTP_CLIENT_CALL:
-            if meta.get("base") == BASE_UNKNOWN and "origin" not in meta:
-                if claim.id is not None:
-                    decisions[claim.id] = UNKNOWN_BASE if _segments(meta) else UNREAD
-                    evidence[claim.id] = _called(claim, meta, by_file)
-                continue
-            request = _request(claim, meta)
-            if request is None or claim.file_id not in by_file:
-                if claim.id is not None:
-                    decisions[claim.id] = UNREAD
-                    evidence[claim.id] = _called(claim, meta, by_file)
-                continue
-            requests.append(request)
+            unknown = meta.get("base") == BASE_UNKNOWN and "origin" not in meta
+            request = None if unknown or claim.file_id not in by_file else _request(claim, meta)
+            asked.append((claim, meta, request))
 
+    refs = _refs([(claim, meta) for claim, meta, _ in asked], by_file)
     edges: list[EdgeRecord] = []
-    for request in requests:
+    calls: list[HttpCallDecision] = []
+    for (claim, meta, request), (ref, variant) in zip(asked, refs, strict=True):
+        consumer = by_file.get(claim.file_id)
+        found = _called(claim, meta, by_file)
+        start = [hops.caller_hop(claim, consumer)]
+        origin = hops.origin_places(claim, meta, consumer)
+        edge: EdgeRecord | None = None
+        if request is None:
+            # The host is not stated (D2), or the claim is not read: the chain stops at origin.
+            unread = not (
+                meta.get("base") == BASE_UNKNOWN and "origin" not in meta and _segments(meta)
+            )
+            decision = UNREAD if unread else UNKNOWN_BASE
+            reason = "claim_unread" if unread else "host_not_stated"
+            chain = [
+                *start,
+                Hop(hops.ORIGIN, hops.UNRESOLVED, origin, reason=reason),
+                *hops.unreached(*hops.HOPS[2:]),
+            ]
+            calls.append(HttpCallDecision(ref, claim, variant, decision, found, tuple(chain)))
+            continue
+        # A literal URL states its origin at the call itself.
+        stated = origin or tuple(replace(p, role="stated_at") for p in start[0].provenance)
+        start.append(Hop(hops.ORIGIN, hops.PROVEN, stated, detail=request.origin))
         matched = [
             exposure
             for exposure in exposures.get((request.method, request.origin), ())
@@ -333,10 +378,11 @@ def plan_http_crossings(
         rivals = unsourced.get(request.origin, [])
         # The hosts an Ingress gives under a deployment no local source establishes.
         fitting = [p for p in patterns if p.fits(request.origin)]
-        found = _called(request.claim, request.meta, by_file)
         if len(distinct) > 1:
             decision = PROVIDER_AMBIGUOUS
-            found.update(_identities([e.claim for e in distinct.values()], by_file))
+            candidates = list(distinct.values())
+            found.update(_identities([e.claim for e in candidates], by_file))
+            chain = [*start, *_ambiguous(candidates, [], by_file)]
         elif distinct:
             exposure = next(iter(distinct.values()))
             # A pattern of the chart whose rendering made this exposure is that same
@@ -346,34 +392,202 @@ def plan_http_crossings(
             if rivals or unbound:
                 decision = PROVIDER_AMBIGUOUS
                 found.update(_identities([exposure.claim, *rivals, *unbound], by_file))
+                chain = [*start, *_ambiguous([exposure], [*rivals, *unbound], by_file)]
             else:
                 # Inside its own repository too: an identity the source proves says which
                 # handler the request reaches, as route shape alone cannot.
                 decision = LINKED
-                edge = _edge(request, exposure, by_file, producer)
+                edge = _edge(request, exposure, by_file, producer, ref)
                 edges.append(edge)
                 record = json.loads(edge.resolution or "{}").get(HTTP_CROSSING, {})
                 found.update({str(k): str(v) for k, v in record.items()})
+                route = _route(exposure, by_file)
+                chain = [
+                    *start,
+                    *hops.proven_identity(_evidence(exposure.claim, by_file)),
+                    Hop(hops.ROUTE, hops.PROVEN, route, detail=exposure.endpoint),
+                    Hop(hops.HANDLER, hops.PROVEN, route, entity_id=exposure.claim.src_id),
+                ]
         elif rivals:
             decision = SOURCE_UNRESOLVED
             found.update(_identities(rivals, by_file))
+            evidence = hops.merged([_evidence(claim, by_file) for claim in rivals])
+            chain = [
+                *start,
+                Hop(hops.SERVICE_IDENTITY, hops.PROVEN, evidence.identity, detail=evidence.detail),
+                Hop(hops.DEPLOYMENT_BINDING, hops.PROVEN, evidence.binding or evidence.identity),
+                Hop(
+                    hops.SOURCE_BINDING,
+                    hops.UNRESOLVED,
+                    evidence.source,
+                    reason="source_unresolved",
+                    detail=_joined(rivals, "source_outcome"),
+                ),
+                *hops.unreached(hops.ROUTE, hops.HANDLER),
+            ]
         elif fitting:
             decision = BINDING_UNRESOLVED
-            found.update(_identities([p.claim for p in fitting], by_file))
+            claims_fitting = [p.claim for p in fitting]
+            found.update(_identities(claims_fitting, by_file))
+            evidence = hops.merged([_evidence(claim, by_file) for claim in claims_fitting])
+            tied = all(_meta(claim).get("source_outcome") == "tied" for claim in claims_fitting)
+            unresolved = _joined(claims_fitting, "unresolved")
+            outcome = _joined(claims_fitting, "binding_outcome")
+            chain = [
+                *start,
+                Hop(hops.SERVICE_IDENTITY, hops.PROVEN, evidence.identity, detail=evidence.detail),
+                Hop(
+                    hops.DEPLOYMENT_BINDING,
+                    hops.UNRESOLVED,
+                    evidence.binding,
+                    reason="binding_unresolved",
+                    detail="; ".join(part for part in (unresolved, outcome) if part),
+                ),
+                Hop(hops.SOURCE_BINDING, hops.PROVEN, evidence.source)
+                if tied and evidence.source
+                else Hop(
+                    hops.SOURCE_BINDING,
+                    hops.UNRESOLVED,
+                    reason="source_unresolved",
+                    detail=_joined(claims_fitting, "source_outcome"),
+                ),
+                *hops.unreached(hops.ROUTE, hops.HANDLER),
+            ]
         elif covering := [e for e in served if _covers(e, request)]:
             decision = ROUTE_UNMATCHED
             found.update(_identities([e.claim for e in covering], by_file))
+            evidence = hops.merged([_evidence(e.claim, by_file) for e in covering])
+            chain = [
+                *start,
+                *hops.proven_identity(evidence),
+                Hop(hops.ROUTE, hops.UNRESOLVED, reason="route_unmatched"),
+                *hops.unreached(hops.HANDLER),
+            ]
         else:
             decision = SERVICE_UNMATCHED
-        if request.claim.id is not None:
-            decisions[request.claim.id] = decision
-            evidence[request.claim.id] = found
+            chain = [
+                *start,
+                Hop(hops.SERVICE_IDENTITY, hops.UNRESOLVED, reason="no_identity"),
+                *hops.unreached(*hops.HOPS[3:]),
+            ]
+        calls.append(HttpCallDecision(ref, claim, variant, decision, found, tuple(chain), edge))
     edges.sort(key=lambda e: (e.file_id or 0, e.line_start or 0, e.src_id, e.dst_id))
-    return HttpCrossingPlan(edges=tuple(edges), decisions=decisions, evidence=evidence)
+    calls.sort(key=lambda call: call.ref)
+    return HttpCrossingPlan(edges=tuple(edges), calls=tuple(calls))
+
+
+def decision_rows(plan: HttpCrossingPlan) -> list[HttpCallDecisionRow]:
+    """The plan's decisions as the global commit stores them (``http_call_decisions``)."""
+    rows: list[HttpCallDecisionRow] = []
+    for call in plan.calls:
+        claim = call.claim
+        method, _, url = claim.target_key.partition(" ")
+        rows.append(
+            HttpCallDecisionRow(
+                decision_ref=call.ref,
+                repo_id=claim.repo_id,
+                file_id=claim.file_id,
+                src_id=claim.src_id,
+                line_start=claim.line_start,
+                line_end=claim.line_end,
+                method=method,
+                url=url,
+                variant=call.variant,
+                decision=call.decision,
+                evidence_json=json.dumps(call.evidence, sort_keys=True),
+                chain_json=hops.chain_json(call.chain),
+            )
+        )
+    return rows
+
+
+def _variant(meta: dict[str, str]) -> str:
+    """What tells a request apart from another its claim makes: an injected root, or the
+    literal alternative of its base."""
+    if "injected_at" in meta:
+        return f"root:{meta['injected_at']}|{meta.get('base_in', '')}"
+    if "alternatives" in meta:
+        return f"alternative:{meta.get('base_at', '')}"
+    return ""
+
+
+def _refs(
+    asked: list[tuple[UnresolvedRefRecord, dict[str, str]]], by_file: dict[int, FileRow]
+) -> list[tuple[str, str]]:
+    """Each request's ``decision_ref`` and variant, from what the source states of it:
+    its repository, file, lines, the request as written, and the variant. Requests alike
+    in all of that are told apart by their order, which is then all that differs."""
+    keys: list[str] = []
+    for claim, meta in asked:
+        row = by_file.get(claim.file_id)
+        place = [row.repo_slug, row.rel_path] if row else [f"repository:{claim.repo_id}", ""]
+        keys.append(
+            json.dumps([*place, claim.line_start, claim.line_end, claim.target_key, _variant(meta)])
+        )
+    order = sorted(range(len(asked)), key=lambda i: (keys[i], asked[i][0].id or 0))
+    seen: dict[str, int] = defaultdict(int)
+    refs: list[tuple[str, str]] = [("", "")] * len(asked)
+    for index in order:
+        ordinal = seen[keys[index]]
+        seen[keys[index]] += 1
+        text = keys[index] if ordinal == 0 else f"{keys[index]}#{ordinal}"
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
+        refs[index] = (f"hcd1-{digest}", _variant(asked[index][1]))
+    return refs
+
+
+def _evidence(claim: UnresolvedRefRecord, by_file: dict[int, FileRow]) -> hops.IdentityEvidence:
+    return hops.identity_evidence(claim, _meta(claim), by_file[claim.file_id])
+
+
+def _route(exposure: _Exposure, by_file: dict[int, FileRow]) -> tuple[hops.Provenance, ...]:
+    provider = by_file[exposure.claim.file_id]
+    return (
+        hops.Provenance(
+            exposure.claim.repo_id,
+            provider.rel_path,
+            exposure.claim.line_start,
+            exposure.claim.line_end,
+            "served_at",
+        ),
+    )
+
+
+def _ambiguous(
+    candidates: list[_Exposure], rivals: list[UnresolvedRefRecord], by_file: dict[int, FileRow]
+) -> list[Hop]:
+    """The hops of a request more than one thing could answer: one identity serving two
+    matching routes is ambiguous at the route; anything else at the identity."""
+    evidence = [_evidence(e.claim, by_file) for e in candidates]
+    identities = {
+        (e.claim.repo_id, item.identity) for e, item in zip(candidates, evidence, strict=True)
+    }
+    if not rivals and len(identities) == 1:
+        routes = tuple(dict.fromkeys(p for e in candidates for p in _route(e, by_file)))
+        return [
+            *hops.proven_identity(evidence[0]),
+            Hop(hops.ROUTE, hops.AMBIGUOUS, routes, reason="several_routes"),
+            *hops.unreached(hops.HANDLER),
+        ]
+    together = hops.merged([*evidence, *(_evidence(claim, by_file) for claim in rivals)])
+    return [
+        Hop(
+            hops.SERVICE_IDENTITY,
+            hops.AMBIGUOUS,
+            together.identity,
+            reason="several_identities",
+            detail=together.detail,
+        ),
+        *hops.unreached(*hops.HOPS[3:]),
+    ]
+
+
+def _joined(claims: list[UnresolvedRefRecord], key: str) -> str:
+    return "; ".join(dict.fromkeys(v for c in claims if (v := _meta(c).get(key, ""))))
 
 
 def _edge(
-    request: _Request, exposure: _Exposure, by_file: dict[int, FileRow], producer: str
+    request: _Request, exposure: _Exposure, by_file: dict[int, FileRow], producer: str, ref: str
 ) -> EdgeRecord:
     consumer = by_file[request.claim.file_id]
     provider = by_file[exposure.claim.file_id]
@@ -387,6 +601,8 @@ def _edge(
         "called_at": f"{consumer.rel_path}:{request.claim.line_start}",
         "served_at": f"{provider.rel_path}:{exposure.claim.line_start}",
         "identity_source": exposure.meta.get("identity_source", ""),
+        # The stored decision this link is: one each way, never a refusal.
+        "decision_ref": ref,
     }
     # A request on an injected transport: where the options were written, and its base.
     for key in ("injected_at", "base_in"):
