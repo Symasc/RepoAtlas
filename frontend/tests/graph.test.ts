@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { flowEdges } from "@/components/graph/flow";
 import { blend } from "@/components/graph/useTween";
 import type { ChildEntry, ChildLink, RepositoryLink, TopologyChildrenResponse } from "@/lib/api/generated";
-import { arrowhead, centre, floating, LANE_INSET, sideways } from "@/lib/graph/geometry";
+import { arrowhead, centre, floating, LANE_INSET, octilinear, sideways, type Point } from "@/lib/graph/geometry";
 import {
   cardHeight,
   CARD,
@@ -444,11 +444,65 @@ describe("line geometry", () => {
     expect(onTop || onLeft).toBe(true);
   });
 
-  it("bows a curved line away from the centre", () => {
-    const left: Box = { x: -250, y: -120, width: 100, height: 40 };
-    const right: Box = { x: 150, y: -120, width: 100, height: 40 };
-    const route = floating(left, right, 0, 0.2);
-    expect(route.label.y).toBeLessThan(-100);
+  /** A path's straight runs: each `L` from the point before it, a `Q` (a rounded bend) skipped over. */
+  function runs(path: string): [Point, Point][] {
+    const t = path.split(" ");
+    const out: [Point, Point][] = [];
+    let here: Point = { x: 0, y: 0 };
+    for (let i = 0; i < t.length; ) {
+      const command = t[i++];
+      const next = () => ({ x: Number(t[i++]), y: Number(t[i++]) });
+      if (command === "M") here = next();
+      else if (command === "L") {
+        const to = next();
+        out.push([here, to]);
+        here = to;
+      } else if (command === "Q") {
+        next();
+        here = next();
+      }
+    }
+    return out;
+  }
+  function kindOf([a, b]: [Point, Point]): string {
+    const dx = Math.abs(b.x - a.x);
+    const dy = Math.abs(b.y - a.y);
+    if (dy < 0.2) return "flat";
+    if (dx < 0.2) return "upright";
+    return Math.abs(dx - dy) < 0.3 ? "diagonal" : "other";
+  }
+
+  it("draws a line as a transit map does: straight, one 45° diagonal, straight", () => {
+    const route = octilinear({ x: 0, y: 0 }, { x: 200, y: 60 });
+    expect(runs(route.path).map(kindOf)).toEqual(["flat", "diagonal", "flat"]);
+    // the count sits on the diagonal's middle; the arrow arrives flat
+    expect(route.label).toEqual({ x: 100, y: 30 });
+    expect(route.towards.y).toBe(60);
+    expect(route.start).toEqual({ x: 0, y: 0 });
+  });
+
+  it("crosses at 90° where a diagonal has no room, and runs straight when level", () => {
+    expect(runs(octilinear({ x: 0, y: 0 }, { x: 40, y: 200 }).path).map(kindOf)).toEqual(["flat", "upright", "flat"]);
+    expect(runs(octilinear({ x: 0, y: 0 }, { x: 200, y: 0 }).path).map(kindOf)).toEqual(["flat"]);
+  });
+
+  it("keeps parallel lines one gap apart on the diagonal as on the straight", () => {
+    const from: Box = { x: 0, y: 0, width: 100, height: 40 };
+    const to: Box = { x: 400, y: 120, width: 100, height: 40 };
+    const [upper, lower] = [-4, 4].map((offset) => runs(sideways(from, to, offset).path)[1]!);
+    for (const run of [upper!, lower!]) expect(kindOf(run)).toBe("diagonal");
+    // two lines x − y = c, |c1 − c2| / √2 apart
+    const c = ([p]: [Point, Point]) => p.x - p.y;
+    expect(Math.abs(c(upper!) - c(lower!)) / Math.SQRT2).toBeCloseTo(8, 0);
+  });
+
+  it("leaves a box above another through its bottom and arrives at the other's top", () => {
+    const top: Box = { x: 0, y: 0, width: 100, height: 40 };
+    const below: Box = { x: 20, y: 300, width: 100, height: 40 };
+    const route = floating(top, below);
+    expect(route.start.y).toBe(40);
+    expect(route.end.y).toBe(297);
+    expect(runs(route.path).map(kindOf)).toEqual(["upright", "diagonal", "upright"]);
   });
 
   it("meets a frame as a lane at the other end's height", () => {
@@ -550,7 +604,8 @@ describe("line geometry", () => {
 
   it("thickens with the count, within bounds", () => {
     expect(strokeFor(1)).toBeLessThan(strokeFor(100));
-    expect(strokeFor(1e9)).toBe(3.5);
+    expect(strokeFor(1e9)).toBe(5);
+    expect([strokeFor(9), strokeFor(10), strokeFor(999), strokeFor(1000)]).toEqual([2.5, 3.5, 3.5, 5]);
   });
 });
 

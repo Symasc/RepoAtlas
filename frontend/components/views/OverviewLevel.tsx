@@ -125,10 +125,8 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
     () =>
       flowEdges(graph.edges, {
         route: () => "float",
-        // spokes from the anchor run straight; lines between ring neighbours bow outward
-        curve: (e) => (e.source === shape.anchor || e.target === shape.anchor ? 0 : 0.14),
       }),
-    [graph.edges, shape.anchor],
+    [graph.edges],
   );
 
   const families = useMemo<Family[]>(() => {

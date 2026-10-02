@@ -755,14 +755,9 @@
 
 /* -- lines ----------------------------------------------------------------------------- */
 
-/* a line's colour is its relationship; its pattern, below, is its family */
-.link {
+/* a line's colour is its relationship, and so is its count tag's; its pattern is its family */
+:is(.link, .edgeLabel) {
   --stroke: var(--ra-edge-cross);
-  /* React Flow strokes its edge paths from these, and its sheet can load after
-     this one: setting them draws our colour whichever rule wins */
-  --xy-edge-stroke: var(--stroke);
-  --xy-edge-stroke-selected: var(--stroke);
-  transition: opacity var(--ra-duration) var(--ra-ease);
 
   &[data-relation="imports"] {
     --stroke: var(--ra-rel-imports);
@@ -786,43 +781,47 @@
   &[data-emphasis="selected"] {
     --stroke: var(--ra-accent);
   }
+}
 
-  &[data-emphasis="rest"] {
-    opacity: 0.55;
-  }
-  &[data-emphasis="lit"],
-  &[data-emphasis="selected"] {
-    opacity: 1;
-  }
+/* full strength at rest: the lines are the map. Only what is not in focus recedes. */
+.link {
+  /* React Flow strokes its edge paths from these, and its sheet can load after
+     this one: setting them draws our colour whichever rule wins */
+  --xy-edge-stroke: var(--stroke);
+  --xy-edge-stroke-selected: var(--stroke);
+  transition: opacity var(--ra-duration) var(--ra-ease);
+
   &[data-emphasis="dim"] {
-    opacity: 0.06;
+    opacity: 0.12;
   }
 }
 
-:global([data-mantine-color-scheme="light"]) .link[data-emphasis="rest"] {
-  opacity: 0.7;
+/* a band of canvas under every line, as a transit map cases its routes, so a
+   crossing or a parallel reads as two lines and not one smudge */
+.casing {
+  fill: none;
+  stroke: var(--ra-canvas);
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .linkStroke {
   stroke: var(--stroke);
   fill: none;
   stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
+/* the dash and dot spacing scale with the weight, set where the line is drawn */
 .link[data-family="http"] .linkStroke {
-  stroke-dasharray: 8 5;
   stroke-linecap: butt;
-}
-
-.link[data-family="config"] .linkStroke {
-  stroke-dasharray: 0.1 5;
-  stroke-linecap: round;
 }
 
 /* a double line: the colour, hollowed out by the canvas */
 .linkOuter {
   stroke: var(--stroke);
   fill: none;
+  stroke-linejoin: round;
 }
 
 .linkInner {
@@ -830,37 +829,41 @@
   --xy-edge-stroke-selected: var(--ra-canvas);
   stroke: var(--ra-canvas);
   fill: none;
+  stroke-linejoin: round;
 }
 
+/* where a line leaves, and where it arrives */
+.origin,
 .arrow {
   fill: var(--stroke);
   stroke: none;
 }
 
-/* the selected line's casing, as a map draws a route: a wider, paler band beneath */
+/* the selected line's glow-free highlight: a wider, paler band beneath its casing */
 .halo {
   fill: none;
   stroke: var(--ra-halo);
   stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
+/* a count tag, as a route number on a transit map: filled in its line's colour */
 .edgeLabel {
   position: absolute;
   padding: 0 5px;
   font-size: var(--mantine-font-size-xs);
-  font-weight: 600;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
-  line-height: 16px;
-  color: var(--ra-text);
-  background-color: var(--ra-surface-elevated);
-  border: 1px solid var(--ra-border-strong);
+  line-height: 17px;
+  color: var(--ra-on-line);
+  background-color: var(--stroke);
   border-radius: var(--ra-radius-s);
+  /* a ring of canvas, so it sits on its line, not in it */
+  outline: 2px solid var(--ra-canvas);
   pointer-events: none;
 
   &[data-emphasis="selected"] {
     color: var(--ra-on-accent);
-    background-color: var(--ra-accent);
-    border-color: var(--ra-accent);
   }
 }
 

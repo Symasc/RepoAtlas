@@ -4,9 +4,10 @@
  * Neutrals are warm, like paper and graphite, not the blue-black of a default
  * dark theme. One accent, a vermilion, marks what is selected, focused or
  * pressed next, and nothing else: no chrome is tinted with it. A line's colour
- * is data: each relationship has its own (imports blue, calls green, uses
- * violet, other code links ink, HTTP teal, package dependencies plum,
- * configuration ochre), and each keeps 4.5:1 on the canvas. The canvas is
+ * is data, set as a transit map sets its lines: saturated and distinct, one per
+ * relationship (imports blue, calls green, uses violet, other code links grey,
+ * HTTP teal, package dependencies magenta, configuration amber), each at 4.5:1
+ * or better on the canvas, and so is the text on a count tag filled with it. The canvas is
  * squared by a faint graticule, each repository is washed in its own hue
  * (see REPOSITORY_HUES), and a directory is a solid card a step above the
  * canvas, outlined, the same everywhere.
@@ -47,6 +48,8 @@ export interface ColorTokens {
   edge: string;
   /** Code links that are none of the relationships below: structure, mostly. */
   edgeCross: string;
+  /** Text on a count tag filled with a line's colour. */
+  onLine: string;
   /** Code links by relationship. */
   relImports: string;
   relCalls: string;
@@ -74,19 +77,20 @@ export const DARK: ColorTokens = {
   selected: "rgba(239, 122, 80, 0.16)",
   hover: "rgba(236, 233, 226, 0.06)",
   focus: "#ef7a50",
-  package: "#c690bb",
-  endpoint: "#5fbdb4",
-  config: "#d3af52",
+  package: "#ff6fae",
+  endpoint: "#22c7c0",
+  config: "#ffb43a",
   halo: "rgba(239, 122, 80, 0.28)",
   success: "#74c27a",
   warning: "#e2a447",
   danger: "#f2707f",
   evidence: "rgba(226, 196, 92, 0.13)",
   edge: "#45433f",
-  edgeCross: "#a29d93",
-  relImports: "#6fa6e8",
-  relCalls: "#86c46b",
-  relUses: "#a493ec",
+  edgeCross: "#a3a09a",
+  onLine: "#131312",
+  relImports: "#4f9dff",
+  relCalls: "#3fcf73",
+  relUses: "#b07cff",
   shadow: "0 1px 0 rgba(0, 0, 0, 0.3), 0 6px 20px rgba(0, 0, 0, 0.35)",
 };
 
@@ -112,19 +116,20 @@ export const LIGHT: ColorTokens = {
   selected: "rgba(168, 56, 26, 0.11)",
   hover: "rgba(28, 26, 23, 0.06)",
   focus: "#a8381a",
-  package: "#7b3a6c",
-  endpoint: "#0b6660",
-  config: "#735400",
+  package: "#ad1263",
+  endpoint: "#006b66",
+  config: "#7f4f00",
   halo: "rgba(168, 56, 26, 0.2)",
   success: "#276b2c",
   warning: "#855000",
   danger: "#a51833",
   evidence: "#ecdb95",
   edge: "#b4afa4",
-  edgeCross: "#5a554c",
-  relImports: "#2c5f9e",
-  relCalls: "#3b6e22",
-  relUses: "#5b47b0",
+  edgeCross: "#57534c",
+  onLine: "#ffffff",
+  relImports: "#1c5bbd",
+  relCalls: "#0f6a33",
+  relUses: "#7139c7",
   shadow: "0 1px 2px rgba(28, 26, 23, 0.07), 0 6px 18px rgba(28, 26, 23, 0.08)",
 };
 

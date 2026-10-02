@@ -77,6 +77,9 @@ export function Graph(props: Props) {
   );
 }
 
+/** Drawing order among the lines: the later, the more on top. */
+const RAISE: Record<Emphasis, number> = { dim: 0, rest: 1, lit: 2, selected: 3 };
+
 /** The map's grid, in canvas units: wide enough to sit behind the cards, not among them. */
 const GRATICULE = 120;
 const MIN_ZOOM = 0.12;
@@ -171,26 +174,29 @@ function Canvas({
     [nodes, related, focus, selected],
   );
 
+  // every line stays under the cards, as a transit line runs under its
+  // stations; what is lit or selected is drawn last, so it crosses the rest
   const shownEdges = useMemo<GraphEdge[]>(
     () =>
-      edges.map((edge) => {
-        const scope = edge.data?.scope ?? null;
-        const touching = focus !== null && (edge.source === focus || edge.target === focus);
-        let emphasis: Emphasis = "rest";
-        let hidden = false;
-        if (focus === null) hidden = scope === "detail";
-        else if (scope === "aggregate") hidden = true;
-        else if (touching) emphasis = "lit";
-        else if (scope === "detail") hidden = true;
-        else emphasis = "dim";
-        // every line of the connection being explained, one per relationship it carries
-        if (selectedEdge !== null && edge.data?.base === selectedEdge) {
-          emphasis = "selected";
-          hidden = false;
-        }
-        const raised = emphasis === "lit" || emphasis === "selected";
-        return { ...edge, hidden, zIndex: raised ? 1000 : 0, data: { ...edge.data!, emphasis } };
-      }),
+      edges
+        .map((edge) => {
+          const scope = edge.data?.scope ?? null;
+          const touching = focus !== null && (edge.source === focus || edge.target === focus);
+          let emphasis: Emphasis = "rest";
+          let hidden = false;
+          if (focus === null) hidden = scope === "detail";
+          else if (scope === "aggregate") hidden = true;
+          else if (touching) emphasis = "lit";
+          else if (scope === "detail") hidden = true;
+          else emphasis = "dim";
+          // every line of the connection being explained, one per relationship it carries
+          if (selectedEdge !== null && edge.data?.base === selectedEdge) {
+            emphasis = "selected";
+            hidden = false;
+          }
+          return { ...edge, hidden, zIndex: 0, data: { ...edge.data!, emphasis } };
+        })
+        .sort((a, b) => RAISE[a.data!.emphasis] - RAISE[b.data!.emphasis]),
     [edges, focus, selectedEdge],
   );
 
