@@ -35,10 +35,11 @@ from tests.http_crossing_corpus import (
     LOAD_USER_CALL_LINE,
     WORKSPACE,
 )
-from tests.impact_corpus import build
+from tests.impact_corpus import HTTP_API, HTTP_WEB, build
 from tests.test_http_call_decisions import MIRRORED, TWINNED
 from tests.test_http_crossings import ALTERNATED
 from tests.test_http_ts_injection import WEB
+from tests.topology_corpus import HTTP_REFUSED
 
 
 def _ask(
@@ -461,3 +462,36 @@ def test_a_cursor_issued_without_the_ref_is_refused_with_it(joined: Workspace) -
     assert first.has_more and first.next_cursor is not None
     with pytest.raises(InvalidCursorError):
         _ask(joined, decision_ref=_stored(joined, "portal")[0], cursor=first.next_cursor)
+
+
+def test_the_explorer_corpus_refuses_each_request_for_its_own_reason(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """The linked corpus's ``http-refused`` requests, as the explorer's e2e expects them
+    (M5b Phase A): two route-matching rows and one only the join reads, each refusal
+    stopping at its own hop."""
+    built = build(
+        workspace,
+        tmp_path,
+        {"http-api": HTTP_API, "http-web": HTTP_WEB, "http-refused": HTTP_REFUSED},
+    )
+    rows = _ask(built, "http-refused", cross_repository=True).operations
+    assert [
+        (
+            row.line_start,
+            row.status.value,
+            [(c.status.value, c.decision_ref, [h.status for h in c.chain]) for c in row.crossings],
+        )
+        for row in rows
+    ] == [
+        (5, "no_indexed_handler", [("http-route-unmatched", "hcd1-25680369ded384629e5e",
+                                    ["proven"] * 5 + ["unresolved", "not_reached"])]),
+        (9, "no_indexed_handler", [("http-service-unmatched", "hcd1-1a63689c3b7bd6debe06",
+                                    ["proven"] * 2 + ["unresolved"] + ["not_reached"] * 4)]),
+        (13, "join_only", [("http-base-unknown", "hcd1-72d6b105266f94bea41e",
+                            ["proven", "unresolved"] + ["not_reached"] * 5)]),
+    ]  # fmt: skip
+    [linked] = _ask(built, "http-web").operations
+    assert [(c.status.value, c.decision_ref) for c in linked.crossings] == [
+        ("linked", "hcd1-b208cc48f79ed1081fac")
+    ]

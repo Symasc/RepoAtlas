@@ -22,7 +22,33 @@ from tests.xrepo_corpus import LINKING
 
 GLOBAL = CapabilityContext(scope=CapabilityScope.GLOBAL)
 
-LINKED: dict[str, dict[str, str]] = {**LINKING, "http-api": HTTP_API, "http-web": HTTP_WEB}
+#: Requests the HTTP join refuses, each for its own reason (M5b): a route the published
+#: service does not serve, a host no identity publishes, and a host the source does not
+#: state. Literal URLs make route-matching rows; the last is a row only the join reads.
+HTTP_REFUSED = {
+    "client.py": (
+        "import requests\n"
+        "\n"
+        "\n"
+        "def missing():\n"
+        '    return requests.get("https://http-pair.example/missing/7")\n'  # 5: route-unmatched
+        "\n"
+        "\n"
+        "def elsewhere():\n"
+        '    return requests.get("https://elsewhere.example/items/7")\n'  # 9: service-unmatched
+        "\n"
+        "\n"
+        "def unstated(host, item_id):\n"
+        '    return requests.get(f"{host}/items/{item_id}")\n'  # 13: base-unknown
+    )
+}
+
+LINKED: dict[str, dict[str, str]] = {
+    **LINKING,
+    "http-api": HTTP_API,
+    "http-web": HTTP_WEB,
+    "http-refused": HTTP_REFUSED,
+}
 
 #: The oracle's own classification, written out rather than imported.
 HTTP_TYPES = frozenset(
