@@ -18,7 +18,8 @@ a caller row's crossings are the decisions the last global link pass stored
 (``http_call_decisions``), placed on the row written at the same lines by the same
 entity. A request only the join reads — an absolute or deployment-addressed URL, a
 host the source does not state — has no route-matching row; it gets one of its own,
-``unresolved`` with detail ``join_only``, so no stored decision goes unlisted.
+of status ``join_only``, so no stored decision goes unlisted. That row is not a route
+match and not an unresolved path, and is counted as neither.
 :func:`project` then withholds what another repository proves, as the scope asks.
 """
 
@@ -82,9 +83,6 @@ GLOBAL_PARSER = "linker:global"
 
 _CURSOR_REFUSED = "that HTTP operations cursor does not belong to this request"
 _CURSOR_STALE = "the HTTP operation inventory changed since that page was issued"
-
-#: The detail of a caller row only the workspace join reads.
-JOIN_ONLY = "join_only"
 
 #: Hops whose places are always the caller's own repository.
 _OWN_HOPS = frozenset({http_chain.CALLER, http_chain.ORIGIN})
@@ -429,8 +427,8 @@ def _crossed(
     first in order when two rows are. A request whose route a wrapper composed is a row
     of its file with no lines (its base is stated elsewhere): a decision of that file's
     requests with exactly its method and path goes there, one to each such row in the
-    order of the requests' lines. What neither places gets a ``join_only`` row, so each
-    stored decision is listed exactly once.
+    order of the requests' lines. What neither places gets a row of status ``join_only``,
+    so each stored decision is listed exactly once.
     """
     grouped: dict[tuple[str | None, int | None, int | None, str | None], list[HttpCrossing]] = {}
     for row in decisions:
@@ -481,7 +479,7 @@ def _crossed(
             Draft(
                 operation=HttpOperation(
                     role="caller",
-                    status=OperationStatus.UNRESOLVED,
+                    status=OperationStatus.JOIN_ONLY,
                     method=first.method or None,
                     route=_path_of(first.url),
                     path=path,
@@ -489,7 +487,6 @@ def _crossed(
                     line_end=line_end,
                     entity=entity,
                     package=package(path),
-                    detail=JOIN_ONLY,
                     crossings=ordered,
                 ),
                 qualified_name=owner.qualified_name if owner else None,
@@ -920,7 +917,7 @@ def coverage(
     callers = [d.operation for d in scoped if d.operation.role == "caller"]
     unresolved = Counter(row.detail for row in callers if row.status is OperationStatus.UNRESOLVED)
     # A request only the join reads has a path; its crossings say what became of it.
-    joined = unresolved.get(JOIN_ONLY, 0)
+    joined = sum(1 for row in callers if row.status is OperationStatus.JOIN_ONLY)
     ambiguous = sum(1 for row in callers if row.status is OperationStatus.AMBIGUOUS)
     declared = sum(1 for d in scoped if d.operation.status is OperationStatus.DECLARED)
     limitations = [
@@ -944,9 +941,10 @@ def coverage(
             CoverageLimitation(
                 code="join_only",
                 count=joined,
-                note="Requests only the workspace join reads (an absolute or "
-                "deployment-addressed URL, or a host the source does not state). Their "
-                "status is not a route match; their crossings say what the join decided.",
+                note="Rows of status join_only: requests only the workspace join reads (an "
+                "absolute or deployment-addressed URL, or a host the source does not "
+                "state). Neither a route match nor an unresolved path, and not counted as "
+                "either; their crossings say what the join decided.",
             )
         )
     fetch = unresolved.get(http_claims.REASON_DIRECT_FETCH, 0)
@@ -958,7 +956,7 @@ def coverage(
                 note="Direct fetch calls with a template URL are recorded, never matched.",
             )
         )
-    others = sum(unresolved.values()) - fetch - joined
+    others = sum(unresolved.values()) - fetch
     if others:
         limitations.append(
             CoverageLimitation(
@@ -1001,7 +999,7 @@ def coverage(
         unresolved=dict(sorted(unresolved.items())),
         ambiguous=ambiguous,
         declared=declared,
-        unknown_paths=sum(unresolved.values()) - joined,
+        unknown_paths=sum(unresolved.values()),
         limitations=tuple(limitations),
     )
 

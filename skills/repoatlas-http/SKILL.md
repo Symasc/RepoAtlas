@@ -37,7 +37,7 @@ None of these proves runtime reachability. Do not invent a deployment, a public 
 ## Reading crossings
 
 - A caller's `crossings` are the workspace join's decisions, one per request (each literal alternative and injected root has its own), with a chain `caller → origin → service_identity → deployment_binding → source_binding → route → handler`. The first hop that is not `proven` says where and why it stopped; `not_reached` hops cite nothing.
-- `crossing: ["http-base-unknown"]` lists requests whose host the source does not state. A `join_only` row is a request only the join reads; its status is not a route match.
+- `crossing: ["http-base-unknown"]` lists requests whose host the source does not state. A row of status `join_only` is a request only the join reads: not a route match, not an unresolved path.
 - Under repository scope another repository's hops are `withheld`. Pass `cross_repository: true` to see them; their lines are evidence only under global scope.
 
 Stop when each link you report is labelled with its strength and you have read both sides' lines.
