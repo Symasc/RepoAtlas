@@ -18,11 +18,12 @@ flowchart LR
 repoatlas ui
 ```
 
-That is all. It starts the local API and this app together, opens
-<http://127.0.0.1:7318> in your browser, and stops both on Ctrl-C. The first run
-installs the packages and makes a production build (into `.next-ui/`); later
-runs rebuild only when a source has changed. It needs Node.js 22 and pnpm 11
-(or Node's corepack).
+That is all. An installed release serves the explorer it ships with, and needs
+nothing else (see [As shipped](#as-shipped-a-static-export)). From a checkout, it
+starts the local API and this app together, opens <http://127.0.0.1:7318> in your
+browser, and stops both on Ctrl-C. The first run installs the packages and makes
+a production build (into `.next-ui/`); later runs rebuild only when a source has
+changed. A checkout needs Node.js 22 and pnpm 11 (or Node's corepack).
 
 | Option | Effect |
 |---|---|
@@ -248,6 +249,10 @@ its own name), no cross-site request, JSON bodies up to 1 MiB, and only the
 endpoints the contract lists (`sync` and `verify_grounding` are not among
 them). It forwards only to a loopback `http://host:port` named by the
 connection file. The token and the file's path never reach the browser.
+
+An exported build has no route: the local API answers `/api/ra/<name>` itself,
+with these checks and these refusals (`repoatlas/api/server.py`,
+[docs/local-api.md](../docs/local-api.md#an-installed-release-one-server)).
 
 ## Checks
 

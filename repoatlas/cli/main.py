@@ -325,7 +325,7 @@ def ui(
         ),
     ] = None,
 ) -> None:
-    """Open the graph explorer: the local API and the web app, started together.
+    """Open the graph explorer in a browser, with the local API it reads.
 
     Serves the index and the explorer at http://127.0.0.1:PORT and opens it in
     a browser. An installed release carries the explorer ready to serve, and
