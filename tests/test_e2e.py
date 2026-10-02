@@ -110,10 +110,14 @@ def test_the_full_success_scenario(repoatlas, workspace_root: Path, tmp_path: Pa
     assert everything.exit_code == ExitCode.OK, everything
     assert f"Syncing {MANAGED_REPOSITORY_COUNT} repositories" in everything.output
 
-    # 5. From an unrelated directory, RepoAtlas refuses to guess.
+    # 5. From an unrelated directory, sync is the whole workspace; anything else
+    # refuses to guess.
     outside = tmp_path / "home" / "user"
     outside.mkdir(parents=True)
-    refused = run(outside, "sync")
+    anywhere = run(outside, "sync")
+    assert anywhere.exit_code == ExitCode.OK, anywhere
+    assert f"Syncing {MANAGED_REPOSITORY_COUNT} repositories" in anywhere.output
+    refused = run(outside, "status")
     assert refused.exit_code == ExitCode.CONTEXT, refused
     assert "Unable to determine repository." in refused.output
 
@@ -203,7 +207,8 @@ def test_an_unmanaged_git_repository_is_named_as_such(
 ) -> None:
     run = repoatlas
     assert run(workspace_root, "init", str(workspace_root)).exit_code == ExitCode.OK
-    result = run(unmanaged_repo, "sync")
+    # `status`, not `sync`: from there `sync` syncs the whole workspace instead.
+    result = run(unmanaged_repo, "status")
     assert result.exit_code == ExitCode.CONTEXT, result
     assert "not managed by RepoAtlas" in result.output
 

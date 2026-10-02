@@ -24,11 +24,13 @@ filesystem rather than from the path (V1_SPEC §17).
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from repoatlas.config.settings import DiscoverySettings
 from repoatlas.containment import RepositoryBoundary
+from repoatlas.discovery.finder import VIRTUAL_ENVIRONMENT_MARKER
 from repoatlas.discovery.ignore import (
     IGNORE_FILENAME,
     MAX_IGNORE_BYTES,
@@ -197,6 +199,7 @@ def scan_repository(
         # takes the count and writes its own sentence.
         incomplete.extend(listing.warnings)
 
+    environments = _virtual_environments(listing.paths)
     results: list[ScannedFile] = []
     for rel_path in listing.paths:
         # Security policy first: not configurable, not negotiable, and decided
@@ -204,6 +207,8 @@ def scan_repository(
         if is_secret_path(rel_path):
             continue
         if _is_excluded(rel_path, config):
+            continue
+        if _in_virtual_environment(rel_path, environments):
             continue
         if ignore.matches(rel_path):
             continue
@@ -243,6 +248,29 @@ def _load_ignore_rules(boundary: RepositoryBoundary) -> IgnoreRules:
 
 def _is_excluded(rel_path: str, config: DiscoverySettings) -> bool:
     return any(part in config.exclusions for part in Path(rel_path).parts)
+
+
+def _virtual_environments(paths: Iterable[str]) -> frozenset[PurePosixPath]:
+    """The directories a listing shows to be Python virtual environments.
+
+    Recent ``venv`` and ``uv`` environments ignore themselves for Git, so none of
+    their files is listed; an older or hand-made one is listed in full, and its
+    ``pyvenv.cfg`` with it. Decided from the listing alone, before anything is
+    read. A ``pyvenv.cfg`` at the repository's top does not make the repository
+    one: its own files are still its own.
+    """
+    found: set[PurePosixPath] = set()
+    for rel_path in paths:
+        path = PurePosixPath(rel_path)
+        if path.name == VIRTUAL_ENVIRONMENT_MARKER and path.parent != PurePosixPath("."):
+            found.add(path.parent)
+    return frozenset(found)
+
+
+def _in_virtual_environment(rel_path: str, environments: frozenset[PurePosixPath]) -> bool:
+    return bool(environments) and any(
+        parent in environments for parent in PurePosixPath(rel_path).parents
+    )
 
 
 def _belongs_to_nested_repository(

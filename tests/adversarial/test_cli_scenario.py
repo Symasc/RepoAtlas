@@ -169,10 +169,13 @@ def test_the_full_scenario_with_answers_that_must_change(
     assert everything.exit_code == ExitCode.OK, everything
     assert f"Syncing {len(REPOSITORIES)} repositories" in everything.stdout
 
-    # From an unrelated directory, RepoAtlas refuses.
+    # From an unrelated directory, sync is the whole workspace; anything else refuses.
     outside = tmp_path / "home" / "user"
     outside.mkdir(parents=True)
-    refused = cli(outside, "sync")
+    anywhere = cli(outside, "sync")
+    assert anywhere.exit_code == ExitCode.OK, anywhere
+    assert f"Syncing {len(REPOSITORIES)} repositories" in anywhere.stdout
+    refused = cli(outside, "status")
     assert refused.exit_code == ExitCode.CONTEXT, refused
     assert "Unable to determine repository." in refused.output
 

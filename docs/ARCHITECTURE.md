@@ -2125,8 +2125,10 @@ walk(root):                       iterative, explicit stack, depth-first
   pop a directory
     is it a Git repository?       .git as a directory or a file → yield it, and keep descending
     read its entries              refused → record the path, do not claim it was empty
+    a virtual environment?        holds pyvenv.cfg and is no repository → not entered, whatever its name
     for each entry, descend if:
       not named .git              structural, independent of the configurable exclusions
+      not hidden                  a name starting with "." (tools, caches, settings), structural too
       not in exclusions           node_modules, .venv, dist, vendor, …
       a directory                 files and dangling links are not descended
       not a symlink               unless follow_symlinks, and then only inside the root
@@ -2149,6 +2151,14 @@ whole breadth-first frontier.
 **`.git` is never descended into.** Recognizing it is what makes the directory holding it a repository; walking its
 object database afterwards is thousands of directories of pure cost. This is enforced separately from the
 configurable exclusion list, so overriding `exclusions` cannot turn a preference into a pathological walk.
+
+**Hidden directories and virtual environments are not walked.** A root may be the home directory (`init`'s default
+on first use), where hidden directories hold tool installs, caches and settings, some of them Git clones
+(`~/.oh-my-zsh`, `~/.nvm`), and every project may carry its own virtual environment under any name. Neither holds a
+project, and both are most of a home directory's walk. A virtual environment is recognized by the `pyvenv.cfg` at its
+top, read from the listing the walk already took. These rules decide only where repositories are looked for: a
+repository's files, its own `.github` or `.circleci` included, are enumerated by Git (§6), and there a directory a
+listing shows to hold `pyvenv.cfg` is skipped the same way.
 
 **Nested repositories stay separate.** The walk continues *into* a repository looking for more, because a repository
 inside another is its own managed repository (V1_SPEC §5) and the closest enclosing one wins at context resolution
@@ -2496,6 +2506,8 @@ resolve(cwd, explicit_repo) -> RepositoryContext
                                                              managed by RepoAtlas."     (exit 2)
 
 5. otherwise                                              → unresolved-context error    (exit 2)
+
+   `sync` only (anywhere=True): steps 4 and 5            → GLOBAL scope, all repositories
 ```
 
 ### Why step 2 precedes step 3
@@ -2511,6 +2523,10 @@ step-5 error. There is deliberately **no subtree scope**: a partial scope inferr
 answer a question against an arbitrary subset of repositories, and a wrong-scope answer is worse than an error
 that names the fix.
 
+`sync` is the one command that treats "outside every managed repository" as the whole workspace, so it runs from
+any directory. That is no subset inferred from proximity: it is every repository, as at the root. Inside a
+managed repository, that repository still wins.
+
 ### Detail rules
 
 - **Canonicalization**: `Path.resolve()` on both sides before comparison, so `~`, `..`, trailing slashes,
@@ -2519,8 +2535,9 @@ that names the fix.
 - **Containment**: `Path.is_relative_to`, never string prefix comparison — `/work/repos-old` must not match
   `/work/repos`.
 - **Nearest-first ordering** in step 2 gives "closest managed repository wins" with no special-casing.
-- **`sync` never registers a repository outside the managed root.** Step 4 reports and exits: an enclosing
-  Git repository that is not beneath the configured root is not RepoAtlas's to adopt. Membership *within*
+- **`sync` never registers a repository outside the managed root.** From inside an enclosing Git repository
+  that is not beneath the configured root, `sync` syncs the workspace and leaves that repository alone: it is
+  not RepoAtlas's to adopt. Membership *within*
   the root is reconciled by every sync that covers it (§9) — `init` establishes the root, not a permanent
   snapshot of what was in it.
 - **Scope is data, not behavior**: `RepositoryContext` carries `scope`, `primary`, `repositories` and a

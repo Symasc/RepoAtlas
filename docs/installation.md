@@ -73,9 +73,9 @@ skill directory of the same name, is left alone and reported.
 ## After installing
 
 ```bash
-repoatlas init ~/work/repos     # index every Git repository under a directory (once)
+repoatlas init ~/work/repos     # index every Git repository under a directory (once; default: your home directory)
 repoatlas ui                    # open the graph explorer
-repoatlas sync                  # update the index after you change code
+repoatlas sync                  # update the index after you change code (from any directory)
 ```
 
 Restart Claude Code so it starts the MCP server and loads the skills. Then ask it something RepoAtlas answers,

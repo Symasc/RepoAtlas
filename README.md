@@ -137,7 +137,7 @@ tools are for the agent. See [`frontend/README.md`](frontend/README.md).
 The CLI covers indexing, quick lookups and the two ways of serving the index:
 
 ```bash
-repoatlas init ~/work/repos        # index every repository under a root (once)
+repoatlas init ~/work/repos        # index every repository under a root directory
 repoatlas sync                     # update the index
 repoatlas status                   # how the index stands against the working tree
 repoatlas repos                    # list indexed repositories

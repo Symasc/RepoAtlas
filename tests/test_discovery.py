@@ -52,6 +52,48 @@ def test_excluded_directories_are_not_descended(tmp_path: Path) -> None:
     assert discover_repositories(tmp_path) == []
 
 
+def test_hidden_directories_are_not_searched_for_repositories(tmp_path: Path) -> None:
+    """In a home directory, tools installed as Git clones (`~/.oh-my-zsh`) are not projects."""
+    from tests.conftest import init_git_repository
+
+    tool = tmp_path / ".oh-my-zsh"
+    tool.mkdir()
+    (tool / "oh-my-zsh.sh").write_text("echo hi\n")
+    init_git_repository(tool)
+    project = tmp_path / "projects" / "app"
+    project.mkdir(parents=True)
+    (project / "main.py").write_text("x = 1\n")
+    init_git_repository(project)
+
+    assert [c.path for c in discover_repositories(tmp_path)] == [project]
+
+
+def test_virtual_environments_are_not_walked_whatever_their_name(tmp_path: Path) -> None:
+    """`pip install -e` clones into an environment's `src/`: a dependency, not a project."""
+    from tests.conftest import init_git_repository
+
+    environment = tmp_path / "app" / "py38env"
+    dependency = environment / "src" / "dependency"
+    dependency.mkdir(parents=True)
+    (environment / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    (dependency / "setup.py").write_text("x = 1\n")
+    init_git_repository(dependency)
+
+    assert discover_repositories(tmp_path) == []
+
+
+def test_a_repository_holding_pyvenv_cfg_is_still_a_repository(tmp_path: Path) -> None:
+    from tests.conftest import init_git_repository
+
+    repo = tmp_path / "made-in-place"
+    repo.mkdir()
+    (repo / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    (repo / "main.py").write_text("x = 1\n")
+    init_git_repository(repo)
+
+    assert [c.path for c in discover_repositories(tmp_path)] == [repo]
+
+
 def test_depth_does_not_bound_the_walk(tmp_path: Path) -> None:
     """The walk had a ``max_depth`` of 6 and this test asserted it.
 
