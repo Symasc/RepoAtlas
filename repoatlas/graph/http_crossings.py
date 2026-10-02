@@ -43,7 +43,12 @@ from dataclasses import dataclass, field
 
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType
-from repoatlas.parsers.http_facts import HTTP_CLIENT_CALL, HTTP_EXPOSED_ENDPOINT, PENDING_FACT
+from repoatlas.parsers.http_facts import (
+    BASE_UNKNOWN,
+    HTTP_CLIENT_CALL,
+    HTTP_EXPOSED_ENDPOINT,
+    PENDING_FACT,
+)
 from repoatlas.storage.protocols import EdgeRecord, FileRow, UnresolvedRefRecord
 
 #: The key of the evidence record in a ``CALLS_HTTP_HANDLER`` edge's resolution.
@@ -55,6 +60,9 @@ SAME_REPOSITORY = "same-repository"
 PROVIDER_AMBIGUOUS = "http-provider-ambiguous"
 ROUTE_UNMATCHED = "http-route-unmatched"
 SERVICE_UNMATCHED = "http-service-unmatched"
+#: A request whose path is read but whose host the source does not state (D2): counted
+#: and listed, never joined.
+UNKNOWN_BASE = "http-base-unknown"
 UNREAD = "http-claim-unread"
 
 #: The roles this join reads; every other pending fact is someone else's.
@@ -134,25 +142,36 @@ def _exposure(claim: UnresolvedRefRecord, meta: dict[str, str]) -> _Exposure | N
     )
 
 
-def _request(claim: UnresolvedRefRecord, meta: dict[str, str]) -> _Request | None:
-    method = http.http_method(meta.get("method", ""))
-    origin = http.client_target(meta.get("origin", "") + "/")
+def _segments(meta: dict[str, str]) -> tuple[str | None, ...] | None:
+    """A request claim's path shape, or ``None`` when it is not one."""
     try:
         segments = json.loads(meta.get("segments", "null"))
     except json.JSONDecodeError:
         return None
     if (
+        not isinstance(segments, list)
+        or not segments
+        or not all(s is None or isinstance(s, str) for s in segments)
+        or http.http_method(meta.get("method", "")) is None
+    ):
+        return None
+    return tuple(segments)
+
+
+def _request(claim: UnresolvedRefRecord, meta: dict[str, str]) -> _Request | None:
+    method = http.http_method(meta.get("method", ""))
+    origin = http.client_target(meta.get("origin", "") + "/")
+    segments = _segments(meta)
+    if (
         method is None
         or origin is None
         or origin.origin is None
         or origin.origin != meta.get("origin")
-        or not isinstance(segments, list)
-        or not segments
-        or not all(s is None or isinstance(s, str) for s in segments)
+        or segments is None
     ):
         return None
     display = claim.target_key.partition(" ")[2]
-    return _Request(claim, method, origin.origin, tuple(segments), display, meta)
+    return _Request(claim, method, origin.origin, segments, display, meta)
 
 
 def _covers(exposure: _Exposure, request: _Request) -> bool:
@@ -183,6 +202,10 @@ def plan_http_crossings(
                 exposures[(exposure.method, exposure.origin)].append(exposure)
                 served.append(exposure)
         elif role == HTTP_CLIENT_CALL:
+            if meta.get("base") == BASE_UNKNOWN and "origin" not in meta:
+                if claim.id is not None:
+                    decisions[claim.id] = UNKNOWN_BASE if _segments(meta) else UNREAD
+                continue
             request = _request(claim, meta)
             if request is None or claim.file_id not in by_file:
                 if claim.id is not None:

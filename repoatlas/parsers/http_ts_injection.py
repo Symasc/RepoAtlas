@@ -430,9 +430,11 @@ class Injections:
             stated = self._wrappers.literal_node(inner)
             value = static_string(self._source, stated) if stated is not None else None
             if stated is None or value is None:
-                return []
-            meta["base"] = value
-            meta["base_at"] = str(line_range(stated)[0])
+                # A base no file states (D2): the request is counted, never joined.
+                meta["base_unknown"] = "true"
+            else:
+                meta["base"] = value
+                meta["base_at"] = str(line_range(stated)[0])
         rest: list[list[str]] = []
         for child in content[1:]:
             if child.type == "string_fragment":

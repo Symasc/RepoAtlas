@@ -133,14 +133,10 @@ def test_a_request_on_a_base_its_own_file_states() -> None:
         "return opts.fetcher.get(`${base}/x`);",
         # the function rebinds its transport
         "fetcher = other; return fetcher.get(`${base}/x`);",
-        # a nested function's own parameter is not the option
-        "return (base: string) => fetcher.get(`${base}/x`);",
         # the URL does not begin with its base
         "return fetcher.get(`https://accounts.example/${base}`);",
         "return fetcher.get(url);",
         "return fetcher.get(`${base}\\u002fx`);",
-        # a base the file does not state
-        "return fetcher.get(`${elsewhere}/x`);",
         # not a request method
         "return fetcher.agent(`${base}/x`);",
     ],
@@ -152,6 +148,27 @@ def test_an_unproven_injected_request_makes_no_claim(body: str) -> None:
         }}
     """
     assert _requests(source) == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # a nested function's own parameter is not the option
+        "return (base: string) => fetcher.get(`${base}/x`);",
+        # a base the file does not state
+        "return fetcher.get(`${elsewhere}/x`);",
+        "return fetcher.get(`${pick(base)}/x`);",
+    ],
+)
+def test_a_request_on_an_unstated_base_is_kept_for_its_transport(body: str) -> None:
+    source = f"""\
+        export function f({{ fetcher, base }}: Opts) {{
+          {body}
+        }}
+    """
+    [request] = _requests(source)
+    assert (request["transport"], request["base_unknown"]) == ("fetcher", "true")
+    assert "base_option" not in request and "base" not in request
 
 
 # -- the calls that hand options on --------------------------------------------------------
@@ -405,8 +422,8 @@ def test_options_are_followed_through_three_functions_and_never_around_a_cycle(
     build(workspace, tmp_path, {"chains": CHAINS})
     plan = ReferenceLinker(workspace.knowledge).prepare_global()
     reached = sorted(record.target_key for record in plan.http.injected)
-    # hop4 is a fourth function from its root; `unstated` is given a base no file states,
-    # and `viaAxios` a transport that is not superagent.
+    # hop4 is a fourth function from its root, and `viaAxios` is given a transport that is
+    # not superagent. `unstated` is given a base no file states: counted with no origin (D2).
     assert MAX_HOPS == 3
     assert reached == [
         "GET https://accounts.example/api/hop/1",
@@ -415,4 +432,8 @@ def test_options_are_followed_through_three_functions_and_never_around_a_cycle(
         "GET https://accounts.example/api/local",
         "GET https://accounts.example/api/ping",
         "GET https://accounts.example/api/pong",
+        "GET {base}/unstated",
     ]
+    unstated = next(r for r in plan.http.injected if r.target_key == "GET {base}/unstated")
+    assert json.loads(unstated.meta_json)["base"] == "unknown"
+    assert "origin" not in json.loads(unstated.meta_json)

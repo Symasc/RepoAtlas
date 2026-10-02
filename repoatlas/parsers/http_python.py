@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -67,6 +68,7 @@ from dataclasses import dataclass, field
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedReference
 from repoatlas.parsers.http_facts import (
+    BASE_UNKNOWN,
     COMPOSED,
     EXACT,
     HTTP_CLIENT_CALL,
@@ -101,7 +103,7 @@ _CLIENT_VERBS = {
     "delete": "DELETE",
 }
 
-_LIBRARIES = frozenset({"fastapi", "flask", "requests", "httpx", "flasgger"})
+_LIBRARIES = frozenset({"fastapi", "flask", "requests", "httpx", "flasgger", "os"})
 _CLIENT_LIBRARIES = frozenset({"requests", "httpx"})
 
 _FASTAPI_APP = "fastapi-app"
@@ -126,6 +128,10 @@ _TEMPLATE_FIELDS = ("host", "basePath", "schemes")
 _IMPORT_ERRORS = frozenset({"ImportError", "ModuleNotFoundError"})
 #: Display only: a placeholder's source text is shortened past this.
 _MAX_EXPRESSION = 64
+#: ``http://`` and nothing after it: the host that follows is a value.
+_SCHEME_ONLY = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+#: Operands one ``+`` chain is read through.
+_MAX_ADDED = 16
 
 #: Deep enough for any literal someone writes by hand; shallow enough that an
 #: adversarial chain of ``+`` cannot recurse the parser into the ground.
@@ -261,7 +267,8 @@ def _path_like(value: str) -> bool:
 class _ClientUrl:
     """A request's origin and path shape, as far as the source states them."""
 
-    origin: str
+    #: ``None`` for a base the source does not state (D2): the path is read, the host not.
+    origin: str | None
     #: Each path segment's literal text, or ``None`` where one value fills it.
     segments: tuple[str | None, ...]
     #: The URL as written, a placeholder shown as ``{expression}``: display only.
@@ -547,6 +554,19 @@ def _route_claim(
     ]
 
 
+def _added(node: ast.BinOp) -> list[ast.expr] | None:
+    """The operands of a ``+`` chain, left to right, or ``None`` past :data:`_MAX_ADDED`."""
+    operands: list[ast.expr] = []
+    current: ast.expr = node
+    while isinstance(current, ast.BinOp) and isinstance(current.op, ast.Add):
+        operands.append(current.right)
+        current = current.left
+        if len(operands) > _MAX_ADDED:
+            return None
+    operands.append(current)
+    return list(reversed(operands))
+
+
 class PythonHttp:
     """What one module proves about HTTP, and the facts that follow from it."""
 
@@ -558,6 +578,10 @@ class PythonHttp:
         self._receivers: dict[str, _Receiver] = {}
         #: Module constant → (its literal value, its line), each bound exactly once.
         self._constants: dict[str, tuple[str, int]] = {}
+        #: Module constant → (its environment default, its line), each bound exactly once:
+        #: ``X = os.environ.get("NAME", "<url>")``. Read for request URLs only, never for
+        #: routes, whose paths a deployment's environment does not set.
+        self._env_defaults: dict[str, tuple[str, int]] = {}
         #: Local name → where it is imported from, for every import bound exactly once.
         self._imported: dict[str, _Imported] = {}
         #: Mounts only the global pass can decide: an imported router, or a factory's.
@@ -979,6 +1003,28 @@ class PythonHttp:
             text = static_string(value)
             if text is not None and counts[name] == 1:
                 self._constants[name] = (text, statement.lineno)
+            default = self._env_default(value) if value is not None else None
+            if default is not None and counts[name] == 1:
+                self._env_defaults[name] = (default, statement.lineno)
+
+    def _env_default(self, node: ast.expr) -> str | None:
+        """The literal default of ``os.environ.get("NAME", "<value>")`` or ``os.getenv(…)``.
+
+        The whole default is the value whenever the environment does not set ``NAME``;
+        ``os.environ["NAME"]``, or a default that is not literal, gives nothing.
+        """
+        if not isinstance(node, ast.Call) or any(isinstance(a, ast.Starred) for a in node.args):
+            return None
+        func = node.func
+        getenv = self._resolve(func) == "os.getenv"
+        environ_get = (
+            isinstance(func, ast.Attribute)
+            and func.attr == "get"
+            and self._resolve(func.value) == "os.environ"
+        )
+        if not (getenv or environ_get) or static_string(_argument(node, 0, "key")) is None:
+            return None
+        return static_string(_argument(node, 1, "default"))
 
     # -- routes ---------------------------------------------------------------------
 
@@ -1298,7 +1344,7 @@ class PythonHttp:
         url = static_string(url_node)
         if url is None:
             # Not literal: at most a claim for the join, never a per-file fact.
-            read = self._client_url(url_node)
+            read = self._client_url(url_node) or self._unknown_base(url_node)
             if read is None:
                 return []
             return [self._client_claim(read, method, call.lineno, end, library, source_symbol)]
@@ -1342,10 +1388,13 @@ class PythonHttp:
     ) -> ParsedReference:
         meta = {
             "method": method,
-            "origin": read.origin,
             "segments": json.dumps(list(read.segments)),
             "source": library,
         }
+        if read.origin is None:
+            meta["base"] = BASE_UNKNOWN
+        else:
+            meta["origin"] = read.origin
         if read.base_at is not None:
             meta["base_at"] = str(read.base_at)
         return pending_reference(
@@ -1360,17 +1409,93 @@ class PythonHttp:
         )
 
     def _client_url(self, node: ast.expr) -> _ClientUrl | None:
-        """A URL named by a module constant, or an f-string on a known origin."""
-        if isinstance(node, ast.Name):
-            constant = self._constants.get(node.id)
-            target = http.client_target(constant[0]) if constant is not None else None
-            if constant is None or target is None or target.url is None or target.origin is None:
+        """A URL named by a module constant or an environment default, or an f-string on
+        a known origin."""
+        if isinstance(node, ast.Name | ast.Call):
+            stated = self._stated(node)
+            target = http.client_target(stated[0]) if stated is not None else None
+            if stated is None or target is None or target.url is None or target.origin is None:
                 return None
             segments = tuple(target.path[1:].split("/"))
-            return _ClientUrl(target.origin, segments, target.url, constant[1])
+            return _ClientUrl(target.origin, segments, target.url, stated[1])
         if isinstance(node, ast.JoinedStr):
             return self._template_url(node)
         return None
+
+    def _stated(self, node: ast.expr) -> tuple[str, int] | None:
+        """A string the source states for a URL or its base: a module constant, an
+        environment default, or a constant bound to one; with its line."""
+        if isinstance(node, ast.Name):
+            return self._constants.get(node.id) or self._env_defaults.get(node.id)
+        default = self._env_default(node)
+        return (default, node.lineno) if default is not None else None
+
+    def _unknown_base(self, node: ast.expr) -> _ClientUrl | None:
+        """A request whose path is read but whose host is not (D2): ``None`` otherwise.
+
+        ``f"{base}/users/{uid}"``, ``f"http://{host}/users"`` or ``base + "/users/" + uid``:
+        the host part is an unread value -- or an empty stated one -- and the text after
+        it starts with ``/``, each later value filling one whole segment. A base the
+        source does state, refused for anything else (glued to the next text, say),
+        stays unread.
+        """
+        if isinstance(node, ast.JoinedStr):
+            values: list[ast.expr] = list(node.values)
+            prefix = ""
+            if (
+                len(values) > 1
+                and isinstance(values[0], ast.Constant)
+                and isinstance(values[0].value, str)
+                and _SCHEME_ONLY.fullmatch(values[0].value)
+            ):
+                prefix, values = values[0].value, values[1:]
+            first = values[0] if values else None
+            if (
+                not isinstance(first, ast.FormattedValue)
+                or first.conversion != -1
+                or first.format_spec is not None
+            ):
+                return None
+            head, rest = first.value, values[1:]
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            operands = _added(node)
+            if operands is None:
+                return None
+            head, rest, prefix = operands[0], operands[1:], ""
+        else:
+            return None
+        if not self._unread_base(head):
+            return None
+        parts: list[list[str]] = []
+        for value in rest:
+            for piece in value.values if isinstance(value, ast.JoinedStr) else [value]:
+                if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
+                    parts.append([http.TEMPLATE_LITERAL, piece.value])
+                elif isinstance(piece, ast.FormattedValue):
+                    if piece.conversion != -1 or piece.format_spec is not None:
+                        return None
+                    parts.append([http.TEMPLATE_SUBSTITUTION, ast.unparse(piece.value)])
+                elif isinstance(piece, ast.Name | ast.Attribute | ast.Subscript | ast.Call):
+                    parts.append([http.TEMPLATE_SUBSTITUTION, ast.unparse(piece)])
+                else:
+                    return None
+        template = http.route_template(parts)
+        if isinstance(template, str):
+            return None
+        expressions = iter(template.expressions)
+        display = "/".join(
+            segment if segment is not None else "{" + next(expressions, "")[:_MAX_EXPRESSION] + "}"
+            for segment in template.segments
+        )
+        base = "{" + ast.unparse(head)[:_MAX_EXPRESSION] + "}"
+        return _ClientUrl(None, template.segments, f"{prefix}{base}/{display}")
+
+    def _unread_base(self, node: ast.expr) -> bool:
+        """Whether a URL's host part is a value the source does not state (or states empty)."""
+        if isinstance(node, ast.Constant | ast.JoinedStr):
+            return False
+        stated = self._stated(node) if isinstance(node, ast.Name | ast.Call) else None
+        return stated is None or stated[0] == ""
 
     def _template_url(self, node: ast.JoinedStr) -> _ClientUrl | None:
         """``f"https://host/users/{uid}"`` or ``f"{BASE}/users/{uid}"``, or ``None``.
@@ -1390,7 +1515,7 @@ class PythonHttp:
                 and first.format_spec is None
             ):
                 return None
-            constant = self._constants.get(first.value.id)
+            constant = self._stated(first.value)
             if constant is None:
                 return None
             head, base_at = constant

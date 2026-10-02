@@ -222,6 +222,11 @@ DECISIONS = {
     "audit": "linked",
     "insecure": "http-service-unmatched",
     "unknown": "http-service-unmatched",
+    # A parameter, an environment variable and an imported base: the path is read, the
+    # host is not -- counted, never joined (D2).
+    "dynamic": "http-base-unknown",
+    "from_env": "http-base-unknown",
+    "shared": "http-base-unknown",
 }
 
 #: The joins in the workspace of ``accounts``, ``billing`` and ``portal``: (consumer

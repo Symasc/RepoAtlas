@@ -37,11 +37,11 @@ def _claims(source: str) -> list[dict[str, object]]:
     return [
         {
             "key": r.target_key,
-            "origin": r.meta["origin"],
+            "origin": r.meta.get("origin"),
             "segments": json.loads(r.meta["segments"]),
             "source": r.meta["source"],
             "lines": (r.line_start, r.line_end),
-            **{k: r.meta[k] for k in ("base_at", "scheme_from") if k in r.meta},
+            **{k: r.meta[k] for k in ("base_at", "scheme_from", "base") if k in r.meta},
         }
         for r in _references(source)
         if r.meta.get(PENDING_FACT) == HTTP_CLIENT_CALL
@@ -124,6 +124,25 @@ def test_an_agent_is_read_unless_something_can_rewrite_its_urls() -> None:
 
 @pytest.mark.parametrize(
     "call",
+    ["superagent.get(`${base}/x`)", "superagent.get(`${EMPTY}/x`)"],
+)
+def test_a_request_on_a_base_the_file_does_not_state_is_counted_with_no_origin(call: str) -> None:
+    source = f"""\
+        import superagent from 'superagent';
+
+        const EMPTY = process.env.X ?? '';
+
+        export function f(base: string) {{
+          return {call};
+        }}
+    """
+    [claim] = _claims(source)
+    assert (claim["origin"], claim["base"], claim["segments"]) == (None, "unknown", ["x"])
+    assert _facts(source) == set()
+
+
+@pytest.mark.parametrize(
+    "call",
     [
         # a plugin on the request itself can rewrite its URL
         "superagent.get('https://api.example/x').use(prefix)",
@@ -132,9 +151,6 @@ def test_an_agent_is_read_unless_something_can_rewrite_its_urls() -> None:
         # a base glued to the next text changes the host itself
         "superagent.get(`${BASE}x/${id}`)",
         "superagent.get(`${BASE}x/users/${id}`)",
-        # a base the file does not state
-        "superagent.get(`${base}/x`)",
-        "superagent.get(`${EMPTY}/x`)",
         # a placeholder that does not fill a whole segment
         "superagent.get(`${BASE}/x-${id}`)",
         # not a request method

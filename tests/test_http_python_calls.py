@@ -151,6 +151,31 @@ def test_a_module_level_request_has_no_enclosing_declaration() -> None:
         ("BASE = 'https://a.example'\ndef other():\n    BASE = 'x'\n", "f'{BASE}/users/{uid}'"),
         ("BASE = os.environ['API']\n", "f'{BASE}/users/{uid}'"),
         ("", "f\"{os.environ['API']}/users/{uid}\""),
+        # A host that is a value.
+        ("", "f'https://{host}/users/{uid}'"),
+        # Stated empty: no origin.
+        ("BASE = os.environ.get('API', '')\n", "f'{BASE}/users/{uid}'"),
+        # A + chain on a base that is a value.
+        ("", "base + '/users/' + uid"),
+    ],
+)
+def test_a_request_on_a_base_the_source_does_not_state_is_counted_with_no_origin(
+    prelude: str, url: str
+) -> None:
+    source = (
+        f"import os\nimport requests\n{prelude}"
+        "def load(uid, base, host, path, url, urls, endpoint):\n"
+        f"    return requests.get({url})\n"
+    )
+    [claim] = _claims(source)
+    assert claim.meta["base"] == "unknown" and "origin" not in claim.meta
+    assert json.loads(claim.meta["segments"]) == ["users", None]
+
+
+@pytest.mark.parametrize(
+    ("prelude", "url"),
+    [
+        # The base is stated, and names no origin.
         ("BASE = '/api'\n", "f'{BASE}/users/{uid}'"),
         # The base is text a placeholder is glued to, or is glued to text.
         ("BASE = 'https://a.example'\n", "f'{BASE}users/{uid}'"),
@@ -158,8 +183,12 @@ def test_a_module_level_request_has_no_enclosing_declaration() -> None:
         ("BASE = 'https://a.example'\n", "f'{BASE}users/{uid}/settings'"),
         ("BASE = 'https://a.example/api'\n", "f'{BASE}users/{uid}/settings'"),
         ("BASE = 'https://a.example'\n", "f'{BASE}{uid}'"),
-        ("", "f'https://{host}/users/{uid}'"),
         ("", "f'https://a.example{path}'"),
+        # An unstated base whose path is not read either.
+        ("", "f'{base}{path}'"),
+        ("", "f'{base}/{uid}'"),
+        ("", "f'{base!r}/users/{uid}'"),
+        ("", "base + path"),
         # A placeholder must be a whole path segment, and constrain something.
         ("", "f'https://a.example/users/u-{uid}'"),
         ("", "f'https://a.example/users/{uid}.json'"),
@@ -202,3 +231,72 @@ def test_a_client_object_is_still_not_followed() -> None:
         return session.get(f"{BASE}/users/{uid}")
     """
     assert _claims(source) == []
+
+
+# -- environment defaults (deployment HTTP roadmap, M3) ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("prelude", "url", "base_at"),
+    [
+        ('URL = os.environ.get("TIME_URL", "http://svc-e6:5000/svc-e6/time")\n', "URL", "3"),
+        ('URL = os.getenv("TIME_URL", "http://svc-e6:5000/svc-e6/time")\n', "URL", "3"),
+        ("", 'os.environ.get("TIME_URL", "http://svc-e6:5000/svc-e6/time")', "4"),
+        (
+            'from os import getenv\nURL = getenv("TIME_URL", default="http://svc-e6:5000/svc-e6/time")\n',
+            "URL",
+            "4",
+        ),
+    ],
+)
+def test_an_environment_default_url_is_the_request_s_url(
+    prelude: str, url: str, base_at: str
+) -> None:
+    source = f"import os\nimport requests\n{prelude}def load():\n    return requests.get({url})\n"
+    [claim] = _claims(source)
+    assert claim.target_key == "GET http://svc-e6:5000/svc-e6/time"
+    assert (claim.meta["origin"], claim.meta["base_at"]) == ("http://svc-e6:5000", base_at)
+    assert _facts(source) == []  # a default the deployment may override proves no fact
+
+
+def test_an_environment_default_base_composes_like_a_constant() -> None:
+    source = (
+        "import os\nimport requests\n"
+        'BASE = os.environ.get("ACCOUNTS_URL", "https://accounts.example/api")\n'
+        "def load(uid):\n"
+        '    return requests.get(f"{BASE}/users/{uid}")\n'
+    )
+    [claim] = _claims(source)
+    assert claim.target_key == "GET https://accounts.example/api/users/{uid}"
+    assert claim.meta["origin"] == "https://accounts.example"
+
+
+@pytest.mark.parametrize(
+    "prelude",
+    [
+        'URL = os.environ["TIME_URL"]\n',  # no default
+        'URL = os.environ.get(KEY, "http://svc-e6:5000/x")\n',  # the key is not literal
+        'URL = os.environ.get("TIME_URL", fallback)\n',  # the default is not literal
+        'URL = os.environ.get("TIME_URL", "http://a/x")\nURL = "http://b/x"\n',  # bound twice
+        'import other as os\nURL = os.getenv("TIME_URL", "http://a/x")\n',  # not the os module
+    ],
+)
+def test_anything_but_a_literal_default_is_no_url(prelude: str) -> None:
+    source = f"import os\nimport requests\n{prelude}def load():\n    return requests.get(URL)\n"
+    assert _claims(source) == []
+
+
+def test_an_environment_default_never_names_a_route() -> None:
+    source = (
+        "import os\nfrom fastapi import FastAPI\n"
+        'PREFIX = os.environ.get("PREFIX", "/api")\n'
+        "app = FastAPI()\n"
+        '@app.get(f"{PREFIX}/items")\n'
+        "def items():\n    return []\n"
+    )
+    served = [
+        r.target_key
+        for r in _references(source)
+        if r.edge_type is EdgeType.SERVES_HTTP_ROUTE and PENDING_FACT not in r.meta
+    ]
+    assert served == []

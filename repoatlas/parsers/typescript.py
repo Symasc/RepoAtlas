@@ -740,7 +740,9 @@ class TypeScriptParser:
     #    (repoatlas.parsers.http_ts_injection).
     # 14: oas3-tools applications, and the module-level objects of functions their
     #    controllers may be made of (repoatlas.parsers.http_oas3).
-    version = "14"
+    # 15: a superagent or fetch request, or an injected one, whose path is read but whose
+    #    base is not (unstated, empty or computed) records a claim with no origin (D2).
+    version = "15"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
