@@ -701,6 +701,10 @@ def downgrade_to_schema_v4(database: Path) -> None:
             "UPDATE files SET parser_version = replace(parser_version, ?, 'schema:4')",
             (f"schema:{SCHEMA_VERSION}",),
         )
+        # 008 added the stored HTTP call decisions, and the record that a global pass
+        # wrote them; v4 had neither.
+        connection.execute("DROP TABLE http_call_decisions")
+        connection.execute("DELETE FROM meta WHERE key = 'http_call_decisions'")
         # 007 added which export tables each file's uses read, and the USES stage's
         # record of whether its edges are complete; v4 had neither.
         connection.execute("DROP TABLE use_reads")
