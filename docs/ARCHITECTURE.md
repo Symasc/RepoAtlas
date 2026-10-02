@@ -1904,14 +1904,15 @@ it reads:
 
 **The cross-repository join** (`repoatlas/graph/http_crossings.py`). A request in one repository is joined to the
 handler another repository serves it with when three things agree, and on exactly one handler:
-- **the service identity.** The provider's source must state where its application is published. The one source read
-  today is a flasgger Swagger 2 template bound, in the application's own module, to that exact Flask application,
+- **the service identity.** The provider's source must state where its application is published. One source is a
+  flasgger Swagger 2 template bound, in the application's own module, to that exact Flask application,
   stating `host`, `schemes` and `basePath` (flasgger applies the template last, so those three decide the deployed
   document; all three are required). The optional import `try: from flasgger import Swagger` / `except ImportError:
   Swagger = None` is accepted because calling the fallback raises. Any `Swagger(...)` call the module does not make
   readably — inside a function, without a positional application, through `**kwargs` — leaves every application in
   it unpublished. Each route of a published application is exposed at `scheme://host` + `basePath` + route. The
-  request's origin must equal the endpoint's exactly: no alias, no localhost, no `http` for `https`, no DNS;
+  request's origin must equal the endpoint's exactly: no alias, no localhost, no `http` for `https`, no DNS. The
+  other sources are deployment files (below);
 - **the method**, read on both sides as for route facts. A method that cannot be read makes no claim;
 - **the route shape**, by `endpoint_matches` in `repoatlas/models/http.py`: equal segment counts, literal segments
   byte-equal, a request's dynamic segment only against a declared parameter, and — unlike the same-repository rule
@@ -1922,15 +1923,33 @@ Both sides are recorded per file as pending claims, `http-exposed-endpoint` and 
 carries the lines that prove them. The exposure claim names the kind of source that stated its identity
 (`identity_source`) and nothing more specific, so another source-backed extractor would produce the same claim and
 the join would not change. The global pass decides every request claim together and never reads its own output:
-`linked`, `http-provider-ambiguous` (two handlers or two repositories agree; nothing is chosen), `same-repository`
-(the route rules above already cover it), `http-route-unmatched` (the service is published, the operation is not),
+`linked` (in another repository or the request's own: route shape alone cannot tell one service's `/health` from
+another's, the identity can), `http-provider-ambiguous` (two handlers or two repositories agree; nothing is chosen),
+`http-route-unmatched` (the service is published, the operation is not),
 `http-service-unmatched`, or `http-base-unknown` (the path is read, the host is not: counted and listed, never
 joined). A link is one `CALLS_HTTP_HANDLER` edge, *consumer caller → provider handler*,
 provenanced by the request's own file and lines, whose resolution records under `http` the method, the URL as
 written, the endpoint, the deployment, both repositories, and `called_at`, `base_at`, `served_at`, `identity_at`
-and `bound_at`. That record is the evidence that lets the change-impact walk (`repoatlas/graph/impact.py`) cross it, inward only: a handler's
+and `bound_at` (or `identity_in` and `bound_in`, path and line, for an identity in another file). That record is the evidence that lets the change-impact walk (`repoatlas/graph/impact.py`) cross it, inward only: a handler's
 change may reach the requests, a request's change never reaches the handler. It says the source on both sides names
 the same operation; it does not say the request is sent, or that it reaches this deployment.
+
+**Service identities from deployment files** (`repoatlas/parsers/deploy_compose.py`, `repoatlas/parsers/dockerfile.py`,
+`repoatlas/graph/deploy_identity.py`). A docker-compose service is reached at `http://<name>:<container port>`: its
+key, `container_name`, `hostname` and network aliases, each with every `expose` port and the container side of each
+`ports` entry (`http://<name>` too for port 80). Compose interpolates `${VAR}`, so a value holding one is not read.
+The identity reaches code only through the image the service builds, in the same repository:
+- the command is the Dockerfile's final-stage `ENTRYPOINT` and `CMD`, as the service's own `entrypoint` and
+  `command` override them, read only as `python[3] [-u] <file.py>`, `uvicorn <module>:<attr>` or `gunicorn
+  <module>:<attr>` with documented options that leave the import path alone (a factory, `--app-dir`, `--chdir` or a
+  config file is unread). An `ENTRYPOINT` the base image sets is not known;
+- the module is mapped back to a repository file through the final stage's `COPY`/`ADD`, last first; a copy from
+  another stage, a URL or a wildcard that could cover it leaves it unknown;
+- the identity exposes the routes of the application that module constructs: the module's own routes, and routes
+  mounted onto an application constructed there. A specification document is not an application.
+
+Each tied route becomes a derived `http-exposed-endpoint` claim (`identity_source: docker-compose-service`), citing
+the compose service and the command. An image-only service has no code tie.
 
 **Security.** HTTP extraction reads only files the sync already admitted, so an excluded `.env` holding `API_URL`
 declares nothing and is not cross-resolved. Nothing resolves DNS, fetches a specification or `$ref`, probes an

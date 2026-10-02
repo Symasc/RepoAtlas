@@ -126,6 +126,12 @@ TS_HANDLER_OBJECT = "ts-handler-object"
 #: ``expressAppConfig(spec, { routing: { controllers } })`` from ``oas3-tools``: the
 #: specification it reads, relative to its file, and the objects its controllers are.
 OAS3_APP = "oas3-app"
+#: A docker-compose service: the names and container ports other services reach it by,
+#: the build that makes its image, and any command or entrypoint it overrides.
+COMPOSE_SERVICE = "compose-service"
+#: A Dockerfile's final stage: its working directory, what it copies from the build
+#: context and where, and the command and entrypoint the image runs.
+DOCKERFILE_COMMAND = "dockerfile-command"
 
 #: ``transport`` values of :data:`HTTP_LOCAL_CALL`.
 TRANSPORT_WRAPPER = "wrapper"

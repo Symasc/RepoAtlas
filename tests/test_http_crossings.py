@@ -23,7 +23,6 @@ from repoatlas.graph.http_crossings import (
     LINKED,
     PROVIDER_AMBIGUOUS,
     ROUTE_UNMATCHED,
-    SAME_REPOSITORY,
     SERVICE_UNMATCHED,
     plan_http_crossings,
 )
@@ -179,17 +178,20 @@ def test_a_request_matching_a_literal_and_a_parameter_route_is_ambiguous(
     assert links(workspace) == set()
 
 
-def test_a_request_to_its_own_repository_is_not_a_crossing(
+def test_a_request_to_its_own_repository_s_identity_is_joined_there(
     workspace: Workspace, tmp_path: Path
 ) -> None:
+    """M3: the identity says which handler a request reaches, inside its repository too."""
     service = dict(ACCOUNTS)
     service["client.py"] = (
         "import requests\n\n\ndef self_call():\n"
         "    return requests.get('https://accounts.example/api/users/1')\n"
     )
     build(workspace, tmp_path, {"accounts": service})
-    assert decisions(workspace) == {"self_call": SAME_REPOSITORY}
-    assert links(workspace) == set()
+    assert decisions(workspace) == {"self_call": LINKED}
+    assert links(workspace) == {
+        ("self_call", "accounts", "get_user", "GET https://accounts.example/api/users/<user_id>")
+    }
 
 
 # -- the representation is not the extractor's (A1) --------------------------------------

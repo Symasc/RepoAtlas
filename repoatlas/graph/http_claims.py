@@ -91,6 +91,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
+from repoatlas.graph.deploy_identity import ServedRoute, plan_deployment_exposures
 from repoatlas.graph.keys import global_key
 from repoatlas.graph.py_modules import PythonModules
 from repoatlas.graph.py_routes import plan_python_routes
@@ -138,10 +139,18 @@ from repoatlas.parsers.http_ts_wrappers import (
     wrapper_from,
 )
 from repoatlas.parsers.http_typescript import template_parts
-from repoatlas.storage.protocols import EdgeRecord, EntityRecord, FileRow, UnresolvedRefRecord
+from repoatlas.storage.protocols import (
+    EdgeRecord,
+    EntityRecord,
+    FileRow,
+    RouteServerRow,
+    UnresolvedRefRecord,
+)
 
 #: More modules than any application registers; a bound on adversarial input.
 _MAX_MODULES = 4096
+#: Parsers whose route edges a specification document states: a document is no application.
+_NOT_APPLICATIONS = frozenset({"structured-config"})
 
 PROMOTED = "promoted"
 #: A call to an imported function that is no request helper: not an HTTP claim.
@@ -248,6 +257,11 @@ class HttpClaimPlan:
     #: The join claims requests on an injected transport make, one per root that
     #: reaches them (repoatlas.graph.ts_injection): for the cross-repository join.
     injected: tuple[UnresolvedRefRecord, ...] = ()
+    #: The exposure claims deployment identities derive for the routes their code serves
+    #: (repoatlas.graph.deploy_identity): for the cross-repository join.
+    exposed: tuple[UnresolvedRefRecord, ...] = ()
+    #: Deployment claim id → ``tied`` or why its identity reaches no code.
+    deployments: dict[int, str] = field(default_factory=dict)
 
     @property
     def detail(self) -> str:
@@ -365,6 +379,7 @@ def plan_http_claims(
     producer: str,
     served_routes: Mapping[int, Iterable[str]] | None = None,
     module_facts: Sequence[UnresolvedRefRecord] = (),
+    route_servers: Sequence[RouteServerRow] = (),
 ) -> HttpClaimPlan:
     """Decide every pending HTTP fact at once. Writes nothing.
 
@@ -630,6 +645,36 @@ def plan_http_claims(
         if claim.id is not None and decisions:
             call_decisions[claim.id] = decisions
 
+    # -- service identities a deployment declares, and the code they reach -----------
+    code_routes = [
+        ServedRoute(
+            repo_id=row.repo_id,
+            file_id=row.file_id,
+            src_id=row.src_id,
+            body=row.body,
+            line_start=row.line_start,
+            line_end=row.line_end,
+            roots=frozenset({row.file_id}),
+            declared_at=row.line_start,
+        )
+        for row in route_servers
+        if row.file_id is not None and row.parser not in _NOT_APPLICATIONS
+    ]
+    code_routes.extend(
+        ServedRoute(
+            repo_id=route.repo_id,
+            file_id=route.file_id,
+            src_id=route.src_id,
+            body=route.body,
+            line_start=route.line_start,
+            line_end=route.line_end,
+            roots=route.roots,
+            declared_at=route.declared_at,
+        )
+        for route in python.routes
+    )
+    deployed = plan_deployment_exposures(grouped, by_id, code_routes)
+
     return HttpClaimPlan(
         edges=tuple(edges),
         http=tuple(pending.values()),
@@ -642,6 +687,8 @@ def plan_http_claims(
         promoted=promoted_routes,
         declared=declared_routes,
         injected=plan_injected_requests(grouped, index, by_id),
+        exposed=tuple(deployed.exposures),
+        deployments=deployed.outcomes,
     )
 
 

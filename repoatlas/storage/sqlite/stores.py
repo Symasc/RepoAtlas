@@ -45,6 +45,7 @@ from repoatlas.storage.protocols import (
     NeighborGroup,
     NeighborRow,
     NeighborRule,
+    RouteServerRow,
     SymbolRow,
     SyncCompletion,
     UnresolvedRefRecord,
@@ -1085,6 +1086,42 @@ class SqliteKnowledgeStore:
         for row in rows:
             served.setdefault(row["repo_id"], []).append(row["body"])
         return served
+
+    def list_route_servers(
+        self, *, exclude_parser: str, repo_id: int | None = None
+    ) -> list[RouteServerRow]:
+        """Every per-file edge serving a route: who serves it, in which file, at which lines.
+
+        The same walk as :meth:`list_served_routes`, keeping each edge rather than each
+        body. One producer's edges -- the global pass's own -- are left out, so what it
+        decides never depends on what it decided last time.
+        """
+        rows = self._db.execute(
+            """
+            SELECT e.repo_id AS repo_id, e.file_id AS file_id, e.src_id AS src_id,
+                   t.name AS body, e.parser AS parser, e.line_start AS line_start,
+                   e.line_end AS line_end
+            FROM entities t
+            JOIN edges e ON e.dst_id = t.id
+            WHERE t.key >= ? AND t.key < ?
+              AND t.type = ?
+              AND e.type = ?
+              AND e.repo_id IS NOT NULL
+              AND (e.parser IS NULL OR e.parser <> ?)
+              AND (? IS NULL OR e.repo_id = ?)
+            ORDER BY e.repo_id, e.file_id, e.src_id, t.name
+            """,
+            (
+                ROUTE_KEY_PREFIX,
+                _after(ROUTE_KEY_PREFIX),
+                str(EntityType.HTTP_ROUTE),
+                str(EdgeType.SERVES_HTTP_ROUTE),
+                exclude_parser,
+                repo_id,
+                repo_id,
+            ),
+        ).fetchall()
+        return [RouteServerRow(**dict(row)) for row in rows]
 
     def list_http_edges(self, repo_id: int) -> list[HttpEdgeRow]:
         """Every edge one repository asserts to a shared HTTP route or endpoint.
