@@ -24,11 +24,6 @@
   white-space: nowrap;
 }
 
-/* the land each part of the chain lies in, washed in its repository's hue, as on the map */
-:is(.seed, .card, .frame) {
-  --land: var(--territory, var(--ra-surface));
-}
-
 /* what changes: the one card everything else is read from */
 .seed {
   position: relative;
@@ -38,9 +33,9 @@
   width: 100%;
   height: 100%;
   padding: 12px 16px;
-  border: 2px solid color-mix(in oklab, var(--land) 60%, var(--ra-text-muted));
+  border: 2px solid var(--ra-text-muted);
   border-radius: var(--ra-radius);
-  background-color: color-mix(in oklab, var(--land) var(--ra-wash-land), var(--ra-ground-raised));
+  background-color: var(--ra-surface);
   overflow: hidden;
 
   &[data-selected] {
@@ -123,14 +118,14 @@
   flex-direction: column;
   width: 100%;
   height: 100%;
-  background-color: color-mix(in oklab, var(--land) var(--ra-wash-land), var(--ra-ground-raised));
-  border: 1px solid color-mix(in oklab, var(--land) 35%, var(--ra-border-strong));
+  background-color: var(--ra-surface);
+  border: 1px solid var(--ra-border-strong);
   border-radius: var(--ra-radius);
   overflow: hidden;
   transition: border-color var(--ra-duration-fast) var(--ra-ease);
 
   &:hover {
-    border-color: color-mix(in oklab, var(--land) 50%, var(--ra-text-subtle));
+    border-color: var(--ra-text-subtle);
   }
 
   /* only tests reach here */
@@ -290,8 +285,7 @@
 .frame {
   width: 100%;
   height: 100%;
-  background-color: color-mix(in oklab, var(--land) var(--ra-wash-country), var(--ra-ground));
-  border: 1px solid color-mix(in oklab, var(--land) 60%, var(--ra-border));
+  border: 1px solid var(--ra-border-strong);
   border-radius: var(--ra-radius-l);
   pointer-events: none;
 

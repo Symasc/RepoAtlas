@@ -29,7 +29,7 @@ import {
 import { CODE_RELATIONS, RELATIONS, type Box, type Family, type Relation } from "@/lib/model/graph";
 import { useAnimationsOff } from "@/lib/useMotion";
 
-import { RepoSwatch, territory } from "@/components/common/RepoSwatch";
+import { RepoSwatch } from "@/components/common/RepoSwatch";
 
 import { edgeTypes, RELATION_LABEL, type Emphasis, type GraphEdge } from "./edges";
 import { EntityBadge, LineGlyph, PathBadge } from "./glyphs";
@@ -67,8 +67,6 @@ interface Props {
   end?: ReactNode;
   /** What is on screen but incomplete, in a line under the toolbar. */
   notice?: ReactNode;
-  /** The repository the whole level lies in: its hue tints the land it covers. */
-  hue?: number | null;
 }
 
 export function Graph(props: Props) {
@@ -135,7 +133,6 @@ function Canvas({
   start,
   end,
   notice,
-  hue = null,
 }: Props) {
   const scheme = useComputedColorScheme("dark", { getInitialValueInEffect: true });
   const reduced = useAnimationsOff();
@@ -312,7 +309,6 @@ function Canvas({
       <div className={classes.stage} data-phase={phase}>
         <ReactFlow
           className={classes.flow}
-          style={territory(hue)}
           aria-label={label}
           nodes={shownNodes}
           edges={shownEdges}
@@ -470,7 +466,7 @@ function Legend({ families, edges }: { families: readonly Family[]; edges: reado
 /** The marks things carry, on demand: the canvas shows them, this names them. */
 function Marks() {
   const rows: { mark: ReactNode; label: string }[] = [
-    { mark: <RepoSwatch hue={1} />, label: "Repository: its colour tints all that lies in it" },
+    { mark: <RepoSwatch hue={1} />, label: "Repository, in its own colour" },
     { mark: <PathBadge path="src" />, label: "Directory" },
     { mark: <PathBadge path="index.ts" />, label: "File" },
     { mark: <EntityBadge entityType="package" />, label: "Package" },

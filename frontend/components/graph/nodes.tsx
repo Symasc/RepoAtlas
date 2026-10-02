@@ -24,7 +24,7 @@ import {
 import type { RepositoryModel } from "@/lib/model/repositories";
 
 import { FAMILY_NOUN } from "./edges";
-import { EntityBadge, LineGlyph, PathBadge } from "./glyphs";
+import { EntityBadge, LineGlyph, looksLikeFile, PathBadge } from "./glyphs";
 import classes from "./Graph.module.css";
 import type { TraceNode } from "./traceNodes";
 
@@ -338,19 +338,21 @@ function EntryRow({ entry, repository, actions }: { entry: ChildEntry; repositor
 
 function CardShell({
   id,
+  kind,
   selected,
   header,
   children,
   summary,
 }: {
   id: string;
+  kind: "directory" | "files";
   selected: boolean;
   header: ReactNode;
   children: ReactNode;
   summary: FamilyCounts;
 }) {
   return (
-    <div className={classes.card} data-selected={selected || undefined} data-id={id}>
+    <div className={classes.card} data-kind={kind} data-selected={selected || undefined} data-id={id}>
       <Anchors />
       {header}
       <ul className={classes.rows}>{children}</ul>
@@ -365,6 +367,7 @@ function DirectoryNode({ id, data }: NodeProps<Node<DirectoryNodeData, "director
   return (
     <CardShell
       id={id}
+      kind="directory"
       selected={selected}
       summary={card.summary}
       header={
@@ -401,6 +404,7 @@ function FilesNode({ id, data }: NodeProps<Node<FilesNodeData, "files">>) {
   return (
     <CardShell
       id={id}
+      kind="files"
       selected={selected}
       summary={card.summary}
       header={
@@ -466,7 +470,7 @@ function PlaceNodeView({ id, data }: NodeProps<Node<PlaceNodeData, "place">>) {
   const name = node.path.slice(node.path.lastIndexOf("/") + 1);
   const cut = node.path.lastIndexOf("/");
   return (
-    <div className={classes.place} data-selected={selected || undefined}>
+    <div className={classes.place} data-directory={!looksLikeFile(node.path) || undefined} data-selected={selected || undefined}>
       <Anchors />
       <Cover id={id} name={node.path} selected={selected} openable actions={actions} />
       <PathBadge path={node.path} />
@@ -525,7 +529,12 @@ function AnchorNode({ id, data }: NodeProps<Node<AnchorNodeData, "anchor">>) {
 function NeighbourNode({ id, data }: NodeProps<Node<NeighbourNodeData, "neighbour">>) {
   const { node, actions, selected = false } = data;
   return (
-    <div className={classes.place} data-neighbour data-selected={selected || undefined}>
+    <div
+      className={classes.place}
+      data-neighbour
+      data-directory={!looksLikeFile(node.target) || undefined}
+      data-selected={selected || undefined}
+    >
       <Anchors />
       <Cover id={id} name={node.detail ? `${node.detail}/${node.label}` : node.label} selected={selected} openable actions={actions} />
       <PathBadge path={node.target} />

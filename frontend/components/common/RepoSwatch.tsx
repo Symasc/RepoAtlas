@@ -17,9 +17,8 @@ export function RepoSwatch({ hue, size = 10 }: { hue: number | null; size?: numb
 }
 
 /**
- * A repository's hue as the land it covers, like a country on a political map:
- * `--territory`, read by every surface drawn inside it. Unknown, it is unset,
- * and those surfaces stay neutral.
+ * A repository's hue as the ground of its own node, like a country on a
+ * political map: `--territory`. Unknown, it is unset, and the node stays neutral.
  */
 export function territory(hue: number | null | undefined): CSSProperties {
   return hue ? ({ "--territory": `var(--ra-repo-${hue})` } as CSSProperties) : {};

@@ -245,7 +245,6 @@ function DirectoryLevel({
             onActivate={activate}
             arrival={{ direction: nav.arrival.direction, from }}
             extent={extent}
-            hue={repository.hue}
             families={families}
             start={<Trail repository={repository} nav={nav} file={false} />}
             end={
