@@ -1155,6 +1155,10 @@ export interface HttpOperationsRequest {
    */
   crossing?: CrossingStatus[];
   cursor?: string | null;
+  /**
+   * Return only the caller row holding this stored decision, with only that crossing; a ref nothing stores returns no rows. Under repository scope the decision must be that repository's. With it, global scope needs no discover: the decision's repository answers, every place is shown, and include_provenance supplies the lines of every proven hop in any repository.
+   */
+  decision_ref?: string | null;
   depth?: FreshnessDepth;
   /**
    * With global scope and a non-root route_prefix, discover compatible operations across repositories. Rows retain repository-local statuses and source identity; compatibility does not prove a deployment identity or a runtime dependency, which only a row's crossings state. Results are paginated.

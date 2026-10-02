@@ -1197,6 +1197,13 @@ class SqliteKnowledgeStore:
             for row in rows
         ]
 
+    def http_call_decision_repository(self, decision_ref: str) -> int | None:
+        """The repository whose request a stored decision is, by its exact ref."""
+        row = self._db.execute(
+            "SELECT repo_id FROM http_call_decisions WHERE decision_ref = ?", (decision_ref,)
+        ).fetchone()
+        return None if row is None else int(row["repo_id"])
+
     def http_call_decisions_built(self) -> bool:
         """Whether a global commit has written ``http_call_decisions`` since the table existed."""
         return self._db.get_meta(HTTP_CALL_DECISIONS_KEY) is not None

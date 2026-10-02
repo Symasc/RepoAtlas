@@ -821,13 +821,21 @@ def selected(
     Filters apply to rows, after the whole repository was planned: narrowing what
     is returned must never narrow what is known.
     A ``crossing`` filter keeps the callers with a crossing of those decisions, each
-    with only those crossings.
+    with only those crossings. A ``decision_ref`` keeps the one caller holding that
+    stored decision, with only it: an exact match on the ref, never a search.
     """
     wanted = set(request.status)
     crossing = set(request.crossing)
     rows: list[Draft] = []
     for draft in drafts:
         row = draft.operation
+        if request.decision_ref is not None:
+            named = tuple(c for c in row.crossings if c.decision_ref == request.decision_ref)
+            if not named:
+                continue
+            if len(named) != len(row.crossings):
+                row = row.model_copy(update={"crossings": named})
+                draft = replace(draft, operation=row)
         if crossing:
             kept = tuple(c for c in row.crossings if c.status in crossing)
             if not kept:
@@ -1031,6 +1039,7 @@ def request_digest(request: HttpOperationsRequest, repository: str, prefix: str 
             ("status", *sorted(status.value for status in request.status)),
             ("crossing", *sorted(status.value for status in request.crossing)),
             ("cross_repository", str(request.cross_repository)),
+            ("decision_ref", request.decision_ref or ""),
             ("provenance", str(request.include_provenance)),
         ]
     )

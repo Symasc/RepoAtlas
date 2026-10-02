@@ -13,8 +13,10 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from repoatlas.capabilities.errors import InvalidCursorError
 from repoatlas.capabilities.service import CapabilityService
+from repoatlas.errors import ContextResolutionError
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.http_inventory import (
     CrossingStatus,
@@ -34,7 +36,7 @@ from tests.http_crossing_corpus import (
     WORKSPACE,
 )
 from tests.impact_corpus import build
-from tests.test_http_call_decisions import MIRRORED
+from tests.test_http_call_decisions import MIRRORED, TWINNED
 from tests.test_http_crossings import ALTERNATED
 from tests.test_http_ts_injection import WEB
 
@@ -339,3 +341,123 @@ def test_the_basis_says_what_a_crossing_establishes_and_a_status_does_not(
     discovery = _discover(joined).basis
     assert "deployment_identity" not in discovery.does_not_establish
     assert discovery.crossings.establishes == ("source_backed_deployment_identity_chain",)
+
+
+# -- one stored decision by its ref (M5b; review decisions E3, E4) -------------------------
+
+
+def _lookup(
+    workspace: Workspace, ref: str, repository: str | None = "portal", **kwargs: object
+) -> HttpOperationsResponse:
+    context = (
+        CapabilityContext(scope=CapabilityScope.REPOSITORY, repository=repository)
+        if repository
+        else CapabilityContext(scope=CapabilityScope.GLOBAL)
+    )
+    fields: dict[str, object] = {"context": context, "decision_ref": ref, **kwargs}
+    return CapabilityService(workspace).http_operations(HttpOperationsRequest(**fields))  # type: ignore[arg-type]
+
+
+def test_a_decision_ref_returns_exactly_its_crossing_on_its_row(joined: Workspace) -> None:
+    listed = _ask(joined, cross_repository=True)
+    looked = 0
+    for row in listed.operations:
+        for crossing in row.crossings:
+            found = _lookup(joined, crossing.decision_ref, cross_repository=True)
+            [only] = found.operations
+            assert only.crossings == (crossing,)
+            assert only.model_copy(update={"crossings": ()}) == row.model_copy(
+                update={"crossings": ()}
+            )
+            assert found.summary.total == 1
+            looked += 1
+    assert looked == len(_stored(joined, "portal"))
+
+
+def test_another_repository_s_decision_is_no_row_under_repository_scope(
+    joined: Workspace,
+) -> None:
+    """A ref never reaches into another repository's inventory."""
+    for ref in _stored(joined, "portal"):
+        for other in ("accounts", "billing"):
+            response = _lookup(joined, ref, other)
+            assert (response.operations, response.summary.total) == ((), 0)
+
+
+def test_a_ref_nothing_stores_is_no_row_and_no_error(joined: Workspace) -> None:
+    for repository in ("portal", None):
+        response = _lookup(joined, "hcd1-" + "0" * 20, repository)
+        assert (response.operations, response.summary.total) == ((), 0)
+
+
+def test_a_global_lookup_shows_every_place_and_its_lines_in_any_repository(
+    joined: Workspace,
+) -> None:
+    """The explorer's escalation: only an explicit lookup reads in global scope, and it
+    shows the decision's whole chain with the lines of every proven hop as evidence."""
+    [crossing] = _caller(_ask(joined), "load_user").crossings
+    response = _lookup(joined, crossing.decision_ref, None, include_provenance=True)
+    assert response.basis.crossings.projection == "global"
+    assert getattr(response.basis, "repository", None) == "portal"
+    [row] = response.operations
+    [shown] = row.crossings
+    assert shown.decision_ref == crossing.decision_ref
+    assert not any(hop.withheld for hop in shown.chain)
+    assert {p.repository for hop in shown.chain for p in hop.provenance} == {"portal", "accounts"}
+    supplied = {item.id: item for item in response.evidence}
+    proven = [
+        place
+        for hop in shown.chain
+        if hop.status == "proven"
+        for place in hop.provenance
+        if place.line_start is not None
+    ]
+    assert proven and all(place.evidence_id in supplied for place in proven)
+    assert {item.ref.repository_slug for item in response.evidence} == {"portal", "accounts"}
+    assert {r.repository_slug for r in response.freshness.repositories} == {"portal", "accounts"}
+
+    # The same ref under repository scope shows the places, and supplies only its own lines.
+    near = _lookup(joined, crossing.decision_ref, cross_repository=True, include_provenance=True)
+    assert {item.ref.repository_slug for item in near.evidence} == {"portal"}
+
+
+def test_a_lookup_is_refused_where_it_cannot_name_one_decision(joined: Workspace) -> None:
+    ref = _stored(joined, "portal")[0]
+    portal = CapabilityContext(scope=CapabilityScope.REPOSITORY, repository="portal")
+    everywhere = CapabilityContext(scope=CapabilityScope.GLOBAL)
+    for malformed in ("hcd1-123", "HCD1-" + "0" * 20, "hcd1-" + "g" * 20, ref + "#1"):
+        with pytest.raises(ValidationError):
+            HttpOperationsRequest(context=portal, decision_ref=malformed)
+    with pytest.raises(ValidationError):
+        HttpOperationsRequest(
+            context=everywhere, discover=True, route_prefix="/api", decision_ref=ref
+        )
+    with pytest.raises(ValidationError):
+        HttpOperationsRequest(context=portal, role=OperationRole.PROVIDER, decision_ref=ref)
+    # Global scope still needs a ref or discovery.
+    with pytest.raises(ContextResolutionError):
+        CapabilityService(joined).http_operations(HttpOperationsRequest(context=everywhere))
+
+
+def test_two_roots_giving_one_url_are_each_found_by_their_own_ref(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    built = build(
+        workspace, tmp_path, {"accounts": ACCOUNTS, "web": {**WEB, "src/main.ts": TWINNED}}
+    )
+    row = _caller(_ask(built, "web"), "createUserModel.getUser")
+    assert len({c.variant for c in row.crossings}) == 2
+    for crossing in row.crossings:
+        [near] = _lookup(built, crossing.decision_ref, "web").operations
+        assert near.crossings == (crossing,)
+        [far] = _lookup(built, crossing.decision_ref, None).operations
+        assert [(c.decision_ref, c.variant) for c in far.crossings] == [
+            (crossing.decision_ref, crossing.variant)
+        ]
+
+
+def test_a_cursor_issued_without_the_ref_is_refused_with_it(joined: Workspace) -> None:
+    first = _ask(joined, limit=1)
+    assert first.has_more and first.next_cursor is not None
+    with pytest.raises(InvalidCursorError):
+        _ask(joined, decision_ref=_stored(joined, "portal")[0], cursor=first.next_cursor)
