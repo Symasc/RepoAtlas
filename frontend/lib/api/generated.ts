@@ -136,6 +136,21 @@ export type EdgeType =
  */
 export type InspectionSource = "verified_worktree" | "indexed_chunks";
 /**
+ * The workspace join's decision for one request, as the global link pass stored it.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "CrossingStatus".
+ */
+export type CrossingStatus =
+  | "linked"
+  | "http-provider-ambiguous"
+  | "http-deployment-source-unresolved"
+  | "http-deployment-binding-unresolved"
+  | "http-route-unmatched"
+  | "http-service-unmatched"
+  | "http-base-unknown"
+  | "http-claim-unread";
+/**
  * How hard RepoAtlas looked, and therefore what it is entitled to say.
  *
  * The depth is part of the answer, not a parameter that produced it. A caller
@@ -308,7 +323,7 @@ export type OperationRole = "caller" | "provider" | "both";
 /**
  * What one row is, in indexed static facts of one repository.
  *
- * The first four are callers, the last three providers. None of them is a
+ * The first five are callers, the last three providers. None of them is a
  * statement about the whole system: "no indexed handler" is absence in the
  * index, and so is "no indexed caller".
  *
@@ -320,6 +335,7 @@ export type OperationStatus =
   | "ambiguous"
   | "no_indexed_handler"
   | "unresolved"
+  | "join_only"
   | "called"
   | "no_indexed_caller"
   | "declared";
@@ -636,6 +652,19 @@ export interface CoverageLimitation {
   note?: string;
 }
 /**
+ * What every crossing rests on, and how much of another repository this answer shows.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "CrossingBasis".
+ */
+export interface CrossingBasis {
+  built: boolean;
+  does_not_establish?: string[];
+  establishes?: string[];
+  projection: "own_repository" | "cross_repository" | "global";
+  source?: "stored_link_pass";
+}
+/**
  * Ask what the index records about declared and resolved packages.
  *
  * This interface was referenced by `ApiIndex`'s JSON-Schema
@@ -944,6 +973,7 @@ export interface ProviderView {
  * via the `definition` "DiscoveryBasis".
  */
 export interface DiscoveryBasis {
+  crossings: CrossingBasis;
   does_not_establish?: string[];
   establishes?: string[];
   extraction?: "static";
@@ -1116,10 +1146,18 @@ export interface HttpOperation {
  */
 export interface HttpOperationsRequest {
   context: CapabilityContext;
+  /**
+   * Under repository scope, show what another repository proves in each crossing: its repository, path and lines, the handler and the provider. Off, they are withheld and each hop keeps its status. Lines in another repository are supplied as evidence only under global scope.
+   */
+  cross_repository?: boolean;
+  /**
+   * Return only callers with a crossing of these decisions, and of each only those crossings. `http-base-unknown` lists the requests whose host the source does not state. Empty means every row and every crossing.
+   */
+  crossing?: CrossingStatus[];
   cursor?: string | null;
   depth?: FreshnessDepth;
   /**
-   * With global scope and a non-root route_prefix, discover compatible operations across repositories. Rows retain repository-local statuses and source identity; compatibility does not prove deployment identity or a runtime dependency. Results are paginated.
+   * With global scope and a non-root route_prefix, discover compatible operations across repositories. Rows retain repository-local statuses and source identity; compatibility does not prove a deployment identity or a runtime dependency, which only a row's crossings state. Results are paginated.
    */
   discover?: boolean;
   /**
@@ -1177,6 +1215,7 @@ export interface HttpOperationsResponse {
  * via the `definition` "OperationBasis".
  */
 export interface OperationBasis {
+  crossings: CrossingBasis;
   does_not_establish?: string[];
   establishes?: string[];
   extraction?: "static";
@@ -1209,6 +1248,9 @@ export interface OperationCoverage {
  * via the `definition` "OperationSummary".
  */
 export interface OperationSummary {
+  by_crossing?: {
+    [k: string]: number | undefined;
+  };
   by_role?: {
     [k: string]: number | undefined;
   };
