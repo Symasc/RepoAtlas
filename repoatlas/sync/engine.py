@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -84,6 +85,8 @@ from repoatlas.sync.scanner import (
     hash_within,
     scan_repository,
 )
+
+_logger = logging.getLogger(__name__)
 
 #: Bytes above which a file is recorded but never read (V1_SPEC §17 zip-bomb guard).
 #: How much of a file's head decides whether it is binary. Public because a
@@ -531,11 +534,21 @@ class SyncEngine:
         # `content`. Parsing, dependency extraction and chunking are the expensive
         # half and none of them touch the database, so they run *before* the write
         # lock is taken and the transaction stays as short as the writes it makes.
-        parsed = (
-            parser.parse(Path(rel_path), content)
-            if parser
-            else ParsedFile(language=language or "unknown", parser="none", parser_version="0")
-        )
+        if parser:
+            try:
+                parsed = parser.parse(Path(rel_path), content)
+            except Exception as exc:
+                _logger.error(
+                    "Parser %s failed for repository %s, file %s (%s: %s)",
+                    parser.name,
+                    repo.path,
+                    rel_path,
+                    type(exc).__name__,
+                    exc,
+                )
+                raise
+        else:
+            parsed = ParsedFile(language=language or "unknown", parser="none", parser_version="0")
         dependencies, dependency_diagnostics = self._dependency_reports(rel_path, content)
         chunks = chunk_content(content, parsed.symbols, self._settings.indexing)
 

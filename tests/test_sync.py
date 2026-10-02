@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
+import pytest
 from repoatlas.models.repository import Repository, SyncStatus
+from repoatlas.parsers.typescript import TypeScriptParser
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace
 from tests.conftest import fact_snapshot, git
@@ -63,6 +66,29 @@ def test_new_file_is_indexed(initialized: Workspace, workspace_root: Path) -> No
     report = _sync_one(initialized, workspace_root, "python-service")
     assert report.repositories[0].new == 1
     assert "brand_new_symbol" in _entity_names(initialized, "python-service")
+
+
+def test_parser_failure_logs_repository_and_file(
+    initialized: Workspace,
+    workspace_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rel_path = "src/parser-crash.ts"
+    (workspace_root / "python-service" / rel_path).write_text("export const value = 1;\n")
+
+    def fail_parse(self: TypeScriptParser, path: Path, content: str):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(TypeScriptParser, "parse", fail_parse)
+    with caplog.at_level(logging.ERROR, logger="repoatlas.sync.engine"):
+        with pytest.raises(RecursionError):
+            _sync_one(initialized, workspace_root, "python-service")
+
+    assert "python-service" in caplog.text
+    assert rel_path in caplog.text
+    assert "tree-sitter-typescript" in caplog.text
+    assert "RecursionError" in caplog.text
 
 
 def test_deleted_file_removes_its_facts(initialized: Workspace, workspace_root: Path) -> None:
