@@ -155,22 +155,27 @@ def test_search_expands_from_a_linked_caller_exactly_as_before_links(
     portal = joined.repositories.get_by_slug("portal")
     assert portal is not None
     home = portal.id if confined else None
-    bounds = {"hops": 2, "fanout": 50, "seed_limit": 10}
     linked = walk(
         joined.knowledge,
         [caller],
-        **bounds,
+        hops=2,
+        fanout=50,
+        seed_limit=10,
         edge_types=RELATIONSHIP_DEFAULT_EDGES,
         crossing_edges=RELATIONSHIP_CROSSING_EDGES,
     )
     assert any(step.edge.type is HANDLER and step.hop == 1 for step in linked.steps)
     assert linked.reasons[handler] == f"{HANDLER.value.lower()} (hop 1)"
 
-    expanded = expand_from_seeds(joined.knowledge, [caller], **bounds, home_repo_id=home)
+    expanded = expand_from_seeds(
+        joined.knowledge, [caller], hops=2, fanout=50, seed_limit=10, home_repo_id=home
+    )
     before = walk(
         joined.knowledge,
         [caller],
-        **bounds,
+        hops=2,
+        fanout=50,
+        seed_limit=10,
         edge_types=EXPANSION_EDGES,
         crossing_edges=CROSS_REPOSITORY_EDGES,
         home_repo_id=home,
