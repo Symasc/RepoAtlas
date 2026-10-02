@@ -201,26 +201,21 @@ it, and an id from a previous process comes back `UNKNOWN_INVESTIGATION` rather
 than as a silently empty one. Evidence ids such as `E1` mean something only
 inside the investigation that issued them.
 
-## 6. No language model, no network
+## 6. No model, no network
 
-RepoAtlas runs no language model and makes no network request --- over MCP or
-anywhere else. Retrieval, traversal, dependency reads and grounding verification
-are all deterministic and local, and a full session including a sync completes
-with outbound networking unavailable. The one exception is opt-in:
-`repoatlas sync --embed` downloads a small embedding model (about 67 MB) once,
-for semantic search, and runs it locally from then on.
+RepoAtlas runs no model and makes no network request --- over MCP or anywhere
+else. Retrieval, traversal, dependency reads and grounding verification are all
+deterministic and local, and a full session including a sync completes with
+outbound networking unavailable.
 
 That includes parsing. The tree-sitter grammars for TypeScript, JavaScript and
 Bash are package dependencies, installed with RepoAtlas and pinned exactly, so a
 first sync on a fresh machine needs neither the network nor a warm cache.
-Apart from that opt-in, installation is the only step that downloads anything.
-Ruby files are indexed as text but not parsed structurally; see the README's
-language table.
+Installation is the only step that downloads anything. Ruby files are indexed as
+text but not parsed structurally; see the README's language table.
 
-There is nothing to install first and nothing to configure. Earlier versions ran
-a local reasoning model behind the `ask` and `debug` CLI commands; those commands,
-that model and its configuration are gone. The agent is the reasoner, which was
-always true over MCP and is now true everywhere.
+There is nothing to install first and nothing to configure: the agent is the
+reasoner.
 
 An installed HTTP library is not network use: the MCP SDK brings one
 transitively, and on stdio nothing opens a connection.

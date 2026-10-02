@@ -444,8 +444,8 @@ def _strengthen(entry: LedgerEntry, item: ProposedEvidence) -> LedgerEntry:
     discoveries in either sequence yields byte-identical state.
 
     That also means a later weak result cannot weaken anything. A span proved by an
-    exact path match and then also returned by an embedding neighbour is still
-    proved; the embedding hit adds a route, not a doubt.
+    exact path match and then also returned by word-overlap recall is still
+    proved; the lexical hit adds a route, not a doubt.
     """
     return entry.model_copy(
         update={

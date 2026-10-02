@@ -145,7 +145,6 @@ def ecosystem(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Worksp
     settings = Settings.model_validate(
         {
             "storage": {"database": str(base / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     workspace = open_workspace(settings=settings, require_root=False)
@@ -689,7 +688,7 @@ def test_the_cli_reports_suffix_paths_under_verbose(root: Path, tmp_path: Path) 
     """Through the installed console script, on a throwaway config and index."""
     config = tmp_path / "cli-config.yaml"
     config.write_text(
-        f"repos:\n  root: {root}\nembeddings:\n  provider: hashing\n  dim: 128\n",
+        f"repos:\n  root: {root}\n",
         encoding="utf-8",
     )
     database = tmp_path / "cli-state" / "atlas.db"

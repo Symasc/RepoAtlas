@@ -210,7 +210,7 @@ class LedgerEntry(BaseModel):
     tier: TierField = EvidenceTier.DETERMINISTIC
     match: MatchField = MatchClass.EXACT_CONTENT
     #: Every route that has found this evidence, sorted and unique. Accumulated
-    #: rather than overwritten: a span reached both exactly and semantically was
+    #: rather than overwritten: a span reached both exactly and lexically was
     #: reached both ways, and first discovery is not more true than the second.
     origins: tuple[EvidenceSource, ...] = ()
     reasons: tuple[str, ...] = ()

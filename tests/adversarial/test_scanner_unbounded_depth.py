@@ -125,7 +125,6 @@ def make_repo(root: Path, files: dict[str, str] | None = None) -> Path:
 def settings_for(tmp_path: Path, tag: str = "state", **overrides: object) -> Settings:
     payload: dict[str, object] = {
         "storage": {"database": str(tmp_path / tag / "atlas.db")},
-        "embeddings": {"provider": "hashing", "dim": 64},
     }
     payload.update(overrides)
     return Settings.model_validate(payload)
@@ -846,7 +845,7 @@ def test_a_deep_marker_is_retrievable_after_a_sync(workspace_root: Path, tmp_pat
         workspace.close()
 
 
-def test_deep_chunks_are_embedded_like_shallow_ones(workspace_root: Path, tmp_path: Path) -> None:
+def test_deep_files_are_chunked_like_shallow_ones(workspace_root: Path, tmp_path: Path) -> None:
     repo = make_repo(workspace_root / "r", {"shallow.py": "def shallow_fn():\n    return 1\n"})
     deep_file(repo, 80, "deep.py", "def deep_fn():\n    return 2\n")
 
@@ -860,12 +859,6 @@ def test_deep_chunks_are_embedded_like_shallow_ones(workspace_root: Path, tmp_pa
             "WHERE f.rel_path LIKE '%deep.py'"
         ).fetchone()
         assert int(row["n"]) > 0, "the deep file produced no chunks"
-        embedded = workspace.database.execute(
-            "SELECT COUNT(*) AS n FROM embeddings e "
-            "JOIN chunks c ON c.content_hash = e.content_hash "
-            "JOIN files f ON f.id = c.file_id WHERE f.rel_path LIKE '%deep.py'"
-        ).fetchone()
-        assert int(embedded["n"]) > 0, "deep chunks were not embedded"
     finally:
         workspace.close()
 

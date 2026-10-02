@@ -75,7 +75,6 @@ def workspace(tmp_path: Path) -> Workspace:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     space = open_workspace(settings=settings, require_root=False)
@@ -188,7 +187,6 @@ def test_a_duplicate_basename_across_repositories_returns_both(tmp_path: Path) -
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     space = open_workspace(settings=settings, require_root=False)
@@ -302,7 +300,6 @@ def test_a_literal_crossing_a_boundary_is_found_by_exact_search(
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     space = open_workspace(settings=settings, require_root=False)
@@ -323,7 +320,6 @@ def test_a_literal_crossing_the_second_boundary_is_found(tmp_path: Path) -> None
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     space = open_workspace(settings=settings, require_root=False)
@@ -341,7 +337,6 @@ def test_a_boundary_match_cites_a_real_line_range(tmp_path: Path) -> None:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     space = open_workspace(settings=settings, require_root=False)
@@ -360,7 +355,6 @@ def test_a_literal_absent_from_a_split_file_is_still_absent(tmp_path: Path) -> N
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     space = open_workspace(settings=settings, require_root=False)
@@ -378,7 +372,6 @@ def test_one_boundary_match_is_one_candidate(tmp_path: Path) -> None:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     space = open_workspace(settings=settings, require_root=False)
@@ -402,7 +395,6 @@ def test_a_renamed_file_leaves_no_stale_path(tmp_path: Path) -> None:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     space = open_workspace(settings=settings, require_root=False)
@@ -424,7 +416,6 @@ def test_a_deleted_file_leaves_no_stale_path(tmp_path: Path) -> None:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     space = open_workspace(settings=settings, require_root=False)
@@ -443,7 +434,6 @@ def test_an_ignored_file_disappears_and_returns(tmp_path: Path) -> None:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     space = open_workspace(settings=settings, require_root=False)
@@ -472,7 +462,6 @@ def test_a_boundary_literal_survives_an_incremental_edit(tmp_path: Path) -> None
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     space = open_workspace(settings=settings, require_root=False)
@@ -497,7 +486,6 @@ def test_a_full_reindex_finds_exactly_what_the_incremental_sync_found(tmp_path: 
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     space = open_workspace(settings=settings, require_root=False)

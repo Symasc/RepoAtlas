@@ -8,9 +8,9 @@ RepoAtlas does not have one and cannot acquire one without guessing, so the publ
 contract counts the thing it actually produces.
 
 **Profiles, not knobs.** ``RetrievalLimits`` carries hop counts, fan-out, seed
-counts, a primary-repository bias and a similarity floor. Those are tuning for a
-ranking whose trust guarantees depend on them holding together (V1_SPEC §14): a
-caller that could raise ``graph_seeds`` or drop ``semantic_floor`` could quietly
+counts and a primary-repository bias. Those are tuning for a ranking whose trust
+guarantees depend on them holding together (V1_SPEC §14): a caller that could
+raise ``graph_seeds`` or ``primary_boost`` could quietly
 change which tier of evidence reaches the top, which is the one property evidence
 is supposed to have. Three named profiles are exposed instead.
 
@@ -177,7 +177,7 @@ def retrieval_limits_for(
 ) -> RetrievalLimits:
     """Internal retrieval bounds for a granted budget.
 
-    The biases — hop count, fan-out, seeds, primary boost, semantic floor — come
+    The biases — hop count, fan-out, seeds, primary boost — come
     from configuration and are **not** derived from the budget, because they are
     not a quantity of evidence. Only the two caps a caller can move are set here.
 
