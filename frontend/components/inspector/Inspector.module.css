@@ -484,6 +484,23 @@
   }
 }
 
+.decision {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ra-border);
+}
+
+.decisionTitle {
+  margin: 0;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 600;
+  color: var(--ra-text);
+}
+
 /* -- code ------------------------------------------------------------------------------- */
 
 .code {

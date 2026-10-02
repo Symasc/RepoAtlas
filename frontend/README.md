@@ -159,6 +159,35 @@ that declares a deployment is marked, so it can be selected and traced like a
 name, and the inspector's **Symbols** tab lists routes, endpoints and
 deployments in sections of their own.
 
+### HTTP decisions
+
+A line between two repositories means a proven relationship. For HTTP that is a
+handler link: the workspace join proved, from the source, every hop from a
+request to one handler. A request the join refused is never drawn; it is
+listed.
+
+- **Requests** (on a repository, a directory, or a file) lists the requests made
+  there, each with the join's stored decisions under their exact statuses
+  (`linked`, `http-route-unmatched`, `http-service-unmatched`,
+  `http-base-unknown`, `http-deployment-binding-unresolved`,
+  `http-deployment-source-unresolved`, …), never one generic failure. The
+  header counts every decision in scope. Requests only the join reads (an
+  absolute or deployment-addressed URL, or a host the source does not state,
+  status `join_only`) are counted but not listed until **Show join-only
+  requests** asks for them.
+- **A decision's chain** reads as a stepper of its seven hops: caller, origin,
+  service identity, deployment binding, source binding, route, handler. Each hop
+  shows its state as the API wrote it (`proven`, `unresolved`, `ambiguous`,
+  `not_reached`) and, when it is not proven, its reason. Emphasis stops at the
+  first hop that is not proven, and the hops never reached are subdued and cite
+  nothing. A proven or unresolved hop opens out to its places, each of which
+  opens that file at its line.
+- **Evidence** reads one decision whole: chosen from a request, or shown for a
+  handler link's own decision, found by the `decision_ref` the link records.
+  Only then is it read in global scope, with every repository's part of the
+  chain and the lines of each proven hop. Listing reads one repository, with
+  other repositories' places shown and no evidence recorded.
+
 ### Pointing, selecting, opening
 
 | Action | Result |

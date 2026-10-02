@@ -1,0 +1,368 @@
+/* -- the Requests view ------------------------------------------------------------------ */
+
+.requests {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.counts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.count {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--mantine-font-size-sm);
+}
+
+.countValue {
+  font-variant-numeric: tabular-nums;
+  color: var(--ra-text);
+}
+
+.countHidden {
+  color: var(--ra-text-subtle);
+}
+
+/* An exact machine status, as the API writes it: never a merged "failed". */
+.decision {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-muted);
+}
+
+.decision[data-status="linked"] {
+  color: var(--ra-success);
+}
+
+.groups {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.file {
+  margin: 0;
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 400;
+  color: var(--ra-text-subtle);
+  word-break: break-all;
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.request {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 8px;
+  border-left: 1px solid var(--ra-border);
+}
+
+.requestLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--mantine-font-size-md);
+}
+
+.method {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 600;
+}
+
+.route {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-sm);
+  word-break: break-all;
+}
+
+.rowStatus,
+.rowDetail {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-subtle);
+}
+
+.requestAt {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-subtle);
+}
+
+.noDecision {
+  margin: 0;
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-subtle);
+}
+
+.crossing,
+.detailed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.crossingHead {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.crossingLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+}
+
+.url {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-muted);
+  word-break: break-all;
+}
+
+.meaning,
+.variant {
+  margin: 0;
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-subtle);
+}
+
+.variant {
+  font-family: var(--mantine-font-family-monospace);
+}
+
+/* -- the evidence stepper ---------------------------------------------------------------- */
+
+.stepper {
+  align-self: stretch;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.step {
+  position: relative;
+  display: flex;
+  gap: 10px;
+  padding-bottom: 8px;
+}
+
+/* the thin rule joining one hop to the next */
+.step:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 0;
+  left: 4px;
+  width: 1px;
+  background-color: var(--ra-border-strong);
+}
+
+.mark {
+  flex: none;
+  box-sizing: border-box;
+  width: 9px;
+  height: 9px;
+  margin-top: 4px;
+  border: 1.5px solid var(--ra-text-muted);
+  border-radius: 50%;
+}
+
+.step[data-state="proven"] .mark {
+  border-color: var(--ra-text);
+  background-color: var(--ra-text);
+}
+
+.step[data-state="unresolved"] .mark {
+  border-color: var(--ra-danger);
+}
+
+.step[data-state="ambiguous"] .mark {
+  border-color: var(--ra-warning);
+  background: linear-gradient(90deg, var(--ra-warning) 50%, transparent 50%);
+}
+
+.step[data-state="not_reached"] .mark {
+  border-style: dotted;
+  border-color: var(--ra-text-subtle);
+}
+
+.step[data-tone="plain"] .stepLabel {
+  font-weight: 400;
+}
+
+.step[data-tone="subdued"] {
+  opacity: 0.55;
+}
+
+.step[data-tone="subdued"] .stepLabel {
+  font-weight: 400;
+  color: var(--ra-text-subtle);
+}
+
+.stepBody {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.stepHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--mantine-font-size-sm);
+}
+
+.stepLabel {
+  font-weight: 600;
+  color: var(--ra-text);
+}
+
+.stepState {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-muted);
+}
+
+.step[data-state="unresolved"] .stepState {
+  color: var(--ra-danger);
+}
+
+.step[data-state="ambiguous"] .stepState {
+  color: var(--ra-warning);
+}
+
+.stepToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-muted);
+  cursor: pointer;
+}
+
+.stepToggle:focus-visible,
+.placeLink:focus-visible {
+  outline: 2px solid var(--ra-focus);
+  outline-offset: 1px;
+}
+
+.stepWhy,
+.stepDetail {
+  margin: 0;
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-muted);
+  word-break: break-word;
+}
+
+.stepDetail {
+  font-family: var(--mantine-font-family-monospace);
+  color: var(--ra-text-subtle);
+}
+
+.places {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.place {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.placeLink,
+.placeText {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text);
+  text-align: left;
+  word-break: break-all;
+}
+
+.placeLink {
+  text-decoration: underline;
+  text-decoration-color: var(--ra-border-strong);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.placeRole {
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-subtle);
+}
+
+.lines {
+  flex-basis: 100%;
+  margin: 2px 0 0;
+  padding: 4px 0;
+  overflow-x: auto;
+  border-radius: var(--ra-radius-s);
+  background-color: var(--ra-evidence);
+  font-family: var(--mantine-font-family-monospace);
+  font-size: 12px;
+  line-height: 1.6;
+  scrollbar-width: thin;
+}
+
+.line {
+  display: block;
+  padding-right: 12px;
+  white-space: pre;
+}
+
+.lineNumber {
+  display: inline-block;
+  min-width: 3.4em;
+  padding: 0 12px 0 6px;
+  text-align: right;
+  color: var(--ra-text-subtle);
+  user-select: none;
+}

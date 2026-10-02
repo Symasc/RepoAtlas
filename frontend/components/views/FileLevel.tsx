@@ -14,6 +14,7 @@ import { Connections } from "@/components/inspector/Connections";
 import { EntryList } from "@/components/inspector/Entries";
 import { Evidence } from "@/components/inspector/Evidence";
 import { Inspector, Quiet, type InspectorTab } from "@/components/inspector/Inspector";
+import { Requests } from "@/components/inspector/Requests";
 import inspectorClasses from "@/components/inspector/Inspector.module.css";
 import { linesOf, SymbolList } from "@/components/inspector/Symbols";
 import type { TopologyChildrenResponse } from "@/lib/api/generated";
@@ -32,7 +33,7 @@ import {
 import type { RepositoryModel } from "@/lib/model/repositories";
 import { symbolIndex, type SymbolIndex, type SymbolTarget } from "@/lib/model/symbols";
 
-import type { Navigation } from "./navigation";
+import { LINE_SELECT, openAt, type Navigation } from "./navigation";
 import { Trail, useClimb } from "./Trail";
 import classes from "./Views.module.css";
 
@@ -42,7 +43,7 @@ function dirname(path: string): string {
 }
 
 /** A selection naming a line to show: `line:<n>`. */
-const LINE = "line:";
+const LINE = LINE_SELECT;
 
 type Mode = "code" | "links";
 
@@ -313,6 +314,14 @@ export function FileLevel({
     />
   );
 
+  const requests = (
+    <Requests
+      scope={{ repository: repository.slug, path }}
+      subject={`file:${repository.slug}:${path}`}
+      onOpenPlace={(at) => openAt(nav, at)}
+    />
+  );
+
   let inspector;
   if (mode === "code" && symbol) {
     const occurs = linesOf(index, symbol.key);
@@ -394,10 +403,11 @@ export function FileLevel({
             </Button>
           ) : undefined
         }
-        tab={view.tab === "details" ? "details" : "symbols"}
+        tab={view.tab === "details" || view.tab === "requests" ? view.tab : "symbols"}
         onTab={(value) => setView((v) => ({ ...v, tab: value }))}
         tabs={[
           { value: "symbols", label: "Symbols", count: index.targets.size, panel: symbols },
+          { value: "requests", label: "Requests", panel: requests },
           { value: "details", label: "Details", panel: details },
         ]}
       />
@@ -430,6 +440,7 @@ export function FileLevel({
               />
             ),
           },
+          { value: "requests", label: "Requests", panel: requests },
           { value: "details", label: "Details", panel: details },
           {
             value: "evidence",
@@ -439,6 +450,7 @@ export function FileLevel({
                 connection={picked}
                 subject={`file:${repository.slug}:${path}`}
                 here={{ repository: repository.slug, path }}
+                onOpenPlace={(at) => openAt(nav, at)}
                 onShowInCode={(span) => {
                   setMode("code");
                   nav.select(`${LINE}${span.start}`);
