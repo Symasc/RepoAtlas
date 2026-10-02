@@ -61,7 +61,7 @@ test("the overview draws one line per link and kind, each in its own stroke", as
   expect(await dash("http")).not.toBe("none");
   expect(await dash("observed")).toBe("none");
   // every line says which way it runs
-  await expect(lines(page, "observed").first().locator("path:not(.react-flow__edge-path):not(.react-flow__edge-interaction)")).toHaveCount(1);
+  await expect(lines(page, "observed").first().locator('path[data-part="arrow"]')).toHaveCount(1);
   // and is painted in its relationship's colour, never the canvas library's own grey
   const painted = await page.locator(".react-flow__edges g[data-relation][data-emphasis]").evaluateAll((groups) => {
     const token: Record<string, string> = {

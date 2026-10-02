@@ -563,7 +563,10 @@ export function layoutTrace(graph: TraceGraph): Layout {
   return layout;
 }
 
-/** Link stroke width: 1.25px for one relationship, up to 3.5px for thousands. */
+/**
+ * Link stroke width, in three weights as a transit map has: 2.5px for a few
+ * relationships, 3.5px for hundreds, 5px from a thousand up.
+ */
 export function strokeFor(count: number): number {
-  return Math.min(3.5, 1.25 + Math.log10(Math.max(count, 1)) * 0.75);
+  return count >= 1000 ? 5 : count >= 10 ? 3.5 : 2.5;
 }

@@ -42,8 +42,6 @@ export type LinkEdgeData = {
   /** Pixels across the line, to separate families drawn between the same pair. */
   offset: number;
   route: RouteKind;
-  /** For `float`: how far the line bows, as a fraction of its length. */
-  curve: number;
   scope: "detail" | "aggregate" | null;
 };
 
@@ -84,6 +82,12 @@ export function describeLink(link: LinkData, relation?: Relation): string {
   return `${formatCount(link.count)} ${noun} ${link.count === 1 ? "relationship" : "relationships"}${types.length ? ` (${types.join(", ")})` : ""}${packages}`;
 }
 
+/** A pattern in proportion to the line's weight: HTTP dashed, configuration dotted. */
+const DASH: Partial<Record<Family, (width: number) => string>> = {
+  http: (w) => `${w * 2.6} ${w * 1.6}`,
+  config: (w) => `0.1 ${w * 2.2}`,
+};
+
 function boxOf(node: InternalNode): Box {
   return {
     x: node.internals.positionAbsolute.x,
@@ -94,9 +98,11 @@ function boxOf(node: InternalNode): Box {
 }
 
 /**
- * One family of relationship, in its own stroke: code solid, HTTP dashed, a
- * package dependency double, configuration dotted. Width grows with the count,
- * logarithmically; the arrow says which way it runs.
+ * One relationship, drawn as a transit map draws a line: its colour is the
+ * relationship, its pattern the family (code solid, HTTP dashed, a package
+ * dependency double, configuration dotted), its weight one of three by count.
+ * A band of canvas beneath it keeps crossings and parallels apart; a dot marks
+ * where it leaves, the arrow where it arrives.
  */
 function LinkEdge({ id, source, target, data }: EdgeProps<GraphEdge>) {
   const from = useInternalNode(source);
@@ -107,13 +113,14 @@ function LinkEdge({ id, source, target, data }: EdgeProps<GraphEdge>) {
   const t = boxOf(to);
   let route: Route;
   if (data.route === "float") {
-    route = floating(s, t, offset, data.curve);
+    route = floating(s, t, offset);
   } else {
     const lane = data.route === "lane" ? (from.type === "frame" ? "source" : to.type === "frame" ? "target" : null) : null;
     route = sideways(s, t, offset, lane);
   }
   const width = strokeFor(link.count) + (emphasis === "selected" ? 1 : 0);
-  const head = arrowhead(route.end, route.towards, 5 + width * 1.6);
+  const head = arrowhead(route.end, route.towards, 4 + width * 1.2);
+  const casing = (link.family === "dependency" ? width + 3 : width) + 3;
   return (
     <>
       <g
@@ -126,6 +133,7 @@ function LinkEdge({ id, source, target, data }: EdgeProps<GraphEdge>) {
       >
         <title>{describeLink(link, relation)}</title>
         {emphasis === "selected" && <path d={route.path} className={classes.halo} style={{ strokeWidth: width + 9 }} />}
+        <path d={route.path} className={classes.casing} style={{ strokeWidth: casing }} />
         {link.family === "dependency" ? (
           <>
             <BaseEdge id={id} path={route.path} className={classes.linkOuter} style={{ strokeWidth: width + 3 }} />
@@ -137,15 +145,17 @@ function LinkEdge({ id, source, target, data }: EdgeProps<GraphEdge>) {
             />
           </>
         ) : (
-          <BaseEdge id={id} path={route.path} className={classes.linkStroke} style={{ strokeWidth: width }} />
+          <BaseEdge id={id} path={route.path} className={classes.linkStroke} style={{ strokeWidth: width, strokeDasharray: DASH[link.family]?.(width) }} />
         )}
-        <path d={head} className={classes.arrow} />
+        <circle cx={route.start.x} cy={route.start.y} r={width / 2 + 1.5} className={classes.origin} />
+        <path d={head} className={classes.arrow} data-part="arrow" />
       </g>
       {badge && (labelled || emphasis === "lit" || emphasis === "selected") && emphasis !== "dim" && (
         <EdgeLabelRenderer>
           <span
             className={classes.edgeLabel}
             data-family={badge.family}
+            data-relation={relation}
             data-emphasis={emphasis}
             style={{ transform: `translate(-50%, -50%) translate(${route.label.x}px, ${route.label.y}px)` }}
           >

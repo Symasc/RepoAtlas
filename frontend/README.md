@@ -102,29 +102,34 @@ letters; Enter takes the first result. With **Include variables** on, it also
 finds the names code declares: functions, classes, methods, variables and the
 environment variables code reads. The switch is remembered, and off at first.
 
-A line's pattern is its family and its colour is its relationship. Families are
-never merged into one line, and a code link is drawn as one line per
-relationship it carries, side by side:
+Lines are drawn as a transit map draws them: straight runs joined by 45°
+bends, in bold saturated colours, at full strength. A line's pattern is its
+family and its colour is its relationship. Families are never merged into one
+line, and a code link is drawn as one line per relationship it carries, side by
+side, keeping one gap through every bend:
 
 | Family | Relationship | Line |
 |---|---|---|
 | code | imports (imports, exports, requires, includes, sources) | solid, blue |
 | code | calls (calls, executes) | solid, green |
 | code | uses (uses, references) | solid, violet |
-| code | other (defines, contains…) | solid, ink |
+| code | other (defines, contains…) | solid, grey |
 | HTTP | serves or calls a route or endpoint | dashed, teal |
-| package dependency | depends on | double, plum |
-| configuration and environment variables | reads, configures | dotted, ochre |
+| package dependency | depends on | double, magenta |
+| configuration and environment variables | reads, configures | dotted, amber |
 | the connection being explained | any | thick, in the accent (vermilion) |
 
-Every line has an arrowhead for its direction. Its width grows with its count,
-and one line of each link carries the link's total. The legend lists what the
+A dot marks where a line leaves and an arrowhead where it arrives. It has one
+of three weights by its count (a few, hundreds, thousands), a band of canvas
+beneath it so crossings stay legible, and it runs under the cards, never across
+them. One line of each link carries the link's total, on a tag filled in its
+colour. The legend lists what the
 level draws. Where code is summed (a card's tally, a family's heading in the
 inspector) its mark shows blue, green and violet together. Each connection in
 the inspector lists its relationships with their colours.
 Each kind of node carries its own icon, drawn in the colour of the line that
-reaches it (modules blue, commands green, packages plum, configuration and
-environment variables ochre, HTTP teal), and a shared node is washed in that
+reaches it (modules blue, commands green, packages magenta, configuration and
+environment variables amber, HTTP teal), and a shared node is washed in that
 colour too; the outline tells kinds apart as well as the colour.
 
 The canvas is a map. A faint grid squares it and moves with it. Each repository

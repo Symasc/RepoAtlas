@@ -17,7 +17,7 @@ export function place(node: Unplaced, box: Box, style?: GraphNode["style"]): Gra
 }
 
 /** Gap between two lines drawn between the same two nodes. */
-const PARALLEL = 6;
+const PARALLEL = 8;
 
 /**
  * React Flow edges. Links of different families between the same pair are
@@ -30,7 +30,6 @@ export function flowEdges(
   edges: readonly ViewEdge[],
   how: {
     route: (edge: ViewEdge) => RouteKind;
-    curve?: (edge: ViewEdge) => number;
     labelled?: boolean;
   },
 ): GraphEdge[] {
@@ -73,7 +72,6 @@ export function flowEdges(
         labelled: how.labelled ?? false,
         offset: (offsets.get(id) ?? 0) * flip,
         route,
-        curve: how.curve?.(edge) ?? 0,
         scope: edge.scope ?? null,
       },
     };

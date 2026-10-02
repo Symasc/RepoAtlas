@@ -206,7 +206,6 @@ function DirectoryLevel({
     const cards = new Set([...graph.directories.map((d) => d.id), FILES_ID]);
     return flowEdges(graph.edges, {
       route: (e) => (e.scope === "aggregate" ? "lane" : cards.has(e.source) && cards.has(e.target) ? "float" : "side"),
-      curve: () => 0.12,
     });
   }, [graph]);
   const extent = useMemo(() => (layout ? bounds(layout.values()) : null), [layout]);

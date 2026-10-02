@@ -46,7 +46,7 @@ export function LineGlyph({
   width?: number;
 }) {
   // a bare code mark's three segments, with a hairline gap so each colour reads
-  const gap = 1.5;
+  const gap = 2;
   const segment = (width - 2 - gap * (CODE_SAMPLE.length - 1)) / CODE_SAMPLE.length;
   return (
     <svg
