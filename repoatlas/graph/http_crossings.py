@@ -17,9 +17,9 @@ is ordinary literal segments). Exactly one handler must agree. Two — two route
 service, or two repositories publishing the same identity — is ambiguous, and nothing
 is chosen.
 
-The join is made **across repositories only**: a request matched inside its own
-repository is already joined to its routes there, by route shape, and a
-cross-repository relationship is what this adds. It becomes one
+A request matched inside its own repository is joined too: its routes there meet it by
+route shape alone, which cannot tell one service's ``/health`` from another's, and the
+identity is what says which one it reaches. A join becomes one
 :attr:`~repoatlas.models.parsing.EdgeType.CALLS_HTTP_HANDLER` edge, *consumer caller →
 provider handler*, provenanced by the request's own file and lines, whose resolution
 records the evidence on both sides under ``http``. That record is what lets the edge
@@ -56,7 +56,6 @@ HTTP_CROSSING = "http"
 
 #: Decisions, one per request claim. Stable: tests and diagnostics read them.
 LINKED = "linked"
-SAME_REPOSITORY = "same-repository"
 PROVIDER_AMBIGUOUS = "http-provider-ambiguous"
 ROUTE_UNMATCHED = "http-route-unmatched"
 SERVICE_UNMATCHED = "http-service-unmatched"
@@ -222,15 +221,14 @@ def plan_http_crossings(
         ]
         # One handler serving one endpoint is one candidate, however many claims say so.
         distinct = {(e.claim.src_id, e.endpoint): e for e in matched}
-        elsewhere = [e for e in distinct.values() if e.claim.repo_id != request.claim.repo_id]
         if len(distinct) > 1:
             decision = PROVIDER_AMBIGUOUS
-        elif elsewhere:
-            decision = LINKED
-            edges.append(_edge(request, elsewhere[0], by_file, producer))
         elif distinct:
-            decision = SAME_REPOSITORY
-        elif any(_covers(e, request) and e.claim.repo_id != request.claim.repo_id for e in served):
+            # Inside its own repository too: an identity the source proves says which
+            # handler the request reaches, as route shape alone cannot.
+            decision = LINKED
+            edges.append(_edge(request, next(iter(distinct.values())), by_file, producer))
+        elif any(_covers(e, request) for e in served):
             decision = ROUTE_UNMATCHED
         else:
             decision = SERVICE_UNMATCHED
@@ -260,6 +258,10 @@ def _edge(
     for key in ("injected_at", "base_in"):
         if key in request.meta:
             record[key] = request.meta[key]
+    # An identity a deployment declares, in its own file: where, and what binds it to code.
+    for key in ("identity_in", "bound_in"):
+        if key in exposure.meta:
+            record[key] = exposure.meta[key]
     for key, line in (
         ("base_at", _line(request.meta.get("base_at"))),
         ("identity_at", _line(exposure.meta.get("identity_at"))),

@@ -27,6 +27,8 @@ a program named ``$TOOL``. Both were checked against a real daemon.
 
 from __future__ import annotations
 
+import json
+import posixpath
 import re
 from pathlib import Path
 
@@ -47,6 +49,7 @@ from repoatlas.parsers.dockerwords import (
     split_words,
     verbatim,
 )
+from repoatlas.parsers.http_facts import DOCKERFILE_COMMAND, pending_reference
 from repoatlas.parsers.marks import split_lines, whole_file_span
 
 _INSTRUCTIONS = frozenset(
@@ -153,6 +156,115 @@ def _has_heredoc(words: list[Word]) -> bool:
     return any(word.raw.startswith("<<") for word in words)
 
 
+class _Runs:
+    """What one stage says about the program its image runs, for deployment identities.
+
+    Only literal values are kept. ``WORKDIR`` resolves against the one before it; a
+    ``COPY``/``ADD`` records its literal sources and its destination (relative to the
+    working directory then), and one whose content comes from elsewhere -- ``--from``,
+    a URL, a computed source -- is recorded as *foreign*, so it can still shadow a path.
+    ``CMD`` and ``ENTRYPOINT`` keep their argument vector: the exec form verbatim, the
+    shell form only when every word is literal and no operator joins them.
+    """
+
+    def __init__(self) -> None:
+        self.workdir: str | None = None
+        self.copies: list[list[object]] = []
+        self.entrypoint: dict[str, object] | None = None
+        self.cmd: dict[str, object] | None = None
+        #: The line of the last instruction read here: where a claim without a command sits.
+        self.last = 0
+
+    def read(self, instruction: _Instruction) -> None:
+        keyword = instruction.keyword
+        if keyword in {"WORKDIR", "COPY", "ADD", "CMD", "ENTRYPOINT"}:
+            self.last = instruction.line_start
+        if keyword == "WORKDIR":
+            words = split_words(instruction.arguments)
+            value = words[0].literal if len(words) == 1 else None
+            if value is None:
+                self.workdir = None
+            elif value.startswith("/"):
+                self.workdir = posixpath.normpath(value)
+            else:
+                self.workdir = (
+                    posixpath.normpath(posixpath.join(self.workdir, value))
+                    if self.workdir is not None
+                    else None
+                )
+        elif keyword in {"COPY", "ADD"}:
+            self.copies.append(self._copy(instruction))
+        elif keyword in {"CMD", "ENTRYPOINT"}:
+            argv = exec_form(instruction.arguments)
+            form = "exec"
+            if argv is None:
+                form = "shell"
+                words = split_words(instruction.arguments, substitution=True)
+                literal = [word.literal for word in words]
+                if any(value is None for value in literal) or any(
+                    word.raw in _SEPARATORS or word.raw.startswith(("<", ">")) for word in words
+                ):
+                    argv = None
+                else:
+                    argv = [str(value) for value in literal]
+            recorded = {"argv": argv, "form": form, "line": instruction.line_start}
+            if keyword == "CMD":
+                self.cmd = recorded
+            else:
+                self.entrypoint = recorded
+
+    def _copy(self, instruction: _Instruction) -> list[object]:
+        flags, rest = split_flags(instruction.arguments)
+        argv = exec_form(rest)
+        words = (
+            [expanded(element) for element in argv]
+            if argv is not None
+            else [word for word in split_words(rest) if not word.raw.startswith("--")]
+        )
+        destination = words[-1].literal if len(words) >= 2 else None
+        if destination is not None and not destination.startswith("/"):
+            destination = (
+                posixpath.join(self.workdir, destination) if self.workdir is not None else None
+            )
+        into = bool(words) and words[-1].raw.endswith(("/", "/."))
+        if destination is not None:
+            destination = posixpath.normpath(destination)
+        sources = [word.literal for word in words[:-1]]
+        foreign = (
+            source_domain(flags) is SourceDomain.FOREIGN
+            or not sources
+            or any(
+                source is None or "://" in source or any(c in source for c in "*?[")
+                for source in sources
+            )
+        )
+        literal = [] if foreign else [str(source) for source in sources]
+        return [literal, destination, instruction.line_start, foreign, into]
+
+    def claim(self) -> ParsedReference | None:
+        # Kept without a command too: a compose service's ``command`` may supply it.
+        if self.cmd is None and self.entrypoint is None and not self.copies and not self.workdir:
+            return None
+        meta = {
+            "copies": json.dumps(self.copies),
+            "entrypoint": json.dumps(self.entrypoint),
+            "cmd": json.dumps(self.cmd),
+        }
+        if self.workdir is not None:
+            meta["workdir"] = self.workdir
+        lines = [int(str(found["line"])) for found in (self.cmd, self.entrypoint) if found]
+        line = max(lines) if lines else self.last
+        return pending_reference(
+            EdgeType.REFERENCES,
+            EntityType.CONFIG,
+            "command",
+            line,
+            line,
+            role=DOCKERFILE_COMMAND,
+            **meta,
+        )
+
+
 class DockerfileParser:
     """Deterministic Dockerfile instruction extraction."""
 
@@ -164,7 +276,9 @@ class DockerfileParser:
     #    The bump is load-bearing: the Dockerfile that produced a false edge is
     #    byte-identical afterwards, so only a facts-version change makes an
     #    ordinary `sync` reparse it and drop the edge (V1_SPEC §12).
-    version = "4"
+    # 5: the final stage's working directory, copies and command, as a claim for
+    #    deployment identities (repoatlas.graph.deploy_identity).
+    version = "5"
     language = "Dockerfile"
 
     def supports(self, path: Path) -> bool:
@@ -178,6 +292,7 @@ class DockerfileParser:
         stage_index = 0
         stages: set[str] = set()
 
+        runs = _Runs()
         for instruction in _logical_lines(content):
             handler = getattr(self, f"_{instruction.keyword.lower()}", None)
             if instruction.keyword == "FROM":
@@ -185,9 +300,14 @@ class DockerfileParser:
                 stage = self._from(instruction, symbols, references, stage_index, stages)
                 if stage is not None:
                     stages.add(stage)
+                runs = _Runs()
                 continue
+            runs.read(instruction)
             if handler is not None:
                 handler(instruction, references, stage)
+        command = runs.claim()
+        if command is not None:
+            references.append(command)
 
         whole_file_start, whole_file_last = whole_file_span(content)
         image = ParsedSymbol(

@@ -104,6 +104,12 @@ class PendingRoute:
     file_id: int
     line_start: int | None
     line_end: int | None
+    #: The modules constructing the applications that serve it (file ids): what a
+    #: deployment's command must run for its identity to expose the route. Empty when
+    #: the stage does not trace its applications.
+    roots: frozenset[int] = frozenset()
+    #: The line its claim states it at, cited when the route itself is composed.
+    declared_at: int | None = None
 
     @property
     def target(self) -> EntityRecord:
@@ -333,8 +339,10 @@ def plan_python_routes(
                         body=body,
                         repo_id=origin.repo_id,
                         file_id=origin.file_id,
-                        line_start=claim.line_start if exact[body] else None,
-                        line_end=claim.line_end if exact[body] else None,
+                        line_start=claim.line_start if exact[body][0] else None,
+                        line_end=claim.line_end if exact[body][0] else None,
+                        roots=exact[body][1],
+                        declared_at=claim.line_start,
                     )
                 )
             if claim.id is not None:
@@ -383,43 +391,49 @@ class _Chains:
         receiver = self._receivers.get(key)
         return receiver is not None and receiver.usable and key not in self._blocked
 
-    def fastapi(self, key: Key, *, own_module: bool, depth: int = 0) -> list[tuple[str, bool]]:
-        """``(prefix, exact)`` such that a route path ``p`` on router ``key`` is served at
-        ``prefix + p``: the chain's prefixes and the router's own. The mounts its own module
-        makes are left out at the first level when the route is in that module, which
-        serves those itself."""
+    def fastapi(self, key: Key, *, own_module: bool, depth: int = 0) -> list[tuple[str, bool, int]]:
+        """``(prefix, exact, root)`` such that a route path ``p`` on router ``key`` is served
+        at ``prefix + p`` by the application module ``root``: the chain's prefixes and the
+        router's own. The mounts its own module makes are left out at the first level when
+        the route is in that module, which serves those itself."""
         receiver = self._receivers.get(key)
         if receiver is None or depth > MAX_DEPTH or not self.usable(key):
             return []
         own = receiver.prefix or ""
-        found: list[tuple[str, bool]] = []
+        found: list[tuple[str, bool, int]] = []
         if not own_module:
             for mount in receiver.mounts:
-                found.append((f"{mount or ''}{own}", not mount and not own))
+                found.append((f"{mount or ''}{own}", not mount and not own, key[0]))
         for mount in self._mounts.get(key, ()):
             if mount.call != "include_router":
                 continue
             prefix = mount.prefix or ""
             if mount.owner_kind == _FASTAPI_APP:
-                found.append((f"{prefix}{own}", not prefix and not own))
+                found.append((f"{prefix}{own}", not prefix and not own, mount.owner[0]))
             elif mount.owner_kind == _FASTAPI_ROUTER:
-                for base, exact in self.fastapi(mount.owner, own_module=False, depth=depth + 1):
-                    found.append((f"{base}{prefix}{own}", exact and not prefix and not own))
+                for base, exact, root in self.fastapi(
+                    mount.owner, own_module=False, depth=depth + 1
+                ):
+                    found.append((f"{base}{prefix}{own}", exact and not prefix and not own, root))
         return found
 
-    def flask(self, key: Key, *, own_module: bool) -> list[str | None]:
-        """The prefix each mount on an application serves a blueprint's rules under: the
-        mount's ``url_prefix``, else the blueprint's own."""
+    def flask(self, key: Key, *, own_module: bool) -> list[tuple[str | None, int]]:
+        """The prefix each mount on an application serves a blueprint's rules under -- the
+        mount's ``url_prefix``, else the blueprint's own -- and that application's module."""
         receiver = self._receivers.get(key)
         if receiver is None or not self.usable(key):
             return []
-        chosen: list[str | None] = [] if own_module else list(receiver.mounts)
+        chosen: list[tuple[str | None, int]] = (
+            [] if own_module else [(mount, key[0]) for mount in receiver.mounts]
+        )
         chosen.extend(
-            mount.prefix
+            (mount.prefix, mount.owner[0])
             for mount in self._mounts.get(key, ())
             if mount.call == "register_blueprint" and mount.owner_kind == _FLASK_APP
         )
-        return [prefix if prefix is not None else receiver.prefix for prefix in chosen]
+        return [
+            (prefix if prefix is not None else receiver.prefix, root) for prefix, root in chosen
+        ]
 
 
 def _route(
@@ -429,7 +443,7 @@ def _route(
     constants: Mapping[int, Mapping[str, str]],
     chains: _Chains,
     by_id: Mapping[int, FileRow],
-) -> tuple[str, list[str], dict[str, bool]]:
+) -> tuple[str, list[str], dict[str, tuple[bool, frozenset[int]]]]:
     meta = _meta(claim)
     origin = by_id.get(claim.file_id)
     if origin is None:
@@ -458,27 +472,29 @@ def _route(
         return UNREADABLE_MOUNT, [], {}
     literal = meta.get("provenance") == EXACT
     own_module = module is None
-    served: list[tuple[str | None, bool]]
+    served: list[tuple[str | None, bool, int]]
     if receiver.kind in _APPLICATIONS:
-        served = [(path, True)]
+        served = [(path, True, key[0])]
     elif receiver.kind == _FASTAPI_ROUTER:
         if path and not path.startswith("/"):
             return NOT_MOUNTED, [], {}
         served = [
-            (f"{base}{path}", exact) for base, exact in chains.fastapi(key, own_module=own_module)
+            (f"{base}{path}", exact, root)
+            for base, exact, root in chains.fastapi(key, own_module=own_module)
         ]
     else:
         served = [
-            (flask_join(prefix, path), not prefix)
-            for prefix in chains.flask(key, own_module=own_module)
+            (flask_join(prefix, path), not prefix, root)
+            for prefix, root in chains.flask(key, own_module=own_module)
         ]
-    bodies: dict[str, bool] = {}
-    for full, exact in served:
+    bodies: dict[str, tuple[bool, frozenset[int]]] = {}
+    for full, exact, root in served:
         route = http.route_path(full) if full else None
         body = http.route_body(meta.get("method", ""), route) if route is not None else ""
         if not body or http.canonical_route(body) is None:
             continue
-        bodies[body] = bodies.get(body, False) or (exact and literal)
+        was_exact, roots = bodies.get(body, (False, frozenset()))
+        bodies[body] = (was_exact or (exact and literal), roots | {root})
     if bodies:
         return PROMOTED, sorted(bodies), bodies
     if own_module and receiver.mounts:

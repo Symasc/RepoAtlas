@@ -520,12 +520,13 @@ class ReferenceLinker:
                 producer=GLOBAL_PARSER,
                 served_routes=served,
                 module_facts=[claim for claim in recorded if _is_module_fact(claim)],
+                route_servers=self._knowledge.list_route_servers(exclude_parser=GLOBAL_PARSER),
             )
             edges.extend(decided.edges)
             # The one HTTP decision that joins two repositories: exposure and request
-            # claims, both per file, never this pass's previous output.
+            # claims, both per file or derived from them, never this pass's previous output.
             crossings = plan_http_crossings(
-                [*pending, *decided.injected], file_rows, producer=GLOBAL_PARSER
+                [*pending, *decided.injected, *decided.exposed], file_rows, producer=GLOBAL_PARSER
             )
             edges.extend(crossings.edges)
             resolved += decided.resolved

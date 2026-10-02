@@ -301,6 +301,25 @@ class SymbolRow(BaseModel):
     line_start: int | None
 
 
+class RouteServerRow(BaseModel):
+    """A route one file serves: the handler, where it is stated, and which parser read it.
+
+    What a deployment identity exposes is the routes a repository's code serves, so the
+    global pass reads these rows -- per-file ``SERVES_HTTP_ROUTE`` edges, never its own
+    output -- to tie an identity to the application that serves them.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    repo_id: int
+    file_id: int | None = None
+    src_id: int
+    body: str
+    parser: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+
+
 class HttpEdgeRow(BaseModel):
     """One edge to a shared HTTP node, with what a reader needs to locate it.
 
@@ -564,6 +583,9 @@ class KnowledgeStore(Protocol):
     def list_served_routes(
         self, *, exclude_parser: str, repo_id: int | None = None
     ) -> dict[int, list[str]]: ...
+    def list_route_servers(
+        self, *, exclude_parser: str, repo_id: int | None = None
+    ) -> list[RouteServerRow]: ...
     def list_http_edges(self, repo_id: int) -> list[HttpEdgeRow]: ...
     def list_file_parsers(self, repo_id: int) -> list[tuple[str, str | None]]: ...
     def neighbors(

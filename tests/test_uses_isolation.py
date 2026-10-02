@@ -202,6 +202,7 @@ REVIEWED_EDGE_READS = {
     "delete_edges_by_parser": "maintenance: deletes one producer's edges",
     "list_exported_names": "typed: EXPORTS",
     "list_served_routes": "typed: SERVES_HTTP_ROUTE",
+    "list_route_servers": "typed: SERVES_HTTP_ROUTE, the routes deployment identities expose",
     "list_http_edges": "typed: the HTTP edge types",
     "neighbors": "typed by its caller: the audit below requires edge_types",
     "expand_neighbors": "typed by its caller: the audit below requires edge_types",

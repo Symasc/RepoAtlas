@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -27,6 +27,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
     Severity,
 )
+from repoatlas.parsers.deploy_compose import compose_references, is_compose_file
 from repoatlas.parsers.http_openapi import MAX_OPERATIONS, specification_references
 from repoatlas.parsers.marks import diagnostic_line, node_span
 from repoatlas.parsers.module_facts import module_facts
@@ -130,7 +131,9 @@ class StructuredParser:
     #    source of an entry that names build output (repoatlas.graph.packages).
     # 4: an OpenAPI 3 document also records its operations by operationId and its
     #    root servers' base paths, for oas3-tools applications (repoatlas.graph.ts_oas3).
-    version = "4"
+    # 5: a docker-compose file also records each service's names, container ports, build
+    #    and command, for deployment identities (repoatlas.parsers.deploy_compose).
+    version = "5"
     language = "YAML"
 
     def supports(self, path: Path) -> bool:
@@ -173,6 +176,12 @@ class StructuredParser:
                     ),
                 ),
             )
+
+        compose = (
+            compose_references(PurePosixPath(path.as_posix()), documents)
+            if is_compose_file(PurePosixPath(path.as_posix()))
+            else []
+        )
 
         # ``splitlines()`` deliberately: this array is indexed by PyYAML marks and
         # must use PyYAML's line-break set rather than the source-grammar splitter
@@ -218,6 +227,6 @@ class StructuredParser:
             parser=self.name,
             parser_version=self.version,
             symbols=tuple(collector.symbols),
-            references=(*references.values(), *resolution),
+            references=(*references.values(), *resolution, *compose),
             diagnostics=tuple(diagnostics),
         )
