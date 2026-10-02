@@ -104,7 +104,6 @@ def _settings(tmp_path: Path, tag: str = "state") -> Settings:
     return Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / tag / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 64},
         }
     )
 
@@ -369,16 +368,11 @@ def _sentinel_rows(workspace: Workspace, sentinel: str) -> dict[str, int]:
         "entities": database.execute(
             "SELECT count(*) AS n FROM entities WHERE key LIKE ? OR name LIKE ?", (like, like)
         ).fetchone()["n"],
-        "embedded_chunks": database.execute(
-            "SELECT count(*) AS n FROM embeddings e "
-            "JOIN chunks c ON c.content_hash = e.content_hash WHERE c.text LIKE ?",
-            (like,),
-        ).fetchone()["n"],
     }
 
 
 def test_the_canary_reaches_no_representation_at_all(f2_root: Path, tmp_path: Path) -> None:
-    """Storage, search index, embeddings and retrieval, checked one by one."""
+    """Storage, search index and retrieval, checked one by one."""
     settings = _settings(tmp_path)
     workspace = _open(settings, f2_root, enumerable=False)
     try:
@@ -390,7 +384,6 @@ def test_the_canary_reaches_no_representation_at_all(f2_root: Path, tmp_path: Pa
                 "chunks": 0,
                 "chunks_fts": 0,
                 "entities": 0,
-                "embedded_chunks": 0,
             }, sentinel
         assert workspace.database.execute("SELECT count(*) AS n FROM files").fetchone()["n"] == 0
     finally:
@@ -574,9 +567,9 @@ def test_a_file_becoming_ignored_loses_every_representation(tmp_path: Path) -> N
     """Transition A, and the cleanup that has to follow it (§31, §36).
 
     An untracked file that becomes ignored stops being part of the repository, so
-    every derived form of it has to go — the row, the chunks, the FTS entries and
-    the embeddings reachable through them. A chunk that survives in the search
-    index is retrievable whatever the file table says.
+    every derived form of it has to go — the row, the chunks and the FTS entries. A
+    chunk that survives in the search index is retrievable whatever the file table
+    says.
     """
     root = tmp_path / "repos"
     root.mkdir()
@@ -593,7 +586,6 @@ def test_a_file_becoming_ignored_loses_every_representation(tmp_path: Path) -> N
         assert "notes.md" in _indexed(workspace)
         assert _sentinel_rows(workspace, CANARY)["chunks"] == 1
         assert _sentinel_rows(workspace, CANARY)["chunks_fts"] == 1
-        assert _sentinel_rows(workspace, CANARY)["embedded_chunks"] == 1
     finally:
         workspace.close()
 
@@ -607,7 +599,6 @@ def test_a_file_becoming_ignored_loses_every_representation(tmp_path: Path) -> N
             "chunks": 0,
             "chunks_fts": 0,
             "entities": 0,
-            "embedded_chunks": 0,
         }
     finally:
         workspace.close()
@@ -743,9 +734,7 @@ def test_the_cli_refuses_with_a_bounded_message_and_a_controlled_exit(
     empty_path.mkdir()
     config = tmp_path / "config.yaml"
     config.write_text(
-        f"repos:\n  root: {f2_root}\n"
-        f"storage:\n  database: {tmp_path / 'state' / 'atlas.db'}\n"
-        f"embeddings:\n  provider: hashing\n  dim: 64\n"
+        f"repos:\n  root: {f2_root}\nstorage:\n  database: {tmp_path / 'state' / 'atlas.db'}\n"
     )
 
     result = _cli(

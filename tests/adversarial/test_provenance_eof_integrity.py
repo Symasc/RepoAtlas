@@ -296,7 +296,6 @@ def indexed_seven(tmp_path: Path) -> Iterator[tuple[Workspace, Path]]:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     workspace = open_workspace(settings=settings, require_root=False)
@@ -626,7 +625,6 @@ def test_a_carriage_return_file_survives_a_real_index(tmp_path: Path) -> None:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     workspace = open_workspace(settings=settings, require_root=False)
@@ -671,7 +669,6 @@ def test_an_empty_module_is_stored_with_no_line_numbers(tmp_path: Path) -> None:
     settings = Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
     workspace = open_workspace(settings=settings, require_root=False)

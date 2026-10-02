@@ -117,7 +117,6 @@ def test_case_a_a_v1_config_with_a_full_retired_llm_block_loads(tmp_path: Path) 
         {
             "repos": {"root": str(tmp_path / "repos")},
             "llm": LEGACY_LLM_BLOCK,
-            "embeddings": {"provider": "hashing", "enabled": True},
             "output": {"verbosity": "concise"},
         },
     )
@@ -135,7 +134,6 @@ def test_case_b_the_deterministic_settings_keep_their_values(tmp_path: Path) -> 
         {
             "repos": {"root": str(tmp_path / "repos")},
             "llm": LEGACY_LLM_BLOCK,
-            "embeddings": {"provider": "hashing", "dim": 384, "enabled": False},
             "retrieval": {"final": 7, "token_budget": 4321},
             "storage": {"lock_timeout_seconds": 12.5},
             "output": {"verbosity": "concise", "max_evidence": 5},
@@ -144,8 +142,6 @@ def test_case_b_the_deterministic_settings_keep_their_values(tmp_path: Path) -> 
 
     settings = load_settings(config)
 
-    assert settings.embeddings.provider == "hashing"
-    assert settings.embeddings.enabled is False
     assert settings.retrieval.final == 7
     assert settings.retrieval.token_budget == 4321
     assert settings.storage.lock_timeout_seconds == 12.5
@@ -231,7 +227,7 @@ def test_case_e_nested_models_do_not_declare_a_policy_of_their_own() -> None:
     startup failure. That is an improvement somebody has to choose on purpose,
     and choosing it is not what F-02 was.
     """
-    for name in ("repos", "discovery", "indexing", "embeddings", "retrieval", "storage"):
+    for name in ("repos", "discovery", "indexing", "retrieval", "storage"):
         nested = Settings.model_fields[name].annotation
         assert nested is not None
         assert "extra" not in nested.model_config, f"{name} gained an explicit policy"
@@ -241,13 +237,13 @@ def test_case_e_an_unknown_nested_key_is_still_ignored(tmp_path: Path) -> None:
     """Pins the current behaviour rather than asserting it is the right one."""
     config = _write(
         tmp_path / "config.yaml",
-        {"embeddings": {"provider": "hashing", "privder": "typo", "unknown_knob": 3}},
+        {"retrieval": {"final": 7, "fnial": "typo", "unknown_knob": 3}},
     )
 
     settings = load_settings(config)
 
-    assert settings.embeddings.provider == "hashing"
-    assert not hasattr(settings.embeddings, "privder")
+    assert settings.retrieval.final == 7
+    assert not hasattr(settings.retrieval, "fnial")
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +260,7 @@ def test_case_f_generated_configuration_names_no_retired_subsystem(tmp_path: Pat
     # The deterministic sections are present, which is what makes the absence
     # above evidence of removal rather than of an empty file.
     parsed = yaml.safe_load(written)
-    for section in ("embeddings", "retrieval", "storage", "indexing"):
+    for section in ("retrieval", "storage", "indexing"):
         assert section in parsed
 
 

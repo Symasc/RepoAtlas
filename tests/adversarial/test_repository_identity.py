@@ -40,7 +40,6 @@ from repoatlas.services.init_service import initialize
 from repoatlas.services.retrieval_service import locate
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace
-from repoatlas.storage.sqlite.database import SCHEMA_VERSION
 from tests.conftest import fact_snapshot, init_git_repository, reindex_from_scratch
 
 pytestmark = pytest.mark.adversarial
@@ -107,7 +106,6 @@ def make_settings(tmp_path: Path, tag: str = "state") -> Settings:
     return Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / tag / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
 
@@ -651,128 +649,6 @@ def test_a_moved_repository_leaves_no_stale_identity(duplicates: Workspace) -> N
     assert "teamA/common" not in slugs
     assert found == {"teamA/shared"}
     assert not any("teamA/common" in key for key in keys), "a stale identity survived the move"
-
-
-def downgrade_to_schema_v4(database: Path) -> None:
-    """Rewrite a current database into exactly the shape schema v4 produced.
-
-    Migration tests that only ever see a fresh database prove nothing about the
-    upgrade path, and this pass changes what every repository-scoped key *means*.
-    So the database is genuinely regressed: the identity column is removed, every
-    key is rewritten back to the display-name form, and the duplicate repository
-    nodes are collapsed into the single interned row that v4's unique-key index
-    forced them to be. Reopening it then exercises 005 against v4 data.
-    """
-    import sqlite3
-
-    connection = sqlite3.connect(database)
-    connection.row_factory = sqlite3.Row
-    with connection:
-        names = {
-            row["id"]: row["name"]
-            for row in connection.execute("SELECT id, name FROM repositories")
-        }
-        slugs = {
-            row["id"]: row["slug"]
-            for row in connection.execute("SELECT id, slug FROM repositories")
-        }
-        for repo_id, slug in slugs.items():
-            name = names[repo_id]
-            connection.execute(
-                "UPDATE entities SET key = replace(key, ?, ?) WHERE key LIKE ?",
-                (f"file:{slug}:", f"file:{name}:", f"file:{slug}:%"),
-            )
-            connection.execute(
-                "UPDATE entities SET key = replace(key, ?, ?) WHERE key LIKE ?",
-                (f"sym:{slug}:", f"sym:{name}:", f"sym:{slug}:%"),
-            )
-        # v4 could hold only one interned node per name, whichever was seen first.
-        for repo_id, slug in slugs.items():
-            connection.execute(
-                "UPDATE OR IGNORE entities SET key = ?, qualified_name = NULL "
-                "WHERE key = ? AND file_id IS NULL",
-                (f"repo:{names[repo_id]}", f"repo:{slug}"),
-            )
-        connection.execute("DELETE FROM entities WHERE key LIKE 'repo:%/%'")
-        # The stored per-file `parser_version` embeds the schema version, and it is
-        # what makes an upgrade reparse every file. A downgrade that left it saying
-        # `schema:5` would make the upgrade a no-op and the test vacuous.
-        connection.execute(
-            "UPDATE files SET parser_version = replace(parser_version, ?, 'schema:4')",
-            (f"schema:{SCHEMA_VERSION}",),
-        )
-        # 008 added the stored HTTP call decisions, and the record that a global pass
-        # wrote them; v4 had neither.
-        connection.execute("DROP TABLE http_call_decisions")
-        connection.execute("DELETE FROM meta WHERE key = 'http_call_decisions'")
-        # 007 added which export tables each file's uses read, and the USES stage's
-        # record of whether its edges are complete; v4 had neither.
-        connection.execute("DROP TABLE use_reads")
-        connection.execute("DELETE FROM meta WHERE key = 'uses_links'")
-        # 006 added how the global pass resolved an edge; v4 had no such column.
-        connection.execute("ALTER TABLE edges DROP COLUMN resolution")
-        connection.execute("DROP INDEX IF EXISTS idx_repositories_slug")
-        connection.execute("ALTER TABLE repositories DROP COLUMN slug")
-        connection.execute("PRAGMA user_version = 4")
-    connection.close()
-
-
-def test_a_schema_v4_database_upgrades_to_correct_identities(tmp_path: Path) -> None:
-    """The upgrade path, from real v4 data with a duplicated repository name."""
-    root = tmp_path / "root"
-    root.mkdir()
-    build_duplicate_tree(root)
-    settings = make_settings(tmp_path)
-    database = tmp_path / "state" / "atlas.db"
-
-    space = open_workspace(settings=settings, require_root=False)
-    initialize(space, root, config_path=tmp_path / "config.yaml")
-    space.close()
-    downgrade_to_schema_v4(database)
-
-    upgraded = open_workspace(settings=settings, require_root=False)
-    upgraded.settings = upgraded.settings.model_copy(
-        update={"repos": upgraded.settings.repos.model_copy(update={"root": root})}
-    )
-    sync_root(upgraded)
-
-    slugs = {row[0] for row in rows(upgraded, "SELECT slug FROM repositories")}
-    keys = {str(row[0]) for row in rows(upgraded, "SELECT key FROM entities")}
-    nodes = {
-        str(row[0])
-        for row in rows(
-            upgraded, "SELECT key FROM entities WHERE type = 'repository' AND file_id IS NULL"
-        )
-    }
-
-    assert slugs == {"svc", "teamA/common", "teamB/common"}
-    assert nodes == {"repo:svc", "repo:teamA/common", "repo:teamB/common"}
-    assert "file:common:index.ts" not in keys, "a display-name key survived the upgrade"
-    assert {"file:teamA/common:index.ts", "file:teamB/common:index.ts"} <= keys
-    upgraded.close()
-
-
-def test_an_upgraded_database_equals_a_clean_full_index(tmp_path: Path) -> None:
-    """§24: the upgraded state and a from-scratch index must be the same state."""
-    root = tmp_path / "root"
-    root.mkdir()
-    build_duplicate_tree(root)
-    settings = make_settings(tmp_path)
-    database = tmp_path / "state" / "atlas.db"
-
-    space = open_workspace(settings=settings, require_root=False)
-    initialize(space, root, config_path=tmp_path / "config.yaml")
-    space.close()
-    downgrade_to_schema_v4(database)
-
-    upgraded = open_workspace(settings=settings, require_root=False)
-    upgraded.settings = upgraded.settings.model_copy(
-        update={"repos": upgraded.settings.repos.model_copy(update={"root": root})}
-    )
-    sync_root(upgraded)
-
-    assert fact_snapshot(upgraded) == reindex_from_scratch(settings, root, tmp_path, "clean")
-    upgraded.close()
 
 
 def test_incremental_state_equals_a_full_reindex(tmp_path: Path) -> None:

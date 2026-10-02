@@ -40,7 +40,7 @@ the stdlib binding for SQLite's own ``sqlite3_complete()``. It is the only
 splitter that is correct here: ``001_initial.sql`` defines six triggers whose
 bodies contain ``BEGIN ... END;``, and a ``sql.split(";")`` shreds each one into
 an invalid ``CREATE TRIGGER ... BEGIN INSERT ...`` fragment plus a stray ``END``
-(measured: 39 fragments where there are 29 statements). Asking SQLite where a
+(measured: 48 fragments where there are 40 statements). Asking SQLite where a
 statement ends also handles semicolons inside string literals and comments, and
 keeps the migrations as ``.sql`` files rather than transcribing them into Python
 lists that would drift from the schema they document.
@@ -238,8 +238,8 @@ def _object_sql(connection: sqlite3.Connection, name: str) -> str | None:
 def _column_type(connection: sqlite3.Connection, table: str, column: str) -> str | None:
     try:
         # `table_xinfo`, not `table_info`: the latter omits GENERATED columns
-        # entirely, so migration 004's `files.basename` would read as absent and
-        # the migration would be re-applied onto a schema that already has it.
+        # entirely, so a generated column such as `files.basename` would read as
+        # absent and its migration would be re-applied onto a schema that has it.
         rows = connection.execute(f"PRAGMA table_xinfo({table})").fetchall()
     except sqlite3.Error:
         return None
@@ -370,12 +370,12 @@ def resume_point(
     The prefix whose shape matches exactly is the prefix that ran.
 
     Simulation is used because per-statement inspection cannot answer the
-    question. ``003`` drops ``embeddings`` and creates a different table with the
-    same name; asking "has ``CREATE TABLE embeddings`` been applied?" has no
-    order-independent answer, and asking "has ``DROP TABLE embeddings`` been
-    applied?" reads as *no* once the replacement exists. Replaying the statements
-    is the only check that is exact for every migration rather than for the ones
-    whose statements happen to be independent.
+    question in general. A migration that drops a table and creates a different
+    one under the same name makes "has ``CREATE TABLE`` been applied?" a question
+    with no order-independent answer, and "has ``DROP TABLE`` been applied?" reads
+    as *no* once the replacement exists. Replaying the statements is the only
+    check that is exact for every migration rather than for the ones whose
+    statements happen to be independent.
 
     Raises :class:`MigrationError` when no prefix matches. A schema that merely
     resembles a migration is not one RepoAtlas will complete — fail closed.

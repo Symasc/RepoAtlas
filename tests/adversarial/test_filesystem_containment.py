@@ -106,7 +106,6 @@ def containment_settings(tmp_path: Path) -> Settings:
     return Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / "state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
 
@@ -488,8 +487,8 @@ def test_an_ordinary_sync_removes_content_a_weaker_build_indexed(
             )
             workspace.database.execute(
                 "INSERT INTO chunks (file_id, repo_id, line_start, line_end, text, "
-                "token_estimate, content_hash, span_index, split_index, split_total) "
-                "VALUES (?, ?, 1, 1, ?, 1, 'h', 0, 0, 1)",
+                "token_estimate, span_index, split_index, split_total) "
+                "VALUES (?, ?, 1, 1, ?, 1, 0, 0, 1)",
                 (cursor.lastrowid, repo_id, text),
             )
         workspace.database.connection.commit()
@@ -530,32 +529,6 @@ def test_retrieval_returns_no_escaped_evidence(
                 assert candidate.path not in {"sub/passwd", "st/config.yaml"}
                 assert OUTSIDE_CANARY not in candidate.text
                 assert "/usr/sbin/nologin" not in candidate.text
-    finally:
-        workspace.close()
-
-
-def test_the_embedding_backend_never_receives_escaped_content(
-    victim: Path, containment_settings: Settings, managed_root: Path, tmp_path: Path
-) -> None:
-    """Asserted at the backend, not at the table: embeddings leave the process."""
-    seen: list[str] = []
-    workspace = open_workspace(settings=containment_settings, require_root=False)
-    try:
-        model = workspace.embeddings()
-        assert model is not None
-        original = model.embed
-
-        def recording(texts: list[str]) -> object:
-            seen.extend(list(texts))
-            return original(texts)
-
-        model.embed = recording  # type: ignore[method-assign]
-        initialize(workspace, managed_root, config_path=tmp_path / "embed.yaml")
-        joined = "\n".join(seen)
-        assert seen, "the embedding backend must actually have been exercised"
-        assert OUTSIDE_CANARY not in joined
-        assert "/usr/sbin/nologin" not in joined
-        assert INSIDE_CANARY in joined
     finally:
         workspace.close()
 

@@ -3,8 +3,8 @@
 There is exactly one orchestration owner for an index mutation, and it is
 :func:`repoatlas.services.sync_service.sync`. Repository-set reconciliation,
 discovery, containment, ignore and secret policy, binary detection, hashing,
-parser dispatch, per-file replacement, dependency indexing, chunking, embedding,
-linking, sync markers and the writer lock all live below it and are reused whole.
+parser dispatch, per-file replacement, dependency indexing, chunking, linking,
+sync markers and the writer lock all live below it and are reused whole.
 Nothing in this module or its caller restates any of them, because a second
 interpretation of "which files belong to this repository" is precisely how an
 index ends up admitting a file V1 refuses.

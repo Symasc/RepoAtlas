@@ -83,12 +83,9 @@ def adversarial_root(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def adversarial_settings(tmp_path: Path) -> Settings:
-    """Deterministic embeddings; the real model is exercised separately."""
+    """Settings pointing storage at the temp directory."""
     return Settings.model_validate(
-        {
-            "storage": {"database": str(tmp_path / "adv-state" / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
-        }
+        {"storage": {"database": str(tmp_path / "adv-state" / "atlas.db")}}
     )
 
 
