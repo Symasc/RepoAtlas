@@ -1797,7 +1797,11 @@ Until the pass proves one, it stays a pending claim that records the declaration
   request is also read through a module constant holding a URL, or an f-string on a literal or constant origin whose
   placeholders each fill one whole segment; that reading adds a join claim and no per-file fact. An environment
   default, `os.environ.get("X", "<url>")` or `os.getenv("X", "<url>")` (inline, or a module constant bound once to
-  one), is read as that whole URL or base for requests only: never for a route's path.
+  one), is read as that whole URL or base for requests only: never for a route's path. A base that one module-level
+  `if`/`elif`/`else` binds to a literal in every branch, and nothing else binds, is read once per literal: each
+  becomes its own join claim (`base_at` its branch's line, `alternatives` their count), decided on its own, so no
+  alternative's decision overwrites another's. The condition is never read; a branch without a literal, a missing
+  `else` or a second binding leaves the request read as before.
 - **axios**: the default export's method aliases with absolute URLs only. A relative axios URL is combined with a
   `baseURL` any file may set.
 - **superagent**: `superagent.<verb>(url)` on the default import (or `require`), or on a module-level
