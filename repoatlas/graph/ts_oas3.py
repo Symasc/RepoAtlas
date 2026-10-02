@@ -186,6 +186,8 @@ def _serve(
                     file_id=row.file_id,
                     line_start=None,
                     line_end=None,
+                    roots=frozenset({app.file_id}),
+                    declared_at=owner.line_start,
                 )
             )
             if owner.id is not None:

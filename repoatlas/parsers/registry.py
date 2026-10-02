@@ -11,6 +11,7 @@ from pathlib import Path
 
 from repoatlas.parsers.base import LanguageParser
 from repoatlas.parsers.bash import BashParser
+from repoatlas.parsers.deploy_helm import HelmHelpersParser, TiltfileParser
 from repoatlas.parsers.dockerfile import DockerfileParser
 from repoatlas.parsers.jinja import JinjaParser
 from repoatlas.parsers.python import PythonParser
@@ -69,6 +70,8 @@ def default_parsers() -> list[LanguageParser]:
         SaltParser(),
         JinjaParser(),
         DockerfileParser(),
+        HelmHelpersParser(),
+        TiltfileParser(),
         PythonProjectParser(),
         SetuptoolsProjectParser(),
         StructuredParser(),

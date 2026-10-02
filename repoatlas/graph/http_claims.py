@@ -660,19 +660,29 @@ def plan_http_claims(
         for row in route_servers
         if row.file_id is not None and row.parser not in _NOT_APPLICATIONS
     ]
-    code_routes.extend(
-        ServedRoute(
-            repo_id=route.repo_id,
-            file_id=route.file_id,
-            src_id=route.src_id,
-            body=route.body,
-            line_start=route.line_start,
-            line_end=route.line_end,
-            roots=route.roots,
-            declared_at=route.declared_at,
+    # Routes this pass promoted, with the applications that serve them where their stage
+    # traces them; an untraced one (a NestJS route, say) has none, and so leaves its
+    # repository's applications unknown.
+    traced = {
+        (route.src_id, route.body): route
+        for route in (*python.routes, *fastify.routes, *oas3.routes)
+    }
+    for edge in pending.values():
+        if edge.type is not EdgeType.SERVES_HTTP_ROUTE or edge.file_id is None:
+            continue
+        route = traced.get((edge.src_id, edge.target.name))
+        code_routes.append(
+            ServedRoute(
+                repo_id=edge.repo_id,
+                file_id=edge.file_id,
+                src_id=edge.src_id,
+                body=edge.target.name,
+                line_start=edge.line_start,
+                line_end=edge.line_end,
+                roots=route.roots if route is not None else frozenset(),
+                declared_at=route.declared_at if route is not None else edge.line_start,
+            )
         )
-        for route in python.routes
-    )
     deployed = plan_deployment_exposures(grouped, by_id, code_routes)
 
     return HttpClaimPlan(

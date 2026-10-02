@@ -1951,6 +1951,38 @@ The identity reaches code only through the image the service builds, in the same
 Each tied route becomes a derived `http-exposed-endpoint` claim (`identity_source: docker-compose-service`), citing
 the compose service and the command. An image-only service has no code tie.
 
+A Kubernetes Service in a Helm chart (`repoatlas/parsers/deploy_helm.py`) is reached at `http://<name>:<port>`, and at
+`http://<name>` too for port 80. Its name is rarely written out: Helm renders it from the chart, its values and the
+release name the deployment picks. Nothing renders a template. Each file records what it literally states:
+- `Chart.yaml` records the chart's name;
+- the chart's `values.yaml` records its literal scalar leaves, capped;
+- a `kind: Service` template records its `metadata.name` and each `spec.ports[].port` as written. The template is
+  read by lines, since it is not YAML until rendered;
+- a `.tpl` file records which `<chart>.name` and `<chart>.fullname` helpers match the `helm create` scaffold
+  action for action;
+- a `Tiltfile` records each `helm('<chart dir>', name='<literal>', set=[<literals>])`, which binds a release name.
+
+The global pass composes a name only when every action in it is one of four, each read from the same repository's
+chart:
+- `.Chart.Name`;
+- `.Values.<path>`, after the release's `set`;
+- `include "<chart>.name" .`;
+- `include "<chart>.fullname" .`, whose documented meaning is applied: `fullnameOverride` if set, else the release
+  name if it contains the chart's (or `nameOverride`'s) name, else `<release>-<name>`. The result is cut to 63
+  characters, without a trailing dash.
+
+A port is a literal or `.Values.<path>`. The tie is refused in these cases:
+- the document holds any control action (`if`, `range`, `with`, …);
+- no release of the chart is bound by a literal name;
+- the release also names `values=` files;
+- the name uses `.Release.*` outside the helper, or any other function;
+- the name is not a DNS label.
+
+A chart reaches code only when its repository's served routes all come from one traced application, constructed in one
+module. Every route of a NestJS controller, which has no such module, makes that false. Routes in several applications
+make it false too, as does a repository that serves no routes. The Service then exposes all of those routes
+(`identity_source: kubernetes-service`), citing the Service's name line and the release binding.
+
 **Security.** HTTP extraction reads only files the sync already admitted, so an excluded `.env` holding `API_URL`
 declares nothing and is not cross-resolved. Nothing resolves DNS, fetches a specification or `$ref`, probes an
 endpoint, starts a server, or imports repository code.
