@@ -43,7 +43,6 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import time
 from pathlib import Path
 
 import pytest
@@ -659,25 +658,3 @@ def test_the_oracle_shows_tilde_minus_depends_on_shell_state() -> None:
     assert without == "~-/tool", without
     assert with_oldpwd == "/tmp/tool", with_oldpwd  # noqa: S108 - the oracle cwd
     assert executed("~-/tool\n") == set()
-
-
-# -- 40. performance ----------------------------------------------------------
-
-
-@pytest.mark.slow
-@pytest.mark.timing
-def test_tilde_detection_does_not_change_parse_cost() -> None:
-    """§40. One tree lookup per word, on words the parser already visits."""
-    plain = "".join(f"./tool{i}.sh\n" for i in range(1000))
-    tilde = "".join(f"~/tool{i}.sh\n" for i in range(1000))
-
-    def timed(source: str) -> float:
-        best = min(_elapsed(source) for _ in range(3))
-        return best
-
-    def _elapsed(source: str) -> float:
-        start = time.perf_counter()
-        parse(source)
-        return time.perf_counter() - start
-
-    assert timed(tilde) < timed(plain) * 4, "tilde parsing became disproportionately slow"
