@@ -10,8 +10,9 @@
 
 .levelTitle {
   margin: 0;
-  font-size: var(--mantine-font-size-lg);
+  font-size: var(--mantine-h3-font-size);
   font-weight: 600;
+  letter-spacing: -0.01em;
   white-space: nowrap;
 }
 
@@ -60,9 +61,12 @@
   border-radius: var(--ra-radius-s);
   white-space: nowrap;
 
+  /* where the reader is: the toolbar's one heading */
   &[data-current] {
     color: var(--ra-text);
+    font-size: var(--mantine-h3-font-size);
     font-weight: 600;
+    letter-spacing: -0.01em;
   }
 }
 
