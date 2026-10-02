@@ -31,7 +31,7 @@ from repoatlas.parsers.deploy_compose import compose_references, is_compose_file
 from repoatlas.parsers.dockerfile import DockerfileParser
 from repoatlas.parsers.http_facts import COMPOSE_SERVICE, DOCKERFILE_COMMAND, PENDING_FACT
 from repoatlas.services.workspace import Workspace
-from tests.http_crossing_corpus import crossings, links
+from tests.http_crossing_corpus import crossings, decided, links
 from tests.impact_corpus import build
 from tests.incremental_corpus import assert_equals_fresh, edit, sync_all
 
@@ -487,3 +487,60 @@ def test_editing_a_service_s_port_moves_its_identity(
     sync_all(shop, root)
     assert links(shop) == set()
     assert_equals_fresh(shop, settings, root, tmp_path, "port")
+
+
+REFUSED = {
+    "pyproject.toml": '[project]\nname = "refused"\n',
+    "client.py": d("""
+        import requests
+
+
+        def scripted():
+            return requests.get("http://scripted:5000/orders/1", timeout=5)
+
+
+        def missing():
+            return requests.get("http://missing:5000/orders/1", timeout=5)
+
+
+        def cache():
+            return requests.get("http://cache:6379/", timeout=5)
+
+
+        def elsewhere():
+            return requests.get("http://elsewhere:5000/orders/1", timeout=5)
+    """),
+}
+
+
+def test_a_service_that_reaches_no_code_refuses_its_requests_at_that_hop(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    built = build(workspace, tmp_path, {"shop": SHOP, "refused": REFUSED})
+    outcome = {
+        caller: [(decision, evidence.get("source_outcome"), evidence.get("identity_in"))]
+        for caller, [(decision, evidence)] in decided(built, "refused").items()
+    }
+    assert outcome == {
+        # the service resolves (name and container port), but its command is a script
+        "scripted": [
+            ("http-deployment-source-unresolved", COMMAND_UNREAD, "docker-compose.yml:14")
+        ],
+        # ... or its Dockerfile is not in the repository
+        "missing": [
+            ("http-deployment-source-unresolved", DOCKERFILE_UNREAD, "docker-compose.yml:19")
+        ],
+        # an image-only service with no port resolves to no origin at all
+        "cache": [("http-service-unmatched", None, None)],
+        "elsewhere": [("http-service-unmatched", None, None)],
+    }
+    [(_, evidence)] = decided(built, "refused")["scripted"]
+    assert evidence == {
+        "called_at": "client.py:5",
+        "deployment": "http://scripted:5000",
+        "identity_source": "docker-compose-service",
+        "identity_in": "docker-compose.yml:14",
+        "source_outcome": COMMAND_UNREAD,
+        "provider": "shop",
+    }
+    assert {caller for caller, *_ in links(built)}.isdisjoint(outcome)

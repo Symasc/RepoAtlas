@@ -1927,11 +1927,22 @@ Both sides are recorded per file as pending claims, `http-exposed-endpoint` and 
 carries the lines that prove them. The exposure claim names the kind of source that stated its identity
 (`identity_source`) and nothing more specific, so another source-backed extractor would produce the same claim and
 the join would not change. The global pass decides every request claim together and never reads its own output:
-`linked` (in another repository or the request's own: route shape alone cannot tell one service's `/health` from
-another's, the identity can), `http-provider-ambiguous` (two handlers or two repositories agree; nothing is chosen),
-`http-route-unmatched` (the service is published, the operation is not),
-`http-service-unmatched`, or `http-base-unknown` (the path is read, the host is not: counted and listed, never
-joined). A link is one `CALLS_HTTP_HANDLER` edge, *consumer caller → provider handler*,
+- `linked`: in another repository or the request's own. Route shape alone cannot tell one service's `/health` from
+  another's; the identity can.
+- `http-provider-ambiguous`: two handlers or two repositories agree, or the one handler's origin is also an identity
+  that reaches no code. Nothing is chosen.
+- `http-deployment-source-unresolved`: the origin is an identity a deployment resolves (a compose service, a bound
+  Helm Service) that reaches no code.
+- `http-route-unmatched`: the service is published, the operation is not.
+- `http-service-unmatched`.
+- `http-base-unknown`: the path is read, the host is not. Counted and listed, never joined.
+
+The order between them is the chain's: an absent or ambiguous hop removes the link rather than being filled. Each
+decision keeps, per request claim, the hops it rests on (`evidence`): the request's own `called_at` and `base_at`,
+and the identities matched, with their deployment, `identity_in`, `bound_in`, source outcome and provider. A
+refusal thus says how far its chain got.
+
+A link is one `CALLS_HTTP_HANDLER` edge, *consumer caller → provider handler*,
 provenanced by the request's own file and lines, whose resolution records under `http` the method, the URL as
 written, the endpoint, the deployment, both repositories, and `called_at`, `base_at`, `served_at`, `identity_at`
 and `bound_at` (or `identity_in` and `bound_in`, path and line, for an identity in another file). That record is the evidence that lets the change-impact walk (`repoatlas/graph/impact.py`) cross it, inward only: a handler's
