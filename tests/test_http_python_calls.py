@@ -300,3 +300,66 @@ def test_an_environment_default_never_names_a_route() -> None:
         if r.edge_type is EdgeType.SERVES_HTTP_ROUTE and PENDING_FACT not in r.meta
     ]
     assert served == []
+
+
+ALTERNATIVES = """\
+import os
+
+import requests
+
+if os.environ.get("ACCOUNT") == "prod":
+    BASE = "https://api-prd.example"
+elif os.environ.get("ACCOUNT") == "stg":
+    BASE = "https://api-stg.example"
+else:
+    BASE = "http://api.sandbox.example"
+
+
+def keys(vpn):
+    return requests.post(f"{BASE}/vpn/{vpn}/keys", timeout=5)
+"""
+
+
+def test_each_literal_alternative_of_a_base_is_its_own_claim() -> None:
+    claims = _claims(ALTERNATIVES)
+    assert [
+        (c.meta["origin"], c.meta["base_at"], c.meta["alternatives"], c.line_start) for c in claims
+    ] == [
+        ("https://api-prd.example", "6", "3", 14),
+        ("https://api-stg.example", "8", "3", 14),
+        ("http://api.sandbox.example", "10", "3", 14),
+    ]
+    assert {json.dumps(json.loads(c.meta["segments"])) for c in claims} == {
+        json.dumps(["vpn", None, "keys"])
+    }
+    # A claim for the join only: no per-file fact names any of the hosts.
+    assert _facts(ALTERNATIVES) == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        # no else: the name may be left unbound
+        lambda s: s.replace('else:\n    BASE = "http://api.sandbox.example"\n', ""),
+        # bound once more elsewhere
+        lambda s: s + 'BASE = "https://other.example"\n',
+        # a branch that is not a literal
+        lambda s: s.replace('BASE = "https://api-stg.example"', 'BASE = os.environ["BASE"]'),
+        # a branch that binds it twice
+        lambda s: s.replace(
+            '    BASE = "https://api-stg.example"\n',
+            '    BASE = "https://api-stg.example"\n    BASE = "https://api-stg2.example"\n',
+        ),
+        # a literal that is no URL
+        lambda s: s.replace('"http://api.sandbox.example"', '"sandbox"'),
+        # bound in a nested block, not at the branch's own level
+        lambda s: s.replace(
+            '    BASE = "https://api-stg.example"\n',
+            '    if True:\n        BASE = "https://api-stg.example"\n',
+        ),
+    ],
+)
+def test_anything_short_of_a_literal_in_every_branch_is_read_as_before(change) -> None:
+    [claim] = _claims(change(ALTERNATIVES))
+    assert claim.meta["base"] == "unknown"
+    assert "alternatives" not in claim.meta

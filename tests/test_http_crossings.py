@@ -90,6 +90,41 @@ def joined(workspace: Workspace, tmp_path: Path) -> Workspace:
     return build(workspace, tmp_path, WORKSPACE)
 
 
+ALTERNATED = {
+    "client.py": (
+        "import os\n\nimport requests\n\n"
+        'if os.environ.get("STAGE") == "prod":\n'
+        '    BASE = "https://accounts.example/api"\n'
+        "else:\n"
+        '    BASE = "https://sandbox.example/api"\n\n\n'
+        "def pick(user_id):\n"
+        '    return requests.get(f"{BASE}/users/{user_id}")\n'
+    ),
+}
+
+
+def test_each_literal_alternative_is_decided_on_its_own(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    alternated = build(workspace, tmp_path, {"accounts": ACCOUNTS, "portal": ALTERNATED})
+    plan = ReferenceLinker(alternated.knowledge).prepare_global().http_crossings
+    rows = alternated.database.execute(
+        """
+        SELECT u.id, u.meta_json FROM unresolved_refs u
+        JOIN repositories r ON r.id = u.repo_id
+        WHERE r.slug = 'portal' AND u.meta_json LIKE ?
+        """,
+        (f'%"{HTTP_CLIENT_CALL}"%',),
+    ).fetchall()
+    decided = {json.loads(row["meta_json"])["origin"]: plan.decisions[row["id"]] for row in rows}
+    assert decided == {
+        "https://accounts.example": "linked",
+        "https://sandbox.example": "http-service-unmatched",
+    }
+    [row] = [r for r in crossings(alternated) if r["caller"] == "pick"]
+    assert row["resolution"]["http"]["base_at"] == "client.py:6"
+
+
 # -- what is joined (H1-H4, H6-H8) ---------------------------------------------------------
 
 

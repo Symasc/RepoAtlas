@@ -582,6 +582,11 @@ class PythonHttp:
         #: ``X = os.environ.get("NAME", "<url>")``. Read for request URLs only, never for
         #: routes, whose paths a deployment's environment does not set.
         self._env_defaults: dict[str, tuple[str, int]] = {}
+        #: Module name → its literal alternatives, each (value, line): bound once in every
+        #: branch of one module-level ``if``/``elif``/``else`` and nowhere else.
+        self._alternatives: dict[str, tuple[tuple[str, int], ...]] = {}
+        #: The one alternative a request is being read under, by name.
+        self._choice: dict[str, tuple[str, int]] = {}
         #: Local name → where it is imported from, for every import bound exactly once.
         self._imported: dict[str, _Imported] = {}
         #: Mounts only the global pass can decide: an imported router, or a factory's.
@@ -598,6 +603,7 @@ class PythonHttp:
         self._imports(tree, counts)
         self._optional_imports(tree, counts)
         self._read_constants(tree, counts)
+        self._read_alternatives(tree, counts)
         self._constructors(tree, counts)
         self._mounts(tree, counts)
         self._factories(tree)
@@ -1007,6 +1013,52 @@ class PythonHttp:
             if default is not None and counts[name] == 1:
                 self._env_defaults[name] = (default, statement.lineno)
 
+    def _read_alternatives(self, tree: ast.Module, counts: Counter[str]) -> None:
+        """Names one module-level ``if``/``elif``/``else`` binds to a literal in every branch.
+
+        Each branch, ``else`` included, binds the name exactly once at its own top level to
+        a static string, and nothing else in the module binds it; the condition is never
+        read. Without an ``else`` the name may be left unbound, so it is not one of these.
+        """
+        for statement in tree.body:
+            if not isinstance(statement, ast.If):
+                continue
+            branches: list[list[ast.stmt]] = []
+            node = statement
+            while True:
+                branches.append(node.body)
+                if len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If):
+                    node = node.orelse[0]
+                elif node.orelse:
+                    branches.append(node.orelse)
+                    break
+                else:
+                    branches = []
+                    break
+            bound: list[dict[str, tuple[str, int] | None]] = []
+            for body in branches:
+                found: dict[str, tuple[str, int] | None] = {}
+                for item in body:
+                    if (
+                        isinstance(item, ast.Assign)
+                        and len(item.targets) == 1
+                        and isinstance(item.targets[0], ast.Name)
+                    ):
+                        name, value = item.targets[0].id, item.value
+                    elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                        name, value = item.target.id, item.value
+                    else:
+                        continue
+                    text = static_string(value)
+                    found[name] = None if name in found or text is None else (text, item.lineno)
+                bound.append(found)
+            if len(bound) < 2:
+                continue
+            for name in set.intersection(*(set(found) for found in bound)):
+                values = [found[name] for found in bound]
+                if counts[name] == len(bound) and all(value is not None for value in values):
+                    self._alternatives[name] = tuple(value for value in values if value)
+
     def _env_default(self, node: ast.expr) -> str | None:
         """The literal default of ``os.environ.get("NAME", "<value>")`` or ``os.getenv(…)``.
 
@@ -1344,6 +1396,15 @@ class PythonHttp:
         url = static_string(url_node)
         if url is None:
             # Not literal: at most a claim for the join, never a per-file fact.
+            alternatives = self._alternative_urls(url_node)
+            if alternatives:
+                # One claim per literal, each decided on its own: none overwrites another.
+                return [
+                    self._client_claim(
+                        read, method, call.lineno, end, library, source_symbol, len(alternatives)
+                    )
+                    for read in alternatives
+                ]
             read = self._client_url(url_node) or self._unknown_base(url_node)
             if read is None:
                 return []
@@ -1385,12 +1446,15 @@ class PythonHttp:
         end: int,
         library: str,
         source_symbol: str | None,
+        alternatives: int | None = None,
     ) -> ParsedReference:
         meta = {
             "method": method,
             "segments": json.dumps(list(read.segments)),
             "source": library,
         }
+        if alternatives is not None:
+            meta["alternatives"] = str(alternatives)
         if read.origin is None:
             meta["base"] = BASE_UNKNOWN
         else:
@@ -1422,11 +1486,42 @@ class PythonHttp:
             return self._template_url(node)
         return None
 
+    def _alternative_urls(self, node: ast.expr) -> list[_ClientUrl]:
+        """The URL under each literal alternative of the one alternated name it uses.
+
+        ``[]`` unless the URL uses exactly one such name and reads as a URL with an origin
+        under every one of its alternatives; the request is then read as before.
+        """
+        names = {
+            found.id
+            for found in ast.walk(node)
+            if isinstance(found, ast.Name) and found.id in self._alternatives
+        }
+        if len(names) != 1:
+            return []
+        name = names.pop()
+        reads: list[_ClientUrl] = []
+        for alternative in self._alternatives[name]:
+            self._choice = {name: alternative}
+            try:
+                read = self._client_url(node)
+            finally:
+                self._choice = {}
+            if read is None or read.origin is None:
+                return []
+            reads.append(read)
+        return reads
+
     def _stated(self, node: ast.expr) -> tuple[str, int] | None:
         """A string the source states for a URL or its base: a module constant, an
-        environment default, or a constant bound to one; with its line."""
+        environment default, a constant bound to one, or the literal alternative a request
+        is being read under; with its line."""
         if isinstance(node, ast.Name):
-            return self._constants.get(node.id) or self._env_defaults.get(node.id)
+            return (
+                self._choice.get(node.id)
+                or self._constants.get(node.id)
+                or self._env_defaults.get(node.id)
+            )
         default = self._env_default(node)
         return (default, node.lineno) if default is not None else None
 

@@ -367,10 +367,12 @@ class PythonParser:
     # 12: a request on an environment default (os.environ.get / os.getenv with a literal
     #    URL) is read as that URL, and one whose path is read but whose host is not
     #    records a claim with no origin (D2: counted, never joined).
+    # 13: a request on a base one module-level if/elif/else binds to a literal in every
+    #    branch records one claim per literal, each decided on its own.
     # +pyX.Y: `ast` is the running interpreter's, and what it accepts moves with the
     #    interpreter (repoatlas.parsers.interpreter), so facts parsed by another one
     #    are never kept.
-    version = f"12+{interpreter_tag()}"
+    version = f"13+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
