@@ -111,27 +111,60 @@ def test_sync_at_root_syncs_everything(cli_env: Path, workspace_root: Path) -> N
     assert f"Syncing {MANAGED_REPOSITORY_COUNT} repositories" in result.output
 
 
-def test_sync_outside_managed_tree_errors(
+def test_sync_outside_managed_tree_syncs_the_whole_workspace(
     cli_env: Path, workspace_root: Path, tmp_path: Path
 ) -> None:
-    """Must error and ask, never silently sync everything (V1_SPEC §6)."""
+    """`sync` runs from any directory: outside every managed repository, it is all of them."""
     run_in(workspace_root, "init", str(workspace_root))
     outside = tmp_path / "home-of-user"
     outside.mkdir()
 
-    result = run_in(outside, "sync")
-    assert result.exit_code == ExitCode.CONTEXT
-    assert "Unable to determine repository." in result.output
-    assert "repoatlas sync" in result.output
+    result = run_in(outside, "sync", "--verbose")
+    assert result.exit_code == ExitCode.OK, result.output
+    assert f"Syncing {MANAGED_REPOSITORY_COUNT} repositories" in result.output
+    assert "outside every managed repository: the whole workspace" in result.output
+    # Only `sync`: everywhere else, a command there still asks rather than guesses (V1_SPEC §6).
+    refused = run_in(outside, "status")
+    assert refused.exit_code == ExitCode.CONTEXT
+    assert "Unable to determine repository." in refused.output
 
 
-def test_sync_in_unmanaged_git_repository_errors(
+def test_sync_in_unmanaged_git_repository_syncs_the_workspace_and_leaves_it_alone(
     cli_env: Path, workspace_root: Path, unmanaged_repo: Path
 ) -> None:
     run_in(workspace_root, "init", str(workspace_root))
-    result = run_in(unmanaged_repo, "sync")
-    assert result.exit_code == ExitCode.CONTEXT
-    assert "This Git repository is not managed by RepoAtlas." in result.output
+    result = run_in(unmanaged_repo, "sync", "--verbose")
+    assert result.exit_code == ExitCode.OK, result.output
+    assert f"Syncing {MANAGED_REPOSITORY_COUNT} repositories" in result.output
+    assert "which RepoAtlas does not manage" in result.output
+    assert "unmanaged" not in run_in(workspace_root, "repos").output
+    refused = run_in(unmanaged_repo, "status")
+    assert refused.exit_code == ExitCode.CONTEXT
+    assert "This Git repository is not managed by RepoAtlas." in refused.output
+
+
+def test_init_without_a_directory_indexes_the_home_directory(
+    cli_env: Path, workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(workspace_root))
+    result = run_in(tmp_path, "init")
+    assert result.exit_code == ExitCode.OK, result.output
+    assert f"Root: {workspace_root}" in result.output
+    assert f"Repositories discovered: {MANAGED_REPOSITORY_COUNT}" in result.output
+
+
+def test_init_without_a_directory_keeps_the_configured_root(
+    cli_env: Path, workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare `init` re-indexes the configured root; it never moves the workspace home."""
+    run_in(workspace_root, "init", str(workspace_root))
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    result = run_in(tmp_path, "init")
+    assert result.exit_code == ExitCode.OK, result.output
+    assert f"Root: {workspace_root}" in result.output
+    assert f"Repositories discovered: {MANAGED_REPOSITORY_COUNT}" in result.output
 
 
 def test_sync_explicit_repository_overrides_cwd(cli_env: Path, workspace_root: Path) -> None:
@@ -211,9 +244,12 @@ def test_end_to_end_success_scenario(cli_env: Path, workspace_root: Path) -> Non
     assert everything.exit_code == 0
     assert f"Syncing {MANAGED_REPOSITORY_COUNT} repositories" in everything.output
 
-    # From outside, RepoAtlas refuses to guess.
+    # From outside, sync is the whole workspace; anything else refuses to guess.
     outside = workspace_root.parent / "elsewhere-entirely"
     outside.mkdir(exist_ok=True)
-    refused = run_in(outside, "sync")
+    anywhere = run_in(outside, "sync")
+    assert anywhere.exit_code == ExitCode.OK
+    assert f"Syncing {MANAGED_REPOSITORY_COUNT} repositories" in anywhere.output
+    refused = run_in(outside, "status")
     assert refused.exit_code == ExitCode.CONTEXT
     assert "Unable to determine repository." in refused.output

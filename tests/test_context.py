@@ -70,6 +70,25 @@ def test_unmanaged_git_repository_errors(initialized: Workspace, unmanaged_repo:
     assert excinfo.value.exit_code == 2
 
 
+def test_anywhere_is_the_whole_workspace_outside_every_managed_repository(
+    initialized: Workspace, workspace_root: Path, unmanaged_repo: Path, tmp_path: Path
+) -> None:
+    """`sync`'s rule: what would be an error becomes all repositories, never a subset."""
+    resolver = _resolver(initialized)
+    every = len(initialized.repositories.list_all())
+    elsewhere = tmp_path / "somewhere-else"
+    elsewhere.mkdir()
+    for place in (elsewhere, unmanaged_repo, workspace_root / "nested-outer" / ".."):
+        context = resolver.resolve(place, anywhere=True)
+        assert context.scope is ContextScope.GLOBAL
+        assert context.primary is None
+        assert len(context.repositories) == every
+    # Inside a managed repository, that repository still wins.
+    inside = resolver.resolve(workspace_root / "python-service" / "src", anywhere=True)
+    assert inside.scope is ContextScope.REPOSITORY
+    assert inside.primary is not None and inside.primary.name == "python-service"
+
+
 def test_directory_under_root_but_not_in_a_repository_errors(
     initialized: Workspace, workspace_root: Path
 ) -> None:

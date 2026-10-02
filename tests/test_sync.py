@@ -351,3 +351,32 @@ def test_metadata_reflects_the_whole_tree_not_just_reindexed_files(
     after = _repo(initialized, "python-service")
     assert after.languages == before.languages
     assert after.manifests == before.manifests
+
+
+def test_a_virtual_environment_git_lists_is_not_indexed(tmp_path: Path) -> None:
+    """An environment that does not ignore itself is listed by Git in full; none is indexed."""
+    from repoatlas.sync.scanner import scan_repository
+    from tests.conftest import init_git_repository
+
+    repo = tmp_path / "app"
+    environment = repo / "tools" / "py38env"
+    (environment / "lib").mkdir(parents=True)
+    (repo / "main.py").write_text("x = 1\n")
+    (environment / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    (environment / "lib" / "site.py").write_text("y = 2\n")
+    init_git_repository(repo)
+
+    assert [f.rel_path for f in scan_repository(repo)] == ["main.py"]
+
+
+def test_a_pyvenv_cfg_at_the_top_leaves_the_repository_s_own_files(tmp_path: Path) -> None:
+    from repoatlas.sync.scanner import scan_repository
+    from tests.conftest import init_git_repository
+
+    repo = tmp_path / "made-in-place"
+    repo.mkdir()
+    (repo / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    (repo / "main.py").write_text("x = 1\n")
+    init_git_repository(repo)
+
+    assert [f.rel_path for f in scan_repository(repo)] == ["main.py", "pyvenv.cfg"]

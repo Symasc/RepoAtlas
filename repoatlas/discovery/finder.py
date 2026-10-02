@@ -57,6 +57,13 @@ from repoatlas.models.repository import RepositoryCandidate, repository_slug
 #: preference into a pathological walk (V1_SPEC §5).
 GIT_DIRECTORY = ".git"
 
+#: The file every Python virtual environment holds at its top (``venv``,
+#: ``virtualenv``, ``uv``), whatever the directory is called. A virtual environment
+#: is installed packages, never a project: thousands of directories to walk and no
+#: repository to find, so the walk never enters one. A directory that is also a
+#: Git repository is still a repository.
+VIRTUAL_ENVIRONMENT_MARKER = "pyvenv.cfg"
+
 
 def discover_repositories(
     root: Path,
@@ -138,6 +145,15 @@ def _walk(
                 unreadable.append(current)
             continue
 
+        if (
+            current != root
+            and not repository
+            and any(entry.name == VIRTUAL_ENVIRONMENT_MARKER for entry in entries)
+        ):
+            # Read from the listing already taken, so recognizing a virtual
+            # environment costs no extra filesystem call.
+            continue
+
         if repository:
             yield current
 
@@ -165,6 +181,14 @@ def _descendable(
 ) -> Path | None:
     """``entry`` if the walk may descend into it, else ``None``."""
     if entry.name == GIT_DIRECTORY:
+        return None
+    if entry.name.startswith("."):
+        # Hidden directories hold tools, caches and settings (`~/.nvm`, `~/.cache`,
+        # `~/.vscode-server`), not projects: walking them is the bulk of a home
+        # directory's cost, and tools installed as Git clones (`~/.oh-my-zsh`)
+        # would be adopted as repositories. This decides only where repositories
+        # are looked for; a repository's own hidden directories (`.github`,
+        # `.circleci`) are enumerated by Git and indexed as before.
         return None
     if entry.name in config.exclusions:
         return None

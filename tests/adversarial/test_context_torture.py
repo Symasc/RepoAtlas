@@ -315,7 +315,7 @@ def cli(tmp_path: Path, adversarial_root: Path, monkeypatch: pytest.MonkeyPatch)
 
 @pytest.mark.parametrize(
     "command",
-    [("sync",), ("status",), ("locate", "SERVICE_HOST")],
+    [("status",), ("locate", "SERVICE_HOST")],
 )
 def test_no_command_broadens_scope_from_an_unresolvable_directory(
     cli, tmp_path: Path, command: tuple[str, ...]
@@ -326,6 +326,18 @@ def test_no_command_broadens_scope_from_an_unresolvable_directory(
     result = cli(elsewhere, *command)
     assert result.exit_code == ExitCode.CONTEXT, result.output
     assert "Unable to determine repository." in result.output
+
+
+def test_sync_from_an_unresolvable_directory_is_every_repository_never_a_subset(
+    cli, adversarial_root: Path, tmp_path: Path
+) -> None:
+    """`sync` alone runs from anywhere, and there it is the whole workspace."""
+    elsewhere = tmp_path / "unrelated-cwd"
+    elsewhere.mkdir()
+    result = cli(elsewhere, "sync")
+    assert result.exit_code == ExitCode.OK, result.output
+    for repository in ("python-service", "ruby-tooling", "ambiguous-provider-a", "unrelated-repo"):
+        assert repository in result.stdout, repository
 
 
 @pytest.mark.parametrize("command", [("sync",), ("status",), ("locate", "SERVICE_HOST")])

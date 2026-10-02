@@ -72,8 +72,12 @@ def _resolve(
     repository: str | None,
     command: str,
     verbose: bool,
+    *,
+    anywhere: bool = False,
 ):
-    context = workspace.resolver().resolve(Path.cwd(), repository, command=command)
+    context = workspace.resolver().resolve(
+        Path.cwd(), repository, command=command, anywhere=anywhere
+    )
     if verbose:
         typer.echo(f"context: {context.reason}", err=True)
     return context
@@ -81,7 +85,14 @@ def _resolve(
 
 @app.command()
 def init(
-    directory: Annotated[Path, typer.Argument(help="Directory containing Git repositories.")],
+    directory: Annotated[
+        Path | None,
+        typer.Argument(
+            help="Directory containing Git repositories. Defaults to the configured root, "
+            "or your home directory on first use.",
+            show_default=False,
+        ),
+    ] = None,
     json_output: _JsonOption = False,
 ) -> None:
     """Discover and index every Git repository beneath DIRECTORY."""
@@ -90,6 +101,10 @@ def init(
     except RepoAtlasError as exc:
         _fail(exc)
         return
+    if directory is None:
+        # Never a silent move: with a root already configured, a bare `init`
+        # re-indexes it rather than relocating the workspace to the home directory.
+        directory = workspace.settings.repos.root or Path.home()
     try:
         with _progress() as progress:
             report, count = services.initialize(workspace, directory, progress=progress)
@@ -126,7 +141,10 @@ def sync(
     json_output: _JsonOption = False,
     verbose: _VerboseOption = False,
 ) -> None:
-    """Incrementally synchronize the index with the working tree."""
+    """Incrementally synchronize the index with the working tree.
+
+    Inside a managed repository, that repository; anywhere else, the whole workspace.
+    """
     workspace = _open()
     if embed:
         # Fetching the model is an explicit act, never a silent stall inside an
@@ -139,7 +157,7 @@ def sync(
             }
         )
     try:
-        context = _resolve(workspace, repo or repository, "sync", verbose)
+        context = _resolve(workspace, repo or repository, "sync", verbose, anywhere=True)
         with _progress() as progress:
             report = services.sync(workspace, context, full=full, progress=progress)
     except RepoAtlasError as exc:

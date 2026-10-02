@@ -2,7 +2,9 @@
 
 Implemented once, used by every command. There are exactly two valid *implicit*
 contexts: an enclosing managed repository, or the exact configured root. Anything
-else is an error — RepoAtlas never guesses a scope from proximity.
+else is an error — RepoAtlas never guesses a scope from proximity — except for a
+command that asks for the whole workspace there instead (``sync``): the whole
+workspace is not a scope guessed from proximity, it is all of it.
 """
 
 from __future__ import annotations
@@ -87,7 +89,12 @@ class RepositoryContextResolver:
         explicit_repo: str | None = None,
         *,
         command: str = "sync",
+        anywhere: bool = False,
     ) -> RepositoryContext:
+        """``anywhere``: outside every managed repository, the whole workspace
+        rather than an error (steps 4 and 5 become step 3). Inside one, that
+        repository still wins.
+        """
         if self._root is None:
             raise NotInitializedError()
 
@@ -95,6 +102,7 @@ class RepositoryContextResolver:
             return self._resolve_explicit(explicit_repo, cwd)
 
         canonical = _canonical(cwd)
+        root = self._root
 
         # Step 2 — nearest managed repository wins, so a repository nested inside
         # another resolves to the inner one with no special casing.
@@ -110,17 +118,18 @@ class RepositoryContextResolver:
                 )
 
         # Step 3 — the exact configured root, and only the exact root.
-        if canonical == self._root:
-            return RepositoryContext(
-                scope=ContextScope.GLOBAL,
-                repositories=tuple(self._repositories),
-                primary=None,
-                reason=f"at configured RepoAtlas root ({self._root})",
-                cwd=canonical,
-            )
+        if canonical == root:
+            return self._workspace(canonical, f"at configured RepoAtlas root ({root})")
 
         # Step 4 — an enclosing Git repository that RepoAtlas does not manage.
         enclosing = git_toplevel(canonical)
+        if anywhere:
+            where = (
+                f"in {enclosing}, which RepoAtlas does not manage"
+                if enclosing is not None
+                else "outside every managed repository"
+            )
+            return self._workspace(canonical, f"{where}: the whole workspace ({root})")
         if enclosing is not None:
             raise ContextResolutionError(
                 "This Git repository is not managed by RepoAtlas.",
@@ -138,6 +147,15 @@ class RepositoryContextResolver:
             _UNRESOLVED_MESSAGE,
             reason=ContextFailure.UNRESOLVED,
             detail=_UNRESOLVED_DETAIL.format(command=command, example=self._example_name()),
+        )
+
+    def _workspace(self, cwd: Path, reason: str) -> RepositoryContext:
+        return RepositoryContext(
+            scope=ContextScope.GLOBAL,
+            repositories=tuple(self._repositories),
+            primary=None,
+            reason=reason,
+            cwd=cwd,
         )
 
     def _resolve_explicit(self, name: str, cwd: Path) -> RepositoryContext:
