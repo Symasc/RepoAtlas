@@ -500,7 +500,6 @@ export function FileLevel({
               arrival={{ direction: "none", from: null }}
               extent={extent}
               refit={`${expanded.left}:${expanded.right}`}
-              hue={repository.hue}
               families={families.length > 0 ? families : ["code"]}
               start={<Trail repository={repository} nav={nav} file />}
               end={

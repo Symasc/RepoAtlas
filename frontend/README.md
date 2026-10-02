@@ -129,9 +129,9 @@ colour too; the outline tells kinds apart as well as the colour.
 
 The canvas is a map. A faint grid squares it and moves with it. Each repository
 has its own colour, like a country on a political map: a small square beside its
-name wherever it appears, and a light wash over everything that lies in it (its
-card on the overview, the frame of an opened repository and every card, file and
-trace step inside it).
+name wherever it appears, and a light wash over its card on the overview. Inside
+a repository, a directory is a solid card a step lighter than the canvas, with a
+clear outline (its card, and its node when another directory links to it).
 
 Each view has a toolbar above the canvas, saying where you are and what the
 level holds. Below the canvas, a status bar holds the zoom and the key to the

@@ -13,6 +13,7 @@ export default defineConfig([
   globalIgnores([
     ".next/**",
     ".next-e2e/**",
+    ".next-ui/**",
     "out/**",
     "next-env.d.ts",
     "lib/api/generated.ts",

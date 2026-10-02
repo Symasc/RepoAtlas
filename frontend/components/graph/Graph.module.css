@@ -98,6 +98,8 @@
   --ra-surface: var(--ra-canvas);
   --ra-surface-elevated: var(--ra-canvas);
   --ra-ground-raised: var(--ra-canvas);
+  --ra-directory-fill: var(--ra-canvas);
+  --ra-directory-border: var(--ra-border);
   --ra-text: var(--ra-text-subtle);
   --ra-text-muted: var(--ra-text-subtle);
   --ra-border-strong: var(--ra-border);
@@ -156,16 +158,18 @@
   pointer-events: none;
 }
 
-/* -- territory: a repository's hue over the land it covers ----------------------- */
+/* -- territory: a repository's hue on its own node -------------------------------- */
 
 /*
- * As a political map colours its countries: an opened repository's frame, and
- * every card, place and file inside it, is washed in that repository's hue
- * (`--territory`, set by the view or by the node), and a repository on the
- * overview is washed in its own. The wash stays light enough that every text
- * tone keeps 4.5:1 on it. With no territory a surface stays neutral.
+ * As a political map colours its countries: a repository on the overview, or
+ * beside an opened one, is washed in its own hue (`--territory`, set by the
+ * node). Inside a repository things are coloured by what they are, not whose
+ * they are: a directory is the same solid, outlined card in every repository. The wash
+ * stays light enough that every text tone keeps 4.5:1 on it. With no territory
+ * a surface stays neutral.
  */
-:is(.frame, .card, .repository, .peer, .place, .fileAnchor) {
+.repository,
+.peer {
   --land: var(--territory, var(--ra-surface));
 }
 
@@ -182,14 +186,14 @@
   width: 100%;
   height: 100%;
   padding: 0 14px;
-  background-color: color-mix(in oklab, var(--land) var(--ra-wash-land), var(--ra-ground-raised));
-  border: 1px solid color-mix(in oklab, var(--land) 35%, var(--ra-border-strong));
+  background-color: var(--ra-surface);
+  border: 1px solid var(--ra-border-strong);
   border-radius: var(--ra-radius);
   color: var(--ra-text);
   transition: border-color var(--ra-duration-fast) var(--ra-ease);
 
   &:hover {
-    border-color: color-mix(in oklab, var(--land) 50%, var(--ra-text-subtle));
+    border-color: var(--ra-text-subtle);
   }
 }
 
@@ -198,6 +202,10 @@
 .peer {
   background-color: color-mix(in oklab, var(--land) var(--ra-wash-country), var(--ra-ground-raised));
   border-color: color-mix(in oklab, var(--land) 55%, var(--ra-border-strong));
+
+  &:hover {
+    border-color: color-mix(in oklab, var(--land) 50%, var(--ra-text-subtle));
+  }
 }
 
 .body {
@@ -346,8 +354,7 @@
 .frame {
   width: 100%;
   height: 100%;
-  background-color: color-mix(in oklab, var(--land) var(--ra-wash-country), var(--ra-ground));
-  border: 1px solid color-mix(in oklab, var(--land) 60%, var(--ra-border));
+  border: 1px solid var(--ra-border-strong);
   border-radius: var(--ra-radius-l);
   pointer-events: none;
 }
@@ -444,9 +451,9 @@
   color: var(--ra-text-subtle);
 }
 
-/* a directory is a region of the country it lies in */
+/* a directory, the same wherever it is */
 .folder {
-  color: var(--territory, var(--ra-text-subtle));
+  color: var(--ra-directory);
 }
 
 .card {
@@ -455,14 +462,14 @@
   flex-direction: column;
   width: 100%;
   height: 100%;
-  background-color: color-mix(in oklab, var(--land) var(--ra-wash-land), var(--ra-ground-raised));
-  border: 1px solid color-mix(in oklab, var(--land) 35%, var(--ra-border-strong));
+  background-color: var(--ra-surface);
+  border: 1px solid var(--ra-border-strong);
   border-radius: var(--ra-radius);
   overflow: hidden;
   transition: border-color var(--ra-duration-fast) var(--ra-ease);
 
   &:hover {
-    border-color: color-mix(in oklab, var(--land) 50%, var(--ra-text-subtle));
+    border-color: var(--ra-text-subtle);
   }
 }
 
@@ -700,10 +707,21 @@
 .place {
   gap: 8px;
   padding: 0 12px;
-  background-color: color-mix(in oklab, var(--land) var(--ra-wash-land), var(--ra-canvas));
+  background-color: var(--ra-canvas);
 
   &[data-neighbour] {
-    background-color: color-mix(in oklab, var(--land) var(--ra-wash-land), var(--ra-ground-raised));
+    background-color: var(--ra-surface);
+  }
+}
+
+/* after the places, so it wins: a directory is a solid card a step above the
+   canvas with a clear outline, the same in every repository */
+:is(.card[data-kind="directory"], .place[data-directory]) {
+  background-color: var(--ra-directory-fill);
+  border-color: var(--ra-directory-border);
+
+  &:hover {
+    border-color: var(--ra-directory);
   }
 }
 
@@ -712,7 +730,7 @@
 .fileAnchor {
   gap: 12px;
   padding: 0 18px;
-  border: 2px solid color-mix(in oklab, var(--land) 60%, var(--ra-text-muted));
+  border: 2px solid var(--ra-text-muted);
 }
 
 .anchorIcon {
