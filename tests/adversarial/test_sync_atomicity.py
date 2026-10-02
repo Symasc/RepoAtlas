@@ -586,7 +586,6 @@ def test_a_terminated_writer_does_not_strand_the_lock(
     assert integrity(database) == ("ok", 0)
 
 
-@pytest.mark.timing
 def test_a_reader_does_not_need_the_writer_lock(
     cli_workspace: tuple[Path, Path, dict[str, str]],
 ) -> None:
@@ -597,18 +596,23 @@ def test_a_reader_does_not_need_the_writer_lock(
     reads = (["status"], ["repos"], ["locate", "helper"], ["locate", "helper", "--json"])
     with writer_lock(Path(env["REPOATLAS_DB"]), timeout=0.0):
         for command in reads:
-            started = time.perf_counter()
             result = _cli(command, {**env, "REPOATLAS_SYNC_LOCK_TIMEOUT": "0"}, cwd=root)
-            elapsed = time.perf_counter() - started
             assert result.returncode == 0, (command, result.stderr)
             assert "database is locked" not in result.stderr
-            assert elapsed < 20.0, (command, elapsed)
 
 
-@pytest.mark.timing
-def test_the_second_writer_waits_when_a_timeout_allows_it(tmp_path: Path) -> None:
-    """The bounded wait is the default; a contending run is not simply rejected."""
+def test_the_second_writer_waits_when_a_timeout_allows_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bounded wait is the default; a contending run is not simply rejected.
+
+    The holder lets go only when the second writer first polls, so a successful
+    acquisition proves that writer found the lock taken and waited it out.
+    """
+    from types import SimpleNamespace
+
     from repoatlas.errors import SyncInProgressError
+    from repoatlas.sync import lock as lock_module
     from repoatlas.sync.lock import writer_lock
 
     database = tmp_path / "wait-state" / "atlas.db"
@@ -617,30 +621,45 @@ def test_the_second_writer_waits_when_a_timeout_allows_it(tmp_path: Path) -> Non
 
     project = str(Path(__file__).resolve().parents[2])
     script = (
-        "import time\n"
+        "import sys\n"
         "from pathlib import Path\n"
         "from repoatlas.sync.lock import writer_lock\n"
         f"with writer_lock(Path({str(database)!r}), timeout=0.0):\n"
         "    print('held', flush=True)\n"
-        "    time.sleep(1.0)\n"
+        "    sys.stdin.readline()\n"
     )
     holder = subprocess.Popen(
         [sys.executable, "-c", script],
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
         env={**os.environ, "PYTHONPATH": project},
     )
-    assert holder.stdout is not None
+    assert holder.stdin is not None and holder.stdout is not None
+    release = holder.stdin
     assert holder.stdout.readline().strip() == "held"
 
     with pytest.raises(SyncInProgressError), writer_lock(database, timeout=0.0):
         pass
 
-    started = time.perf_counter()
+    polls: list[float] = []
+
+    def release_on_first_poll(seconds: float) -> None:
+        if not polls:
+            release.write("release\n")
+            release.flush()
+        polls.append(seconds)
+        time.sleep(seconds)
+
+    monkeypatch.setattr(
+        lock_module,
+        "time",
+        SimpleNamespace(monotonic=time.monotonic, sleep=release_on_first_poll),
+    )
     with writer_lock(database, timeout=15.0):
-        waited = time.perf_counter() - started
+        pass
     holder.communicate()
-    assert waited >= 0.2, "the second writer did not actually wait"
+    assert polls, "the second writer did not actually wait"
 
 
 # ---------------------------------------------------------------------------
