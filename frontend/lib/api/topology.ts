@@ -67,7 +67,7 @@ export function usePreviews(
  */
 const investigations = new Map<string, string>();
 
-async function within<T extends { investigation_id: string }>(
+export async function within<T extends { investigation_id: string }>(
   subject: string,
   run: (investigation: string | null) => Promise<T>,
 ): Promise<T> {
