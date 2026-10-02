@@ -76,6 +76,11 @@ HTTP_EXPOSED_ENDPOINT = "http-exposed-endpoint"
 #: the global pass (:mod:`repoatlas.graph.deploy_identity`), never stored. A request to it is
 #: refused as ``http-deployment-source-unresolved``, and a link it could rival is refused.
 HTTP_UNSOURCED_IDENTITY = "http-unsourced-identity"
+#: The hosts an Ingress template would give under a deployment no local source establishes:
+#: literal text and the chart's name, with a hole for each value or item it substitutes.
+#: Derived by the global pass, never stored, and never linked: a request it fits is
+#: refused as ``http-deployment-binding-unresolved``, and a link it could rival is refused.
+HTTP_UNRESOLVED_PATTERN = "http-unresolved-pattern"
 #: A request whose origin and path shape the source states: a literal URL, a module
 #: constant, or an f-string on a literal or constant origin. The other side of the join.
 #: A request whose path is read but whose host is not carries ``base`` =
@@ -146,6 +151,9 @@ HELM_SERVICE = "helm-service"
 HELM_HELPER = "helm-helper"
 #: A release of a chart that a deployment file binds by a literal name (a Tiltfile ``helm()``).
 HELM_RELEASE = "helm-release"
+#: A chart template's ``kind: Ingress``: its wrapping ``if`` and ``range``, its hosts as
+#: literal text and substitutions, its scheme and its backend, or why it is not read.
+HELM_INGRESS = "helm-ingress"
 
 #: ``transport`` values of :data:`HTTP_LOCAL_CALL`.
 TRANSPORT_WRAPPER = "wrapper"

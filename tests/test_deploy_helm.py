@@ -112,13 +112,23 @@ def test_a_chart_and_its_values() -> None:
     assert chart_references(PurePosixPath("Chart.yaml"), _documents("name: x\n")) == []
     values = values_references(
         PurePosixPath("charts/devices/values.yaml"),
-        _documents("service:\n  port: 80\n  type: ClusterIP\nnameOverride: ''\nlist: [1, 2]\n"),
+        _documents(
+            "service:\n  port: 80\n  type: ClusterIP\nnameOverride: ''\nlist: [1, 2]\n"
+            "ingress:\n  groups:\n    - name: internal\n      host: int.example.com\n"
+            "    - name: public\n"
+        ),
     )
     [found] = _meta(values)
+    # A list's items by index, as a `range` iterates them.
     assert json.loads(str(found["values"])) == {
         "nameOverride": "",
         "service.port": "80",
         "service.type": "ClusterIP",
+        "list[0]": "1",
+        "list[1]": "2",
+        "ingress.groups[0].name": "internal",
+        "ingress.groups[0].host": "int.example.com",
+        "ingress.groups[1].name": "public",
     }
 
 
