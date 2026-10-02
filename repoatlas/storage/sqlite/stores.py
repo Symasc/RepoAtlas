@@ -38,6 +38,7 @@ from repoatlas.storage.protocols import (
     EntityRecord,
     FileFacts,
     FileRow,
+    HttpCallDecisionRow,
     HttpEdgeRow,
     NeighborCount,
     NeighborCursor,
@@ -97,6 +98,9 @@ _HTTP_KEY_PREFIX = "http-"
 
 #: The ``meta`` key under which the ``USES`` stage records whether its edges are complete.
 USES_LINKS_KEY = "uses_links"
+#: The ``meta`` key the global commit sets once it has written ``http_call_decisions``:
+#: until then an empty table means "not decided yet", not "no requests".
+HTTP_CALL_DECISIONS_KEY = "http_call_decisions"
 #: The columns a standing claim is read back with (:func:`_claim`).
 _CLAIM_COLUMNS = (
     "u.id, u.repo_id, u.file_id, u.src_id, u.edge_type, u.target_kind, "
@@ -1122,6 +1126,80 @@ class SqliteKnowledgeStore:
             ),
         ).fetchall()
         return [RouteServerRow(**dict(row)) for row in rows]
+
+    def replace_http_call_decisions(self, rows: Sequence[HttpCallDecisionRow]) -> None:
+        """Replace every stored HTTP call decision, and record that they have been written.
+
+        Called by the global commit inside its transaction, so the rows and the edges
+        they account for change together.
+        """
+        with self._db.transaction() as conn:
+            conn.execute("DELETE FROM http_call_decisions")
+            conn.executemany(
+                """
+                INSERT INTO http_call_decisions (
+                    decision_ref, repo_id, file_id, src_id, line_start, line_end,
+                    method, url, variant, decision, evidence_json, chain_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        row.decision_ref,
+                        row.repo_id,
+                        row.file_id,
+                        row.src_id,
+                        row.line_start,
+                        row.line_end,
+                        row.method,
+                        row.url,
+                        row.variant,
+                        row.decision,
+                        row.evidence_json,
+                        row.chain_json,
+                    )
+                    for row in rows
+                ],
+            )
+            self._db.set_meta(HTTP_CALL_DECISIONS_KEY, "built")
+
+    def list_http_call_decisions(self, repo_id: int | None = None) -> list[HttpCallDecisionRow]:
+        """The stored decisions of one repository's requests, or of every repository's,
+        in file and line order, with each caller's path and entity key."""
+        where = "WHERE d.repo_id = ?" if repo_id is not None else ""
+        rows = self._db.execute(
+            f"""
+            SELECT d.*, f.rel_path AS path, s.key AS src_key
+            FROM http_call_decisions d
+            JOIN files f ON f.id = d.file_id
+            JOIN entities s ON s.id = d.src_id
+            {where}
+            ORDER BY d.repo_id, f.rel_path, d.line_start, d.decision_ref
+            """,  # noqa: S608 - the one optional clause is fixed text, values are bound
+            (repo_id,) if repo_id is not None else (),
+        ).fetchall()
+        return [
+            HttpCallDecisionRow(
+                decision_ref=row["decision_ref"],
+                repo_id=row["repo_id"],
+                file_id=row["file_id"],
+                src_id=row["src_id"],
+                line_start=row["line_start"],
+                line_end=row["line_end"],
+                method=row["method"],
+                url=row["url"],
+                variant=row["variant"],
+                decision=row["decision"],
+                evidence_json=row["evidence_json"],
+                chain_json=row["chain_json"],
+                path=row["path"],
+                src_key=row["src_key"],
+            )
+            for row in rows
+        ]
+
+    def http_call_decisions_built(self) -> bool:
+        """Whether a global commit has written ``http_call_decisions`` since the table existed."""
+        return self._db.get_meta(HTTP_CALL_DECISIONS_KEY) is not None
 
     def list_http_edges(self, repo_id: int) -> list[HttpEdgeRow]:
         """Every edge one repository asserts to a shared HTTP route or endpoint.

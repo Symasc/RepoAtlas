@@ -514,3 +514,73 @@ def test_a_pattern_of_many_holes_is_matched_in_bounded_time(
         "far": ["http-service-unmatched"],
         "near": ["http-deployment-binding-unresolved"],
     }
+
+
+def _stored_chain(workspace: Workspace, caller: str) -> list[tuple[str, str, list, str, str]]:
+    """One caller's stored decision chain: each hop's kind, status, places, reason, detail."""
+    from repoatlas.graph.http_chain import chain_from_json
+
+    keys = {
+        row["key"]
+        for row in workspace.database.execute(
+            "SELECT key FROM entities WHERE qualified_name = ?", (caller,)
+        )
+    }
+    [row] = [r for r in workspace.knowledge.list_http_call_decisions() if r.src_key in keys]
+    return [
+        (
+            hop.kind,
+            hop.status,
+            [(p.path, p.line_start, p.role) for p in hop.provenance],
+            hop.reason,
+            hop.detail,
+        )
+        for hop in chain_from_json(row.chain_json)
+    ]
+
+
+def test_an_unrendered_ingress_s_chain_stops_at_the_deployment_binding(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    built = build(
+        workspace, tmp_path, {"devices": {**APP, **chart(enabled=False)}, "caller": CALLER}
+    )
+    chain = _stored_chain(built, "dev_item")
+    assert [(kind, status) for kind, status, *_ in chain] == [
+        ("caller", "proven"),
+        ("origin", "proven"),
+        ("service_identity", "proven"),
+        ("deployment_binding", "unresolved"),
+        ("source_binding", "proven"),
+        ("route", "not_reached"),
+        ("handler", "not_reached"),
+    ]
+    _, _, identity, _, pattern = chain[2]
+    assert identity == [
+        ("charts/devices/templates/ingress.yaml", 14, "identity_in"),
+        ("charts/devices/templates/ingress.yaml", 10, "scheme_in"),
+        ("charts/devices/templates/ingress.yaml", 21, "backend_in"),
+    ]
+    assert pattern == "https://devices-{stage}.{ingress.groups[].host}"
+    _, _, binding, reason, detail = chain[3]
+    assert (binding, reason) == ([("Tiltfile", 1, "binding_in")], "binding_unresolved")
+    assert detail == f"stage, ingress.groups[].host; {NOT_RENDERED}"
+    # The tie is that every route comes from one application: its module, with no line.
+    assert chain[4][2] == [("app.py", None, "source_in")]
+
+
+def test_an_ingress_reaching_no_code_has_a_chain_that_stops_at_the_source(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    deploy = {"pyproject.toml": '[project]\nname = "deploy"\n', **chart(enabled=True)}
+    built = build(workspace, tmp_path, {"deploy": deploy, "caller": CALLER})
+    chain = _stored_chain(built, "dev_item")
+    assert [(kind, status) for kind, status, *_ in chain][2:] == [
+        ("service_identity", "proven"),
+        ("deployment_binding", "proven"),
+        ("source_binding", "unresolved"),
+        ("route", "not_reached"),
+        ("handler", "not_reached"),
+    ]
+    assert chain[3][2] == [("Tiltfile", 1, "binding_in")]
+    assert (chain[4][3], chain[4][4]) == ("source_unresolved", NOTHING_SERVED)

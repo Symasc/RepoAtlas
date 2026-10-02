@@ -14,6 +14,7 @@ between two repositories.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,7 @@ from tests.http_crossing_corpus import (
     PORTAL_BASE_LINE,
     WORKSPACE,
     crossings,
+    decision_of,
     links,
 )
 from tests.impact_corpus import build, verify_steps
@@ -66,7 +68,7 @@ def decisions(workspace: Workspace, path: str = "client.py") -> dict[str, str]:
         """,
         (path, f'%"{HTTP_CLIENT_CALL}"%'),
     ).fetchall()
-    return {row["qualified_name"]: plan.decisions[row["id"]] for row in rows}
+    return {row["qualified_name"]: decision_of(plan, row["id"]) for row in rows}
 
 
 def impact(workspace: Workspace, seed: str) -> ImpactResponse:
@@ -116,7 +118,7 @@ def test_each_literal_alternative_is_decided_on_its_own(
         """,
         (f'%"{HTTP_CLIENT_CALL}"%',),
     ).fetchall()
-    decided = {json.loads(row["meta_json"])["origin"]: plan.decisions[row["id"]] for row in rows}
+    decided = {json.loads(row["meta_json"])["origin"]: decision_of(plan, row["id"]) for row in rows}
     assert decided == {
         "https://accounts.example": "linked",
         "https://sandbox.example": "http-service-unmatched",
@@ -159,6 +161,9 @@ def test_a_join_is_provenanced_by_the_request_and_made_by_the_global_pass(
 def test_the_evidence_on_both_sides_is_exact(joined: Workspace) -> None:
     """H9: every line the join cites, as the source states it."""
     [row] = [r for r in crossings(joined) if r["caller"] == "load_user"]
+    # The stored decision the link is: opaque, so only its form is pinned here.
+    ref = row["resolution"]["http"].pop("decision_ref")
+    assert re.fullmatch(r"hcd1-[0-9a-f]{20}", ref)
     assert row["resolution"] == {
         "http": {
             "method": "GET",
@@ -288,7 +293,7 @@ def test_any_source_stating_the_identity_joins_the_same_way(identity_source: str
         segments='["users", "7"]',
     )
     plan = plan_http_crossings([exposure, request], files, producer="linker:global")
-    assert plan.decisions == {2: LINKED}
+    assert [(call.claim.id, call.decision) for call in plan.calls] == [(2, LINKED)]
     [edge] = plan.edges
     assert (edge.src_id, edge.dst_id, edge.type) == (22, 11, EdgeType.CALLS_HTTP_HANDLER)
     record = json.loads(edge.resolution or "{}")["http"]
@@ -316,7 +321,7 @@ def test_a_claim_the_join_cannot_read_is_never_joined() -> None:
     )
     plan = plan_http_crossings([exposure, broken], files, producer="linker:global")
     assert plan.edges == ()
-    assert plan.decisions == {2: "http-claim-unread"}
+    assert [(call.claim.id, call.decision) for call in plan.calls] == [(2, "http-claim-unread")]
 
 
 # -- impact: inward only, with the evidence (H10, A2, A3) --------------------------------
