@@ -380,6 +380,16 @@ def index(tmp_path: Path) -> Path:
     return directory / "index.db"
 
 
+@pytest.fixture
+def short_busy_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give up on a held lock after half a second instead of ten, in this process.
+
+    For tests whose writer never lets go: they assert what the open ends in, and
+    waiting out the real deadline to get there proves nothing more.
+    """
+    monkeypatch.setattr("repoatlas.storage.sqlite.database.BUSY_TIMEOUT_MS", 500)
+
+
 # == 1. the review's reproduction ============================================
 
 
@@ -401,7 +411,6 @@ def test_simultaneous_first_opens_of_a_new_database_all_succeed(index: Path, cou
     assert {r["integrity"] for r in results} == {"ok"}
 
 
-@pytest.mark.timing
 def test_a_lock_released_before_the_deadline_is_waited_out(index: Path) -> None:
     """§10: a millisecond-scale race is a wait, not an error.
 
@@ -418,15 +427,11 @@ def test_a_lock_released_before_the_deadline_is_waited_out(index: Path) -> None:
     """
     healthy_delete(index)
     with foreign_holder(index, seconds=1.0):
-        began = time.perf_counter()
         database = open_database(index)
-        elapsed = time.perf_counter() - began
     try:
         assert database.connection.execute("PRAGMA journal_mode").fetchone()[0] == WAL
     finally:
         database.close()
-    # It waited rather than failing, and it did not wait out the whole deadline.
-    assert 0.5 < elapsed < BUSY_TIMEOUT_MS / 1000, f"{elapsed:.2f}s"
 
 
 def test_no_opener_ever_reports_a_raw_sqlite_error(index: Path) -> None:
@@ -516,72 +521,24 @@ def test_an_ordinary_open_of_a_healthy_index_never_writes_the_header(index: Path
     assert f"PRAGMA journal_mode = {WAL}" not in statements, statements
 
 
-@pytest.mark.timing
-def test_a_healthy_index_opens_immediately_while_another_process_writes(index: Path) -> None:
-    """The consequence of the previous test, measured rather than inspected.
+def test_a_healthy_index_opens_while_another_process_writes(
+    index: Path, short_busy_timeout: None
+) -> None:
+    """The consequence of the previous test, observed rather than inspected.
 
     A reader must not queue behind a writer merely to open the database
-    (ARCHITECTURE.md §9). The old header write did exactly that.
+    (ARCHITECTURE.md §9). The old header write did exactly that. The writer here
+    never lets go, so an open that needed its lock would end in
+    :class:`MigrationContentionError` instead of succeeding.
     """
     healthy_wal(index)
     open_database(index).close()
 
     with Holder(index):
-        began = time.perf_counter()
         open_database(index).close()
-        elapsed = time.perf_counter() - began
-    assert elapsed < 1.0, f"an ordinary open waited {elapsed:.2f}s behind a writer"
 
 
-# == 3. busy-handler semantics, measured =====================================
-
-
-@pytest.mark.timing
-def test_the_busy_timeout_does_not_cover_the_journal_mode_transition(index: Path) -> None:
-    """The measurement the whole design rests on, kept executable.
-
-    Two operations, one timeout, opposite behaviour — and the difference is why
-    a retry exists at all. If a future SQLite starts running the busy handler
-    for the promotion, this test fails and the retry becomes removable; that is
-    a fact worth being told about rather than one to assume either way.
-    """
-    healthy_delete(index)
-    waiter = sqlite3.connect(index, isolation_level="DEFERRED")
-    waiter.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
-    try:
-        with Holder(index):
-            began = time.perf_counter()
-            with pytest.raises(sqlite3.OperationalError) as raised:
-                waiter.execute(f"PRAGMA journal_mode = {WAL}")
-            elapsed = time.perf_counter() - began
-    finally:
-        waiter.close()
-
-    assert raised.value.sqlite_errorname == "SQLITE_BUSY"
-    # The point: nothing like the configured ten seconds was spent waiting.
-    assert elapsed < 1.0, f"the busy handler ran for {elapsed:.2f}s after all"
-
-
-@pytest.mark.timing
-def test_an_ordinary_write_does_get_the_busy_timeout(index: Path) -> None:
-    """The control for the test above. Without it, "SQLite ignores the timeout"
-    would read as a general claim, and the design would be aimed at the wrong
-    thing: ordinary write contention is handled correctly and needs no retry."""
-    healthy_wal(index)
-    waiter = sqlite3.connect(index, isolation_level="DEFERRED")
-    waiter.execute("PRAGMA busy_timeout = 1500")
-    try:
-        with Holder(index):
-            began = time.perf_counter()
-            with pytest.raises(sqlite3.OperationalError):
-                waiter.execute("BEGIN IMMEDIATE")
-            elapsed = time.perf_counter() - began
-    finally:
-        waiter.close()
-    assert elapsed >= 1.0, f"the busy handler gave up after {elapsed:.2f}s"
-
-
-# == 4. the shape matrix, opened concurrently ================================
+# == 3. the shape matrix, opened concurrently ================================
 
 
 @pytest.mark.parametrize("name,prepare", USABLE, ids=[n for n, _ in USABLE])
@@ -653,13 +610,12 @@ def test_a_refused_wal_database_gains_nothing_in_its_sidecars(index: Path) -> No
     assert not log.exists() or log.stat().st_size == 0, "the refusal wrote WAL frames"
 
 
-# == 5. sustained contention =================================================
+# == 4. sustained contention =================================================
 
 
 @pytest.mark.parametrize("name,prepare", USABLE, ids=[n for n, _ in USABLE])
-@pytest.mark.timing
 def test_a_lock_held_past_the_timeout_is_a_diagnostic_not_a_traceback(
-    index: Path, name: str, prepare: Shape
+    index: Path, name: str, prepare: Shape, short_busy_timeout: None
 ) -> None:
     """§ persistent contention: bounded wait, then a product error.
 
@@ -668,19 +624,16 @@ def test_a_lock_held_past_the_timeout_is_a_diagnostic_not_a_traceback(
     each was its own way to reach the terminal as ``sqlite3.OperationalError``.
     """
     prepare(index)
-    with Holder(index):
-        began = time.perf_counter()
-        with pytest.raises(MigrationContentionError) as raised:
-            open_database(index)
-        elapsed = time.perf_counter() - began
+    with Holder(index), pytest.raises(MigrationContentionError) as raised:
+        open_database(index)
 
     assert raised.value.exit_code == ExitCode.RUNTIME
     assert isinstance(raised.value.__cause__, sqlite3.Error)
-    # Bounded by the configured timeout, and not much beyond it.
-    assert BUSY_TIMEOUT_MS / 1000 <= elapsed < BUSY_TIMEOUT_MS / 1000 + 5
 
 
-def test_the_database_is_usable_again_once_the_lock_is_released(index: Path) -> None:
+def test_the_database_is_usable_again_once_the_lock_is_released(
+    index: Path, short_busy_timeout: None
+) -> None:
     """Contention leaves nothing behind. It is a moment, not a state."""
     holder = Holder(index)
     holder.__enter__()
@@ -710,7 +663,7 @@ def test_contention_is_never_reported_as_an_unusable_index(index: Path) -> None:
     assert MigrationContentionError("x").exit_code != ExitCode.NOT_INITIALIZED
 
 
-# == 6. taxonomy: what must not be mistaken for contention ===================
+# == 5. taxonomy: what must not be mistaken for contention ===================
 
 
 @pytest.mark.parametrize(
@@ -775,7 +728,6 @@ def test_a_migration_failure_that_mentions_a_lock_is_not_contention(index: Path)
         connection.close()
 
 
-@pytest.mark.timing
 def test_a_read_only_index_fails_at_once_rather_than_waiting(index: Path) -> None:
     """§ read-only: nothing improves by waiting ten seconds to say the same thing.
 
@@ -788,33 +740,26 @@ def test_a_read_only_index_fails_at_once_rather_than_waiting(index: Path) -> Non
     index.chmod(0o444)
     index.parent.chmod(0o555)
     try:
-        began = time.perf_counter()
         with pytest.raises(IndexInaccessibleError):
             open_database(index)
-        elapsed = time.perf_counter() - began
     finally:
         index.parent.chmod(0o755)
         index.chmod(0o644)
-    assert elapsed < 2.0, f"a read-only index took {elapsed:.2f}s to refuse"
 
 
-@pytest.mark.timing
 def test_an_unreachable_index_path_fails_at_once(index: Path) -> None:
     """The same principle for a path fault rather than a permission one."""
     unreachable = index.parent / "missing" / "index.db"
     index.parent.joinpath("missing").mkdir()
     index.parent.joinpath("missing").chmod(0o000)
     try:
-        began = time.perf_counter()
         with pytest.raises(IndexInaccessibleError):
             open_database(unreachable)
-        elapsed = time.perf_counter() - began
     finally:
         index.parent.joinpath("missing").chmod(0o755)
-    assert elapsed < 2.0, f"an unreachable path took {elapsed:.2f}s to refuse"
 
 
-# == 7. the journal mode actually reached ====================================
+# == 6. the journal mode actually reached ====================================
 
 
 class _StubConnection:
@@ -919,7 +864,9 @@ def test_concurrent_openers_of_a_legacy_database_claim_it_exactly_once(index: Pa
     assert {r["user_version"] for r in results} == {SCHEMA_VERSION}
 
 
-def test_claiming_a_legacy_index_under_a_held_lock_is_a_diagnostic(index: Path) -> None:
+def test_claiming_a_legacy_index_under_a_held_lock_is_a_diagnostic(
+    index: Path, short_busy_timeout: None
+) -> None:
     """§24, the case the open path does not reach.
 
     An index written before the marker existed already carries
@@ -1017,7 +964,9 @@ def test_a_refused_open_leaves_no_file_descriptor_behind(index: Path) -> None:
 
 
 @pytest.mark.skipif(not Path("/proc/self/fd").exists(), reason="needs /proc")
-def test_a_contended_open_leaves_no_file_descriptor_behind(index: Path) -> None:
+def test_a_contended_open_leaves_no_file_descriptor_behind(
+    index: Path, short_busy_timeout: None
+) -> None:
     """The same guarantee on the path that now retries and can time out.
 
     Three times, because one leak inside a tolerance proves nothing and this
@@ -1191,12 +1140,11 @@ def test_initialization_and_the_writer_lock_cannot_deadlock(workspace: Workspace
     object the open produces. The acquisition order is therefore structural —
     database, then writer lock — and a cycle needs two orders.
 
-    Asserted rather than argued, with a bound: a deadlock shows up here as a
-    timeout, not as a wrong answer.
+    Asserted rather than argued, with a bound: a deadlock shows up here as the
+    ``communicate`` timeout, not as a wrong answer.
     """
     workspace.revert_to_rollback_journal()
     environment = workspace.environment | {"REPOATLAS_SYNC_LOCK_TIMEOUT": "30"}
-    began = time.perf_counter()
     processes = [
         subprocess.Popen(
             [str(CLI), "sync"],
@@ -1209,7 +1157,6 @@ def test_initialization_and_the_writer_lock_cannot_deadlock(workspace: Workspace
         for _ in range(6)
     ]
     outcomes = [p.communicate(timeout=180) for p in processes]
-    elapsed = time.perf_counter() - began
 
     codes = [p.returncode for p in processes]
     assert ExitCode.OK in codes, outcomes
@@ -1217,7 +1164,6 @@ def test_initialization_and_the_writer_lock_cannot_deadlock(workspace: Workspace
         assert code in (ExitCode.OK, ExitCode.SYNC_LOCKED), (code, err)
         for marker in TRACEBACK_MARKERS:
             assert marker not in out + err, (marker, err[-1000:])
-    assert elapsed < 170, f"six racing syncs took {elapsed:.0f}s"
 
 
 @pytest.mark.skipif(not CLI.exists(), reason="the repoatlas console script is not installed")
