@@ -128,7 +128,9 @@ def post(serving: Serving, name: str, body: object, **options: Any) -> Reply:
 
 
 @contextmanager
-def running(settings: Settings, connection_file: Path, token: str = TOKEN) -> Iterator[Serving]:
+def running(
+    settings: Settings, connection_file: Path, token: str = TOKEN, **options: Any
+) -> Iterator[Serving]:
     """``serve`` on its own thread, as the command runs it, stopped on the way out."""
     started: queue.Queue[Serving | BaseException] = queue.Queue()
 
@@ -141,6 +143,7 @@ def running(settings: Settings, connection_file: Path, token: str = TOKEN) -> It
                 connection_file=connection_file,
                 ready=started.put,
                 environ={},
+                **options,
             )
         except BaseException as exc:  # handed to the test thread, which raises it
             started.put(exc)

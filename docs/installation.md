@@ -1,9 +1,26 @@
 # Installing RepoAtlas
 
-One command takes a fresh checkout to a working installation:
+## From PyPI
+
+To use RepoAtlas, install the released package, in an environment of its own:
 
 ```bash
-git clone <this repository> RepoAtlas && cd RepoAtlas
+uv tool install symasc-repoatlas
+claude mcp add --scope user repoatlas -- repoatlas mcp
+repoatlas init
+```
+
+That is everything, the graph explorer included: `repoatlas ui` serves it with no Node.js. Update with
+`uv tool upgrade symasc-repoatlas`. The [README](../README.md#install) shows how to give Claude Code the skills
+from the installed package.
+
+## From a checkout
+
+To work on RepoAtlas, install from a checkout instead. One command takes a fresh checkout to a working
+installation:
+
+```bash
+git clone https://github.com/Symasc/RepoAtlas && cd RepoAtlas
 ./install.sh
 ```
 
@@ -17,7 +34,7 @@ after a `git pull` is how you update.
 |---|---|---|
 | `git` | everything | RepoAtlas reads repositories through git |
 | [uv](https://docs.astral.sh/uv/) | everything | The installer offers to install it. uv fetches Python 3.13 itself if you do not have it |
-| Node.js 22 or later, and pnpm 11 | the explorer only (`repoatlas ui`) | Without them, everything else still works. pnpm can come from `npm install -g pnpm@11` or Node's `corepack` |
+| Node.js 22 or later, and pnpm 11 | building the explorer from source (`repoatlas ui` in a checkout) | Without them, everything else still works. pnpm can come from `npm install -g pnpm@11` or Node's `corepack`. A PyPI installation needs neither |
 | [Claude Code](https://claude.com/claude-code) (`claude`) | connecting it automatically | Any MCP client works; see [Other agents](#other-agents) |
 
 Linux and macOS are supported. On Windows, use WSL.
@@ -156,7 +173,7 @@ Then delete the checkout.
 | Configuration, including the managed root | `~/.config/repoatlas/config.yaml` | `REPOATLAS_CONFIG` |
 | The index | `~/.local/share/repoatlas/atlas.db` | `REPOATLAS_DB` |
 | The local API's connection file | beside the index: `api.json` (`serve`), `ui-api.json` (`ui`) | `REPOATLAS_API_CONNECTION_FILE` |
-| The explorer | `frontend/` in the checkout; its build is `frontend/.next-ui/` | `--frontend`, `REPOATLAS_FRONTEND_DIR` |
+| The explorer | `frontend/` in a checkout, built into `frontend/.next-ui/`; in a PyPI installation, `repoatlas/ui/explorer/` in the package | `--frontend`, `REPOATLAS_FRONTEND_DIR` |
 
 ## Troubleshooting
 
@@ -164,8 +181,8 @@ Then delete the checkout.
 |---|---|
 | `repoatlas: command not found` | `~/.local/bin` is not on PATH. Add `export PATH="$HOME/.local/bin:$PATH"` to your shell's startup file and open a new shell |
 | A command exits with code 3 | Nothing is indexed yet: `repoatlas init <directory>` |
-| `repoatlas ui`: "needs Node.js 22 or later" | Install Node.js 22+ (nodejs.org, or nvm), then run it again |
+| `repoatlas ui`: "needs Node.js 22 or later" | In a checkout the explorer is built from source. Install Node.js 22+ (nodejs.org, or nvm), then run it again |
 | `repoatlas ui`: "port 7318 is already in use" | Another explorer, or a `pnpm dev`, holds it. Stop it or use `repoatlas ui --port 7320` |
-| `repoatlas ui`: "the explorer is not part of this installation" | RepoAtlas was installed from a wheel, which carries no explorer. Install from a checkout, or pass `--frontend <checkout>/frontend` |
-| The explorer shows an old version | `repoatlas ui --rebuild` |
+| `repoatlas ui`: "the explorer is not part of this installation" | This RepoAtlas was built without it. Install the release (`uv tool install symasc-repoatlas`), or pass `--frontend <checkout>/frontend` |
+| The explorer shows an old version | In a checkout, `repoatlas ui --rebuild`. A PyPI installation's explorer is the release's: `uv tool upgrade symasc-repoatlas` |
 | The agent does not see the tools | Restart the agent. `claude mcp get repoatlas` shows what Claude Code has registered |
