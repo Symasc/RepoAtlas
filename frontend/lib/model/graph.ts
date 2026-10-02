@@ -37,7 +37,7 @@ export const FAMILIES: readonly Family[] = ["code", "http", "dependency", "confi
 export type FamilyCounts = Partial<Record<Family, number>>;
 
 const CONFIG_ENTITIES: ReadonlySet<string> = new Set(["env_var", "config"]);
-const CONFIG_EDGES: ReadonlySet<string> = new Set(["READS", "WRITES", "CONFIGURES"]);
+const CONFIG_EDGES: ReadonlySet<string> = new Set(["READS", "WRITES", "CONFIGURES", "GENERATES"]);
 
 export function familyOf(
   kind: LinkKind,

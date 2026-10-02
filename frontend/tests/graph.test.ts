@@ -130,6 +130,7 @@ describe("link families", () => {
     expect(familyOf("observed", "env_var")).toBe("config");
     expect(familyOf("observed", "config")).toBe("config");
     expect(familyOf("observed", null, [{ type: "READS", count: 2 }])).toBe("config");
+    expect(familyOf("observed", null, [{ type: "GENERATES", count: 1 }])).toBe("config");
     expect(familyOf("observed", null, [{ type: "READS", count: 2 }, { type: "IMPORTS", count: 1 }])).toBe("code");
     expect(familyOf("observed", "module", [{ type: "IMPORTS", count: 4 }])).toBe("code");
   });

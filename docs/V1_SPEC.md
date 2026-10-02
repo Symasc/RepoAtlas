@@ -935,6 +935,14 @@ salt execution function references
 
 **Only create relationships that can be supported deterministically.**
 
+Salt pillar reads may cross repositories only when RepoAtlas can establish the Salt installation, root role, and
+environment from an indexed master config or an explicit `salt.installations[].roots` mapping. The consumer's
+state-top and provider's pillar-top must select the same environment and supported static target; the mapped SLS
+and any explicit includes must lead to exactly one definition of the literal pillar key. Similar key names,
+repository names, paths, or environment labels alone are not evidence. The consumer retains its `READS` edge to the
+shared pillar key; a proven provider config definition produces a `GENERATES` edge to the consumer file, which is
+the provider-to-consumer repository-overview direction. Unsupported or ambiguous Salt mappings remain unresolved.
+
 ### 7.6 Jinja
 
 Capture useful relationships:
@@ -1120,14 +1128,12 @@ repo-a DEPENDS_ON repo-b
 - If **two or more** managed repositories provide the same exact name, create no edge at all. Choosing one would be
   a guess, and two repositories genuinely publishing `common-lib` is an ordinary situation.
 
-**Granularity (V1 limit, confirmed by validation).** Cross-repository relationships are established between
-**repositories and packages**, never between symbols. `from common_lib.settings import load_config` in one
-repository does not produce an edge to the `load_config` defined in another, even when that repository is managed
-and does define it; the reference stays in `unresolved_refs`. Resolving a bare package specifier to a file requires
-each ecosystem's own module-resolution rules, and approximating them is exactly the "similar name, assumed
-relationship" this section forbids. The consequence is a recall limit, not a correctness one — a cross-repository
-reference never resolves to the wrong same-named definition — and "which repository provides X?" is answered from
-the dependency graph and from retrieval. A per-ecosystem resolver is V2 work (§22).
+**Granularity.** Package relationships remain repository/package-level, and arbitrary source references are not
+resolved across repositories by symbol-name equality. For example, `from common_lib.settings import load_config`
+does not link to a same-named declaration in another repository without the ecosystem's own package-resolution
+proof. Salt pillar is the narrow exception: its source-level `GENERATES` edge is allowed only when explicit or
+indexed Salt roots, top-file environment/target mappings, and a unique literal key definition prove the path. This
+does not relax the no-similar-name rule for other languages or relationship types.
 
 ---
 

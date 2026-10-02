@@ -41,6 +41,7 @@ import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
+from repoatlas.config.settings import SaltSettings
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
 from repoatlas.graph.http_claims import HttpClaimPlan, plan_http_claims
 from repoatlas.graph.http_crossings import (
@@ -50,6 +51,7 @@ from repoatlas.graph.http_crossings import (
 )
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
+from repoatlas.graph.salt_pillar import resolve_pillar_reads
 from repoatlas.graph.uses import use_resolution
 from repoatlas.graph.uses_link import (
     UsesChangeLog,
@@ -187,9 +189,11 @@ class ReferenceLinker:
         self,
         knowledge: SqliteKnowledgeStore,
         dependencies: SqliteDependencyStore | None = None,
+        salt: SaltSettings | None = None,
     ) -> None:
         self._knowledge = knowledge
         self._dependencies = dependencies
+        self._salt = salt or SaltSettings()
 
     # -- per-file pass -------------------------------------------------------
 
@@ -495,8 +499,15 @@ class ReferenceLinker:
             resolved = 0
             unresolved = 0
             pending: list[UnresolvedRefRecord] = []
+            salt_resolutions = {
+                id(result.claim): result
+                for result in resolve_pillar_reads(self._salt, index, claims, by_id)
+            }
+            salt_crossings: set[tuple[int, int]] = set()
 
             for claim in claims:
+                if _is_salt_mapping_claim(claim):
+                    continue
                 if claim_role(claim) is not None:
                     # Never proven by symbol resolution: decided below, together.
                     pending.append(claim)
@@ -504,6 +515,29 @@ class ReferenceLinker:
                 origin = by_id.get(claim.file_id)
                 if origin is None:
                     unresolved += 1
+                    continue
+                salt_resolution = salt_resolutions.get(id(claim))
+                if salt_resolution is not None:
+                    definition = salt_resolution.definition
+                    if definition.repo_id == origin.repo_id:
+                        edges.append(self._edge(claim, origin, definition.entity_id))
+                    else:
+                        edges.append(
+                            EdgeRecord(
+                                src_id=definition.entity_id,
+                                dst_id=origin.file_entity_id,
+                                type=EdgeType.GENERATES,
+                                confidence=claim.confidence,
+                                repo_id=origin.repo_id,
+                                file_id=origin.file_id,
+                                line_start=claim.line_start,
+                                line_end=claim.line_end,
+                                parser=GLOBAL_PARSER,
+                                resolution=salt_resolution.resolution,
+                            )
+                        )
+                        salt_crossings.add((definition.repo_id, origin.repo_id))
+                    resolved += 1
                     continue
                 edge = self._resolve(claim, origin, index, by_file.get(claim.file_id, []))
                 if edge is None:
@@ -572,7 +606,7 @@ class ReferenceLinker:
             uses=uses_plan,
             resolved=resolved,
             unresolved=unresolved,
-            cross_repository=cross,
+            cross_repository=cross + len(salt_crossings),
             claims_considered=len(claims) + uses_plan.work.claims_examined,
             files_indexed=len(file_rows),
             symbols_indexed=len(symbols),
@@ -944,7 +978,7 @@ def plan_repository_http(knowledge: SqliteKnowledgeStore, repo_id: int) -> Repos
     claims = [
         claim
         for claim in knowledge.list_unresolved_refs(repo_id, pending_only=True)
-        if claim_role(claim) is not None
+        if claim_role(claim) is not None and not _is_salt_mapping_claim(claim)
     ]
     served = knowledge.list_served_routes(exclude_parser=GLOBAL_PARSER, repo_id=repo_id)
     index = ResolutionIndex.build(files, symbols)
@@ -996,6 +1030,12 @@ def _is_module_fact(claim: UnresolvedRefRecord) -> bool:
     if not claim.meta_json or MODULE_RESOLUTION not in claim.meta_json:
         return False
     return bool(json.loads(claim.meta_json).get(MODULE_RESOLUTION))
+
+
+def _is_salt_mapping_claim(claim: UnresolvedRefRecord) -> bool:
+    if not claim.meta_json:
+        return False
+    return json.loads(claim.meta_json).get("salt_fact") in {"master_root", "top_entry"}
 
 
 def _uses_detail(plan: UsesPlan) -> str:

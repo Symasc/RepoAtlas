@@ -1518,8 +1518,46 @@ resolves every use: a first index, a database from before this stage, a run that
 | script / file path | joined against the referencing file's directory, then matched to a managed repository — including paths that climb out of one repository into another |
 | Salt `include:` | dotted state path → `x/y.sls` or `x/y/init.sls` |
 | Salt requisite | state ID, unique within the repository |
+| Salt master roots / `top.sls` | indexed root declarations and literal environment/target/SLS mappings |
 | `salt://` source | unique matching managed path, at reduced confidence |
-| `pillar[...]` key | the config key that defines it, searched only in files this one provably includes |
+| `pillar[...]` key | a unique config key in the consumer's direct includes or its explicitly mapped Salt pillar roots |
+
+Cross-repository pillar resolution requires a Salt installation association. An indexed master config supplies
+`file_roots` and `pillar_roots`; a root whose absolute path is inside a managed repository is mapped by exact path.
+Roots outside managed checkouts require an explicit `salt.installations[].roots` setting that names the repository,
+repository-relative path, root role, environment, and corresponding master `salt_path`. When the master file is
+indexed, that mapping must agree with its parsed root declarations. A missing/unindexed master file permits the
+explicit mapping as the evidence source; RepoAtlas never scans host Salt configuration implicitly.
+
+For roots whose Salt paths are outside their source checkouts, the settings shape is:
+
+```yaml
+salt:
+  installations:
+    - name: production
+      master_config:
+        repository: operations
+        path: etc/salt/master
+      roots:
+        - repository: deployment
+          path: pillar
+          role: pillar
+          environment: base
+          salt_path: /srv/pillar/base
+        - repository: application
+          path: states
+          role: state
+          environment: base
+          salt_path: /srv/salt/base
+```
+
+`top.sls` claims retain environment, matcher, selector, SLS name, and source line. Pillar resolution currently
+accepts only static `glob` selectors that are identical on the consumer's state top and the provider's pillar top
+(`*` or an exact minion id), and requires exactly one matching config definition after following explicit SLS
+includes inside the mapped pillar root. Unsupported matchers, environments, roots, or ambiguous definitions stay
+unresolved. The consumer's `READS` edge remains attached to the shared `pillar:<key>` node. A source-backed
+`GENERATES` edge from the provider's config definition to the consumer file carries the complete master/top/read
+provenance and is the directed provider → consumer fact aggregated by the repository overview.
 
 #### `from . import helper` names a module
 
@@ -4121,7 +4159,7 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | FACTS = retrieved evidence, HYPOTHESES = model findings | Split model findings by a confidence threshold | The model is never a source of facts (§2); mapping its output to "hypothesis" and retrieval to "fact" states that structurally instead of by numeric convention |
 | tree-sitter promoted to a core dependency | Keep it behind the `parsers` extra | Six of the eight V1 languages need it; a parser that silently does not exist would make the index quietly incomplete, which is worse than one dependency (the same reasoning as `httpx`) |
 | Jinja neutralized with same-length filler | Strip Jinja, or blank whole lines | Preserving every character position keeps YAML line *and* column marks identical to the original file, so a Salt fact cites the line a human would point at. Stripping shifts every position after the first `{{` |
-| An `.sls` top-level key is a state or config data, decided structurally | Treat every `.sls` as states, or infer from the path | Salt itself distinguishes them only through the top file, which RepoAtlas cannot read. What *is* in the text is whether the key declares a `module.function`; that test is deterministic and is what lets `pillar['service']['host']` resolve to the line defining it |
+| An `.sls` top-level key is a state or config data, decided structurally | Treat every `.sls` as states, or infer from the path | A top-file mapping identifies state-vs-pillar role only when its installation/root role is known. The structural `module.function` test remains deterministic for file-local parsing; cross-repository pillar links additionally require indexed master roots or an explicit RepoAtlas root mapping, matching top-file environment/target claims, and one exact key definition |
 | Two link passes, the global one idempotent by delete-and-rebuild | Incrementally patch cross-repository edges | Cross-repository edges depend on repositories the current sync never touched. Rebuilding from the standing claims is the only cheap way to keep "incremental sync equals full reindex" true for them (§9) |
 | `USES` edges kept and replaced per consumer file | Rebuild them with the rest of the global pass | Rebuilding every use doubled a one-file sync. What a use reads is known exactly — its own claims, the export tables it traced (recorded in `use_reads`), its repository's files and module facts, the package rows a link consults — so a change reaches a known set of files and the invariant still holds; anything the sync cannot vouch for makes it resolve every use (§6) |
 | A workspace member's entry in build output mapped to its source for `USES`; a declaration naming something else refuses the member | Leave such entries unresolved inside a repository, or accept a member only under a `workspace:` declaration | The member's own tsconfig is the same evidence a package link already trusts, and ignoring it left every use of a package whose entries are all build output unresolved. A declaration is read as the target it names: only an alias of another name, a path to another directory or a remote source refuses the member, never a protocol as such, and nothing assumes that a workspace ends where a repository does (§6) |
@@ -4131,7 +4169,7 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | Parsers reading with the interpreter's own standard library (`ast`, `tomllib`) carry its major and minor version | A fixed parser version | What `ast` accepts moves between interpreter versions, so an index written by one interpreter would keep facts another would not produce. The facts version is one string, so an interpreter change reparses every file once, the cost of any parser change (§6) |
 | A Python import of a module another project ships joins it only on the importer's own `pyproject.toml` declaration of that project's distribution: a uv `path` or `workspace = true` source (the project's own, else its workspace root's) pins the provider, otherwise exactly one indexed project may provide the name | Turn the distribution name into a module name (`my-dist` → `my_dist`), join any project that ships the module, or fall back to the name when a pin fails | A distribution name is not an import name, and a project whose module is unrelated to its name is ordinary. The module is found on disk in the provider's own roots; the declaration proves the dependency and must name the project that ships it, so a shadow shipping the same module is never joined. A uv source applies to a member as uv applies it, inherited unless overridden, and a workspace pin needs the indexed workspace's own `members` and `exclude`. A pin that fails, a Poetry table or a direct reference joins nothing. Across repositories the edge carries the crossing a TypeScript package link carries, and the change log and the coarse dependents read PyPI rows exactly as they read npm's (§6) |
 | Cross-file symbol references resolved only through a written import | Resolve on name equality within the repository | Name equality is not evidence (V1_SPEC §2). The import is the proof, and it is already in the file, so requiring it costs nothing and removes a whole class of wrong edges |
-| `salt://` sources resolved at confidence < 1.0 | Resolve at full confidence, or not at all | `file_roots` is not readable, so no `salt://` mapping is ever proven. Refusing to resolve would lose a genuinely useful link; resolving silently at 1.0 would overstate it. The confidence value carries the distinction |
+| `salt://` sources resolved at confidence < 1.0 | Resolve at full confidence, or not at all | Master `file_roots` values do not identify a source checkout unless an exact managed-root association is available. The existing unique-path `salt://` match remains an inference, so its reduced confidence distinguishes it from a proven top-file/pillar mapping |
 | `unresolved_refs` retained after a successful resolution | Delete rows once resolved | The row is the file's durable claim, not a work queue. Keeping it is what makes the global pass rebuildable and what lets a repository added later gain its edges without a reparse |
 | A tier order re-imposed before the budget | Document the rule and trust fusion to have kept it | Deduplication sits between fusion and the budget and can drop the candidate that anchored a file. A guarantee that holds only while every stage remembers it is not a guarantee, and the budget is spent immediately after — so a wrong order would also starve deterministic evidence out of the answer (§10) |
 | Diagnostic and symbol line numbers clamped to the file | Report the parser's raw mark | A YAML end-of-stream mark sits one line past the last line. A citation to a line that does not exist is a fabrication, however small, and §11 makes provenance a guarantee rather than a best effort |
