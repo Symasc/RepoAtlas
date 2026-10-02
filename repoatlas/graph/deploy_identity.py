@@ -74,6 +74,7 @@ CONTROLLED = "its template renders it only under a condition or loop"
 RELEASE_UNBOUND = "no release of its chart is bound by a literal name"
 NAME_UNREAD = "its name is not read"
 NOT_ONE_APPLICATION = "its repository's code is not one traced application"
+NOTHING_SERVED = "its repository's code serves no route"
 
 _PYTHON = re.compile(r"python(\d+(\.\d+)?)?")
 _PYTHON_FLAGS = frozenset({"-u", "-O", "-OO", "-B", "-E", "-s", "-S", "-I"})
@@ -492,7 +493,7 @@ class _Charts:
             return RELEASE_UNBOUND
         served = self._routes[origin.repo_id]
         if not served:
-            return NO_ROUTES
+            return NOTHING_SERVED
         if origin.repo_id in self._untraced or len(self._roots[origin.repo_id]) != 1:
             return NOT_ONE_APPLICATION
         outcome = NAME_UNREAD
