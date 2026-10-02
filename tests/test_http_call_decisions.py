@@ -218,7 +218,8 @@ def test_a_request_s_ref_does_not_depend_on_another_request(
         edit(root, "web", "src/main.ts", changed)
         sync_all(built, root)
         after = refs()
-        assert len(set(after.values()) & set(before.values())) == 1, changed
+        # The root left alone keeps its own ref; a ref moving to the other root is not it.
+        assert sum(after[variant] == before[variant] for variant in before) == 1, changed
     edit(root, "web", "src/main.ts", TWINNED)
     sync_all(built, root)
     assert refs() == before
