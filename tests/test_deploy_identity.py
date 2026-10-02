@@ -167,8 +167,8 @@ def test_the_final_stage_s_workdir_copies_and_command_are_recorded() -> None:
 @pytest.mark.parametrize(
     ("text", "argv"),
     [
-        ("FROM x\nCMD python3 app.py && echo done\n", None),  # an operator joins two programs
-        ("FROM x\nCMD python3 $APP\n", None),  # computed
+        ("FROM x\nWORKDIR /srv\nCMD python3 app.py && echo done\n", None),  # an operator
+        ("FROM x\nWORKDIR /srv\nCMD python3 $APP\n", None),  # computed
         ('FROM x\nCMD ["python3", "$APP"]\n', ["python3", "$APP"]),  # exec form is verbatim
     ],
 )
@@ -183,6 +183,8 @@ def test_a_stage_without_a_command_keeps_its_copies_for_a_service_s_command() ->
     final = {"copies": [[["."], "/srv", 4, False, False]], "entrypoint": None, "cmd": None}
     assert _command('FROM x AS a\nCMD ["run"]\nFROM y\nCOPY . /srv\n') == final
     assert _command("FROM x\nRUN make\n") is None
+    # A stage whose every value is computed states nothing a service could use.
+    assert _command("FROM x\nCMD python3 $APP\nCOPY $SRC /srv\n") is None
 
 
 # -- what the container runs ---------------------------------------------------------------
