@@ -54,7 +54,6 @@ def corpus_settings(state: Path) -> Settings:
     return Settings.model_validate(
         {
             "storage": {"database": str(state / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
 

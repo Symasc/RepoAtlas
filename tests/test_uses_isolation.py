@@ -86,7 +86,6 @@ def pair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Work
         settings = Settings.model_validate(
             {
                 "storage": {"database": str(tmp_path / tag / "atlas.db")},
-                "embeddings": {"provider": "hashing", "dim": 128},
             }
         )
         workspace = open_workspace(settings=settings, require_root=False)

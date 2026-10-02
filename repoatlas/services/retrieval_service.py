@@ -45,9 +45,9 @@ function's limits are its own rather than a description of what an agent gets.
 :mod:`repoatlas.services`). ``locate_diagnostic`` has no caller in the shipped
 CLI at all: its callers are the evaluation runner and the adversarial suites,
 for which a plain :class:`~repoatlas.models.evidence.EvidenceSet` under fixed,
-budget-free bounds is exactly the right baseline --- the runner compares
-retrieval quality across embedding providers and must not have its caps moved
-by a budget policy it is not measuring.
+budget-free bounds is exactly the right baseline --- the runner measures
+retrieval quality and must not have its caps moved by a budget policy it is not
+measuring.
 """
 
 from __future__ import annotations

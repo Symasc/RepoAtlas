@@ -270,12 +270,6 @@ def main() -> int:  # pragma: no cover - operator entry point
     parser = argparse.ArgumentParser(description="Run the RepoAtlas retrieval evaluation.")
     parser.add_argument("--detail", action="store_true", help="print every returned ranking")
     parser.add_argument("--category", help="restrict to one category")
-    parser.add_argument(
-        "--provider",
-        default="hashing",
-        choices=("hashing", "fastembed"),
-        help="embedding backend; 'fastembed' downloads and runs the real model",
-    )
     arguments = parser.parse_args()
 
     from tests.evaluation.harness import evaluation_workspace
@@ -284,7 +278,7 @@ def main() -> int:  # pragma: no cover - operator entry point
     if arguments.category:
         cases = [case for case in cases if case.category == arguments.category]
 
-    with evaluation_workspace(arguments.provider) as (workspace, root):
+    with evaluation_workspace() as (workspace, root):
         outcomes = run_all(workspace, root, cases)
 
     print(report(outcomes))

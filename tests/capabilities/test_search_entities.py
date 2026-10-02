@@ -193,7 +193,7 @@ def test_a_named_path_outranks_a_semantically_attractive_neighbour(
         len(response.evidence),
     )
     assert response.evidence.index(named[0]) < first_associative
-    assert named[0].match < MatchClass.SIMILAR
+    assert named[0].match < MatchClass.LEXICAL
 
 
 def test_duplicate_display_names_are_distinguished_by_slug(initialized: Workspace) -> None:

@@ -17,7 +17,9 @@ transaction and was none: every statement committed separately.
 
 Everything here uses real SQLite, real files under the production PRAGMAs, real
 historical schemas built by applying the real migrations, and real subprocesses
-for concurrency and crash cases.
+for concurrency and crash cases. The committed schema is a single migration, so
+the upgrade cases move from it to :mod:`tests.adversarial.migration_probe`, a
+test-only second migration with the shape that broke before.
 """
 
 from __future__ import annotations
@@ -34,7 +36,6 @@ import pytest
 from repoatlas.errors import IndexNotRecognizedError, IndexSchemaError, MigrationError
 from repoatlas.storage.sqlite.database import SCHEMA_VERSION, open_database
 from repoatlas.storage.sqlite.migrator import (
-    Migration,
     apply_migrations,
     load_migrations,
     resume_point,
@@ -42,10 +43,26 @@ from repoatlas.storage.sqlite.migrator import (
     split_statements,
     user_version,
 )
+from tests.adversarial import migration_probe
+from tests.adversarial.migration_probe import PROBE
 
 pytestmark = pytest.mark.adversarial
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: The committed schema's version, which the upgrade cases start from.
+CURRENT = PROBE.version - 1
+#: The version an upgrade reaches once the probe is installed.
+PROBED = PROBE.version
+
+#: Prepended to every subprocess that has to see the probe migration.
+INSTALL = "from tests.adversarial.migration_probe import install; install()\n"
+
+
+@pytest.fixture
+def probed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the probe migration part of the chain for this test."""
+    migration_probe.patch(monkeypatch.setattr)
 
 
 # == helpers =================================================================
@@ -70,14 +87,14 @@ def connect(path: Path) -> sqlite3.Connection:
 
 
 def historical(path: Path, version: int) -> sqlite3.Connection:
-    """A genuine database at ``version``, built by applying the real migrations.
+    """A genuine database at ``version``, built by applying the migrations.
 
-    Deliberately not ``PRAGMA user_version = 4`` stamped onto the current schema:
-    that fixture has the new columns already and would let a vacuous upgrade test
+    Deliberately not ``PRAGMA user_version = 1`` stamped onto the probed schema:
+    that fixture has the new column already and would let a vacuous upgrade test
     pass while proving nothing.
     """
     connection = connect(path)
-    for migration in load_migrations():
+    for migration in migration_probe.chain():
         if migration.version > version:
             break
         connection.execute("BEGIN IMMEDIATE")
@@ -88,20 +105,16 @@ def historical(path: Path, version: int) -> sqlite3.Connection:
     return connection
 
 
-def migration(version: int) -> Migration:
-    return next(m for m in load_migrations() if m.version == version)
-
-
 def shape(path: Path) -> dict[str, object]:
     connection = connect(path)
     try:
         columns = [r[1] for r in connection.execute("PRAGMA table_xinfo(repositories)")]
         return {
             "user_version": user_version(connection),
-            "slug": "slug" in columns,
-            "slug_index": bool(
+            "probe": "probe" in columns,
+            "probe_index": bool(
                 connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE name = 'idx_repositories_slug'"
+                    "SELECT 1 FROM sqlite_master WHERE name = 'idx_repositories_probe'"
                 ).fetchall()
             ),
             "integrity": connection.execute("PRAGMA integrity_check").fetchone()[0],
@@ -111,9 +124,9 @@ def shape(path: Path) -> dict[str, object]:
         connection.close()
 
 
-def run_openers(path: Path, count: int) -> list[str]:
+def run_openers(path: Path, count: int, *, probed: bool = False) -> list[str]:
     """Open the same database from ``count`` real, concurrent processes."""
-    script = (
+    script = (INSTALL if probed else "") + (
         "import sys, pathlib\n"
         "from repoatlas.storage.sqlite.database import open_database\n"
         "try:\n"
@@ -256,7 +269,7 @@ def test_splitting_survives_trigger_bodies() -> None:
     INSERT ...` fragment plus a stray `END`, which is why the splitter asks
     SQLite where statements end instead.
     """
-    first = migration(1)
+    (first,) = load_migrations()
     assert any("CREATE TRIGGER" in s.upper() for s in first.statements)
     for statement in first.statements:
         if "CREATE TRIGGER" in statement.upper():
@@ -296,24 +309,26 @@ def test_a_fresh_database_reaches_the_current_schema(tmp_path: Path) -> None:
         database.close()
 
 
-@pytest.mark.parametrize("start", [0, 1, 2, 3, 4])
+@pytest.mark.usefixtures("probed")
+@pytest.mark.parametrize("start", [0, CURRENT])
 def test_a_database_any_number_of_versions_behind_upgrades(tmp_path: Path, start: int) -> None:
     path = tmp_path / f"v{start}.db"
     historical(path, start).close()
     database = open_database(path)
     try:
-        assert user_version(database.connection) == SCHEMA_VERSION
+        assert user_version(database.connection) == PROBED
     finally:
         database.close()
 
 
+@pytest.mark.usefixtures("probed")
 def test_fresh_and_upgraded_and_recovered_schemas_are_identical(tmp_path: Path) -> None:
     """§21: every route to the current schema must arrive at the same schema."""
     fresh = open_database(tmp_path / "fresh.db")
     fingerprint = schema_fingerprint(fresh.connection)
     fresh.close()
 
-    for label, version in (("v1", 1), ("v2", 2), ("v3", 3), ("v4", 4)):
+    for label, version in ((f"v{CURRENT}", CURRENT),):
         path = tmp_path / f"{label}.db"
         historical(path, version).close()
         upgraded = open_database(path)
@@ -322,8 +337,8 @@ def test_fresh_and_upgraded_and_recovered_schemas_are_identical(tmp_path: Path) 
 
     # and the recovered-from-interruption route
     path = tmp_path / "recovered.db"
-    connection = historical(path, 4)
-    connection.execute("ALTER TABLE repositories ADD COLUMN slug TEXT NOT NULL DEFAULT ''")
+    connection = historical(path, CURRENT)
+    connection.execute("ALTER TABLE repositories ADD COLUMN probe TEXT NOT NULL DEFAULT ''")
     connection.commit()
     connection.close()
     recovered = open_database(path)
@@ -334,26 +349,27 @@ def test_fresh_and_upgraded_and_recovered_schemas_are_identical(tmp_path: Path) 
 # == 4. failure at every point ===============================================
 
 
+@pytest.mark.usefixtures("probed")
 @pytest.mark.parametrize("point", [0, 1, 2, "stamp", "commit"])
 def test_a_failure_anywhere_in_a_migration_rolls_the_whole_thing_back(
     tmp_path: Path, point: object
 ) -> None:
     """§8: prior schema intact, no partial effects, version unchanged, retry works."""
     path = tmp_path / f"fail{point}.db"
-    connection = historical(path, 4)
+    connection = historical(path, CURRENT)
     connection.execute("INSERT INTO repositories (name, path) VALUES ('common', '/a/common')")
     connection.commit()
     connection.close()
 
     working = connect(path)
     with pytest.raises(RuntimeError):
-        apply_migrations(FailAt(working, point), [migration(5)])  # type: ignore[arg-type]
+        apply_migrations(FailAt(working, point), [PROBE])  # type: ignore[arg-type]
     working.close()
 
     assert shape(path) == {
-        "user_version": 4,
-        "slug": False,
-        "slug_index": False,
+        "user_version": CURRENT,
+        "probe": False,
+        "probe_index": False,
         "integrity": "ok",
         "foreign_key_rows": 0,
     }
@@ -361,26 +377,27 @@ def test_a_failure_anywhere_in_a_migration_rolls_the_whole_thing_back(
     # the data is still there, and the retry succeeds
     database = open_database(path)
     try:
-        assert user_version(database.connection) == SCHEMA_VERSION
+        assert user_version(database.connection) == PROBED
         assert database.connection.execute("SELECT COUNT(*) FROM repositories").fetchone()[0] == 1
     finally:
         database.close()
 
 
+@pytest.mark.usefixtures("probed")
 def test_a_statement_failure_is_a_domain_error_not_a_raw_sqlite_error(tmp_path: Path) -> None:
     path = tmp_path / "conflict.db"
-    connection = historical(path, 4)
+    connection = historical(path, CURRENT)
     # Something else already owns the name the migration's index needs.
-    connection.execute("CREATE TABLE idx_repositories_slug (x INTEGER)")
+    connection.execute("CREATE TABLE idx_repositories_probe (x INTEGER)")
     connection.commit()
 
     try:
         with pytest.raises(MigrationError) as caught:
-            apply_migrations(connection, load_migrations())
-        assert "migration 005" in str(caught.value).lower()
+            apply_migrations(connection, migration_probe.chain())
+        assert f"migration {PROBED:03d}" in str(caught.value).lower()
     finally:
         connection.close()
-    assert shape(path)["user_version"] == 4
+    assert shape(path)["user_version"] == CURRENT
 
     # Through `open_database` this schema no longer reaches the migrator at all:
     # a database carrying no RepoAtlas identity, whose shape is not one the
@@ -390,20 +407,21 @@ def test_a_statement_failure_is_a_domain_error_not_a_raw_sqlite_error(tmp_path: 
     # modified the header (ARCHITECTURE.md §3).
     with pytest.raises(IndexSchemaError):
         open_database(path).close()
-    assert shape(path)["user_version"] == 4
+    assert shape(path)["user_version"] == CURRENT
 
 
 # == 5. recovery of databases the vulnerable build damaged ===================
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 4, 5])
+@pytest.mark.usefixtures("probed")
+@pytest.mark.parametrize("version", [CURRENT, PROBED])
 def test_every_interruption_point_of_every_migration_recovers(tmp_path: Path, version: int) -> None:
-    """§18: the vulnerable mechanism affected *all* migrations, not only 005.
+    """§18: the vulnerable mechanism affected *all* migrations, not only one.
 
     For each migration, every committed prefix is built and then opened. Each
     must reach the current schema with integrity intact.
     """
-    entry = migration(version)
+    entry = next(m for m in migration_probe.chain() if m.version == version)
     for cut in range(len(entry.statements) + 1):
         path = tmp_path / f"m{version}_c{cut}.db"
         connection = historical(path, version - 1)
@@ -414,7 +432,7 @@ def test_every_interruption_point_of_every_migration_recovers(tmp_path: Path, ve
 
         database = open_database(path)
         try:
-            assert user_version(database.connection) == SCHEMA_VERSION, (version, cut)
+            assert user_version(database.connection) == PROBED, (version, cut)
             assert database.connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok", (
                 version,
                 cut,
@@ -424,34 +442,35 @@ def test_every_interruption_point_of_every_migration_recovers(tmp_path: Path, ve
             database.close()
 
 
+@pytest.mark.usefixtures("probed")
 def test_a_fully_applied_but_unstamped_migration_is_not_reapplied(tmp_path: Path) -> None:
     """§16: the whole shape is verified, not one column.
 
-    The resume point lands on 005's trailing `DELETE` rather than past it, and
+    The resume point lands on the trailing `DELETE` rather than past it, and
     that is the design rather than an off-by-one: a data-only statement leaves no
     schema trace, so no shape comparison can distinguish "before" it from
     "after" it. Recovery therefore replays it, which is safe exactly because it
     is idempotent — the property every statement with no detectable effect must
     have. The DDL before it *is* recognized as applied and is not repeated, which
-    is what would otherwise raise `duplicate column name: slug`.
+    is what would otherwise raise `duplicate column name: probe`.
     """
     path = tmp_path / "unstamped.db"
-    connection = historical(path, 4)
-    for statement in migration(5).statements:
+    connection = historical(path, CURRENT)
+    for statement in PROBE.statements:
         connection.execute(statement)
     connection.commit()
 
-    statements = migration(5).statements
-    start = resume_point(connection, migration(5), load_migrations())
+    statements = PROBE.statements
+    start = resume_point(connection, PROBE, migration_probe.chain())
     assert start == len(statements) - 1
     assert "DELETE" in statements[start].upper(), "only the data-only tail may be replayed"
     connection.close()
 
     database = open_database(path)
     try:
-        assert user_version(database.connection) == SCHEMA_VERSION
+        assert user_version(database.connection) == PROBED
         columns = [r[1] for r in database.connection.execute("PRAGMA table_xinfo(repositories)")]
-        assert columns.count("slug") == 1
+        assert columns.count("probe") == 1
     finally:
         database.close()
 
@@ -460,7 +479,7 @@ def test_every_statement_with_no_detectable_effect_is_idempotent() -> None:
     """The obligation the recovery design creates, checked against every migration.
 
     A statement whose effect leaves no schema trace may be replayed during
-    recovery. Today that is one `DELETE` with a `WHERE` clause. If a future
+    recovery. Today there is none in the committed schema. If a future
     migration adds an `INSERT` or an `UPDATE`, this fails and the author has to
     decide what replay means, rather than discovering it in production.
     """
@@ -468,7 +487,7 @@ def test_every_statement_with_no_detectable_effect_is_idempotent() -> None:
 
     connection = sqlite3.connect(":memory:")
     try:
-        for entry in load_migrations():
+        for entry in migration_probe.chain():
             for statement in entry.statements:
                 if statement_state(connection, statement) != OPAQUE:
                     continue
@@ -478,44 +497,46 @@ def test_every_statement_with_no_detectable_effect_is_idempotent() -> None:
         connection.close()
 
 
+@pytest.mark.usefixtures("probed")
 def test_an_unrecognized_schema_is_refused_rather_than_forced(tmp_path: Path) -> None:
     """§17: a schema that merely overlaps a migration is not one that ran."""
     path = tmp_path / "strange.db"
-    connection = historical(path, 4)
+    connection = historical(path, CURRENT)
     # The column exists but with the wrong type, and the index is absent: no
     # interrupted migration produces this.
-    connection.execute("ALTER TABLE repositories ADD COLUMN slug INTEGER NOT NULL DEFAULT 0")
+    connection.execute("ALTER TABLE repositories ADD COLUMN probe INTEGER NOT NULL DEFAULT 0")
     connection.commit()
 
     try:
         with pytest.raises(MigrationError):
-            apply_migrations(connection, load_migrations())
+            apply_migrations(connection, migration_probe.chain())
     finally:
         connection.close()
-    assert shape(path)["user_version"] == 4, "a refused migration must change nothing"
+    assert shape(path)["user_version"] == CURRENT, "a refused migration must change nothing"
 
     with pytest.raises(IndexNotRecognizedError):
         open_database(path).close()
-    assert shape(path)["user_version"] == 4
+    assert shape(path)["user_version"] == CURRENT
 
 
+@pytest.mark.usefixtures("probed")
 def test_an_index_with_a_different_definition_is_refused(tmp_path: Path) -> None:
     path = tmp_path / "wrongindex.db"
-    connection = historical(path, 4)
-    connection.execute("ALTER TABLE repositories ADD COLUMN slug TEXT NOT NULL DEFAULT ''")
-    connection.execute("CREATE INDEX idx_repositories_slug ON repositories (name)")
+    connection = historical(path, CURRENT)
+    connection.execute("ALTER TABLE repositories ADD COLUMN probe TEXT NOT NULL DEFAULT ''")
+    connection.execute("CREATE INDEX idx_repositories_probe ON repositories (name)")
     connection.commit()
 
     try:
         with pytest.raises(MigrationError):
-            apply_migrations(connection, load_migrations())
+            apply_migrations(connection, migration_probe.chain())
     finally:
         connection.close()
-    assert shape(path)["user_version"] == 4
+    assert shape(path)["user_version"] == CURRENT
 
     with pytest.raises(IndexNotRecognizedError):
         open_database(path).close()
-    assert shape(path)["user_version"] == 4
+    assert shape(path)["user_version"] == CURRENT
 
 
 # == 6. concurrency ==========================================================
@@ -534,13 +555,13 @@ def test_concurrent_openers_of_a_fresh_database_all_succeed(tmp_path: Path, coun
 def test_concurrent_openers_of_an_old_database_all_succeed(tmp_path: Path, count: int) -> None:
     """The case the review reproduced: every process sees a valid old schema
     first, so every process believes it must migrate."""
-    path = tmp_path / f"v4_{count}.db"
-    historical(path, 4).close()
-    results = run_openers(path, count)
+    path = tmp_path / f"old_{count}.db"
+    historical(path, CURRENT).close()
+    results = run_openers(path, count, probed=True)
     assert all(r.startswith("OK") for r in results), results
-    assert all(r.split()[1] == str(SCHEMA_VERSION) for r in results), results
+    assert all(r.split()[1] == str(PROBED) for r in results), results
     state = shape(path)
-    assert state["user_version"] == SCHEMA_VERSION
+    assert state["user_version"] == PROBED
     assert state["integrity"] == "ok"
     assert state["foreign_key_rows"] == 0
 
@@ -549,7 +570,7 @@ def test_exactly_one_process_applies_the_migration(tmp_path: Path) -> None:
     """§6: the loser re-reads the version inside its own write transaction and
     finds the work already done, rather than repeating it."""
     path = tmp_path / "once.db"
-    connection = historical(path, 4)
+    connection = historical(path, CURRENT)
     for _ in range(3):
         connection.execute(
             "INSERT INTO entities (type, key, name) VALUES ('repository', ?, 'r')", (f"repo:{_}",)
@@ -557,17 +578,18 @@ def test_exactly_one_process_applies_the_migration(tmp_path: Path) -> None:
     connection.commit()
     connection.close()
 
-    results = run_openers(path, 6)
+    results = run_openers(path, 6, probed=True)
     assert all(r.startswith("OK") for r in results), results
     check = connect(path)
     try:
-        # 005 deletes global repository entities. Applied twice it would still be
-        # zero, so the durable evidence of single application is the schema: one
-        # slug column and one index, which a second application could not add.
+        # The probe deletes global repository entities. Applied twice it would
+        # still be zero, so the durable evidence of single application is the
+        # schema: one probe column and one index, which a second application
+        # could not add.
         columns = [r[1] for r in check.execute("PRAGMA table_xinfo(repositories)")]
-        assert columns.count("slug") == 1
+        assert columns.count("probe") == 1
         indexes = check.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_repositories_slug'"
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_repositories_probe'"
         ).fetchone()[0]
         assert indexes == 1
     finally:
@@ -577,17 +599,17 @@ def test_exactly_one_process_applies_the_migration(tmp_path: Path) -> None:
 def test_a_waiting_opener_observes_the_finished_migration(tmp_path: Path) -> None:
     """§13/§23: the second process waits, then sees the new schema."""
     path = tmp_path / "wait.db"
-    historical(path, 4).close()
+    historical(path, CURRENT).close()
 
     holder = connect(path)
     holder.execute("BEGIN IMMEDIATE")
-    for statement in migration(5).statements:
+    for statement in PROBE.statements:
         holder.execute(statement)
 
     # The waiter announces the first statement it blocks on. SQLite's trace
     # callback fires as a statement starts, before it asks for the lock the holder
     # has, so the announcement means the waiter is queued: no head start to guess at.
-    script = (
+    script = INSTALL + (
         "import sys, pathlib, sqlite3\n"
         "real = sqlite3.connect\n"
         "announced = []\n"
@@ -618,12 +640,12 @@ def test_a_waiting_opener_observes_the_finished_migration(tmp_path: Path) -> Non
     assert announced == "WAITING", announced
     assert waiter.poll() is None, "the second opener should still be waiting"
 
-    holder.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    holder.execute(f"PRAGMA user_version = {PROBED}")
     holder.commit()
     holder.close()
 
     out = waiter.communicate(timeout=30)[0].strip()
-    assert out == f"OK {SCHEMA_VERSION}", out
+    assert out == f"OK {PROBED}", out
 
 
 def test_a_reader_of_a_current_database_is_not_blocked_by_a_writer(tmp_path: Path) -> None:
@@ -648,19 +670,19 @@ def test_a_reader_of_a_current_database_is_not_blocked_by_a_writer(tmp_path: Pat
 # == 7. process death ========================================================
 
 
+@pytest.mark.usefixtures("probed")
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGKILL])
 def test_a_killed_migration_leaves_the_previous_schema_usable(tmp_path: Path, sig: int) -> None:
     """§25: SQLite's own crash recovery does this. No custom cleanup exists, and
     none should — a stale-lock file would be one more thing to get wrong."""
     path = tmp_path / f"kill{sig}.db"
-    historical(path, 4).close()
+    historical(path, CURRENT).close()
 
     script = (
         "import sys, pathlib, sqlite3, time\n"
-        "from repoatlas.storage.sqlite.migrator import load_migrations\n"
+        "from tests.adversarial.migration_probe import PROBE as m\n"
         "c = sqlite3.connect(sys.argv[1], isolation_level='DEFERRED')\n"
         "c.execute('PRAGMA journal_mode = WAL')\n"
-        "m = [m for m in load_migrations() if m.version == 5][0]\n"
         "c.execute('BEGIN IMMEDIATE')\n"
         "[c.execute(s) for s in m.statements]\n"
         "print('READY', flush=True)\n"
@@ -679,14 +701,14 @@ def test_a_killed_migration_leaves_the_previous_schema_usable(tmp_path: Path, si
     victim.wait(timeout=30)
 
     state = shape(path)
-    assert state["user_version"] == 4
-    assert state["slug"] is False
+    assert state["user_version"] == CURRENT
+    assert state["probe"] is False
     assert state["integrity"] == "ok"
     assert state["foreign_key_rows"] == 0
 
     database = open_database(path)
     try:
-        assert user_version(database.connection) == SCHEMA_VERSION
+        assert user_version(database.connection) == PROBED
     finally:
         database.close()
 
@@ -694,10 +716,11 @@ def test_a_killed_migration_leaves_the_previous_schema_usable(tmp_path: Path, si
 # == 8. data =================================================================
 
 
+@pytest.mark.usefixtures("probed")
 def test_representative_indexed_state_survives_the_upgrade(tmp_path: Path) -> None:
     """§22: migrations are not only schemas."""
     path = tmp_path / "data.db"
-    connection = historical(path, 4)
+    connection = historical(path, CURRENT)
     connection.execute(
         "INSERT INTO repositories (name, path, branch, head_sha) "
         "VALUES ('common', '/teamA/common', 'main', 'abc')"
@@ -738,7 +761,7 @@ def test_representative_indexed_state_survives_the_upgrade(tmp_path: Path) -> No
         assert execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
         assert execute("SELECT value FROM meta WHERE key = 'probe'").fetchone()[0] == "kept"
         # The symbol and env entities survive; only the global repository nodes
-        # are dropped, which is what migration 005 exists to do.
+        # are dropped, which is what the probe's data-only tail does.
         kinds = {r[0] for r in execute("SELECT DISTINCT type FROM entities")}
         assert kinds == {"symbol", "env"}
         assert execute("PRAGMA integrity_check").fetchone()[0] == "ok"
@@ -756,7 +779,7 @@ def test_the_transaction_is_held_for_every_statement(tmp_path: Path) -> None:
     plausible. One observation before `COMMIT` cannot tell those apart.
     """
     path = tmp_path / "held.db"
-    historical(path, 4).close()
+    historical(path, CURRENT).close()
 
     connection = connect(path)
     observed: list[bool] = []
@@ -789,7 +812,7 @@ def test_the_transaction_is_held_for_every_statement(tmp_path: Path) -> None:
             self._open = False
             self._inner.rollback()
 
-    apply_migrations(Watch(connection), [migration(5)])  # type: ignore[arg-type]
+    apply_migrations(Watch(connection), [PROBE])  # type: ignore[arg-type]
     connection.close()
 
     assert observed, "nothing was observed"
@@ -797,17 +820,17 @@ def test_the_transaction_is_held_for_every_statement(tmp_path: Path) -> None:
         "the transaction was closed part-way through the migration: "
         f"{observed.index(False)} of {len(observed)} observations"
     )
-    # Only migration 5 was applied, so it lands at 5 whatever the latest schema is.
-    assert shape(path)["user_version"] == 5
+    # Only the probe was applied, so it lands at its own version.
+    assert shape(path)["user_version"] == PROBED
 
 
 def test_twelve_concurrent_openers_of_an_old_database_all_succeed(tmp_path: Path) -> None:
     """§10: more contenders than cores, on the case that actually raced."""
-    path = tmp_path / "v4_12.db"
-    historical(path, 4).close()
-    results = run_openers(path, 12)
+    path = tmp_path / "old_12.db"
+    historical(path, CURRENT).close()
+    results = run_openers(path, 12, probed=True)
     assert all(r.startswith("OK") for r in results), results
-    assert {r.split()[1] for r in results} == {str(SCHEMA_VERSION)}
+    assert {r.split()[1] for r in results} == {str(PROBED)}
     state = shape(path)
     assert state["integrity"] == "ok"
     assert state["foreign_key_rows"] == 0

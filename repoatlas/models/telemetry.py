@@ -45,8 +45,6 @@ class RetrievalTrace(BaseModel):
     #: unscoped pass that this number says nothing about, so there it is "how narrow
     #: the first pass was" rather than "how much was searched".
     scoped_repositories: int = 0
-    semantic_used: bool = False
-    semantic_detail: str = ""
     graph_hops: int = 0
     graph_nodes_visited: int = 0
     deterministic_candidates: int = 0

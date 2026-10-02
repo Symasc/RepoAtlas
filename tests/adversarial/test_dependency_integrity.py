@@ -86,7 +86,6 @@ def make_settings(tmp_path: Path, tag: str = "state") -> Settings:
     return Settings.model_validate(
         {
             "storage": {"database": str(tmp_path / tag / "atlas.db")},
-            "embeddings": {"provider": "hashing", "dim": 128},
         }
     )
 
