@@ -64,6 +64,7 @@ from repoatlas.graph.uses_link import (
 from repoatlas.models import http
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.parsing import (
+    ENUM_MEMBER,
     EdgeType,
     EntityType,
     ParsedFile,
@@ -427,7 +428,8 @@ class ReferenceLinker:
                 # A returned object's property is reachable only through the object,
                 # never by its bare name: `createCourse()` beside a `createCourse:`
                 # property names whatever `createCourse` is bound to, not the property.
-                if symbol.meta.get("kind") != "property":
+                # An enum member is reached through its enum in the same way.
+                if symbol.meta.get("kind") not in {"property", ENUM_MEMBER}:
                     mapping.setdefault(symbol.name, entity_id)
         return mapping
 

@@ -20,7 +20,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from repoatlas.models.parsing import EntityType
+from repoatlas.models.parsing import ENUM_MEMBER, EntityType
 from repoatlas.storage.protocols import FileRow, SymbolRow
 
 #: Candidate extensions per import flavor, tried in order.
@@ -291,8 +291,13 @@ class ResolutionIndex:
         """
         matches = self.symbols_by_file.get(file_row.file_id, {}).get(name, [])
         python = flavor_for(file_row.rel_path) == "python"
+        # An enum member is reached through its enum, never by its bare name.
         exact = [
-            s for s in matches if s.name == name and not (python and s.type is EntityType.SYMBOL)
+            s
+            for s in matches
+            if s.name == name
+            and not (python and s.type is EntityType.SYMBOL)
+            and s.meta.get("kind") != ENUM_MEMBER
         ]
         return exact[0] if len(exact) == 1 else None
 
