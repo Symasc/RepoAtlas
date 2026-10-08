@@ -73,6 +73,7 @@ from repoatlas.models.parsing import (
 )
 from repoatlas.models.telemetry import LinkTrace, StageTiming, Stopwatch
 from repoatlas.parsers.graphql import GRAPHQL_FACTS
+from repoatlas.parsers.graphql_codegen import GRAPHQL_CODEGEN_OUTPUT
 from repoatlas.parsers.http_facts import PENDING_FACT
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION
 from repoatlas.storage.protocols import (
@@ -1054,8 +1055,12 @@ def _is_salt_mapping_claim(claim: UnresolvedRefRecord) -> bool:
 
 
 def _is_graphql_claim(claim: UnresolvedRefRecord) -> bool:
-    """A GraphQL type or document claim (repoatlas.parsers.graphql), bound by no pass yet."""
-    return claim_role(claim) in GRAPHQL_FACTS
+    """A GraphQL type, document or codegen-output claim (repoatlas.parsers.graphql,
+    repoatlas.parsers.graphql_codegen): never an HTTP fact, never resolved by name."""
+    return claim_role(claim) in _GRAPHQL_ROLES
+
+
+_GRAPHQL_ROLES = GRAPHQL_FACTS | {GRAPHQL_CODEGEN_OUTPUT}
 
 
 def _uses_detail(plan: UsesPlan) -> str:

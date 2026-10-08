@@ -34,6 +34,7 @@ from repoatlas.parsers.deploy_helm import (
     service_references,
     values_references,
 )
+from repoatlas.parsers.graphql_codegen import codegen_references
 from repoatlas.parsers.http_openapi import MAX_OPERATIONS, specification_references
 from repoatlas.parsers.marks import diagnostic_line, node_span
 from repoatlas.parsers.module_facts import module_facts
@@ -143,7 +144,9 @@ class StructuredParser:
     #    names and ports they state (repoatlas.parsers.deploy_helm).
     # 7: a chart's Ingress templates record their hosts, scheme and backend in a narrow
     #    static subset, or why not; values.yaml also records list items as a.b[0].c.
-    version = "7"
+    # 8: a GraphQL Code Generator configuration records one claim per output: its schema
+    #    inputs, documents, plugins and naming options (repoatlas.parsers.graphql_codegen).
+    version = "8"
     language = "YAML"
 
     def supports(self, path: Path) -> bool:
@@ -200,6 +203,7 @@ class StructuredParser:
             *chart_references(posix, documents),
             *values_references(posix, documents),
         ]
+        generation, generation_diagnostics = codegen_references(posix, documents, content)
 
         # ``splitlines()`` deliberately: this array is indexed by PyYAML marks and
         # must use PyYAML's line-break set rather than the source-grammar splitter
@@ -224,7 +228,7 @@ class StructuredParser:
                     )
                     references.setdefault(identity, reference)
 
-        diagnostics: list[ParseDiagnostic] = []
+        diagnostics: list[ParseDiagnostic] = list(generation_diagnostics)
         if collector.truncated:
             diagnostics.append(
                 ParseDiagnostic(
@@ -245,6 +249,6 @@ class StructuredParser:
             parser=self.name,
             parser_version=self.version,
             symbols=tuple(collector.symbols),
-            references=(*references.values(), *resolution, *compose),
+            references=(*references.values(), *resolution, *compose, *generation),
             diagnostics=tuple(diagnostics),
         )
