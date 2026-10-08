@@ -122,6 +122,11 @@ class GroundingFindingCode(StrEnum):
     #: Free text named a repository object that was never supplied in this
     #: investigation. V1's secondary defence against a fabricated path in prose.
     PROSE_REFERENCE_NOT_SUPPLIED = "prose_reference_not_supplied"
+    #: Every citation of the claim was admitted on its own, yet checking the answer
+    #: as a whole removed the claim for a reason other than its prose. That is an
+    #: inconsistency inside RepoAtlas, not a fault in the answer, and it is named
+    #: as such rather than blamed on the statement.
+    ADMITTED_CITATION_REJECTED = "admitted_citation_rejected"
 
 
 class GroundingGuarantee(BaseModel):
