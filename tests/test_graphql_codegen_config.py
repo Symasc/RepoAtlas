@@ -125,6 +125,28 @@ def test_a_schema_url_is_kept_without_anything_that_could_authenticate_it() -> N
 
 
 @pytest.mark.parametrize(
+    ("written", "kind"),
+    [
+        ("schema/a.graphql", "path"),
+        ("schema/*.graphql", "glob"),
+        ("schema/@(a|b).graphql", "glob"),
+        ("schema/+(a).gql", "glob"),
+        ("!schema/old.graphql", "glob"),
+        ("schema.json", "introspection"),
+        ("build.ts", "code"),
+        ("${SCHEMA}", "computed"),
+        ("schema.prisma", "other"),
+    ],
+)
+def test_each_input_is_classified_as_written(written: str, kind: str) -> None:
+    [claim] = claims(
+        parse(f"schema: '{written}'\ngenerates:\n  out.ts:\n    plugins: [typescript]\n")
+    ).values()
+
+    assert claim["schema"][0]["kind"] == kind
+
+
+@pytest.mark.parametrize(
     ("url", "kept"),
     [
         ("https://a.example.invalid/graphql", "https://a.example.invalid/graphql"),

@@ -493,3 +493,92 @@ def test_a_generates_edge_without_codegen_evidence_is_never_followed(
 
     assert badge not in {c.entity for c in response.candidates}
     assert "sym:parcel-api:src/gen/types.ts:Stage:2" in {c.entity for c in response.candidates}
+
+
+GLOBBED_CONFIG = (
+    "schema: ../parcel-api/schema/parcels.graphql\n"
+    "generates:\n"
+    "  src/globbed.ts:\n"
+    "    schema:\n"
+    "      - ../parcel-api/schema/*.graphql\n"
+    "      - '!../parcel-api/schema/legacy.graphql'\n"
+    "    plugins: [typescript]\n"
+    "  src/code-glob.ts:\n"
+    "    schema: ../parcel-api/src/**/*\n"
+    "    plugins: [typescript]\n"
+    "  src/ext-glob.ts:\n"
+    "    schema: ../parcel-api/schema/@(parcels|legacy).graphql\n"
+    "    plugins: [typescript]\n"
+    "  src/no-match.ts:\n"
+    "    schema: ../parcel-api/schema/*.graphqls\n"
+    "    plugins: [typescript]\n"
+    "  src/kept.ts:\n"
+    "    schema: schema/clash.graphql\n"
+    "    config:\n"
+    "      namingConvention:\n"
+    "        typeNames: keep\n"
+    "    plugins: [typescript]\n"
+    "  src/camel.ts:\n"
+    "    config:\n"
+    "      namingConvention: change-case-all#camelCase\n"
+    "    plugins: [typescript]\n"
+    "  src/schema.json:\n"
+    "    plugins: [introspection]\n"
+    "  src/dir/:\n"
+    "    plugins: [typescript]\n"
+)
+
+
+def test_globs_negation_and_naming_decide_as_configured(
+    workspace: Workspace, tmp_path: Path, settings: Settings
+) -> None:
+    build(workspace, tmp_path, repos())
+    root = tmp_path / "repos"
+    web = root / "parcel-web"
+    (web / "codegen.yml").write_text(GLOBBED_CONFIG)
+    (web / "src" / "globbed.ts").write_text((root / "parcel-api" / "src/gen/types.ts").read_text())
+    (web / "src" / "kept.ts").write_text("export enum shipping_lane {\n  Fast = 'FAST',\n}\n")
+    (web / "src" / "camel.ts").write_text("export enum stage { packed = 'PACKED' }\n")
+    sync(workspace, workspace.resolver().resolve(web))
+
+    found = decisions(workspace)
+    assert {
+        subject: found.get(subject)
+        for subject in (
+            f"{WEB}globbed.ts::Stage",
+            f"{WEB}code-glob.ts",
+            f"{WEB}ext-glob.ts",
+            f"{WEB}no-match.ts",
+            f"{WEB}kept.ts::shipping_lane",
+            f"{WEB}kept.ts::shipping_lane.FAST",
+            f"{WEB}kept.ts::Stage",
+            f"{WEB}camel.ts",
+            f"{WEB}schema.json",
+            f"{WEB}dir/",
+        )
+    } == {
+        f"{WEB}globbed.ts::Stage": "linked",
+        f"{WEB}code-glob.ts": "schema-unsupported",
+        f"{WEB}ext-glob.ts": "schema-unsupported",
+        f"{WEB}no-match.ts": "schema-missing",
+        f"{WEB}kept.ts::shipping_lane": "linked",
+        f"{WEB}kept.ts::shipping_lane.FAST": "linked",
+        f"{WEB}kept.ts::Stage": "schema-conflict",
+        f"{WEB}camel.ts": "naming-unsupported",
+        f"{WEB}schema.json": "output-unsupported",
+        f"{WEB}dir/": "output-unsupported",
+    }
+    linked = pairs(workspace)
+    # The glob loads both schema files, and the negation takes the duplicate back out.
+    assert ("schema/parcels.graphql#Stage", "src/globbed.ts#Stage") in linked
+    assert not [p for p in linked if p[0].startswith("schema/legacy.graphql")]
+    by_subject = {r.subject: r for r in workspace.knowledge.list_link_decisions()}
+    assert (
+        json.loads(by_subject[f"{WEB}code-glob.ts"].evidence_json)["unsupported"][0]["kind"]
+        == "glob-code"
+    )
+    assert (
+        json.loads(by_subject[f"{WEB}ext-glob.ts"].evidence_json)["unsupported"][0]["kind"]
+        == "glob-syntax"
+    )
+    assert fact_snapshot(workspace) == reindex_from_scratch(settings, root, tmp_path)
