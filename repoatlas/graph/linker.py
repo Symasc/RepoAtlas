@@ -79,6 +79,7 @@ from repoatlas.storage.protocols import (
     EdgeRecord,
     EntityRecord,
     FileRow,
+    LinkDecisionRow,
     UnresolvedRefRecord,
 )
 from repoatlas.storage.sqlite.stores import SqliteDependencyStore, SqliteKnowledgeStore
@@ -175,6 +176,8 @@ class GlobalPlan:
     http_crossings: HttpCrossingPlan = field(default_factory=HttpCrossingPlan)
     #: The ``USES`` edges to replace, and whose (repoatlas.graph.uses_link).
     uses: UsesPlan | None = None
+    #: Every link family's decisions, replaced with the edges they account for.
+    decisions: tuple[LinkDecisionRow, ...] = ()
     resolved: int = 0
     unresolved: int = 0
     cross_repository: int = 0
@@ -653,6 +656,7 @@ class ReferenceLinker:
                 # Every request's decision, links and refusals alike, replaced with the
                 # edges they account for.
                 self._knowledge.replace_http_call_decisions(decision_rows(plan.http_crossings))
+                self._knowledge.replace_link_decisions(plan.decisions)
                 applied = apply_uses(self._knowledge, uses, producer=GLOBAL_PARSER)
                 self._knowledge.gc_orphan_entities()
             watch.candidates_out = len(edges) + len(uses.edges)

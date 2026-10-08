@@ -269,7 +269,8 @@ def test_splitting_survives_trigger_bodies() -> None:
     INSERT ...` fragment plus a stray `END`, which is why the splitter asks
     SQLite where statements end instead.
     """
-    (first,) = load_migrations()
+    first = load_migrations()[0]
+    assert first.version == 1
     assert any("CREATE TRIGGER" in s.upper() for s in first.statements)
     for statement in first.statements:
         if "CREATE TRIGGER" in statement.upper():

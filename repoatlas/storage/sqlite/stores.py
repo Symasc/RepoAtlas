@@ -40,6 +40,7 @@ from repoatlas.storage.protocols import (
     FileRow,
     HttpCallDecisionRow,
     HttpEdgeRow,
+    LinkDecisionRow,
     NeighborCount,
     NeighborCursor,
     NeighborEdge,
@@ -1162,6 +1163,78 @@ class SqliteKnowledgeStore:
                 chain_json=row["chain_json"],
                 path=row["path"],
                 src_key=row["src_key"],
+            )
+            for row in rows
+        ]
+
+    def replace_link_decisions(self, rows: Sequence[LinkDecisionRow]) -> None:
+        """Replace every stored link decision.
+
+        Called by the global commit inside its transaction, so the decisions and the
+        edges they account for change together.
+        """
+        with self._db.transaction() as conn:
+            conn.execute("DELETE FROM link_decisions")
+            conn.executemany(
+                """
+                INSERT INTO link_decisions (
+                    decision_ref, family, repo_id, file_id, src_id, line_start, line_end,
+                    subject, decision, evidence_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        row.decision_ref,
+                        row.family,
+                        row.repo_id,
+                        row.file_id,
+                        row.src_id,
+                        row.line_start,
+                        row.line_end,
+                        row.subject,
+                        row.decision,
+                        row.evidence_json,
+                    )
+                    for row in rows
+                ],
+            )
+
+    def list_link_decisions(
+        self, family: str | None = None, repo_id: int | None = None
+    ) -> list[LinkDecisionRow]:
+        """Stored link decisions, of one family or all and of one repository or all, in
+        repository, file, line and subject order, each with its file's path."""
+        clauses: list[str] = []
+        params: list[object] = []
+        if family is not None:
+            clauses.append("d.family = ?")
+            params.append(family)
+        if repo_id is not None:
+            clauses.append("d.repo_id = ?")
+            params.append(repo_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._db.execute(
+            f"""
+            SELECT d.*, f.rel_path AS path
+            FROM link_decisions d JOIN files f ON f.id = d.file_id
+            {where}
+            ORDER BY d.repo_id, f.rel_path, d.line_start, d.subject, d.decision_ref
+            """,  # noqa: S608 - the clauses are fixed text, values are bound
+            params,
+        ).fetchall()
+        return [
+            LinkDecisionRow(
+                decision_ref=row["decision_ref"],
+                family=row["family"],
+                repo_id=row["repo_id"],
+                file_id=row["file_id"],
+                src_id=row["src_id"],
+                line_start=row["line_start"],
+                line_end=row["line_end"],
+                subject=row["subject"],
+                decision=row["decision"],
+                evidence_json=row["evidence_json"],
+                path=row["path"],
             )
             for row in rows
         ]
