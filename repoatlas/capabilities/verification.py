@@ -155,6 +155,13 @@ class CitationOutcome:
     #: The claimed confidence after V1's narrowing rule, as ``ground_answer``
     #: itself computed it. ``None`` when nothing was admitted.
     confidence: float | None
+    #: The source an admitted citation resolved to, exactly as ``ground_answer``
+    #: verified it. ``None`` when nothing was admitted. Carried as fields because
+    #: ``location`` is a display string: a nested repository's slug holds a ``/``,
+    #: so splitting ``parent/child/src/x.ts`` back into a slug and a path cannot
+    #: tell where the slug ends.
+    repository_slug: str | None = None
+    path: str | None = None
 
 
 def _candidate_for(entry: LedgerEntry) -> EvidenceCandidate:
@@ -318,6 +325,8 @@ def resolve_citation(
         ),
         # V1's narrowing rule, applied by V1. Never raised above what was claimed.
         confidence=probe.answer.hypotheses[0].confidence,
+        repository_slug=kept.repository_slug,
+        path=kept.path,
     )
 
 
@@ -489,8 +498,10 @@ def projected_answer(
         kept: list[Evidence] = []
         if decided and all(outcome.admitted for outcome in decided):
             for outcome in decided:
-                slug, _, path = outcome.location.partition("/")
-                path = path.split(":", 1)[0]
+                # The verified source, never a re-parse of ``location``: a nested
+                # slug's own ``/`` would split it in the wrong place.
+                slug, path = outcome.repository_slug, outcome.path
+                assert slug is not None and path is not None, "an admitted citation has a source"
                 kept.append(
                     Evidence(
                         repository=slug,

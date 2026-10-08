@@ -520,9 +520,13 @@ def test_the_corpus_covers_every_finding_the_capability_can_produce() -> None:
     # absent from it. It is pinned at the rule in test_verify_grounding_status.
     # ``citation_without_supplied_lines`` needs file-identity evidence, which the
     # adversarial corpus does not reliably produce; it is pinned there too.
+    # ``admitted_citation_rejected`` names RepoAtlas disagreeing with itself, which
+    # no answer can provoke; it is pinned by forging the disagreement in
+    # tests/capabilities/test_verify_grounding_nested.py.
     assert uncovered <= {
         GroundingFindingCode.UNVERIFIED_EVIDENCE,
         GroundingFindingCode.CITATION_WITHOUT_SUPPLIED_LINES,
+        GroundingFindingCode.ADMITTED_CITATION_REJECTED,
     }, uncovered
 
 
