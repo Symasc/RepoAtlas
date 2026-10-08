@@ -990,7 +990,7 @@ class SqliteKnowledgeStore:
     ) -> list[SymbolRow]:
         """File-scoped definitions, for cross-file and cross-repository resolution."""
         sql = """
-            SELECT id, file_id, repo_id, type, name, qualified_name, line_start
+            SELECT id, file_id, repo_id, type, name, qualified_name, line_start, meta_json
             FROM entities
             WHERE file_id IS NOT NULL
         """
@@ -1017,6 +1017,7 @@ class SqliteKnowledgeStore:
                 name=row["name"],
                 qualified_name=row["qualified_name"],
                 line_start=row["line_start"],
+                meta_json=row["meta_json"],
             )
             for row in rows
         ]
