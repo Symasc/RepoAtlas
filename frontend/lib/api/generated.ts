@@ -597,6 +597,27 @@ export interface EdgeTypeCount {
   type: EdgeType;
 }
 /**
+ * How a generated declaration was generated from the schema definition before it.
+ *
+ * The evidence a configured-generation link recorded (repoatlas.graph.graphql_codegen),
+ * each part locatable as ``<repository>/<path>[:<line>]``: the configuration's entry for
+ * the output, the schema definition it was generated from (``definition``), the generated
+ * file, the plugin that writes it, and -- for an enum member -- the value both sides carry.
+ * Source evidence, not a record that the generator ran: the file may be stale, which the
+ * decision says.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "CodeGeneration".
+ */
+export interface CodeGeneration {
+  config: string;
+  decision_ref: string;
+  definition: string;
+  member_value?: string | null;
+  output: string;
+  plugin: string;
+}
+/**
  * What the context resolved to, as identities rather than rows.
  *
  * A transport-neutral projection of
@@ -1322,6 +1343,7 @@ export interface ImpactStep {
   crossing?: PackageCrossing | null;
   derived?: string | null;
   edge?: EdgeType | null;
+  generation?: CodeGeneration | null;
   http?: HttpCrossing | null;
   lines?: [unknown, unknown] | null;
   parser?: string | null;

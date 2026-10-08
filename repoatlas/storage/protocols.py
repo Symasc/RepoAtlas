@@ -463,6 +463,8 @@ class NeighborRule(BaseModel):
     direction: EdgeDirection
     #: Edge types admitted only when the far end is one of the paired entity types.
     far_types: tuple[tuple[EdgeType, tuple[EntityType, ...]], ...] = ()
+    #: Edge types admitted only when the edge's resolution records the paired evidence key.
+    evidence: tuple[tuple[EdgeType, str], ...] = ()
     #: Leave out a file's own file-level ``REFERENCES`` (a named import) or ``CALLS`` (a
     #: call in a module-scope initializer) to an entity when a declaration in that same
     #: file (or the file itself) has a ``USES`` edge to it: the declaration-level fact

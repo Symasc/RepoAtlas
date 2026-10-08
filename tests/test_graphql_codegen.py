@@ -21,17 +21,22 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from repoatlas.capabilities.service import CapabilityService
 from repoatlas.config.settings import Settings
 from repoatlas.graph import linker as linker_module
 from repoatlas.graph.globs import compile_glob, match_admitted
 from repoatlas.graph.graphql_codegen import FAMILY, plan_codegen
 from repoatlas.graph.linker import GLOBAL_PARSER, ReferenceLinker
 from repoatlas.graph.resolution import ResolutionIndex
+from repoatlas.models.capability import CapabilityContext, CapabilityScope, Presentation
+from repoatlas.models.impact import ImpactRequest
+from repoatlas.models.parsing import EdgeType
 from repoatlas.parsers.graphql_codegen import GRAPHQL_CODEGEN_OUTPUT
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace
+from repoatlas.storage.protocols import EdgeRecord
 from tests.conftest import fact_snapshot, reindex_from_scratch
-from tests.impact_corpus import build
+from tests.impact_corpus import build, verify_steps
 from tests.schema_corpus import repos
 
 API = "parcel-api:codegen.yml->src/gen/types.ts"
@@ -355,3 +360,104 @@ def test_a_glob_matches_admitted_files_only_and_may_climb_into_another_repositor
         ("parcel-api", "schema/parcels.graphql"),
     ]
     assert match_admitted(index, origin, "../../outside/*.graphql") == []
+
+
+# ---------------------------------------------------------------------------
+# change impact: definition -> generated declaration -> its users
+# ---------------------------------------------------------------------------
+
+GLOBAL = CapabilityContext(scope=CapabilityScope.GLOBAL)
+STAGE = "sym:parcel-api:schema/parcels.graphql:Stage:1"
+
+
+def _impact(workspace: Workspace, seed: str) -> Any:
+    response = CapabilityService(workspace).impact(
+        ImpactRequest(context=GLOBAL, seed=seed, presentation=Presentation.FULL)
+    )
+    verify_steps(workspace, response)
+    return response
+
+
+def test_a_definition_reaches_what_was_generated_from_it_and_that_code_s_users(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    build(workspace, tmp_path, repos())
+
+    response = _impact(workspace, STAGE)
+
+    by_entity = {c.entity: c for c in response.candidates}
+    generated = by_entity["sym:parcel-api:src/gen/types.ts:Stage:2"]
+    assert (str(generated.step.edge), generated.distance) == ("GENERATES", 1)
+    assert generated.step.reading == "is generated from"
+    assert generated.step.at == "parcel-api/src/gen/types.ts"
+    assert generated.step.lines == (2, 6)
+    assert generated.step.generation is not None
+    assert generated.step.generation.config == "parcel-api/codegen.yml:3"
+    assert generated.step.generation.definition == "parcel-api/schema/parcels.graphql:1"
+    assert generated.step.generation.member_value is None
+    assert "by parcel-api/codegen.yml:3" in generated.chain
+    user = by_entity["sym:parcel-api:src/ship.ts:ship:2"]
+    assert str(user.step.edge) == "USES"
+    assert user.from_ == generated.id
+    # Across the repository boundary, on the configuration's evidence.
+    crossing = by_entity["sym:parcel-web:src/gen.ts:Stage:1"]
+    assert str(crossing.step.edge) == "GENERATES"
+    assert crossing.step.generation is not None
+    assert crossing.step.generation.config == "parcel-web/codegen.yml:3"
+    assert "sym:parcel-web:src/track.ts:LOST_STAGES:2" in by_entity
+    # A same-named enum no configuration generates, and its users: never.
+    assert not [e for e in by_entity if ":src/ui/" in e or ":schema/legacy.graphql:" in e]
+
+
+def test_a_value_reaches_the_member_generated_with_its_value(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    build(workspace, tmp_path, repos())
+
+    response = _impact(workspace, "sym:parcel-api:schema/parcels.graphql:Stage.SENT:4")
+
+    by_entity = {c.entity: c for c in response.candidates}
+    member = by_entity["sym:parcel-api:src/gen/types.ts:Stage.Sent:5"]
+    assert str(member.step.edge) == "GENERATES"
+    assert member.step.generation is not None
+    assert member.step.generation.member_value == "SENT"
+    assert "sym:parcel-web:src/gen.ts:Stage.Sent:3" in by_entity
+
+
+def test_an_unloaded_duplicate_reaches_nothing_generated(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    build(workspace, tmp_path, repos())
+
+    response = _impact(workspace, "sym:parcel-api:schema/legacy.graphql:Stage:1")
+
+    assert not [c for c in response.candidates if str(c.step.edge) == "GENERATES"]
+
+
+def test_a_generates_edge_without_codegen_evidence_is_never_followed(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """Salt records GENERATES too (a rendered file from its template); that is not this
+    family's evidence, and the walk must not take it for codegen."""
+    build(workspace, tmp_path, repos())
+    keys = {
+        row["key"]: row["id"]
+        for row in workspace.database.execute("SELECT id, key FROM entities").fetchall()
+    }
+    badge = "sym:parcel-api:src/ui/badge.ts:badge:2"
+    workspace.knowledge.add_edges(
+        [
+            EdgeRecord(
+                src_id=keys[STAGE],
+                dst_id=keys[badge],
+                type=EdgeType.GENERATES,
+                parser=GLOBAL_PARSER,
+                resolution=json.dumps({"salt": {"template": "x.j2"}}),
+            )
+        ]
+    )
+
+    response = _impact(workspace, STAGE)
+
+    assert badge not in {c.entity for c in response.candidates}
+    assert "sym:parcel-api:src/gen/types.ts:Stage:2" in {c.entity for c in response.candidates}
