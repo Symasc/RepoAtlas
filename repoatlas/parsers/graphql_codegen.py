@@ -29,6 +29,7 @@ outputs or entries in any one list, is refused whole with a diagnostic.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from pathlib import PurePosixPath
 from urllib.parse import urlsplit, urlunsplit
@@ -75,6 +76,8 @@ NAMING_OPTIONS = frozenset(
 _SDL_SUFFIXES = (".graphql", ".gql", ".graphqls")
 _CODE_SUFFIXES = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
 _GLOB_CHARACTERS = frozenset("*?[{")
+#: An extended glob (``@(a|b)``, ``+(a)``, ``!(a)``): a pattern, however few wildcards.
+_EXTGLOB = re.compile(r"[@+!*?]\(")
 
 
 class _Refused(Exception):
@@ -211,7 +214,11 @@ def _classify(value: str) -> str:
         return "url"
     if "$" in value:
         return "computed"
-    if value.startswith("!") or any(character in _GLOB_CHARACTERS for character in value):
+    if (
+        value.startswith("!")
+        or any(character in _GLOB_CHARACTERS for character in value)
+        or _EXTGLOB.search(value)
+    ):
         return "glob"
     if lowered.endswith(_SDL_SUFFIXES):
         return "path"
