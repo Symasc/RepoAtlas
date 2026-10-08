@@ -575,6 +575,8 @@ class SyncEngine:
                         line_start=symbol.line_start,
                         line_end=symbol.line_end,
                         signature=symbol.signature,
+                        # Sorted, so the same facts are the same row on every build.
+                        meta_json=json.dumps(symbol.meta, sort_keys=True) if symbol.meta else None,
                     )
                 )
 

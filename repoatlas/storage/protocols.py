@@ -6,6 +6,7 @@ so the backend can be replaced without touching a caller.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
@@ -270,6 +271,13 @@ class SymbolRow(BaseModel):
     name: str
     qualified_name: str | None
     line_start: int | None
+    #: The parser's facts about the definition (``ParsedSymbol.meta``), as stored.
+    meta_json: str | None = None
+
+    @property
+    def meta(self) -> dict[str, str]:
+        """``meta_json`` decoded; empty when the parser stated nothing."""
+        return json.loads(self.meta_json) if self.meta_json else {}
 
 
 class RouteServerRow(BaseModel):
