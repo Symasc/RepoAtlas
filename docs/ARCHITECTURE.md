@@ -119,6 +119,7 @@ RepoAtlas/
 │   │   ├── structured.py   YAML / JSON config keys; owns collect_config_keys()
 │   │   ├── dockerfile.py   instruction extraction; asks dockerwords.py for proof
 │   │   ├── graphql.py      graphql-core, pinned: schema coordinates; type and document claims
+│   │   ├── graphql_codegen.py  GraphQL Code Generator configuration: one claim per output
 │   │   └── dockerwords.py  static-vs-computed classification of Dockerfile operands
 │   ├── dependencies/   manifest and lockfile parsers; declared↔resolved join; name normalization
 │   │   ├── base.py         DependencyParser protocol
@@ -133,6 +134,7 @@ RepoAtlas/
 │   │   ├── linker.py       the two link passes
 │   │   ├── uses*.py, py_*.py, modules.py, packages.py   declaration uses, module and package resolution
 │   │   ├── http_claims.py, http_crossings.py   HTTP routes matched within and across repositories
+│   │   ├── graphql_codegen.py, globs.py   generated code linked to the schema its configuration loads
 │   │   └── impact.py, traversal.py, neighbourhood.py   the change-impact walk and bounded expansion
 │   ├── retrieval/      query analysis, exact/lexical/graph retrievers, fusion, precedence
 │   ├── grounding.py    citation verification — deterministic, and the whole of §11
@@ -537,6 +539,14 @@ http_call_decisions(               -- derived: the HTTP join's output, rebuilt b
   decision_ref PRIMARY KEY,        -- opaque, deterministic; never a row id
   repo_id, file_id → files ON DELETE CASCADE, src_id → entities ON DELETE CASCADE,
   line_start, line_end, method, url, variant, decision, evidence_json, chain_json
+)
+
+link_decisions(                    -- derived: every link family's decisions, rebuilt by every global commit (§5)
+  decision_ref PRIMARY KEY,        -- a hash of family and subject; never a row id
+  family,                          -- the pass that decided: graphql_codegen
+  repo_id, file_id → files ON DELETE CASCADE, src_id → entities ON DELETE CASCADE,
+  line_start, line_end,            -- where the decided claim was made
+  subject, decision, evidence_json -- the family's spelling of what was decided, and what it read
 )
 ```
 
@@ -1498,6 +1508,37 @@ The global pass counts these claims as unresolved and does nothing else with the
 symbol, and never hands one to the HTTP planner (`_is_graphql_claim` in `graph/linker.py`). Binding a claim needs
 evidence the file does not carry: the configuration that put a schema together, or the generation that copied
 it.
+
+### Generated code: linked by its configuration
+
+A GraphQL Code Generator configuration is that evidence for generated code. `parsers/graphql_codegen.py` records
+one `graphql-codegen-output` claim per output, with its schema inputs, plugins and naming options.
+`graph/graphql_codegen.py` decides each claim inside the global pass's resolve stage. It is a pure planner, and its
+edges and decisions are committed with the rest of the plan.
+
+> **Invariant.** A generated declaration is linked only to definitions in the schema files its own configuration
+> loads, and a generated enum member only to the value whose name its string literal states. A definition sharing
+> its name anywhere else is never a candidate.
+
+**Resolving the configuration.**
+- Schema paths and globs resolve against admitted files only (`graph/globs.py`), relative to the configuration and
+  across a repository boundary if they climb out of it. They never read, list or resolve anything on disk.
+- A URL, code, an introspection result or a computed path ends the decision for that output (`schema-remote`,
+  `schema-unsupported`). So does an output the `typescript` plugin does not write, or options that rename what it
+  writes.
+
+**Binding types.** A type binds only when the default naming convention provably leaves its name unchanged, or
+naming is `keep`.
+
+**Binding enum values.** Values bind by value, because generated member names are the convention's, but their
+strings are the schema's. So a renamed value in a stale output is `member-stale`, never a guess.
+
+**Decisions.** Every subject the pass decides is a `link_decisions` row (§3), `linked` or refused, with the evidence
+it read. The subject is `<repo>:<config>-><output>[::<coordinate>]`.
+
+**Impact.** The `generates-graphql` family follows these edges outward, from a definition to what was generated from
+it. `Family.evidence` admits only edges whose resolution records `graphql_codegen`, in every count, page and hub
+query, so Salt's `GENERATES` edges stay outside the walk.
 
 ### The two link passes
 
