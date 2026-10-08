@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 
 from repoatlas.config.settings import SaltSettings
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
+from repoatlas.graph.graphql_codegen import plan_codegen
 from repoatlas.graph.http_claims import HttpClaimPlan, plan_http_claims
 from repoatlas.graph.http_crossings import (
     HttpCrossingPlan,
@@ -506,6 +507,7 @@ class ReferenceLinker:
             resolved = 0
             unresolved = 0
             pending: list[UnresolvedRefRecord] = []
+            generation: list[UnresolvedRefRecord] = []
             salt_resolutions = {
                 id(result.claim): result
                 for result in resolve_pillar_reads(self._salt, index, claims, by_id)
@@ -516,10 +518,14 @@ class ReferenceLinker:
                 if _is_salt_mapping_claim(claim):
                     continue
                 if _is_graphql_claim(claim):
-                    # One file is no schema, and nothing yet decides which schema a
-                    # GraphQL type or document belongs to: it stays a claim, never
-                    # resolved by name and never handed to the HTTP pass.
-                    unresolved += 1
+                    # A configured output is decided by the codegen pass below. A type or
+                    # document claim stays a claim: one file is no schema, and nothing yet
+                    # decides which schema it belongs to. Neither is resolved by name, and
+                    # neither is ever handed to the HTTP pass.
+                    if claim_role(claim) == GRAPHQL_CODEGEN_OUTPUT:
+                        generation.append(claim)
+                    else:
+                        unresolved += 1
                     continue
                 if claim_role(claim) is not None:
                     # Never proven by symbol resolution: decided below, together.
@@ -582,10 +588,17 @@ class ReferenceLinker:
                 producer=GLOBAL_PARSER,
             )
             edges.extend(crossings.edges)
-            resolved += decided.resolved
-            unresolved += decided.unresolved
+            # Generated declarations, from the schema files their configuration loads
+            # (repoatlas.graph.graphql_codegen); never from a definition sharing a name.
+            codegen = plan_codegen(generation, index, by_id, symbols, producer=GLOBAL_PARSER)
+            edges.extend(codegen.edges)
+            resolved += decided.resolved + codegen.resolved
+            unresolved += decided.unresolved + codegen.unresolved
             watch.candidates_out = resolved
-            watch.detail = f"{unresolved} still unresolved; {decided.detail}; {crossings.detail}"
+            watch.detail = (
+                f"{unresolved} still unresolved; {decided.detail}; {crossings.detail}; "
+                f"{codegen.detail}"
+            )
         stages.append(_timing(watch))
 
         entered("uses")
@@ -617,9 +630,10 @@ class ReferenceLinker:
             http=decided,
             http_crossings=crossings,
             uses=uses_plan,
+            decisions=codegen.decisions,
             resolved=resolved,
             unresolved=unresolved,
-            cross_repository=cross + len(salt_crossings),
+            cross_repository=cross + len(salt_crossings) + codegen.crossings,
             claims_considered=len(claims) + uses_plan.work.claims_examined,
             files_indexed=len(file_rows),
             symbols_indexed=len(symbols),
