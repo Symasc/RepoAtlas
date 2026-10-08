@@ -1073,6 +1073,53 @@ schema it is written against, so nothing binds it to one.
 error, it holds more than 400,000 tokens, or it nests deeper than the parser can read. A document's selections are
 recorded up to 1,024 nodes and 64 levels; past either bound the claim keeps none of them.
 
+### 7.10 GraphQL code generation (`codegen.yml`, `codegen.yaml`, `codegen.json`)
+
+A GraphQL Code Generator configuration is read as structured configuration, never executed. Each output under
+`generates` becomes one claim. The claim records:
+
+- the output's schema inputs, the root's first and then the output's own, which the generator merges;
+- its documents, plugins and preset;
+- the options that rename generated declarations or reshape enums.
+
+Each schema input is classified as written: a schema file, a glob, a URL, code, an introspection result, or a
+computed path. A URL is stored without its user information, query and fragment.
+
+A TypeScript enum member with a plain string value is a declaration of its own (`Stage.Packed`) that records the
+string. It is reached through its enum, never by its bare name.
+
+**A generated declaration is linked only to the schema its configuration loads.** The global pass resolves each
+output's schema inputs and its output file against the files the sync admitted, across repositories when the
+configuration climbs out of its own. Then:
+
+- **Types.** Each named type the loaded files define `GENERATES` the one top-level declaration of that name in the
+  output. The name is taken as written when naming is `keep`, and under the default convention only when that
+  convention leaves it unchanged.
+- **Enum values.** Each value `GENERATES` the generated member whose string is the value's name: the wire value, not
+  a spelling match.
+
+A definition outside the loaded files never links, whatever its name. Every outcome is a stored decision, and so is
+every refusal (`link_decisions`):
+
+| Decision | Meaning |
+|---|---|
+| `linked` | |
+| `config-unsupported` | the output cannot be read statically |
+| `schema-remote` | |
+| `schema-unsupported` | |
+| `schema-missing` | |
+| `output-unsupported` | a preset, a directory, or not TypeScript |
+| `output-missing` | |
+| `plugin-unsupported` | no `typescript` plugin |
+| `naming-unsupported` | |
+| `schema-conflict` | one name, different kinds |
+| `generated-missing` | |
+| `generated-ambiguous` | |
+| `member-stale` | the generated enum lacks the value |
+| `member-undeclared` | the generated type declares no members |
+
+Change impact follows `GENERATES` outward on this evidence alone (ARCHITECTURE.md, "Generated code: linked by its configuration").
+
 ---
 
 ## 8. Knowledge representation
