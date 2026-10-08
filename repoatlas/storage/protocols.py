@@ -271,6 +271,7 @@ class SymbolRow(BaseModel):
     name: str
     qualified_name: str | None
     line_start: int | None
+    line_end: int | None = None
     #: The parser's facts about the definition (``ParsedSymbol.meta``), as stored.
     meta_json: str | None = None
 
