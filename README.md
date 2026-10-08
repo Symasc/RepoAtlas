@@ -191,6 +191,7 @@ describes every stage.
 | | |
 |---|---|
 | Code: definitions, imports, calls, environment reads | Python, TypeScript, JavaScript, Bash |
+| GraphQL SDL | Enum members, types, fields, arguments, inputs and same-file type dependencies |
 | Configuration and deployment | YAML, JSON, Salt states, Jinja templates, Dockerfiles, docker-compose, Helm charts |
 | Packages | PyPI, npm and RubyGems manifests and lockfiles |
 | HTTP routes served | FastAPI, Flask, Express, NestJS, Fastify, OpenAPI 3 and Swagger 2 specs |
@@ -201,6 +202,12 @@ describes every stage.
 Across repositories, RepoAtlas links code through the packages one repository provides and another declares, and
 through HTTP when the source states where a service is reachable. What each extractor reads, and what it does
 not, is in [`docs/ARCHITECTURE.md`](https://github.com/Symasc/RepoAtlas/blob/master/docs/ARCHITECTURE.md).
+
+GraphQL `.graphql`, `.gql` and `.graphqls` files are parsed offline with source spans.
+Operations and fragments are retained as unresolved document claims. External or
+ambiguous type definitions remain unresolved; document-to-schema binding, generated
+code provenance and database mappings are not yet linked. Matching enum names alone
+does not connect schemas or repositories.
 
 ## Scope and limitations
 

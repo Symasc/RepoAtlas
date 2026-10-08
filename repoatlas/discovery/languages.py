@@ -32,6 +32,9 @@ _EXTENSIONS: dict[str, str] = {
     ".yaml": "YAML",
     ".yml": "YAML",
     ".json": "JSON",
+    ".graphql": "GraphQL",
+    ".gql": "GraphQL",
+    ".graphqls": "GraphQL",
 }
 
 _FILENAMES: dict[str, str] = {
