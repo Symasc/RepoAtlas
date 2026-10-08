@@ -344,6 +344,28 @@ class HttpCallDecisionRow(BaseModel):
     src_key: str | None = None
 
 
+class LinkDecisionRow(BaseModel):
+    """One stored decision of a link family (``link_decisions``): what the global pass
+    decided about one subject, anchored where the claim it decided was made."""
+
+    model_config = ConfigDict(frozen=True)
+
+    decision_ref: str
+    #: The pass that decided it, such as ``graphql_codegen``.
+    family: str
+    repo_id: int
+    file_id: int
+    src_id: int
+    line_start: int | None = None
+    line_end: int | None = None
+    #: The family's own spelling of what was decided.
+    subject: str
+    decision: str
+    evidence_json: str
+    #: Read back with the row; ignored when one is written.
+    path: str | None = None
+
+
 class NeighborEdge(BaseModel):
     """An edge reached by graph expansion, with both endpoints' repositories."""
 

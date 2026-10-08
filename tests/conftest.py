@@ -216,6 +216,15 @@ def fact_snapshot(workspace: Workspace) -> dict[str, object]:
         "JOIN repositories r ON r.id = c.repo_id "
         "ORDER BY r.name, f.rel_path, c.span_index, c.split_index, c.line_start"
     ).fetchall()
+    decisions = workspace.database.execute(
+        # Why each link was or was not made is written by the global pass with the edges
+        # it accounts for; a sync that kept a stale decision is not a reindex.
+        "SELECT d.family, d.subject, d.decision, d.evidence_json, r.slug, f.rel_path, "
+        "d.line_start, d.line_end, s.key FROM link_decisions d "
+        "JOIN repositories r ON r.id = d.repo_id JOIN files f ON f.id = d.file_id "
+        "JOIN entities s ON s.id = d.src_id "
+        "ORDER BY d.family, d.subject, d.decision"
+    ).fetchall()
     return {
         "repositories": [tuple(r) for r in repositories],
         "files": [tuple(r) for r in files],
@@ -224,6 +233,7 @@ def fact_snapshot(workspace: Workspace) -> dict[str, object]:
         "dependencies": [tuple(r) for r in dependencies],
         "unresolved_refs": [tuple(r) for r in claims],
         "chunks": [tuple(r) for r in chunks],
+        "link_decisions": [tuple(r) for r in decisions],
     }
 
 
