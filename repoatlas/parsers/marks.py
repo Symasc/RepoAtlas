@@ -118,6 +118,17 @@ def line_at(content: str, index: int) -> int:
     return len(_LINE_BREAK.findall(content, 0, index)) + 1
 
 
+def line_starts(content: str) -> list[int]:
+    """The offset each source line of ``content`` starts at.
+
+    :func:`line_at` for a parser that asks about many offsets: ``bisect_right(starts,
+    index)`` is the line ``content[index]`` sits on, under the same line model, without
+    rescanning everything before ``index`` on every call. The two agree at every index
+    but the ``\\n`` of a ``\\r\\n`` pair, which is no character a span ends on.
+    """
+    return [0, *(match.end() for match in _LINE_BREAK.finditer(content))]
+
+
 def whole_file_span(content: str) -> tuple[int | None, int | None]:
     """The span a whole-file entity may claim over ``content``.
 

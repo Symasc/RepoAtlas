@@ -23,6 +23,8 @@ const GRAMMARS: Record<string, () => Promise<unknown>> = {
   toml: () => import("shiki/langs/toml.mjs"),
   css: () => import("shiki/langs/css.mjs"),
   sql: () => import("shiki/langs/sql.mjs"),
+  graphql: () => import("shiki/langs/graphql.mjs"),
+  prisma: () => import("shiki/langs/prisma.mjs"),
 };
 
 const BY_EXTENSION: Record<string, string> = {
@@ -53,6 +55,10 @@ const BY_EXTENSION: Record<string, string> = {
   toml: "toml",
   css: "css",
   sql: "sql",
+  graphql: "graphql",
+  graphqls: "graphql",
+  gql: "graphql",
+  prisma: "prisma",
 };
 
 const BY_NAME: Record<string, string> = {

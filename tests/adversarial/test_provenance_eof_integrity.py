@@ -78,6 +78,8 @@ CONTROL_BODIES = {
     "tmpl.jinja": "hello" + LF + "world",
     "conf.yaml": "a: 1" + LF + "b: 2",
     "conf.json": '{"a": 1,' + LF + '"b": 2}',
+    # Added since the review, and held to the same check.
+    "schema.graphql": "type A {" + LF + "  a: Int }",
 }
 
 
@@ -206,6 +208,10 @@ INVARIANT_BODIES = {
     "tmpl.jinja": "{% if x %}" + LF + "hello" + LF + "{% endif %}" + LF,
     "conf.yaml": "a: 1" + LF + "b:" + LF + "  c: 2" + LF,
     "conf.json": '{"a": 1, "b": {"c": 2}}' + LF,
+    "schema.graphql": (CR + LF).join(
+        ["type A {", '  """a', '  description"""', "  a: Int", "}", "# final comment", ""]
+    ),
+    "ops.gql": "query Q {" + LF + "  a {" + LF + "    b" + LF + "  }" + LF + "}",
 }
 
 
