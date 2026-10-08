@@ -1046,18 +1046,18 @@ built, no document is validated or executed, and nothing is fetched.
 Every definition is named by its **schema coordinate**:
 
 ```
-Listing                    named types (class)
-Listing.phase              fields and input fields
-Query.listings(phase:)     arguments
-Phase.DRAFT                enum values
+Parcel                     named types (class)
+Parcel.stage               fields and input fields
+Query.parcels(stage:)      arguments
+Stage.PACKED               enum values
 @key, @key(fields:)        directive definitions and their arguments
 schema                     the explicit root operation types
-extend Listing             an extension (its members keep the coordinates they extend)
-GetListings, ListingCard   named operations and fragments
+extend Parcel              an extension (its members keep the coordinates they extend)
+Shipments, ParcelCard      named operations and fragments
 ```
 
 Each definition records its GraphQL role. A field, argument or input field also records its type with its
-wrappers (`[Phase!]!`), its named type, and its default as written. The directives applied to a definition are
+wrappers (`[Stage!]!`), its named type, and its default as written. The directives applied to a definition are
 recorded with their arguments.
 
 **One file is not a schema.** A reference to a named type becomes an edge only when the same file defines that
