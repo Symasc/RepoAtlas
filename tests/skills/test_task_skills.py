@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 
 import pytest
+from repoatlas.mcp.server import INSTRUCTIONS
 from repoatlas.mcp.tools import TOOLS, TOOLS_BY_NAME
 from tests.skills.conftest import (
     SKILL_NAMES,
@@ -136,6 +137,14 @@ def test_change_impact_is_not_rebuilt_from_walks() -> None:
     workflow = sections(text("repoatlas-change-impact"))["workflow"]
     assert "do not rebuild impact from repeated" in workflow
     assert "not a list of breakages" in opening("repoatlas-change-impact")
+
+
+def test_change_impact_inspects_a_file_before_an_answer_names_it() -> None:
+    """Impact supplies no evidence, and grounding drops prose naming a file the
+    investigation never supplied: the skill and the server both say so."""
+    workflow = sections(text("repoatlas-change-impact"))["workflow"]
+    assert "inspect each file in the same investigation before your answer names it" in workflow
+    assert "inspect a step's file in the same investigation" in INSTRUCTIONS
 
 
 def test_code_trace_leaves_ordinary_coding_to_the_agent() -> None:

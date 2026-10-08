@@ -12,7 +12,7 @@ description: Use when a code change is proposed or under way (a refactor, a rena
 1. **Name the seed.** If you can name what changes (a symbol or qualified name, a file or directory path, an `env:` or `module:` key, a configuration key), call `repoatlas_impact` with it directly. If you can only describe it, make one `repoatlas_search` to find it, then pass the returned key.
 2. **Resolve ambiguity.** `seed.status` other than `resolved` means nothing was followed. For `ambiguous`, call again with one listed candidate's `entity` key.
 3. **Triage** by `basis`, cross-repository steps and `boundaries`; use `tests` to choose what to run.
-4. **Read the source** of every candidate you will report or change: `repoatlas_inspect` with the step's path and lines gives citable evidence, or read the file directly and label it as outside evidence.
+4. **Read the source** of every candidate you will report or change: `repoatlas_inspect` with the step's path and lines gives citable evidence, or read the file directly and label it as outside evidence. Inspect each file in the same investigation before your answer names it: an impact step supplies nothing, and verification drops a claim whose prose names a file the investigation never supplied.
 5. **Expand only what you need**: `repoatlas_relationships` from one candidate's exact key for its neighbourhood, `repoatlas_dependencies` when a crossing's provider matters, `repoatlas_http_operations` for the callers or handlers of a route contract.
 6. **Report, then validate.** Check RepoAtlas citations with `repoatlas_verify_grounding`, make the change, run the compiler and tests.
 
@@ -25,7 +25,7 @@ Stop when every candidate you report has been read or is labelled unread. After 
 - `step.crossing` is package evidence for a step into another repository; `step.http` joins a request in one repository to a handler in another (`called_at`, `served_at`, `identity_at`). Report both sides.
 - `packages` are coarse, and `exact_consumers: "unresolved"` means RepoAtlas does not know which declarations use the change. `hubs` collapse dependents, which are no less affected. `unresolved` lists importers not narrowed to a declaration.
 - `summary.complete: false` or a non-zero `omitted` means the walk stopped early. Say so: a short list is not proof nothing else is affected.
-- Impact records no evidence ids. Inspect a step's lines before citing it.
+- Impact records no evidence ids and supplies no files. Inspect a step's lines before citing it, and its file before naming that file in prose.
 
 ## Tools
 

@@ -81,7 +81,8 @@ INSTRUCTIONS = (
     "a statement is true. A search item marked declaration is RepoAtlas's record of "
     "a definition, not its source: inspect its entity key to read the source. "
     "For a change-impact question, call repoatlas_impact with what changes, then "
-    "read the source each step names."
+    "read the source each step names. Impact supplies no evidence: inspect a step's "
+    "file in the same investigation before a grounded answer names that file."
 )
 
 
