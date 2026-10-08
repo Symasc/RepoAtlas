@@ -6,13 +6,13 @@ version is another parser. Like every parser here it is a pure function of the p
 content. Nothing is executed, fetched, imported or resolved, and no other file is read.
 
 **A definition is named by its schema coordinate**, the spelling the GraphQL specification
-gives every element of a schema: ``Listing``, ``Listing.phase``,
-``Query.listings(phase:)``, ``Phase.DRAFT``, ``@key``, ``@key(fields:)``. A named type is
+gives every element of a schema: ``Parcel``, ``Parcel.stage``,
+``Query.parcels(stage:)``, ``Stage.PACKED``, ``@key``, ``@key(fields:)``. A named type is
 a ``class``; everything inside one is a ``symbol`` under it. An extension is named
 ``extend <Type>``, so the definition it extends keeps its name to itself, and the members it
 adds keep the coordinates they extend. ``meta["graphql"]`` says which element a symbol is;
 a field, argument or input field also records how it is typed (``type_ref``, such as
-``[Phase!]!``) and the named type inside (``named_type``).
+``[Stage!]!``) and the named type inside (``named_type``).
 
 **A type reference is linked here only when this file defines that type exactly once**, and
 nothing else in the file holds its name. One file is not a schema: the type a field names
