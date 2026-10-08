@@ -97,6 +97,11 @@ USES_EXPORT_TABLE = "export-table"
 #: declarations. Impact and relationships reach it by name or key.
 USES_ONLY_KINDS = frozenset({"variable", "type-alias"})
 
+#: The ``kind`` of an enum member that states a string value (repoatlas.parsers.typescript).
+#: It is reached through its enum (``Phase.Draft``), never by its bare name, and its
+#: ``meta["value"]`` is the string it stands for.
+ENUM_MEMBER = "enum-member"
+
 
 class EdgeDirection(StrEnum):
     """Which end of an edge the queried entity is required to sit on.
