@@ -69,7 +69,7 @@ def match_admitted(index: ResolutionIndex, origin: FileRow, pattern: str) -> lis
     segments = pattern.split("/")
     static: list[str] = []
     for segment in segments:
-        if any(character in _GLOB_CHARACTERS for character in segment):
+        if any(character in _GLOB_CHARACTERS for character in segment) or _EXTGLOB.search(segment):
             break
         static.append(segment)
     rest = "/".join(segments[len(static) :])
