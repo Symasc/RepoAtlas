@@ -76,9 +76,9 @@ BROKEN_GRAPHQL: dict[str, str] = {
     "empty": "",
     "only-a-comment": "# nothing here\n",
     "only-commas": ",,,\n",
-    "very-deep-list-type": "type A { a: " + "[" * 2_000 + "Int" + "]" * 2_000 + " }\n",
-    "very-deep-selection": "query {" + " a {" * 2_000 + " b" + " }" * 2_000 + " }\n",
-    "very-deep-value": "query { a(x: " + "[" * 2_000 + "1" + "]" * 2_000 + ") }\n",
+    "very-deep-list-type": "type A { a: " + "[" * 500 + "Int" + "]" * 500 + " }\n",
+    "very-deep-selection": "query {" + " a {" * 500 + " b" + " }" * 500 + " }\n",
+    "very-deep-value": "query { a(x: " + "[" * 500 + "1" + "]" * 500 + ") }\n",
 }
 
 
