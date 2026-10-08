@@ -778,7 +778,7 @@ class LanguageParser(Protocol):
     def parse(self, path: Path, content: str) -> ParsedFile: ...
 ```
 
-Recognize at least: Python, TypeScript, JavaScript, Bash, Ruby, Salt SLS, Jinja, YAML, JSON, Dockerfile.
+Recognize at least: Python, TypeScript, JavaScript, Bash, Ruby, Salt SLS, Jinja, YAML, JSON, Dockerfile, GraphQL.
 
 **Rules**
 
@@ -1037,6 +1037,41 @@ separate feature; a partial version of it would fabricate an image whenever one 
 
 Suppressing a computed target does not remove the evidence around it: `ARG TOOL` still records the variable,
 `ENV HOST=$OTHER` still records `HOST`, and `FROM ${BASE}` still opens its stage.
+
+### 7.9 GraphQL (`.graphql`, `.gql`, `.graphqls`)
+
+Parsed with **graphql-core**, pinned exactly (`THIRD_PARTY_NOTICES.md`). Only its parser is used. No schema is
+built, no document is validated or executed, and nothing is fetched.
+
+Every definition is named by its **schema coordinate**:
+
+```
+Listing                    named types (class)
+Listing.phase              fields and input fields
+Query.listings(phase:)     arguments
+Phase.DRAFT                enum values
+@key, @key(fields:)        directive definitions and their arguments
+schema                     the explicit root operation types
+extend Listing             an extension (its members keep the coordinates they extend)
+GetListings, ListingCard   named operations and fragments
+```
+
+Each definition records its GraphQL role. A field, argument or input field also records its type with its
+wrappers (`[Phase!]!`), its named type, and its default as written. The directives applied to a definition are
+recorded with their arguments.
+
+**One file is not a schema.** A reference to a named type becomes an edge only when the same file defines that
+type exactly once and nothing else in the file holds its name. Every other type reference is a `graphql-type` claim
+with its reason, `external` or `duplicate`. No pass links such a claim by name to a same-named type in another
+file: which definition a reference means depends on which files a schema configuration puts together.
+
+Each operation and fragment is also a `graphql-document` claim. The claim carries its selections, aliases,
+arguments, variables, spreads, inline fragments and literal values, with their lines. A document does not name the
+schema it is written against, so nothing binds it to one.
+
+**Bounds.** A file is refused whole, with a diagnostic in RepoAtlas's own words, in three cases: it has a syntax
+error, it holds more than 400,000 tokens, or it nests deeper than the parser can read. A document's selections are
+recorded up to 1,024 nodes and 64 levels; past either bound the claim keeps none of them.
 
 ---
 

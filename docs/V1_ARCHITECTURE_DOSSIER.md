@@ -447,6 +447,7 @@ class LanguageParser(Protocol):
 | Jinja | `parsers/jinja.py` | `jinja-scan` | 2 | lexical scan, never rendered |
 | Dockerfile | `parsers/dockerfile.py` | `dockerfile` | 4 | instruction scan + `dockerwords.py` |
 | YAML / JSON | `parsers/structured.py` | `structured-config` | 1 | safe load, key flattening |
+| GraphQL | `parsers/graphql.py` | `graphql` | 1 | graphql-core 3.2.6 parse; schema coordinates; no schema built |
 
 Dispatch order matters exactly once: `SaltParser` must precede `StructuredParser` so an `.sls` file is never treated as ordinary YAML. `ParserRegistry.for_path()` returns the first parser that claims the path.
 

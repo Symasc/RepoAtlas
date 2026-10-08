@@ -71,6 +71,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
 )
 from repoatlas.models.telemetry import LinkTrace, StageTiming, Stopwatch
+from repoatlas.parsers.graphql import GRAPHQL_FACTS
 from repoatlas.parsers.http_facts import PENDING_FACT
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION
 from repoatlas.storage.protocols import (
@@ -507,6 +508,12 @@ class ReferenceLinker:
 
             for claim in claims:
                 if _is_salt_mapping_claim(claim):
+                    continue
+                if _is_graphql_claim(claim):
+                    # One file is no schema, and nothing yet decides which schema a
+                    # GraphQL type or document belongs to: it stays a claim, never
+                    # resolved by name and never handed to the HTTP pass.
+                    unresolved += 1
                     continue
                 if claim_role(claim) is not None:
                     # Never proven by symbol resolution: decided below, together.
@@ -978,7 +985,9 @@ def plan_repository_http(knowledge: SqliteKnowledgeStore, repo_id: int) -> Repos
     claims = [
         claim
         for claim in knowledge.list_unresolved_refs(repo_id, pending_only=True)
-        if claim_role(claim) is not None and not _is_salt_mapping_claim(claim)
+        if claim_role(claim) is not None
+        and not _is_salt_mapping_claim(claim)
+        and not _is_graphql_claim(claim)
     ]
     served = knowledge.list_served_routes(exclude_parser=GLOBAL_PARSER, repo_id=repo_id)
     index = ResolutionIndex.build(files, symbols)
@@ -1036,6 +1045,11 @@ def _is_salt_mapping_claim(claim: UnresolvedRefRecord) -> bool:
     if not claim.meta_json:
         return False
     return json.loads(claim.meta_json).get("salt_fact") in {"master_root", "top_entry"}
+
+
+def _is_graphql_claim(claim: UnresolvedRefRecord) -> bool:
+    """A GraphQL type or document claim (repoatlas.parsers.graphql), bound by no pass yet."""
+    return claim_role(claim) in GRAPHQL_FACTS
 
 
 def _uses_detail(plan: UsesPlan) -> str:

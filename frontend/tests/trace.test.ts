@@ -174,6 +174,9 @@ describe("highlighted lines", () => {
     expect(grammarFor("web/App.TSX")).toBe("tsx");
     expect(grammarFor("Dockerfile.prod")).toBe("dockerfile");
     expect(grammarFor("Gemfile")).toBe("ruby");
+    expect(grammarFor("api/schema.graphqls")).toBe("graphql");
+    expect(grammarFor("web/queries.gql")).toBe("graphql");
+    expect(grammarFor("prisma/schema.prisma")).toBe("prisma");
     expect(grammarFor("LICENSE")).toBeNull();
     expect(grammarFor("notes.unknownext")).toBeNull();
   });
@@ -300,6 +303,7 @@ describe("a trace", () => {
     expect(unitLabel("refusals:ok")).toBe("refusals / ok");
     expect(boundaryLabel("contracts:. -> refusals:ok")).toBe("contracts → refusals / ok");
     expect(nameFromKey(ROLE)).toBe("CourseRole");
+    expect(nameFromKey("sym:api:schema.graphql:Query.items(first:):4")).toBe("Query.items(first:)");
     expect(nameFromKey("file:app:src/policy.ts")).toBe("policy.ts");
     expect(nameFromKey("contracts:src/legacy/")).toBe("legacy");
   });

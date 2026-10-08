@@ -118,6 +118,7 @@ RepoAtlas/
 │   │   ├── jinja.py        template relationships; owns neutralize()
 │   │   ├── structured.py   YAML / JSON config keys; owns collect_config_keys()
 │   │   ├── dockerfile.py   instruction extraction; asks dockerwords.py for proof
+│   │   ├── graphql.py      graphql-core, pinned: schema coordinates; type and document claims
 │   │   └── dockerwords.py  static-vs-computed classification of Dockerfile operands
 │   ├── dependencies/   manifest and lockfile parsers; declared↔resolved join; name normalization
 │   │   ├── base.py         DependencyParser protocol
@@ -1477,6 +1478,26 @@ which this parser does not read, and the introducer is a redirection operator �
 node naming nothing at all. An unparseable JSON array falls back to shell form, as Docker itself does, rather than
 being salvaged into target keys; the previous hand-rolled comma split turned `COPY ["src/file with space.txt",
 "/app/"]` into a file reference called `[src/file with space.txt,`.
+
+### GraphQL: one file is not a schema
+
+`parsers/graphql.py` names every definition by its schema coordinate (`Listing.phase`, `Query.listings(phase:)`,
+`Phase.DRAFT`; V1_SPEC §7.9), so a field and the enum it is typed by are two declarations joined by a
+`REFERENCES` edge, and change impact walks from one to the other.
+
+> **Invariant.** A GraphQL type reference is linked only when the file that makes it defines that type exactly
+> once, and nothing else in the file holds the name. Matching names never establish graph identity across files.
+
+A schema is assembled from files that some configuration selects, so a type defined once in the repository may still
+not be the type a reference means. The same name is also commonly defined in several schemas at once: a provider's
+SDL, a supergraph copy, and an unrelated service. Every reference the file cannot decide alone is a
+`pending_fact` claim (`graphql-type`, with reason `external` or `duplicate`), and so is every operation and fragment
+(`graphql-document`, with what it selects).
+
+The global pass counts these claims as unresolved and does nothing else with them. It never resolves one as a
+symbol, and never hands one to the HTTP planner (`_is_graphql_claim` in `graph/linker.py`). Binding a claim needs
+evidence the file does not carry: the configuration that put a schema together, or the generation that copied
+it.
 
 ### The two link passes
 

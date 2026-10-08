@@ -64,12 +64,30 @@ BROKEN_JINJA: dict[str, str] = {
     "only-delimiters": "{%%}{{}}{##}\n",
 }
 
+BROKEN_GRAPHQL: dict[str, str] = {
+    "unclosed-type": "type Parcel {\n  id: ID!\n",
+    "missing-name": "type {\n}\n",
+    "unterminated-string": 'type A @note(text: "open\n) { a: Int }\n',
+    "unterminated-block-string": 'type A {\n  """never closed\n  a: Int\n}\n',
+    "argument-without-a-type": "type Query { find(x): Int }\n",
+    "stray-close-brace": "}\n",
+    "invalid-character": "type A { a: Int }\n\x01\n",
+    "binary-ish": "\x00\x01\x02 not text at all\n",
+    "empty": "",
+    "only-a-comment": "# nothing here\n",
+    "only-commas": ",,,\n",
+    "very-deep-list-type": "type A { a: " + "[" * 2_000 + "Int" + "]" * 2_000 + " }\n",
+    "very-deep-selection": "query {" + " a {" * 2_000 + " b" + " }" * 2_000 + " }\n",
+    "very-deep-value": "query { a(x: " + "[" * 2_000 + "1" + "]" * 2_000 + ") }\n",
+}
+
 
 def _every_broken_input() -> list[tuple[str, str, str]]:
     return [
         *[("broken.yaml", name, text) for name, text in BROKEN_YAML.items()],
         *[("broken.sls", name, text) for name, text in BROKEN_SALT.items()],
         *[("broken.jinja", name, text) for name, text in BROKEN_JINJA.items()],
+        *[("broken.graphql", name, text) for name, text in BROKEN_GRAPHQL.items()],
     ]
 
 

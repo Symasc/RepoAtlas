@@ -165,6 +165,8 @@ INVALID_JSON = "invalid JSON"
 INVALID_YAML = "invalid YAML"
 INVALID_TOML = "invalid TOML"
 INVALID_CFG = "invalid cfg"
+#: A file larger than a parser's own bound reads: refused whole, never read in part.
+PARSE_BOUND_EXCEEDED = "parse bound exceeded"
 
 #: Safe wording for an enumeration that git could not complete.
 #:
