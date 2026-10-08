@@ -409,3 +409,23 @@ def test_a_word_in_the_question_is_not_treated_as_a_fabrication() -> None:
     )
 
     assert report.answer.summary == "nothing in deploy/prod.yaml sets it"
+
+
+@pytest.mark.parametrize(
+    ("statement", "kept"),
+    [
+        ("./src/config.py reads the host", True),
+        ("././src/config.py reads the host", True),
+        ("../src/config.py reads the host", False),
+        ("./src/other.py reads the host", False),
+        ("./config.py reads the host", True),
+    ],
+    ids=["dot-slash", "repeated-dot-slash", "parent", "unsupplied", "basename"],
+)
+def test_a_supplied_file_named_relative_to_the_root_is_not_a_fabrication(
+    statement: str, kept: bool
+) -> None:
+    """``./`` restates the path; ``../`` names somewhere else and stays checked."""
+    report = ground_answer(_answer(_cite(start=22, end=25), statement=statement), _set(_supplied()))
+
+    assert bool(report.answer.hypotheses) is kept
