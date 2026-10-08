@@ -194,7 +194,7 @@ from repoatlas.graph.keys import is_positional
 from repoatlas.graph.linker import plan_repository_http
 from repoatlas.graph.traversal import RELATIONSHIP_CROSSING_EDGES, WalkResult, WalkStep, walk
 from repoatlas.graph.units import package_directories, unit_of
-from repoatlas.grounding import GroundingReport, ground_answer
+from repoatlas.grounding import NAMED_REFERENCE, GroundingReport, ground_answer
 from repoatlas.indexing.chunking import chunk_hash
 from repoatlas.models.capability import (
     AppliedBudget,
@@ -1937,30 +1937,48 @@ class CapabilityService:
                 )
 
         # A claim whose citations every one resolved, and which V1 removed anyway.
-        # The adapter handed V1 that claim with resolvable evidence at coordinates
-        # it had already verified, so the prose rule is the only thing left that
-        # can have removed it: the statement named a repository object — a file, a
+        # V1 records why it removed each one, so the finding says what happened
+        # rather than what is left once everything else is ruled out. The prose
+        # rule is one reason: the statement named a repository object — a file, a
         # line or a route — this investigation was never supplied. Which claim it
         # was is the whole value of the finding, so it carries its index; not a
         # word of the statement is repeated, for the same reason the count below
-        # quotes nothing.
+        # quotes nothing. Any other removal of a claim whose citations were all
+        # admitted is RepoAtlas disagreeing with itself, and is named as that.
+        # The projection is total and ordered, so a hypothesis's position is its
+        # claim's index.
         aligned = aligned_hypotheses(answer, report, outcomes=outcomes, routes=routes)
+        removals = dict(report.removals)
         for claim_index, claim in enumerate(answer.claims):
             decided = [outcomes[(claim_index, index)] for index in range(len(claim.citations))]
             if not decided or not all(outcome.admitted for outcome in decided):
                 continue
             if aligned[claim_index] is not None:
                 continue
-            findings.append(
-                GroundingFinding(
-                    code=GroundingFindingCode.PROSE_REFERENCE_NOT_SUPPLIED,
-                    claim_index=claim_index,
-                    detail=(
-                        "the statement named a repository, file, line or route this "
-                        "investigation never supplied"
-                    ),
+            reasons = removals.get(claim_index, frozenset())
+            if NAMED_REFERENCE in reasons:
+                findings.append(
+                    GroundingFinding(
+                        code=GroundingFindingCode.PROSE_REFERENCE_NOT_SUPPLIED,
+                        claim_index=claim_index,
+                        detail=(
+                            "the statement named a repository, file, line or route this "
+                            "investigation never supplied"
+                        ),
+                    )
                 )
-            )
+            if not reasons or reasons - {NAMED_REFERENCE}:
+                findings.append(
+                    GroundingFinding(
+                        code=GroundingFindingCode.ADMITTED_CITATION_REJECTED,
+                        claim_index=claim_index,
+                        detail=(
+                            "every citation was admitted, yet checking the whole answer "
+                            "removed the claim; this is an inconsistency in RepoAtlas, not "
+                            "in the answer"
+                        ),
+                    )
+                )
 
         # Everything V1 removed that was not a claim: the summary, an unknown, or
         # the next check, each because it named a repository object nobody

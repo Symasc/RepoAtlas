@@ -125,6 +125,19 @@ class GroundingReport:
     clamped_citations: int = 0
     demoted_findings: int = 0
     unsupported: tuple[str, ...] = field(default=())
+    #: Why each removed hypothesis went, keyed by its position in the submitted
+    #: answer: any of :data:`NAMED_REFERENCE`, :data:`FABRICATED_CITATION` and
+    #: :data:`NO_EVIDENCE`. Recorded rather than inferred, so that a caller never
+    #: blames the prose for a removal the citations caused.
+    removals: tuple[tuple[int, frozenset[str]], ...] = field(default=())
+
+
+#: The statement named a repository object nobody supplied.
+NAMED_REFERENCE = "named-reference"
+#: A citation resolved to no supplied source.
+FABRICATED_CITATION = "fabricated-citation"
+#: The hypothesis carried no citation that survived.
+NO_EVIDENCE = "no-evidence"
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,8 +313,9 @@ def ground_answer(answer: RepoAtlasAnswer, evidence: EvidenceSet) -> GroundingRe
     clamped = 0
     unsupported: list[str] = []
     surviving: list[Hypothesis] = []
+    removals: list[tuple[int, frozenset[str]]] = []
 
-    for hypothesis in answer.hypotheses:
+    for position, hypothesis in enumerate(answer.hypotheses):
         kept: list[Evidence] = []
         fabricated = 0
         narrowed = False
@@ -321,6 +335,12 @@ def ground_answer(answer: RepoAtlasAnswer, evidence: EvidenceSet) -> GroundingRe
         # evidence, whatever else it also cites.
         if not kept or fabricated or named:
             unsupported.append(hypothesis.statement)
+            reasons = {NAMED_REFERENCE} if named else set()
+            if fabricated:
+                reasons.add(FABRICATED_CITATION)
+            if not kept and not fabricated:
+                reasons.add(NO_EVIDENCE)
+            removals.append((position, frozenset(reasons)))
             continue
 
         surviving.append(
@@ -367,6 +387,7 @@ def ground_answer(answer: RepoAtlasAnswer, evidence: EvidenceSet) -> GroundingRe
         clamped_citations=clamped,
         demoted_findings=len(answer.hypotheses) - len(surviving),
         unsupported=tuple(unsupported),
+        removals=tuple(removals),
     )
 
 
