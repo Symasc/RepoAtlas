@@ -207,6 +207,28 @@ class HttpCrossing(BaseModel):
     bound_at: str | None = None
 
 
+class CodeGeneration(BaseModel):
+    """How a generated declaration was generated from the schema definition before it.
+
+    The evidence a configured-generation link recorded (repoatlas.graph.graphql_codegen),
+    each part locatable as ``<repository>/<path>[:<line>]``: the configuration's entry for
+    the output, the schema definition it was generated from (``definition``), the generated
+    file, the plugin that writes it, and -- for an enum member -- the value both sides carry.
+    Source evidence, not a record that the generator ran: the file may be stale, which the
+    decision says.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    config: str
+    #: The schema definition (or enum value) it was generated from.
+    definition: str
+    output: str
+    plugin: str
+    member_value: str | None = None
+    decision_ref: str
+
+
 class ImpactStep(BaseModel):
     """The one fact connecting a candidate to its predecessor.
 
@@ -234,6 +256,9 @@ class ImpactStep(BaseModel):
     crossing: PackageCrossing | None = None
     #: The HTTP evidence of a step from a handler to a request in another repository.
     http: HttpCrossing | None = None
+    #: The configured generation behind a step from a schema definition to what was
+    #: generated from it.
+    generation: CodeGeneration | None = None
     #: The edge's recorded resolution; ``full`` only.
     resolution: dict[str, object] | None = None
 

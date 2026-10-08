@@ -20,6 +20,7 @@ from repoatlas.models.capability import CapabilityContext, CapabilityScope, Pres
 from repoatlas.models.impact import ImpactCandidate, ImpactRequest, ImpactResponse, ImpactRole
 from repoatlas.services.workspace import Workspace, open_workspace
 from tests.impact_corpus import DIRECTION, HTTP_API, HTTP_WEB, build, verify_steps
+from tests.schema_corpus import API as CODEGEN_API
 
 GLOBAL = CapabilityContext(scope=CapabilityScope.GLOBAL)
 D = "sym:direction:"
@@ -126,6 +127,16 @@ CASES: dict[str, Case] = {
         ImpactRole.DEPENDENT,
         ("IMPORTS", "file:direction:src/b.ts", "file:direction:src/a.ts"),
     ),
+    "generates-graphql": Case(
+        "sym:parcel-api:schema/parcels.graphql:Stage:1",
+        "sym:parcel-api:src/gen/types.ts:Stage:2",
+        ImpactRole.DEPENDENT,
+        (
+            "GENERATES",
+            "sym:parcel-api:schema/parcels.graphql:Stage:1",
+            "sym:parcel-api:src/gen/types.ts:Stage:2",
+        ),
+    ),
     MEMBER: Case("file:direction:src/a.ts", f"{D}src/a.ts:A:1", ImpactRole.MEMBER, None),
     MEMBER_OF: Case(f"{D}src/a.ts:A:1", f"{D}src/holder.ts:Holder:2", ImpactRole.DEPENDENT, None),
 }
@@ -143,7 +154,12 @@ def indexed(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Workspace]:
     build(
         workspace,
         root,
-        {"direction": DIRECTION, "http-api": HTTP_API, "http-web": HTTP_WEB},
+        {
+            "direction": DIRECTION,
+            "http-api": HTTP_API,
+            "http-web": HTTP_WEB,
+            "parcel-api": CODEGEN_API,
+        },
     )
     yield workspace
     workspace.close()

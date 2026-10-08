@@ -6,6 +6,7 @@ This module and its siblings are the only place SQL appears.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -135,6 +136,10 @@ def _chunks(values: Sequence[int]) -> Iterator[Sequence[int]]:
 def _after(prefix: str) -> str:
     """The smallest string greater than every string starting with ``prefix``."""
     return prefix[:-1] + chr(ord(prefix[-1]) + 1)
+
+
+#: An evidence key a neighbour rule filters on: a resolution field name, nothing else.
+_EVIDENCE_KEY = re.compile(r"[a-z_]+")
 
 
 class SqliteRepositoryStore:
@@ -1492,6 +1497,15 @@ class SqliteKnowledgeStore:
                 f" AND (e.type != ? OR {far}.type IN ({','.join('?' * len(entity_types))}))"
             )
             params.extend([str(edge_type), *(str(t) for t in entity_types)])
+        for edge_type, key in rule.evidence:
+            # Only the edges one pass made on its own evidence (repoatlas.graph.impact,
+            # Family.evidence). The key is a constant of the rule, never input.
+            if not _EVIDENCE_KEY.fullmatch(key):
+                raise ValueError(f"not an evidence key: {key!r}")
+            constrained += (
+                f" AND (e.type != ? OR json_extract(e.resolution, '$.{key}') IS NOT NULL)"
+            )
+            params.append(str(edge_type))
         if rule.uses_replace_file_facts:
             # The far end is a file asserting a file-level import or call; its own USES,
             # or a declaration's in it, to the same entity replaces that fact.

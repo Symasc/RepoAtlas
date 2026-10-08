@@ -29,6 +29,7 @@ from pathlib import PurePosixPath
 
 from repoatlas.dependencies.normalize import PYPI
 from repoatlas.graph.declared import REFUSED_AS, TargetKind, classify_dependency_target
+from repoatlas.graph.graphql_codegen import FAMILY as GENERATION
 from repoatlas.graph.http_crossings import HTTP_CROSSING
 from repoatlas.graph.impact import ImpactWalk, Node, Tier, WalkResult, is_test_path
 from repoatlas.graph.keys import file_key, package_key
@@ -38,6 +39,7 @@ from repoatlas.graph.units import package_directories, unit_of
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.impact import (
     MAX_SEED_CANDIDATES,
+    CodeGeneration,
     Granularity,
     HttpCrossing,
     HubImpact,
@@ -67,8 +69,9 @@ from repoatlas.storage.protocols import (
 )
 
 #: The traversal policy's name and version, reported with every answer. 2: a use crosses
-#: into another repository on a package link's evidence.
-POLICY = "impact/2"
+#: into another repository on a package link's evidence. 3: a schema definition reaches
+#: what a configured generator generated from it (``GENERATES`` on codegen evidence).
+POLICY = "impact/3"
 
 #: Entity types a change is a *key* change for: they name a value, not code.
 _KEYS = frozenset(
@@ -501,6 +504,9 @@ def assemble(
                 f"{node.step.reading}, {request.get('provider')} -> {consumer}"
                 f" via {request.get('method')} {request.get('url')}"
             )
+        generated = node.step.resolution.get(GENERATION)
+        if isinstance(generated, dict):
+            return f"{node.step.reading}, by {generated.get('config')}"
         return node.step.reading
 
     tests = [n for n in ranked if is_test_path(n.path) and n.role is not ImpactRole.MEMBER]
@@ -561,6 +567,7 @@ def assemble(
                 lines = (row.line_start, row.line_end or row.line_start)
         crossing = _crossing(resolution, walk.slug_of(row.file_repo_id) if row else None, row)
         http = http_crossing(resolution, walk.slug_of(row.file_repo_id) if row else None)
+        generation = code_generation(resolution)
         via = tuple(str(v) for v in _list(resolution.get("via")))
         if crossing is not None:
             via = tuple(f"{crossing.from_repository}/{v}" for v in via)
@@ -590,6 +597,7 @@ def assemble(
                 via_names=tuple(str(v) for v in _list(resolution.get("via_names"))),
                 crossing=crossing,
                 http=http,
+                generation=generation,
                 resolution=(resolution or None) if full else None,
             ),
             boundaries=tuple(boundaries),
@@ -1112,6 +1120,22 @@ def package_crossing(
         declared_as=_text(resolution.get("name")),
         imported_as=_text(resolution.get("imported")),
         local=_text(resolution.get("local")),
+    )
+
+
+def code_generation(resolution: Mapping[str, object]) -> CodeGeneration | None:
+    """An edge's configured-generation evidence, or ``None``."""
+    record = resolution.get(GENERATION)
+    if not isinstance(record, dict):
+        return None
+    value = record.get("member_value")
+    return CodeGeneration(
+        config=str(record.get("config")),
+        definition=str(record.get("schema")),
+        output=str(record.get("output")),
+        plugin=str(record.get("plugin")),
+        member_value=str(value) if value is not None else None,
+        decision_ref=str(record.get("decision_ref")),
     )
 
 
