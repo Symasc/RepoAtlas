@@ -264,6 +264,10 @@ class ReferenceLinker:
                     claims.append(self._claim(repo_id, file_id, source_id, reference, parsed))
                 continue
 
+            if reference.meta.get("graphql-fact"):
+                claims.append(self._claim(repo_id, file_id, source_id, reference, parsed))
+                continue
+
             if reference.meta.get(PENDING_FACT):
                 # A pending fact (repoatlas.parsers.http_facts): only the global pass
                 # can prove it, so it is kept as a claim — never interned here, and
@@ -506,6 +510,9 @@ class ReferenceLinker:
             salt_crossings: set[tuple[int, int]] = set()
 
             for claim in claims:
+                if json.loads(claim.meta_json or "{}").get("graphql-fact"):
+                    unresolved += 1
+                    continue
                 if _is_salt_mapping_claim(claim):
                     continue
                 if claim_role(claim) is not None:

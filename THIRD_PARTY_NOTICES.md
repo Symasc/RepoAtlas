@@ -29,6 +29,15 @@ buffer overflows"), a memory-safety fix in the scanner that reads untrusted
 source. A Ruby grammar will be adopted only from a release that contains that
 commit and installs as a wheel, after the parser's output is re-characterized.
 
+## GraphQL
+
+GraphQL SDL and documents are parsed with `graphql-core` 3.2.6, an MIT-licensed
+package from https://github.com/graphql-python/graphql-core, tag `v3.2.6`.
+It is installed, not vendored, and performs no network access while parsing.
+The dependency is pinned exactly; artifact hashes are recorded in `uv.lock` and
+the installed distribution carries its license. Changes to the pin require
+re-characterizing parser output and bumping the GraphQL parser version.
+
 ## License texts
 
 ### tree-sitter-typescript 0.23.2
