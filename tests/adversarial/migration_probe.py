@@ -1,6 +1,6 @@
 """A test-only second migration, so the upgrade path has something to upgrade to.
 
-The committed schema is one migration. The migrator's guarantees — one
+The committed schema is a short chain of migrations. The migrator's guarantees — one
 transaction per migration, recovery from an interrupted one, refusal of a schema
 no migration produces, one winner among concurrent openers — are about moving
 *between* versions, and they have to hold for the next real migration the day it
@@ -18,8 +18,8 @@ from typing import Any
 
 from repoatlas.storage.sqlite.migrator import Migration, load_migrations, split_statements
 
-#: The version the probe migration stamps, one past the committed schema.
-VERSION = 2
+#: The version the probe migration stamps, one past the committed schema, whatever it is.
+VERSION = load_migrations()[-1].version + 1
 
 SQL = """
 ALTER TABLE repositories ADD COLUMN probe TEXT NOT NULL DEFAULT '';
