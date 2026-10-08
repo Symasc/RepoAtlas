@@ -10,11 +10,13 @@ linker's job (ARCHITECTURE.md §5); the parser only records what is written.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from repoatlas.models.parsing import (
+    ENUM_MEMBER,
     GRAMMAR_UNAVAILABLE,
     EdgeType,
     EntityType,
@@ -81,6 +83,9 @@ _DECLARATIONS: dict[str, tuple[EntityType, str]] = {
     "enum_declaration": (EntityType.SYMBOL, "enum"),
     "module": (EntityType.MODULE, "namespace"),
 }
+
+
+_MEMBER_NAME = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 
 
 def _relative(specifier: str) -> bool:
@@ -387,11 +392,54 @@ class _Walker:
             )
         )
         self._record_heritage(node, self._qualify(name))
+        if node.type == "enum_declaration":
+            self._enum_members(node, self._qualify(name))
         if entity_type is EntityType.FUNCTION:
             self._mark_returns(node)
         self._scope.append(name)
         self._visit_children(node)
         self._scope.pop()
+
+    def _enum_members(self, node: Node, enum: str) -> None:
+        """An enum's members whose value is a plain string literal, as ``Enum.Member``.
+
+        The literal is recorded as the member's ``value``: what the member *is* at run
+        time, which a generated enum shares with the schema it came from. A member with
+        no initializer, a number, an escape or a template states no string, and is left
+        out rather than recorded with a guessed one. A member is reached through its enum,
+        never by its bare name (``ReferenceLinker._symbol_ids``).
+        """
+        body = node.child_by_field_name("body")
+        for member in body.named_children if body is not None else ():
+            key = member.child_by_field_name("name")
+            value = member.child_by_field_name("value")
+            if member.type != "enum_assignment" or key is None or value is None:
+                continue
+            literal = string_literal(self._source, value) if value.type == "string" else None
+            if key.type == "property_identifier":
+                name: str | None = node_text(self._source, key)
+            else:
+                name = string_literal(self._source, key) if key.type == "string" else None
+            if (
+                literal is None
+                or "\\" in literal
+                or name is None
+                or not _MEMBER_NAME.fullmatch(name)
+            ):
+                continue
+            start, end = line_range(member)
+            self.symbols.append(
+                ParsedSymbol(
+                    kind=EntityType.SYMBOL,
+                    name=name,
+                    qualified_name=f"{enum}.{name}",
+                    line_start=start,
+                    line_end=end,
+                    signature=node_text(self._source, member),
+                    parent=enum,
+                    meta={"kind": ENUM_MEMBER, "value": literal},
+                )
+            )
 
     def _record_heritage(self, node: Node, qualified: str) -> None:
         """``extends`` / ``implements`` clauses become REFERENCES."""
@@ -746,7 +794,9 @@ class TypeScriptParser:
     #    controllers may be made of (repoatlas.parsers.http_oas3).
     # 15: a superagent or fetch request, or an injected one, whose path is read but whose
     #    base is not (unstated, empty or computed) records a claim with no origin (D2).
-    version = "15"
+    # 16: an enum's members with a plain string value are symbols (``Enum.Member``) that
+    #    record the value, which is what a generated enum shares with its schema.
+    version = "16"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
