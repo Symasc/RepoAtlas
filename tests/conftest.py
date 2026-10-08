@@ -166,7 +166,9 @@ def fact_snapshot(workspace: Workspace) -> dict[str, object]:
         "JOIN repositories r ON r.id = f.repo_id ORDER BY r.name, f.rel_path"
     ).fetchall()
     entities = workspace.database.execute(
-        "SELECT type, key, name, qualified_name, line_start, line_end FROM entities "
+        # `meta_json` holds the parser's facts about a definition, which the global
+        # link pass reads; a sync that kept stale facts there is not a reindex.
+        "SELECT type, key, name, qualified_name, line_start, line_end, meta_json FROM entities "
         "ORDER BY key, name, line_start"
     ).fetchall()
     edges = workspace.database.execute(
