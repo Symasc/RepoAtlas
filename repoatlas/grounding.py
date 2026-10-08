@@ -229,6 +229,13 @@ def _unsupported_references(text: str, allowed: set[str]) -> list[str]:
             continue
         if token in allowed or token.lstrip("/") in allowed:
             continue
+        # ``./src/app.py`` is ``src/app.py`` spelled relative to the repository
+        # root. ``../`` is not stripped: it names a different place.
+        relative = token
+        while relative.startswith("./"):
+            relative = relative[2:]
+        if relative != token and relative in allowed:
+            continue
         found.append(match.group(0))
     return found
 
