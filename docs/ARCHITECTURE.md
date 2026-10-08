@@ -1481,8 +1481,8 @@ being salvaged into target keys; the previous hand-rolled comma split turned `CO
 
 ### GraphQL: one file is not a schema
 
-`parsers/graphql.py` names every definition by its schema coordinate (`Listing.phase`, `Query.listings(phase:)`,
-`Phase.DRAFT`; V1_SPEC §7.9), so a field and the enum it is typed by are two declarations joined by a
+`parsers/graphql.py` names every definition by its schema coordinate (`Parcel.stage`, `Query.parcels(stage:)`,
+`Stage.PACKED`; V1_SPEC §7.9), so a field and the enum it is typed by are two declarations joined by a
 `REFERENCES` edge, and change impact walks from one to the other.
 
 > **Invariant.** A GraphQL type reference is linked only when the file that makes it defines that type exactly

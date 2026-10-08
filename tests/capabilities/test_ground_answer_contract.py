@@ -434,12 +434,12 @@ def test_a_supplied_file_named_relative_to_the_root_is_not_a_fabrication(
 @pytest.mark.parametrize(
     ("statement", "kept"),
     [
-        ("other.graphql defines the phase", False),
-        ("other.graphqls defines the phase", False),
+        ("other.graphql defines the stage", False),
+        ("other.graphqls defines the stage", False),
         ("the queries in listings.gql select it", False),
         ("schema.prisma maps the column", False),
-        ("api/schema.graphql defines the phase", True),
-        ("schema.graphql defines the phase", True),
+        ("api/schema.graphql defines the stage", True),
+        ("schema.graphql defines the stage", True),
     ],
     ids=["graphql", "graphqls", "gql", "prisma", "supplied", "supplied-basename"],
 )
@@ -448,7 +448,7 @@ def test_a_schema_file_the_answer_was_never_shown_is_a_fabrication(
 ) -> None:
     """A bare schema file name is a path, so prose naming one is checked like any other
     (the supplied file's own basename included, and accepted)."""
-    supplied = _supplied(path="api/schema.graphql", text="enum Phase { DRAFT }")
+    supplied = _supplied(path="api/schema.graphql", text="enum Stage { PACKED }")
     report = ground_answer(
         _answer(_cite(path="api/schema.graphql", start=22, end=25), statement=statement),
         _set(supplied),
