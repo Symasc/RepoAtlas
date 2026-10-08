@@ -187,6 +187,30 @@ def test_a_renamed_value_is_stale_until_the_output_is_generated_again(
     assert fact_snapshot(workspace) == reindex_from_scratch(settings, root, tmp_path, "again")
 
 
+def test_a_member_binds_by_the_value_it_carries_never_by_its_name(
+    workspace: Workspace, tmp_path: Path, settings: Settings
+) -> None:
+    """The generator's member names are its convention's; their strings are the schema's."""
+    build(workspace, tmp_path, repos())
+    root = tmp_path / "repos"
+    generated = root / "parcel-api" / "src" / "gen" / "types.ts"
+    generated.write_text(
+        generated.read_text()
+        .replace("Sent = 'SENT'", "Moving = 'SENT'")
+        .replace("Lost = 'LOST'", "Lost = 'MISSING'")
+    )
+    sync(workspace, workspace.resolver().resolve(root / "parcel-api"))
+
+    found = decisions(workspace)
+    assert found[f"{API}::Stage.SENT"] == "linked"
+    assert ("schema/parcels.graphql#Stage.SENT", "src/gen/types.ts#Stage.Moving") in pairs(
+        workspace
+    )
+    assert found[f"{API}::Stage.LOST"] == "member-stale"
+    assert not [p for p in pairs(workspace) if p[1] == "src/gen/types.ts#Stage.Lost"]
+    assert fact_snapshot(workspace) == reindex_from_scratch(settings, root, tmp_path)
+
+
 @pytest.mark.parametrize(
     ("removed", "decision"),
     [
@@ -264,9 +288,13 @@ def test_a_failed_commit_leaves_the_previous_decisions_and_edges(
     workspace: Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     build(workspace, tmp_path, repos())
+    # Planning writes nothing: with the stored decisions cleared, they stay cleared.
+    workspace.knowledge.replace_link_decisions([])
     before = fact_snapshot(workspace)
     linker = ReferenceLinker(workspace.knowledge)
     plan = linker.prepare_global()
+    assert fact_snapshot(workspace) == before
+    assert plan.decisions
 
     def broken(rows: object) -> None:
         raise RuntimeError("injected")
@@ -360,6 +388,10 @@ def test_a_glob_matches_admitted_files_only_and_may_climb_into_another_repositor
         ("parcel-api", "schema/parcels.graphql"),
     ]
     assert match_admitted(index, origin, "../../outside/*.graphql") == []
+    # A glob stays in the directory, and the repository, it names.
+    own = match_admitted(index, origin, "schema/*.graphql")
+    assert own is not None
+    assert [(f.repo_slug, f.rel_path) for f in own] == [("parcel-web", "schema/clash.graphql")]
 
 
 # ---------------------------------------------------------------------------
