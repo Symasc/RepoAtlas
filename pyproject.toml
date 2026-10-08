@@ -50,6 +50,15 @@ dependencies = [
     "tree-sitter-bash==0.25.1",
     "tree-sitter-javascript==0.25.0",
     "tree-sitter-typescript==0.23.2",
+    # GraphQL schema and documents are read with graphql-core, the Python port of
+    # the GraphQL reference implementation, and only with its parser
+    # (`graphql.language.parse`, under a token bound): no schema is built, no
+    # document is validated or executed, and nothing is fetched. Pinned exactly
+    # for the grammars' reason: a different version is a different set of facts
+    # from the same file, so changing it means re-characterising the GraphQL
+    # parser's output and bumping its version. THIRD_PARTY_NOTICES.md records the
+    # provenance.
+    "graphql-core==3.2.6",
     # The official Model Context Protocol SDK, for the stdio transport adapter
     # only. Pinned below 2.0: that line swaps `httpx` for a second HTTP client
     # (`httpx2`) and adds an OpenTelemetry dependency, neither of which a local

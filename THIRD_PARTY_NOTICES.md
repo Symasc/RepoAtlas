@@ -1,4 +1,4 @@
-# Third-party notices: parser grammars
+# Third-party notices: parser grammars and libraries
 
 RepoAtlas parses TypeScript, JavaScript and Bash with tree-sitter grammars that it
 **does not vendor and never downloads at run time**. Each grammar is a separate
@@ -28,6 +28,20 @@ structurally**. The only offline-installable Ruby grammar is `tree-sitter-ruby`
 buffer overflows"), a memory-safety fix in the scanner that reads untrusted
 source. A Ruby grammar will be adopted only from a release that contains that
 commit and installs as a wheel, after the parser's output is re-characterized.
+
+## Parser libraries
+
+GraphQL schema files and documents are read with graphql-core, the Python port of
+the GraphQL reference implementation. Only its parser is used
+(`graphql.language.parse`, under a token bound): no schema is built, no document is
+validated or executed, and nothing is fetched. It is pure Python, pinned exactly in
+`pyproject.toml` and hashed in `uv.lock`. The GraphQL parser's tests hold this row,
+the pin, the lockfile hash and the installed license to one another, and tie the
+pin to the parser's version.
+
+| Library | Distribution | Version | Upstream | Tag | Commit | License | sdist SHA-256 |
+|---|---|---|---|---|---|---|---|
+| GraphQL parser | `graphql-core` | 3.2.6 | https://github.com/graphql-python/graphql-core | v3.2.6 | b7935f75511dde280325631541f4a8a24b245709 | MIT | c08eec22f9e40f0bd61d805907e3b3b1b9a320bc606e23dc145eebca07c8fbab |
 
 ## License texts
 
@@ -89,6 +103,34 @@ SOFTWARE.
 The MIT License (MIT)
 
 Copyright (c) 2017 Max Brunsfeld
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### graphql-core 3.2.6
+
+```
+MIT License
+
+Copyright (c) GraphQL Contributors (GraphQL.js)
+Copyright (c) Syrus Akbary (GraphQL-core 2)
+Copyright (c) Christoph Zwerschke (GraphQL-core 3)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

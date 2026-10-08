@@ -257,12 +257,16 @@ export function boundaryLabel(boundary: string): string {
   return boundary.split(" -> ").map(unitLabel).join(" → ");
 }
 
-/** A readable name from an entity key: `sym:repo:path:Name:12` reads `Name`. */
+/**
+ * A readable name from an entity key: `sym:repo:path:Name:12` reads `Name`. A name may
+ * hold a colon itself (a GraphQL argument, `Query.items(first:)`), so it is everything
+ * between the path and the line.
+ */
 export function nameFromKey(key: string): string {
   // a directory, as impact lists one: `<repository>:<path>/`
   if (key.endsWith("/")) return key.slice(0, -1).split(/[:/]/).pop()!;
   const parts = key.split(":");
-  if (parts[0] === "sym" && parts.length >= 5) return parts[parts.length - 2]!;
+  if (parts[0] === "sym" && parts.length >= 5) return parts.slice(3, -1).join(":");
   if (parts[0] === "file" && parts.length >= 3) return parts.slice(2).join(":").split("/").pop()!;
   return parts.length > 1 ? parts.slice(1).join(":") : key;
 }
