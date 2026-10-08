@@ -65,6 +65,7 @@ dependencies = [
     # reads `pyproject.toml` and the TOML lockfiles into facts, so a different
     # version is a different parser.
     "tomli==2.4.1; python_version < '3.11'",
+    "graphql-core==3.2.6",
 ]
 
 [project.urls]
