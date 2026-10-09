@@ -18,7 +18,9 @@ For a service under ``services:`` with a literal key, the claim records:
   the compose file's directory to repository paths (``dockerfile`` against the
   context, ``Dockerfile`` by default); a path leaving the repository is not read;
 * ``command`` and ``entrypoint``, which replace the image's ``CMD`` and ``ENTRYPOINT``:
-  a list, or a string split on whitespace; and ``image``.
+  a list, or a string split on whitespace; and ``image``;
+* its ``environment``: each variable's **name** and line, in the mapping or the list
+  form -- never a value (DF1_PHASE_A.md §7, §11).
 
 Compose interpolates ``${VAR}`` and ``$VAR`` in values from the environment it runs in,
 so a value holding one is not read: that field is left out, never guessed.
@@ -107,6 +109,22 @@ def _inside(directory: str, relative: str) -> str | None:
     return "" if joined == "." else joined
 
 
+def _environment(node: yaml.Node) -> list[list[object]]:
+    """A service's environment variable names with their lines; values are never kept."""
+    found: list[list[object]] = []
+    if isinstance(node, yaml.MappingNode):
+        for key, _ in node.value:
+            if isinstance(key, yaml.ScalarNode) and not _INTERPOLATION.search(str(key.value)):
+                found.append([str(key.value), key.start_mark.line + 1])
+    elif isinstance(node, yaml.SequenceNode):
+        for item in node.value:
+            if isinstance(item, yaml.ScalarNode):
+                name = str(item.value).split("=", 1)[0].strip()
+                if name and not _INTERPOLATION.search(name):
+                    found.append([name, item.start_mark.line + 1])
+    return found
+
+
 def compose_references(path: PurePosixPath, documents: list[yaml.Node]) -> list[ParsedReference]:
     """A :data:`~repoatlas.parsers.http_facts.COMPOSE_SERVICE` claim per literal service."""
     directory = "" if str(path.parent) == "." else str(path.parent)
@@ -162,6 +180,11 @@ def compose_references(path: PurePosixPath, documents: list[yaml.Node]) -> list[
             image = _scalar(fields["image"][1]) if "image" in fields else None
             if image is not None:
                 meta["image"] = image
+            environment = (
+                _environment(fields["environment"][1]) if "environment" in fields else None
+            )
+            if environment:
+                meta["environment"] = json.dumps(environment)
             line = key.start_mark.line + 1
             found.append(
                 pending_reference(
