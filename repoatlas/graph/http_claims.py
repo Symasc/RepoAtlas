@@ -265,6 +265,9 @@ class HttpClaimPlan:
     identities: tuple[UnresolvedRefRecord, ...] = ()
     #: Deployment claim id → ``tied`` or why its identity reaches no code.
     deployments: dict[int, str] = field(default_factory=dict)
+    #: The routes code serves, with the applications serving them: what the global pass's
+    #: artifact join ties CI-established deployments to (repoatlas.graph.deploy_artifacts).
+    code_routes: tuple[ServedRoute, ...] = ()
 
     @property
     def detail(self) -> str:
@@ -703,6 +706,7 @@ def plan_http_claims(
         exposed=tuple(deployed.exposures),
         identities=(*deployed.identities, *deployed.patterns),
         deployments=deployed.outcomes,
+        code_routes=tuple(code_routes),
     )
 
 

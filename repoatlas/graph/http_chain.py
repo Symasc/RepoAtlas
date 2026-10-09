@@ -12,9 +12,15 @@ seven hops, in this order:
 * the **route** that code serves;
 * the **handler** serving it.
 
-Each hop is ``proven``, ``unresolved``, ``ambiguous`` or ``not_reached``:
+Each hop is ``proven``, ``declared``, ``version_unverified``, ``unresolved``, ``ambiguous`` or
+``not_reached``:
 
-* a proven hop cites where the source proves it;
+* a proven hop cites where the source proves it -- a place resting on RepoAtlas's own
+  version-specific semantics of a CI action says so with its ``basis`` (``builtin``);
+* a declared hop (DF2) cites where the operator's declaration supplies what no indexed
+  source proves, and every place of it carries the basis ``declared``;
+* a ``version_unverified`` hop (accepted from DF2, written from DF4) rests on an indexed
+  implementation not proven to be the referenced version;
 * an unresolved or ambiguous hop gives a reason code, the text behind it, and whatever
   partial provenance there is;
 * a hop not reached cites nothing, because nothing was established there.
@@ -33,6 +39,14 @@ These are ``path:line`` in the claim's repository, or a bare path for a binding 
 proves as a whole. ``identity_at`` and ``bound_at`` are lines in the claim's own file. A
 claim with no ``binding_in`` states its deployment where it states its identity, as a
 compose file or a specification's host does.
+
+A CI-established deployment (DF2, :mod:`repoatlas.graph.deploy_artifacts`) spans
+repositories: the chart and the release in one, the image's build and its code in another,
+an operator declaration in a third. Its claims name each place's repository with a sibling
+``<key>_repo`` and any basis but source with ``<key>_basis``; a claim without them is read
+exactly as before. It adds ``values_in`` (the host's effective value) to the identity,
+``declared_in`` to the binding, and ``workload_in``, ``image_in``, ``published_in`` and
+``built_in`` to the source binding.
 """
 
 from __future__ import annotations
@@ -57,6 +71,12 @@ PROVEN = "proven"
 UNRESOLVED = "unresolved"
 AMBIGUOUS = "ambiguous"
 NOT_REACHED = "not_reached"
+#: DF2 (K1): a hop an operator declaration supplies, and one an indexed implementation
+#: supplies without proof that it is the referenced version (written from DF4).
+DECLARED = "declared"
+VERSION_UNVERIFIED = "version_unverified"
+#: The hop statuses a surface may show a link through: established, by source or otherwise.
+ESTABLISHED = frozenset({PROVEN, DECLARED, VERSION_UNVERIFIED})
 
 #: Why a hop is unresolved or ambiguous. Stable codes: a surface may show them under any
 #: scope, since they name a kind of failure and nothing of the source.
@@ -69,6 +89,14 @@ REASONS: dict[str, str] = {
     "source_unresolved": "the identity reaches no code",
     "route_unmatched": "the service publishes no route matching the request",
     "several_routes": "more than one route of the service matches the request",
+    # DF2: the artifact a CI-established deployment runs. Each says what is configured,
+    # never what was built, pushed or run.
+    "image_unread": "the image the deployment's workload runs is not read",
+    "registry_unresolved": "the registry of the image the deployment runs is not stated literally",
+    "publisher_unresolved": "no indexed build is configured to publish this image",
+    "artifact_ambiguous": "more than one indexed build is configured to publish this image",
+    "tag_unmatched": "every indexed build configured to publish this image names another version",
+    "workload_unmatched": "the deployment's Service does not select exactly one workload container",
 }
 
 
@@ -82,15 +110,21 @@ class Provenance:
     line_end: int | None
     #: What the place is, as the claim names it (``called_at``, ``identity_in``, …).
     role: str
+    #: What proves it, when not the source itself: ``builtin``, ``declared`` or
+    #: ``version-unverified``. Written only when set, so a source chain reads as before.
+    basis: str = ""
 
     def as_json(self) -> dict[str, object]:
-        return {
+        found: dict[str, object] = {
             "repo_id": self.repo_id,
             "path": self.path,
             "line_start": self.line_start,
             "line_end": self.line_end,
             "role": self.role,
         }
+        if self.basis:
+            found["basis"] = self.basis
+        return found
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +170,7 @@ def chain_from_json(text: str) -> tuple[Hop, ...]:
                         line_start=p.get("line_start"),
                         line_end=p.get("line_end"),
                         role=str(p.get("role", "")),
+                        basis=str(p.get("basis", "")),
                     )
                     for p in item.get("provenance", ())
                 ),
@@ -147,7 +182,9 @@ def chain_from_json(text: str) -> tuple[Hop, ...]:
     return tuple(hops)
 
 
-def places(repo_id: int, value: str, role: str, *, path: str | None = None) -> list[Provenance]:
+def places(
+    repo_id: int, value: str, role: str, *, path: str | None = None, basis: str = ""
+) -> list[Provenance]:
     """Each place ``value`` names: ``path:line`` or a bare path, several joined by ``; ``;
     or, given the file's ``path``, a bare line in it."""
     found: list[Provenance] = []
@@ -156,14 +193,26 @@ def places(repo_id: int, value: str, role: str, *, path: str | None = None) -> l
             continue
         if path is not None:
             if part.isdigit():
-                found.append(Provenance(repo_id, path, int(part), int(part), role))
+                found.append(Provenance(repo_id, path, int(part), int(part), role, basis))
             continue
         name, _, line = part.rpartition(":")
         if name and line.isdigit():
-            found.append(Provenance(repo_id, name, int(line), int(line), role))
+            found.append(Provenance(repo_id, name, int(line), int(line), role, basis))
         else:
-            found.append(Provenance(repo_id, part, None, None, role))
+            found.append(Provenance(repo_id, part, None, None, role, basis))
     return found
+
+
+def _at(claim: UnresolvedRefRecord, meta: Mapping[str, str], key: str) -> list[Provenance]:
+    """The places ``meta[key]`` names, in the repository and with the basis its siblings
+    ``<key>_repo`` and ``<key>_basis`` give (DF2), else in the claim's own repository."""
+    repo = meta.get(f"{key}_repo", "")
+    return places(
+        int(repo) if repo.isdigit() else claim.repo_id,
+        meta.get(key, ""),
+        key,
+        basis=meta.get(f"{key}_basis", ""),
+    )
 
 
 def _unique(items: Iterable[Provenance]) -> tuple[Provenance, ...]:
@@ -179,6 +228,9 @@ class IdentityEvidence:
     source: tuple[Provenance, ...]
     #: The deployment or pattern the claim is, for the identity hop's detail.
     detail: str
+    #: DF2: the binding's and the source's hop status when not proven by source.
+    binding_status: str = PROVEN
+    source_status: str = PROVEN
 
 
 def identity_evidence(
@@ -186,21 +238,36 @@ def identity_evidence(
 ) -> IdentityEvidence:
     repo = claim.repo_id
     identity = [
-        *places(repo, meta.get("identity_in", ""), "identity_in"),
+        *_at(claim, meta, "identity_in"),
         *places(repo, meta.get("identity_at", ""), "identity_at", path=row.rel_path),
-        *places(repo, meta.get("scheme_in", ""), "scheme_in"),
-        *places(repo, meta.get("backend_in", ""), "backend_in"),
+        *_at(claim, meta, "scheme_in"),
+        *_at(claim, meta, "backend_in"),
+        *_at(claim, meta, "values_in"),
     ]
     source = [
-        *places(repo, meta.get("source_in", ""), "source_in"),
+        *_at(claim, meta, "workload_in"),
+        *_at(claim, meta, "image_in"),
+        *_at(claim, meta, "published_in"),
+        *_at(claim, meta, "built_in"),
+        *_at(claim, meta, "source_in"),
         *places(repo, meta.get("bound_at", ""), "bound_at", path=row.rel_path),
     ]
     return IdentityEvidence(
         identity=_unique(identity),
-        binding=_unique(places(repo, meta.get("binding_in", ""), "binding_in")),
+        binding=_unique([*_at(claim, meta, "binding_in"), *_at(claim, meta, "declared_in")]),
         source=_unique(source),
         detail=meta.get("pattern") or meta.get("deployment", ""),
+        binding_status=DECLARED if meta.get("binding_basis") == "declared" else PROVEN,
+        source_status=DECLARED if meta.get("build_basis") == "declared" else PROVEN,
     )
+
+
+def _status(statuses: Iterable[str]) -> str:
+    """Several claims' status for one hop: declared when any rests on a declaration."""
+    found = set(statuses)
+    if DECLARED in found:
+        return DECLARED
+    return VERSION_UNVERIFIED if VERSION_UNVERIFIED in found else PROVEN
 
 
 def merged(evidence: Sequence[IdentityEvidence]) -> IdentityEvidence:
@@ -209,6 +276,8 @@ def merged(evidence: Sequence[IdentityEvidence]) -> IdentityEvidence:
         binding=_unique(p for e in evidence for p in e.binding),
         source=_unique(p for e in evidence for p in e.source),
         detail="; ".join(dict.fromkeys(e.detail for e in evidence if e.detail)),
+        binding_status=_status(e.binding_status for e in evidence),
+        source_status=_status(e.source_status for e in evidence),
     )
 
 
@@ -239,12 +308,13 @@ def origin_places(
 
 
 def proven_identity(evidence: IdentityEvidence) -> list[Hop]:
-    """The identity, binding and source hops an identity with a source tie proves."""
+    """The identity, binding and source hops an identity with a source tie establishes:
+    proven, or declared where an operator declaration supplies them (DF2)."""
     return [
         Hop(SERVICE_IDENTITY, PROVEN, evidence.identity, detail=evidence.detail),
         # A claim with no separate binding states its deployment where it states its identity.
-        Hop(DEPLOYMENT_BINDING, PROVEN, evidence.binding or evidence.identity),
-        Hop(SOURCE_BINDING, PROVEN, evidence.source),
+        Hop(DEPLOYMENT_BINDING, evidence.binding_status, evidence.binding or evidence.identity),
+        Hop(SOURCE_BINDING, evidence.source_status, evidence.source),
     ]
 
 
