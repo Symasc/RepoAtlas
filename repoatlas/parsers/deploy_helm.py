@@ -45,6 +45,7 @@ import posixpath
 import re
 from collections import defaultdict
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import yaml
 
@@ -62,9 +63,13 @@ from repoatlas.parsers.http_facts import (
     HELM_RELEASE,
     HELM_SERVICE,
     HELM_VALUES,
+    HELM_VALUES_FILE,
+    K8S_CONFIGMAP,
+    K8S_WORKLOAD,
     pending_reference,
 )
 from repoatlas.parsers.marks import whole_file_span
+from repoatlas.parsers.withhold import guarded
 
 #: Leaves one values file may contribute.
 MAX_VALUES = 256
@@ -145,6 +150,10 @@ def chart_references(path: PurePosixPath, documents: list[yaml.Node]) -> list[Pa
     if name is None or "apiVersion" not in fields:
         return []
     line = fields["name"].start_mark.line + 1
+    extra = {}
+    app_version = _scalar(fields.get("appVersion"))
+    if app_version is not None:
+        extra["app_version"] = app_version
     return [
         pending_reference(
             EdgeType.REFERENCES,
@@ -154,18 +163,54 @@ def chart_references(path: PurePosixPath, documents: list[yaml.Node]) -> list[Pa
             line,
             role=HELM_CHART,
             chart=_directory(path),
+            **extra,
         )
     ]
 
 
+_VALUES_FILE = re.compile(r"values[\w.-]*\.ya?ml")
+
+
 def values_references(path: PurePosixPath, documents: list[yaml.Node]) -> list[ParsedReference]:
-    """A chart's ``values.yaml``: its literal scalar leaves, by dotted path; a list's items
-    by index, as ``a.b[0].c``."""
-    if path.name != "values.yaml" or not documents or documents[0] is None:
+    """A chart's ``values.yaml`` (:data:`HELM_VALUES`) or any other ``values*.y(a)ml``
+    (:data:`HELM_VALUES_FILE`, an overlay a release may name): its literal scalar leaves,
+    by dotted path; a list's items by index, as ``a.b[0].c``. A leaf whose path names a
+    credential, or whose value carries one, is stored as ``<withheld>``."""
+    if not _VALUES_FILE.fullmatch(path.name) or not documents or documents[0] is None:
         return []
+    leaves, truncated = _leaves(documents[0])
+    if path.name != "values.yaml":
+        return [
+            pending_reference(
+                EdgeType.REFERENCES,
+                EntityType.CONFIG,
+                path.as_posix(),
+                1,
+                1,
+                role=HELM_VALUES_FILE,
+                values=json.dumps(leaves, sort_keys=True),
+                truncated="true" if truncated else "false",
+            )
+        ]
+    return [
+        pending_reference(
+            EdgeType.REFERENCES,
+            EntityType.CONFIG,
+            "values",
+            1,
+            1,
+            role=HELM_VALUES,
+            chart=_directory(path),
+            values=json.dumps(leaves, sort_keys=True),
+            truncated="true" if truncated else "false",
+        )
+    ]
+
+
+def _leaves(document: yaml.Node) -> tuple[dict[str, str], bool]:
     leaves: dict[str, str] = {}
     truncated = False
-    stack: list[tuple[str, yaml.Node]] = [("", documents[0])]
+    stack: list[tuple[str, yaml.Node]] = [("", document)]
     while stack:
         prefix, node = stack.pop()
         if isinstance(node, yaml.MappingNode):
@@ -182,20 +227,8 @@ def values_references(path: PurePosixPath, documents: list[yaml.Node]) -> list[P
                 if len(leaves) >= MAX_VALUES:
                     truncated = True
                     break
-                leaves[prefix] = value
-    return [
-        pending_reference(
-            EdgeType.REFERENCES,
-            EntityType.CONFIG,
-            "values",
-            1,
-            1,
-            role=HELM_VALUES,
-            chart=_directory(path),
-            values=json.dumps(leaves, sort_keys=True),
-            truncated="true" if truncated else "false",
-        )
-    ]
+                leaves[prefix] = guarded(prefix, value)
+    return leaves, truncated
 
 
 def _value(text: str) -> str:
@@ -675,3 +708,364 @@ class TiltfileParser:
             symbols=(module,),
             references=tuple(references),
         )
+
+
+# ----------------------------------------------------------------------------- workloads
+_WORKLOAD_KINDS = frozenset({"Deployment", "StatefulSet", "DaemonSet"})
+_CONTAINERS = ("spec", "template", "spec", "containers")
+_OPENING = frozenset({"if", "range", "with", "define", "block"})
+_IMAGE_TEXT = re.compile(r"[A-Za-z0-9._:/@-]*")
+#: The substitutions an image or env value is read through: a value, the chart's own
+#: metadata, an optional ``default`` and output filters that do not change the text.
+_SUBSTITUTION = re.compile(
+    r"(?P<root>\$?\.Values(?:\.[A-Za-z_][\w-]*)+|\.Chart\.(?:Name|AppVersion|Version))"
+    r"(?:\s*\|\s*default\s+(?P<default>\$?\.Values(?:\.[A-Za-z_][\w-]*)+|\.Chart\.(?:Name|AppVersion|Version)|\"[^\"]*\"))?"
+    r"(?:\s*\|\s*(?:quote|toString))?"
+)
+
+
+def _control_stacks(lines: list[str]) -> list[tuple[tuple[str, str], ...]]:
+    """The control actions open at each line, outermost first, and whether the line opens or
+    closes one itself (then it is a control line, not content)."""
+    blanked = _COMMENT.sub(lambda m: "\n" * m.group(0).count("\n"), "\n".join(lines))
+    stacks: list[tuple[tuple[str, str], ...]] = []
+    stack: list[tuple[str, str]] = []
+    for line in blanked.split("\n"):
+        stacks.append(tuple(stack))
+        for match in _ACTION.finditer(line):
+            body = _body(match.group(1))
+            keyword = _CONTROL_ACTION.match(body)
+            if keyword is None:
+                continue
+            word = keyword.group(1)
+            if word in _OPENING:
+                stack.append((word, body[keyword.end() :].strip()))
+            elif word == "end" and stack:
+                stack.pop()
+    return stacks
+
+
+def _documents(lines: list[str]) -> list[tuple[int, int]]:
+    starts = [0] + [index + 1 for index, line in enumerate(lines) if line.strip() == "---"]
+    ends = [index for index, line in enumerate(lines) if line.strip() == "---"] + [len(lines)]
+    return list(zip(starts, ends, strict=True))
+
+
+def _substitution_parts(text: str) -> list[list[str]] | None:
+    """Literal image text and the substitutions this reads, as parts; ``None`` otherwise."""
+    parts: list[list[str]] = []
+    cursor = 0
+    for match in _ACTION.finditer(text):
+        literal = text[cursor : match.start()]
+        if literal:
+            if not _IMAGE_TEXT.fullmatch(literal):
+                return None
+            parts.append(["text", literal])
+        cursor = match.end()
+        read = _SUBSTITUTION.fullmatch(_body(match.group(1)))
+        if read is None:
+            return None
+        part = (
+            ["value", read.group("root").lstrip("$").removeprefix(".Values.")]
+            if ".Values" in read.group("root")
+            else ["chart", read.group("root").removeprefix(".Chart.")]
+        )
+        if read.group("default"):
+            part += ["default", read.group("default")]
+        parts.append(part)
+    rest = text[cursor:]
+    if rest:
+        if not _IMAGE_TEXT.fullmatch(rest):
+            return None
+        parts.append(["text", rest])
+    return parts or None
+
+
+def _wrapper_of(stack: tuple[tuple[str, str], ...]) -> str | bool | None:
+    """A document's wrapper: ``None`` for none, the ``if`` value path for one
+    ``if .Values.<path>``, ``False`` for anything else."""
+    if not stack:
+        return None
+    if len(stack) == 1 and stack[0][0] == "if":
+        value = _VALUES_PATH.fullmatch(stack[0][1])
+        return value.group(1)[1:] if value is not None else False
+    return False
+
+
+def workload_references(path: PurePosixPath, content: str) -> list[ParsedReference]:
+    """Each Deployment, StatefulSet or DaemonSet document of a chart template: what its
+    containers state in the subset this reads (DF1_PHASE_A.md §7), or why it is not read.
+
+    A document wrapped in one ``if .Values.<path>`` is read under that condition; a
+    ``range`` or ``with`` around it, or more than one action, leaves it unread. Inside, a
+    control action enclosing ``containers`` leaves the document unread; one enclosing a
+    container's image, command, args, port or environment entry leaves that field unread,
+    with the reason. Environment values are never kept: an entry records its name and
+    where its value comes from (``value`` and the ``.Values`` path it reads, or a
+    ConfigMap's or Secret's name and key)."""
+    if path.parent.name != "templates" or path.suffix not in {".yaml", ".yml"}:
+        return []
+    lines = content.splitlines()
+    stacks = _control_stacks(lines)
+    found: list[ParsedReference] = []
+    for start, end in _documents(lines):
+        document = lines[start:end]
+        kind_at = next(
+            (
+                i
+                for i, line in enumerate(document)
+                if (m := re.fullmatch(r"kind:\s*(\w+)\s*", line)) and m.group(1) in _WORKLOAD_KINDS
+            ),
+            None,
+        )
+        if kind_at is None:
+            continue
+        kind = document[kind_at].split(":", 1)[1].strip()
+        line = start + kind_at + 1
+        base = stacks[start + kind_at]
+        wrapper = _wrapper_of(base)
+        meta: dict[str, str] = {"kind": kind, "chart": _directory(PurePosixPath(_directory(path)))}
+        if wrapper is False:
+            meta["unread"] = "its control is not one `if .Values.<path>` around the document"
+        else:
+            if isinstance(wrapper, str):
+                meta["if"] = wrapper
+            read = _workload(document, start, stacks, len(base))
+            if isinstance(read, str):
+                meta["unread"] = read
+            else:
+                meta.update(read)
+        name = meta.pop("name", kind)
+        found.append(
+            pending_reference(
+                EdgeType.REFERENCES, EntityType.CONFIG, name, line, line, role=K8S_WORKLOAD, **meta
+            )
+        )
+    return found
+
+
+def _workload(
+    document: list[str], start: int, stacks: list[tuple[tuple[str, str], ...]], base: int
+) -> dict[str, str] | str:
+    fields, other = _fields(document, start)
+
+    def controlled(line: int) -> bool:
+        return len(stacks[line - 1]) > base or bool(_CONTROL.search(document[line - 1 - start]))
+
+    if any(len(stacks[line - 1]) < base for _, _, line in fields):
+        return "its `if` does not enclose it"
+    containers_line = next((line for path_, _, line in fields if path_ == _CONTAINERS), None)
+    if containers_line is None:
+        return "it states no containers"
+    if controlled(containers_line):
+        return "a control action encloses its containers"
+    # An action line that is not control can add fields where it stands (toYaml, include):
+    # it leaves unread the read field it sits under; at a container's own level it may add
+    # or override any field, so the container is unread. A sequence item written at its
+    # key's indentation (`command:` then `- x`) belongs to the key just above it.
+    touched: dict[str, set[str]] = defaultdict(set)
+    for path_, text, line in other:
+        if path_[: len(_CONTAINERS)] != _CONTAINERS or len(path_) < 5 or "{{" not in text:
+            continue
+        alone = re.fullmatch(r"\{\{(.*?)\}\}", text)
+        if alone and _CONTROL_ACTION.match(_body(alone.group(1))):
+            continue
+        index, below = path_[4], path_[5:]
+        if not below and text.lstrip().startswith("-"):
+            above = [
+                p[5] for p, _, ln in fields if p[:5] == path_[:5] and len(p) == 6 and ln < line
+            ]
+            below = (above[-1],) if above else ()
+        touched[index].add(below[0] if below else "*")
+    containers: dict[str, dict[str, Any]] = {}
+    labels: list[list[object]] = []
+    selector: list[list[object]] = []
+    name = ""
+    for path_, text, line in fields:
+        if path_ == ("metadata", "name"):
+            name = text
+        elif path_[:3] == ("spec", "selector", "matchLabels") and len(path_) == 4:
+            selector.append([path_[3], text])
+        elif path_[:4] == ("spec", "template", "metadata", "labels") and len(path_) == 5:
+            labels.append([path_[4], text])
+        if path_[: len(_CONTAINERS)] != _CONTAINERS or len(path_) < 6:
+            continue
+        container = containers.setdefault(path_[4], {"env": [], "env_from": [], "ports": []})
+        field = path_[5:]
+        unread = controlled(line)
+        if field == ("name",):
+            container["name"] = text
+        elif field == ("image",):
+            parts = None if unread else _substitution_parts(text)
+            if parts is None:
+                container["image_unread"] = (
+                    "a control action encloses it"
+                    if unread
+                    else "it is not literal text and the substitutions this reads"
+                )
+            else:
+                container["image"] = parts
+            container["image_line"] = line
+        elif field in (("command",), ("args",)):
+            container[field[0]] = (
+                text if text and not unread else ("unread" if unread or not text else text)
+            )
+        elif len(field) >= 3 and field[0] == "ports" and field[2] in ("containerPort", "name"):
+            port = _entry(container["ports"], field[1])
+            port[field[2]] = "unread" if unread else text
+        elif len(field) >= 3 and field[0] == "env":
+            entry = _entry(container["env"], field[1])
+            entry.setdefault("line", line)
+            if unread:
+                entry["source"] = "conditional"
+            elif field[2:] == ("name",):
+                entry["name"] = text
+            elif field[2:] == ("value",):
+                read = (
+                    _SUBSTITUTION.fullmatch(_body(m.group(1)))
+                    if (m := re.fullmatch(r"\{\{(.*?)\}\}", text))
+                    else None
+                )
+                entry.setdefault("source", "value")
+                if read is not None and ".Values" in read.group("root"):
+                    entry["values"] = read.group("root").lstrip("$").removeprefix(".Values.")
+                elif "{{" in text:
+                    entry["source"] = "unread"
+            elif (
+                len(field) == 5
+                and field[2] == "valueFrom"
+                and field[3] in ("configMapKeyRef", "secretKeyRef")
+            ):
+                entry.setdefault("source", field[3])
+                # The ConfigMap's or Secret's own name and key, beside the variable's name.
+                entry[f"ref_{field[4]}"] = text
+            elif (
+                len(field) == 4
+                and field[2] == "valueFrom"
+                and field[3] in ("configMapKeyRef", "secretKeyRef")
+            ):
+                # The flow form, `configMapKeyRef: {name: x, key: y}`, when literal.
+                reference = _flow_reference(text)
+                entry["source"] = field[3] if reference is not None else "unread"
+                entry.update(reference or {})
+        elif len(field) >= 3 and field[0] == "envFrom":
+            source = _entry(container["env_from"], field[1])
+            if unread:
+                source["source"] = "conditional"
+            elif (
+                len(field) == 4 and field[2] in ("configMapRef", "secretRef") and field[3] == "name"
+            ):
+                source.setdefault("source", field[2])
+                source["name"] = text
+    for path_, text, _ in other:
+        alone = re.fullmatch(
+            r"\{\{-?\s*include\s+\"([\w.-]+)\"\s+\.\s*\|\s*nindent\s+\d+\s*-?\}\}", text
+        )
+        if alone is None:
+            continue
+        if path_ == ("spec", "selector", "matchLabels"):
+            selector.append(["include", alone.group(1)])
+        elif path_ == ("spec", "template", "metadata", "labels"):
+            labels.append(["include", alone.group(1)])
+    for index, body in containers.items():
+        added = touched.get(index, set())
+        if "*" in added:
+            body["unread"] = "an action at its level may add or override any field"
+        if "image" in added and "image" in body:
+            body["image_unread"] = "an action may change it"
+            body.pop("image")
+        for name in ("command", "args"):
+            if name in added:
+                body[name] = "unread"
+        for name in ("env", "envFrom", "ports"):
+            if name in added:
+                body[f"{name}_open"] = "an action may add entries"
+    ordered = [
+        {
+            **body,
+            "env": [e for _, e in sorted(body["env"])],
+            "env_from": [e for _, e in sorted(body["env_from"])],
+            "ports": [e for _, e in sorted(body["ports"])],
+        }
+        for _, body in sorted(containers.items(), key=lambda item: int(item[0][1:-1]))
+    ]
+    return {
+        "name": name,
+        "containers": json.dumps(ordered, sort_keys=True),
+        "labels": json.dumps(labels),
+        "selector": json.dumps(selector),
+    }
+
+
+def _entry(listed: list[tuple[int, dict[str, Any]]], index: str) -> dict[str, Any]:
+    """The list item ``index`` (``[n]``) of ``listed``, created when new."""
+    number = int(index[1:-1])
+    for position, entry in listed:
+        if position == number:
+            return entry
+    entry: dict[str, Any] = {}
+    listed.append((number, entry))
+    return entry
+
+
+def configmap_references(path: PurePosixPath, content: str) -> list[ParsedReference]:
+    """Each ConfigMap document of a chart template: its name and data keys with their
+    lines -- never their values -- or why it is not read."""
+    if path.parent.name != "templates" or path.suffix not in {".yaml", ".yml"}:
+        return []
+    lines = content.splitlines()
+    stacks = _control_stacks(lines)
+    found: list[ParsedReference] = []
+    for start, end in _documents(lines):
+        document = lines[start:end]
+        kind_at = next(
+            (i for i, line in enumerate(document) if re.fullmatch(r"kind:\s*ConfigMap\s*", line)),
+            None,
+        )
+        if kind_at is None:
+            continue
+        line = start + kind_at + 1
+        base = stacks[start + kind_at]
+        wrapper = _wrapper_of(base)
+        meta: dict[str, str] = {"chart": _directory(PurePosixPath(_directory(path)))}
+        fields, other = _fields(document, start)
+        name = next((text for p, text, _ in fields if p == ("metadata", "name")), "")
+        keys = [[p[1], ln] for p, _, ln in fields if len(p) == 2 and p[0] == "data"]
+        inner = any(len(stacks[ln - 1]) > len(base) for p, _, ln in fields if p[:1] == ("data",))
+        if wrapper is False:
+            meta["unread"] = "its control is not one `if .Values.<path>` around the document"
+        elif inner or any(p[:1] == ("data",) for p, _, _ in other):
+            meta["unread"] = "an action stands among its data"
+        elif "{{" in name:
+            meta["unread"] = "its name is not literal"
+        else:
+            if isinstance(wrapper, str):
+                meta["if"] = wrapper
+            meta["keys"] = json.dumps(keys)
+        found.append(
+            pending_reference(
+                EdgeType.REFERENCES,
+                EntityType.CONFIG,
+                name or "ConfigMap",
+                line,
+                line,
+                role=K8S_CONFIGMAP,
+                **meta,
+            )
+        )
+    return found
+
+
+def _flow_reference(text: str) -> dict[str, str] | None:
+    """``{name: x, key: y}`` written literally: a ConfigMap's or Secret's name and key."""
+    if not (text.startswith("{") and text.endswith("}")) or "{{" in text or len(text) > 256:
+        return None
+    try:
+        found = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(found, dict) or set(found) != {"name", "key"}:
+        return None
+    if not all(isinstance(value, str) for value in found.values()):
+        return None
+    return {"ref_name": found["name"], "ref_key": found["key"]}

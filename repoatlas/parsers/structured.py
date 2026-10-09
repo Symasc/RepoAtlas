@@ -27,13 +27,16 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
     Severity,
 )
+from repoatlas.parsers.ci_config import MAX_CLAIMS, ci_references, declaration_references
 from repoatlas.parsers.dashboards import dashboard_references
 from repoatlas.parsers.deploy_compose import compose_references, is_compose_file
 from repoatlas.parsers.deploy_helm import (
     chart_references,
+    configmap_references,
     ingress_references,
     service_references,
     values_references,
+    workload_references,
 )
 from repoatlas.parsers.graphql_artifacts import package_script_references
 from repoatlas.parsers.graphql_codegen import codegen_references
@@ -151,7 +154,11 @@ class StructuredParser:
     # 9: package.json scripts that fetch a GraphQL schema (repoatlas.parsers.graphql_artifacts),
     #    and graphql-config projects (repoatlas.parsers.graphql_codegen).
     # 10: SQL in Grafana dashboards (repoatlas.parsers.dashboards).
-    version = "10"
+    # 11: CircleCI and GitHub Actions configurations record the images their jobs build, the
+    #     Helm releases they invoke and every step not interpreted (repoatlas.parsers.ci_config);
+    #     operator declarations; chart workload and ConfigMap templates; every values*.y(a)ml;
+    #     a chart's appVersion; compose environment names; credential leaves withheld.
+    version = "11"
     language = "YAML"
 
     def supports(self, path: Path) -> bool:
@@ -171,6 +178,8 @@ class StructuredParser:
             *resolution,
             *service_references(posix, content),
             *ingress_references(posix, content),
+            *workload_references(posix, content),
+            *configmap_references(posix, content),
         ]
 
         text = content
@@ -208,6 +217,8 @@ class StructuredParser:
             *chart_references(posix, documents),
             *values_references(posix, documents),
         ]
+        ci, ci_truncated = ci_references(posix, documents)
+        compose = [*compose, *ci, *declaration_references(documents)]
         generation, generation_diagnostics = codegen_references(posix, documents, content)
         generation = [
             *generation,
@@ -244,6 +255,13 @@ class StructuredParser:
                 ParseDiagnostic(
                     severity=Severity.WARNING,
                     message=f"document truncated at {_MAX_KEYS} keys",
+                )
+            )
+        if ci_truncated:
+            diagnostics.append(
+                ParseDiagnostic(
+                    severity=Severity.WARNING,
+                    message=f"CI configuration read only in part (at most {MAX_CLAIMS} claims)",
                 )
             )
         if operations_truncated:
