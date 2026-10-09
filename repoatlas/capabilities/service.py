@@ -1927,6 +1927,7 @@ class CapabilityService:
                     verified_range=outcome.verified,
                     location=outcome.location,
                     code=outcome.code,
+                    basis=outcome.basis,
                 )
             )
             if outcome.code is not None:
@@ -2441,6 +2442,7 @@ class CapabilityService:
                             ),
                             text_length=len(text),
                             routes=tuple(sorted(span.routes)),
+                            bases=tuple(sorted(span.bases)),
                         ),
                         text=text,
                     )

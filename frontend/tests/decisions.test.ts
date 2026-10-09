@@ -11,6 +11,7 @@ import {
   decisionRequest,
   HOP_KINDS,
   placeLabel,
+  RELATIONS,
   readRows,
   requestsRequest,
   ShapeError,
@@ -273,5 +274,52 @@ describe("places and files", () => {
       ["client.py", 2],
       ["other.py", 1],
     ]);
+  });
+});
+
+describe("a CI-established link reads with its bases and version relation (DF2)", () => {
+  const declaredLink: Crossing = {
+    decision_ref: "hcd1-0123456789abcdef0123",
+    status: "linked",
+    method: "POST",
+    url: "https://intake.release.sample.example/v1/observations",
+    chain: chain(
+      ["proven", "proven", "proven", "declared", "proven", "proven", "proven"],
+      { 0: "sample-report/clients.py:25", 1: "sample-report/clients.py:9", 2: "sample-intake/ingress.yaml:10", 4: "sample-intake/deploy.Dockerfile:4", 5: "sample-intake/app.py:14", 6: "sample-intake/app.py:14" },
+    ).map((hop) =>
+      hop.kind === "deployment_binding"
+        ? {
+            ...hop,
+            provenance: [
+              { repository: "sample-intake", path: ".circleci/config.yml", line_start: 25, line_end: 25, role: "binding_in", basis: "declared" },
+              { repository: "@declarations", path: "orbs.yml", line_start: 3, line_end: 3, role: "declared_in", basis: "declared" },
+            ],
+          }
+        : hop,
+    ),
+    artifact: { deployed_by: "sample-intake", built_by: "sample-intake", version_relation: "symbolic", binding_basis: "declared", build_basis: "source" },
+  };
+
+  it("reads a declared hop, keeps emphasis through it, opens it out and labels it declared", () => {
+    const stations = stationsOf(readRows({ operations: [{ role: "caller", status: "matched", crossings: [declaredLink] }] } as unknown as HttpOperationsResponse)[0]!.crossings![0]!);
+    expect(stations[3]).toMatchObject({ state: "declared", tone: "emphasis", expandable: true, basis: "declared" });
+    expect(stations.every((s) => s.tone === "emphasis")).toBe(true);
+    expect(stations[2]!.basis).toBe("");
+  });
+
+  it("says the version relation on the source binding only, in configuration's words", () => {
+    const stations = stationsOf(declaredLink);
+    expect(stations[4]!.relation).toBe(RELATIONS.symbolic);
+    expect(stations.filter((s) => s.relation).map((s) => s.kind)).toEqual(["source_binding"]);
+    for (const text of Object.values(RELATIONS)) {
+      expect(text).not.toMatch(/deployed|running|pushed|published|this build/i);
+    }
+  });
+
+  it("accepts a version_unverified hop, and still refuses a state the join never writes", () => {
+    const unverified = { ...declaredLink, chain: declaredLink.chain.map((h, i) => (i === 3 ? { ...h, status: "version_unverified" as HopState } : h)) };
+    expect(() => readRows({ operations: [{ role: "caller", status: "matched", crossings: [unverified] }] } as unknown as HttpOperationsResponse)).not.toThrow();
+    const invented = { ...declaredLink, chain: declaredLink.chain.map((h, i) => (i === 3 ? { ...h, status: "assumed" } : h)) };
+    expect(() => readRows({ operations: [{ role: "caller", status: "matched", crossings: [invented] }] } as unknown as HttpOperationsResponse)).toThrow(ShapeError);
   });
 });

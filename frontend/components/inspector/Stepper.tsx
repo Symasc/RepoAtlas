@@ -10,7 +10,8 @@ import classes from "./Requests.module.css";
 
 /**
  * A crossing's chain as a plain evidence stepper: the join's seven hops in order,
- * each with its exact state. Emphasis stops at the first hop that is not proven;
+ * each with its exact state, and a badge for any basis but source (`declared`,
+ * `builtin`). Emphasis stops at the first hop that is not established;
  * the hops the join never reached are subdued and cite nothing. A proven or
  * unresolved hop opens out to its places, and, when the decision was read with
  * its evidence, to the lines of each.
@@ -52,6 +53,7 @@ function Step({
         <p className={classes.stepHead}>
           <span className={classes.stepLabel}>{station.label}</span>
           <span className={classes.stepState}>{station.state}</span>
+          {station.basis && <span className={classes.basis}>{station.basis}</span>}
           {station.expandable && (
             <button
               type="button"
@@ -66,6 +68,7 @@ function Step({
         </p>
         {why && <p className={classes.stepWhy}>{why}</p>}
         {station.detail && <p className={classes.stepDetail}>{station.detail}</p>}
+        {station.relation && <p className={classes.stepDetail}>{station.relation}</p>}
         {station.withheld && <p className={classes.stepWhy}>Another repository&apos;s part of this hop is not shown in this scope.</p>}
         {station.state === "ambiguous" && station.places.length > 0 && <Places places={station.places} onOpenPlace={onOpenPlace} />}
         {open && <Places places={station.places} evidence={evidence} onOpenPlace={onOpenPlace} />}
@@ -98,6 +101,7 @@ function Places({
               <span className={classes.placeText}>{label}</span>
             )}
             <span className={classes.placeRole}>{place.role}</span>
+            {place.basis && <span className={classes.basis}>{place.basis}</span>}
             {item && <Lines item={item} />}
           </li>
         );

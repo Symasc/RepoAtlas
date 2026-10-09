@@ -266,6 +266,16 @@
   color: var(--ra-warning);
 }
 
+/* A hop or place an operator declaration (or RepoAtlas's own action semantics) supplies. */
+.basis {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-xs);
+  padding: 0 4px;
+  border: 1px solid var(--ra-border);
+  border-radius: 3px;
+  color: var(--ra-text-muted);
+}
+
 .stepToggle {
   display: inline-flex;
   align-items: center;

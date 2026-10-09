@@ -331,6 +331,10 @@ class HopPlace(BaseModel):
     line_end: int | None = None
     #: What the place is, as the join names it (``called_at``, ``identity_in``, …).
     role: str
+    #: What proves it when not the source itself (DF2): ``builtin`` (RepoAtlas's own
+    #: version-specific action semantics), ``declared`` (an operator declaration) or
+    #: ``version-unverified``. Absent for source.
+    basis: str | None = None
     evidence_id: EvidenceId | None = None
 
     @model_serializer(mode="wrap")
@@ -345,8 +349,8 @@ class CrossingHop(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     kind: str
-    #: ``proven``, ``unresolved``, ``ambiguous`` or ``not_reached``. A hop not reached
-    #: cites nothing.
+    #: ``proven``, ``declared`` (an operator declaration supplies it), ``version_unverified``,
+    #: ``unresolved``, ``ambiguous`` or ``not_reached``. A hop not reached cites nothing.
     status: str
     provenance: tuple[HopPlace, ...] = ()
     #: A stable reason code, for an unresolved or ambiguous hop, and its text.
@@ -362,6 +366,37 @@ class CrossingHop(BaseModel):
     @model_serializer(mode="wrap")
     def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         return _lean(handler(self), frozenset({"kind", "status"}))
+
+
+class CrossingArtifact(BaseModel):
+    """What a CI-established deployment adds to a crossing (DF2): the repository whose CI
+    configures the release, the one whose CI is configured to build and publish the image,
+    the release and variant, the image, the version relation and the basis of each.
+
+    All of it configuration: never that a deployment happened, that an image was pushed or
+    exists, or which version runs. Under repository scope a repository this scope does not
+    show is withheld with what it names (``withheld``); the bases and the relation stay.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    deployed_by: str | None = None
+    built_by: str | None = None
+    release: str | None = None
+    variant: str | None = None
+    image: str | None = None
+    #: ``exact``, ``symbolic`` or ``unknown``.
+    version_relation: str | None = None
+    #: ``source``, ``builtin`` or ``declared``.
+    binding_basis: str | None = None
+    build_basis: str | None = None
+    #: ``image`` (through the workload's image) or ``same-repository`` (M3's rule).
+    source_rule: str | None = None
+    withheld: bool = False
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        return _lean(handler(self), frozenset())
 
 
 class HttpCrossing(BaseModel):
@@ -387,6 +422,8 @@ class HttpCrossing(BaseModel):
     provider: str | None = None
     #: A link's shared endpoint node: in every scope, the way to continue from it.
     endpoint: str | None = None
+    #: A CI-established deployment's evidence, as the join stored it (DF2).
+    artifact: CrossingArtifact | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
