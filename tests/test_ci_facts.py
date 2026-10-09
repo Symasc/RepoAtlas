@@ -283,3 +283,27 @@ def test_an_incremental_sync_equals_a_fresh_index(
     # the declaration no longer matches: the orb job is unsupported again
     assert (".circleci/config.yml", "unsupported-action") in decided(workspace, CI_STEP)
     assert ("orbs.yml", "unused") in decided(workspace, CI_SEMANTICS_FAMILY)
+
+
+def test_a_declaration_binds_only_its_exact_orb_never_another_with_the_same_job(
+    workspace: Workspace, tmp_path: Path, declarations: Path
+) -> None:
+    # The same job name under another orb, and the same orb at another version: neither binds.
+    write_declarations(declarations, {"orbs.yml": DECLARATION})
+    trees = repos()
+    trees["builder"][".circleci/config.yml"] = dedent(BUILDER_CIRCLE).replace(
+        "deploy: sample-org/helm-deploy@1.0.0", "deploy: other-org/helm-deploy@1.0.0"
+    )
+    trees["deployer"][".circleci/config.yml"] = dedent(BUILDER_CIRCLE).replace(
+        "sample-org/helm-deploy@1.0.0", "sample-org/helm-deploy@1.0.1"
+    )
+    build(workspace, tmp_path, trees)
+    assert not [
+        r
+        for r in workspace.knowledge.list_link_decisions(family=CI_RELEASE)
+        if r.path == ".circleci/config.yml"
+    ]
+    assert decided(workspace, CI_SEMANTICS_FAMILY) == [
+        ("orbs.yml", "unused"),
+        ("orbs.yml", "unused"),
+    ]
