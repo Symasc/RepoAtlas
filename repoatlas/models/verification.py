@@ -334,6 +334,11 @@ class CitationVerdict(BaseModel):
     #: from the ledger, so it can never describe a span that was not supplied.
     location: str = ""
     code: GroundingFindingCode | None = None
+    #: What the cited evidence rests on when not the source itself (DF2): ``declared``
+    #: (an operator declaration), ``builtin`` (RepoAtlas's own version-specific action
+    #: semantics) or ``version-unverified``, comma-joined; ``None`` for source alone. A
+    #: citation of a declared place grounds what was declared, not what the source proves.
+    basis: str | None = None
 
 
 class EvidenceStatusView(BaseModel):

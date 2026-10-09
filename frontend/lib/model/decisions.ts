@@ -47,7 +47,12 @@ const HOP_LABELS: Readonly<Record<HopKind, string>> = {
   handler: "Handler",
 };
 
-const HOP_STATES = ["proven", "unresolved", "ambiguous", "not_reached"] as const;
+/**
+ * Every hop state the join writes. `declared`: an operator declaration supplies the hop
+ * (each place says so in its `basis`). `version_unverified`: an indexed implementation
+ * not proven to be the referenced version (accepted now, written from DF4).
+ */
+const HOP_STATES = ["proven", "declared", "version_unverified", "unresolved", "ambiguous", "not_reached"] as const;
 export type HopState = (typeof HOP_STATES)[number];
 
 /** Every decision the join stores, in the contract's order: the link first. */
@@ -83,6 +88,8 @@ export interface HopPlace {
   line_start?: number | null;
   line_end?: number | null;
   role: string;
+  /** What proves the place when not the source itself: `builtin`, `declared`, `version-unverified`. */
+  basis?: string | null;
   evidence_id?: string | null;
 }
 
@@ -107,6 +114,21 @@ export interface Crossing {
   handler?: string | null;
   provider?: string | null;
   endpoint?: string | null;
+  /** A CI-established deployment's evidence (DF2): configuration, never a deployment seen. */
+  artifact?: CrossingArtifact | null;
+}
+
+export interface CrossingArtifact {
+  deployed_by?: string | null;
+  built_by?: string | null;
+  release?: string | null;
+  variant?: string | null;
+  image?: string | null;
+  version_relation?: string | null;
+  binding_basis?: string | null;
+  build_basis?: string | null;
+  source_rule?: string | null;
+  withheld?: boolean;
 }
 
 export interface RequestRow {
@@ -297,9 +319,22 @@ export interface Station {
   detail: string;
   withheld: boolean;
   handler: string | null;
-  /** Whether its places can be opened out: a proven or unresolved hop that has any. */
+  /** Every basis other than source its places rest on, comma-joined; `""` for source alone. */
+  basis: string;
+  /** How the configured image versions are tied, on the source binding of a CI-established link. */
+  relation: string;
+  /** Whether its places can be opened out: an established or unresolved hop that has any. */
   expandable: boolean;
 }
+
+/** A version relation in words: what the configuration ties, never what ran. */
+export const RELATIONS: Readonly<Record<string, string>> = {
+  exact: "same image reference configured on both sides (a tag can be moved)",
+  symbolic: "same CI variable within one workflow run",
+  unknown: "same image repository; version not established",
+};
+
+const OPENABLE: ReadonlySet<HopState> = new Set(["proven", "declared", "version_unverified", "unresolved"]);
 
 /** The seven stations of a crossing, in the join's order, each in its exact state. */
 export function stationsOf(crossing: Crossing): Station[] {
@@ -318,7 +353,12 @@ export function stationsOf(crossing: Crossing): Station[] {
       detail: hop.detail ?? "",
       withheld: hop.withheld === true,
       handler: hop.handler ?? null,
-      expandable: (hop.status === "proven" || hop.status === "unresolved") && places.length > 0,
+      basis: [...new Set(places.map((p) => p.basis).filter((b): b is string => Boolean(b)))].sort().join(", "),
+      relation:
+        hop.kind === "source_binding" && crossing.artifact?.version_relation
+          ? (RELATIONS[crossing.artifact.version_relation] ?? "")
+          : "",
+      expandable: OPENABLE.has(hop.status) && places.length > 0,
     };
   });
 }

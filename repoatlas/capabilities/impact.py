@@ -28,6 +28,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
+from repoatlas.config.settings import DECLARATIONS_SLUG
 from repoatlas.dependencies.normalize import PYPI
 from repoatlas.graph.declared import REFUSED_AS, TargetKind, classify_dependency_target
 from repoatlas.graph.graphql_codegen import FAMILY as GENERATION
@@ -516,7 +517,7 @@ def assemble(
             return (
                 f"{node.step.reading}, {request.get('provider')} -> {consumer}"
                 f" via {request.get('method')} {request.get('url')}"
-            )
+            ) + "".join(f"; {part}" for part in deployment_qualifiers(request))
         generated = node.step.resolution.get(GENERATION)
         if isinstance(generated, dict):
             return f"{node.step.reading}, by {generated.get('config')}"
@@ -1284,6 +1285,36 @@ def graph_composition(resolution: Mapping[str, object]) -> Composition | None:
     )
 
 
+#: How a CI-established link's image versions are tied, in the step's words (DF2).
+_RELATIONS = {
+    "exact": "image tag configured identically on both sides",
+    "symbolic": "image version from the same CI run's variable",
+    "unknown": "image version not established",
+}
+
+
+def deployment_qualifiers(record: Mapping[str, object]) -> list[str]:
+    """What a CI-established link's step adds to its reading: who deploys and builds it,
+    any basis but source, and the version relation. Nothing for any other link."""
+    deployed = record.get("deployed_by")
+    if not isinstance(deployed, str) or not deployed:
+        return []
+    found = [
+        f"deployment configured in {deployed}"
+        + (f" ({record['binding_basis']})" if record.get("binding_basis") != "source" else "")
+    ]
+    built = record.get("built_by")
+    if isinstance(built, str) and built:
+        found.append(
+            f"image built in {built}"
+            + (f" ({record['build_basis']})" if record.get("build_basis") != "source" else "")
+        )
+    relation = _RELATIONS.get(str(record.get("version_relation", "")))
+    if relation is not None:
+        found.append(relation)
+    return found
+
+
 def http_crossing(resolution: Mapping[str, object], consumer: str | None) -> HttpCrossing | None:
     """An edge's HTTP evidence, each part spelled where it can be read, or ``None``.
 
@@ -1300,6 +1331,22 @@ def http_crossing(resolution: Mapping[str, object], consumer: str | None) -> Htt
         value = record.get(key)
         return f"{repository}/{value}" if isinstance(value, str) else None
 
+    def each(repository: str | None, key: str) -> str | None:
+        """Several places of one repository, ``; ``-joined, each spelled in it."""
+        value = record.get(key)
+        if repository is None or not isinstance(value, str) or not value:
+            return None
+        return "; ".join(
+            f"{repository}/{place.strip()}" for place in value.split(";") if place.strip()
+        )
+
+    def text(key: str) -> str | None:
+        value = record.get(key)
+        return str(value) if isinstance(value, str) and value else None
+
+    deployed = text("deployed_by")
+    built = text("built_by") or (provider if deployed is not None else None)
+    declared = text("declared_in")
     return HttpCrossing(
         method=str(record.get("method")),
         url=str(record.get("url")),
@@ -1313,6 +1360,22 @@ def http_crossing(resolution: Mapping[str, object], consumer: str | None) -> Htt
         identity_source=str(record.get("identity_source")),
         identity_at=at(provider, "identity_at"),
         bound_at=at(provider, "bound_at"),
+        deployment_repository=deployed,
+        builder_repository=text("built_by"),
+        release=text("release"),
+        variant=text("variant"),
+        image=text("image"),
+        version_relation=text("version_relation"),
+        binding_basis=text("binding_basis"),
+        build_basis=text("build_basis"),
+        source_rule=text("source_rule"),
+        identity_in=each(deployed, "identity_in") if deployed else None,
+        binding_in=each(deployed, "binding_in"),
+        workload_in=each(deployed, "workload_in"),
+        image_in=each(deployed, "image_in"),
+        published_in=each(built, "published_in") if text("built_by") else None,
+        built_in=each(built, "built_in") if text("built_by") else None,
+        declared_in=f"{DECLARATIONS_SLUG}/{declared}" if declared else None,
     )
 
 
