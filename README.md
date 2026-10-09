@@ -217,8 +217,9 @@ Prisma schemas and PostgreSQL migrations are read too. A query is bound to a col
 its client reads the environment variable the repository's own Prisma datasource reads, and an
 explicit typed mapping (`Record<A, B>`, `dict[A, B]`) maps one enum's members to another's.
 
-Every binding, and every refusal, is a stored decision. Matching names alone never connect
-schemas, databases or repositories.
+Every binding, and every refusal, is a stored decision, and a change-impact answer lists the
+refusals made where its walk went. Matching names alone never connect schemas, databases or
+repositories.
 
 ## Scope and limitations
 
