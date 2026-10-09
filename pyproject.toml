@@ -59,6 +59,12 @@ dependencies = [
     # parser's output and bumping its version. THIRD_PARTY_NOTICES.md records the
     # provenance.
     "graphql-core==3.2.6",
+    # SQL -- migrations, and SQL embedded in code -- is read with sqlglot, under its
+    # PostgreSQL dialect, and only parsed: nothing is optimised, transpiled or
+    # executed, and nothing connects to a database. Pinned exactly for the grammars'
+    # reason: a different version is a different set of facts from the same file.
+    # THIRD_PARTY_NOTICES.md records the provenance.
+    "sqlglot==30.19.0",
     # The official Model Context Protocol SDK, for the stdio transport adapter
     # only. Pinned below 2.0: that line swaps `httpx` for a second HTTP client
     # (`httpx2`) and adds an OpenTelemetry dependency, neither of which a local

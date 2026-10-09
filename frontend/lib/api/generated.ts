@@ -127,7 +127,8 @@ export type EdgeType =
   | "EXPOSES_HTTP_ENDPOINT"
   | "CALLS_HTTP_ENDPOINT"
   | "USES"
-  | "CALLS_HTTP_HANDLER";
+  | "CALLS_HTTP_HANDLER"
+  | "MAPS_TO";
 /**
  * Where the text in this response came from. Exactly one per inspection.
  *

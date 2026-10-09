@@ -58,6 +58,8 @@ from repoatlas.graph.http_crossings import (
     plan_http_crossings,
 )
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
+from repoatlas.graph.persistence import plan_persistence
+from repoatlas.graph.prisma_schema import plan_prisma, prisma_projects
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
 from repoatlas.graph.salt_pillar import resolve_pillar_reads
 from repoatlas.graph.uses import use_resolution
@@ -69,6 +71,7 @@ from repoatlas.graph.uses_link import (
     plan_uses,
     stored_scope,
 )
+from repoatlas.graph.value_mappings import plan_value_mappings
 from repoatlas.models import http
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.parsing import (
@@ -87,7 +90,13 @@ from repoatlas.parsers.graphql_codegen import GRAPHQL_CODEGEN_OUTPUT
 from repoatlas.parsers.http_facts import PENDING_FACT
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION
 from repoatlas.parsers.py_graphql import GRAPHQL_BINDABLE
+from repoatlas.parsers.py_persistence import TYPED_COMPARISON
 from repoatlas.parsers.ts_graphql import GRAPHQL_SCHEMA_CONSTRUCTION, TS_OBJECT_SHAPE
+from repoatlas.parsers.ts_persistence import (
+    PERSISTENCE_CLIENT,
+    PERSISTENCE_QUERY,
+    VALUE_MAPPING,
+)
 from repoatlas.storage.protocols import (
     EdgeRecord,
     EntityRecord,
@@ -535,6 +544,7 @@ class ReferenceLinker:
             documents_claims: list[UnresolvedRefRecord] = []
             resolver_claims: list[UnresolvedRefRecord] = []
             artifact_claims: list[UnresolvedRefRecord] = []
+            persistence_claims: list[UnresolvedRefRecord] = []
             salt_resolutions = {
                 id(result.claim): result
                 for result in resolve_pillar_reads(self._salt, index, claims, by_id)
@@ -560,6 +570,10 @@ class ReferenceLinker:
                         artifact_claims.append(claim)
                     else:
                         unresolved += 1
+                    continue
+                if claim_role(claim) in _PERSISTENCE_ROLES:
+                    # Decided after uses resolve: a mapping's types are what it uses.
+                    persistence_claims.append(claim)
                     continue
                 if claim_role(claim) is not None:
                     # Never proven by symbol resolution: decided below, together.
@@ -683,6 +697,49 @@ class ReferenceLinker:
             watch.detail = _uses_detail(uses_plan)
         stages.append(_timing(watch))
 
+        entered("persistence")
+        with Stopwatch("persistence") as watch:
+            # Prisma projects, their migrations and client; queries bound to the database a
+            # source-backed identity names; typed mappings and comparisons, whose types are
+            # what each declaration uses (repoatlas.graph.prisma_schema, .persistence,
+            # .value_mappings). Computed whole every pass, from claims and effective uses.
+            projects = prisma_projects(by_id, ordered_symbols)
+            specifiers = sorted({s for project in projects for s in project.specifiers})
+            prisma = plan_prisma(
+                projects,
+                self._knowledge.list_use_claims_from(specifiers) if specifiers else [],
+                by_id,
+                ordered_symbols,
+                producer=GLOBAL_PARSER,
+            )
+            roles = {id(claim): claim_role(claim) for claim in persistence_claims}
+            persistence = plan_persistence(
+                [c for c in persistence_claims if roles[id(c)] == PERSISTENCE_CLIENT],
+                [c for c in persistence_claims if roles[id(c)] == PERSISTENCE_QUERY],
+                projects,
+                index,
+                by_id,
+                producer=GLOBAL_PARSER,
+            )
+            mappings = plan_value_mappings(
+                [
+                    c
+                    for c in persistence_claims
+                    if roles[id(c)] in {VALUE_MAPPING, TYPED_COMPARISON}
+                ],
+                _effective_uses(self._knowledge, uses_plan),
+                {symbol.entity_id: symbol for symbol in symbols},
+                ordered_symbols,
+                prisma.bound,
+                by_id,
+                producer=GLOBAL_PARSER,
+            )
+            edges.extend((*prisma.edges, *persistence.edges, *mappings.edges))
+            watch.candidates_in = len(persistence_claims)
+            watch.candidates_out = len(prisma.edges) + len(persistence.edges) + len(mappings.edges)
+            watch.detail = f"{prisma.detail}; {persistence.detail}; {mappings.detail}"
+        stages.append(_timing(watch))
+
         entered("dependencies")
         with Stopwatch("dependencies") as watch:
             dependencies, cross = self._plan_dependencies(index, records)
@@ -703,6 +760,9 @@ class ReferenceLinker:
                 *resolvers.decisions,
                 *ownership.decisions,
                 *artifacts.decisions,
+                *prisma.decisions,
+                *persistence.decisions,
+                *mappings.decisions,
             ),
             resolved=resolved,
             unresolved=unresolved,
@@ -711,7 +771,10 @@ class ReferenceLinker:
             + codegen.crossings
             + documents.crossings
             + resolvers.crossings
-            + ownership.crossings,
+            + ownership.crossings
+            + prisma.crossings
+            + persistence.crossings
+            + mappings.crossings,
             claims_considered=len(claims) + uses_plan.work.claims_examined,
             files_indexed=len(file_rows),
             symbols_indexed=len(symbols),
@@ -1087,6 +1150,7 @@ def plan_repository_http(knowledge: SqliteKnowledgeStore, repo_id: int) -> Repos
         if claim_role(claim) is not None
         and not _is_salt_mapping_claim(claim)
         and not _is_graphql_claim(claim)
+        and claim_role(claim) not in _PERSISTENCE_ROLES
     ]
     served = knowledge.list_served_routes(exclude_parser=GLOBAL_PARSER, repo_id=repo_id)
     index = ResolutionIndex.build(files, symbols)
@@ -1178,6 +1242,33 @@ def _is_graphql_claim(claim: UnresolvedRefRecord) -> bool:
 #: Facts a resolver map is followed through, and the constructions that use them.
 _RESOLVER_FACTS = frozenset({GRAPHQL_SCHEMA_CONSTRUCTION, TS_OBJECT_SHAPE, GRAPHQL_BINDABLE})
 _GRAPHQL_ROLES = GRAPHQL_FACTS | {GRAPHQL_CODEGEN_OUTPUT, GRAPHQL_ARTIFACT} | _RESOLVER_FACTS
+#: Database clients, queries, typed mappings and comparisons: decided after uses resolve.
+_PERSISTENCE_ROLES = frozenset(
+    {PERSISTENCE_CLIENT, PERSISTENCE_QUERY, VALUE_MAPPING, TYPED_COMPARISON}
+)
+
+
+def _effective_uses(knowledge: SqliteKnowledgeStore, plan: UsesPlan) -> Callable[[int], list[int]]:
+    """A declaration's ``USES`` targets once ``plan`` is applied: the per-file pass's own
+    edges, the global pass's stored edges of the files the plan leaves alone, and the plan's.
+    Read lazily, one declaration at a time."""
+    planned: dict[int, set[int]] = defaultdict(set)
+    for edge in plan.edges:
+        planned[edge.src_id].add(edge.dst_id)
+    scope = plan.scope.files
+    cache: dict[int, list[int]] = {}
+
+    def uses_of(src_id: int) -> list[int]:
+        if src_id not in cache:
+            kept = {
+                dst
+                for _, dst, file_id, producer in knowledge.list_uses_targets([src_id])
+                if producer != GLOBAL_PARSER or (scope is not None and file_id not in scope)
+            }
+            cache[src_id] = sorted(kept | planned[src_id])
+        return cache[src_id]
+
+    return uses_of
 
 
 def _uses_detail(plan: UsesPlan) -> str:
