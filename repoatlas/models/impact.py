@@ -35,6 +35,8 @@ from repoatlas.models.parsing import EdgeType, EntityType
 
 DEFAULT_CANDIDATES = 30
 MAX_CANDIDATES = 100
+#: The most link decisions one answer lists (``ImpactResponse.decisions``).
+MAX_DECISIONS = 25
 #: The most candidates an ambiguous seed lists; ``total`` says how many there were.
 MAX_SEED_CANDIDATES = 8
 
@@ -248,6 +250,96 @@ class Composition(BaseModel):
     decision_ref: str
 
 
+class Migration(BaseModel):
+    """A migration Prisma Migrate wrote from the schema definition before it.
+
+    The project's schema file, the migration and the database type it creates or alters
+    (repoatlas.graph.prisma_schema). Source evidence: what the migrations leave is compared
+    with the schema in the ``prisma_migrations`` decision.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    project: str
+    migration: str
+    type: str
+    decision_ref: str
+
+
+class ClientBinding(BaseModel):
+    """A name imported from the client a Prisma generator writes, bound to its schema.
+
+    The schema file and the module specifier code imports it by (repoatlas.graph.prisma_schema).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    project: str
+    specifier: str
+    decision_ref: str
+
+
+class QueryBinding(BaseModel):
+    """A query's comparison of a mapped column with one of its enum's database values.
+
+    The database, as the Prisma schema that describes it, and the table, column, operator and
+    value as the query states them (repoatlas.graph.persistence).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    database: str
+    table: str
+    column: str
+    op: str
+    value: str | None = None
+    decision_ref: str
+
+
+class ValueMapping(BaseModel):
+    """An explicit typed mapping that maps the member before it to this one.
+
+    The mapping's entry, as ``<repository>/<path>:<line>`` (repoatlas.graph.value_mappings).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    mapping: str
+    decision_ref: str
+
+
+class TypedComparison(BaseModel):
+    """A comparison of a typed field with a value of the enum the field is declared as.
+
+    The model and enum declarations, as ``<repository>/<path>:<line>``, the field and the value
+    compared (repoatlas.graph.value_mappings).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    model: str
+    field: str
+    enum: str
+    value: str
+
+
+class ImpactDecision(BaseModel):
+    """A link the global pass refused or qualified where the walk went.
+
+    Decided at the seed, a returned candidate, or in a file one of them is in: why something
+    one might expect is not linked (``mapping-incomplete``, ``sql-dynamic``,
+    ``snapshot-stale``, ...). A reason a link was not made, never a breakage.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    family: str
+    subject: str
+    decision: str
+    at: str
+    evidence: dict[str, object] = Field(default_factory=dict)
+
+
 class ImpactStep(BaseModel):
     """The one fact connecting a candidate to its predecessor.
 
@@ -280,6 +372,16 @@ class ImpactStep(BaseModel):
     generation: CodeGeneration | None = None
     #: The federation composition behind a step from a provider definition to a supergraph's.
     composition: Composition | None = None
+    #: The migration behind a step from a Prisma enum to the type a migration creates or alters.
+    migration: Migration | None = None
+    #: The generated Prisma client behind a step from a schema definition to code using it.
+    client: ClientBinding | None = None
+    #: The query behind a step from a mapped column or value to the code comparing it.
+    query: QueryBinding | None = None
+    #: The typed mapping behind a step from one enum member (or enum) to another.
+    mapping: ValueMapping | None = None
+    #: The typed comparison behind a step from an enum member to the code comparing a field.
+    comparison: TypedComparison | None = None
     #: The edge's recorded resolution; ``full`` only.
     resolution: dict[str, object] | None = None
 
@@ -410,6 +512,10 @@ class ImpactResponse(BaseModel):
     packages: tuple[PackageImpact, ...] = ()
     hubs: tuple[HubImpact, ...] = ()
     unresolved: tuple[UnresolvedImpact, ...] = ()
+    #: Links refused or qualified where the walk went, at most :data:`MAX_DECISIONS`.
+    decisions: tuple[ImpactDecision, ...] = ()
+    #: Decisions left out past that bound, counted by family.
+    decisions_omitted: dict[str, int] = Field(default_factory=dict)
     omitted: ImpactOmitted = ImpactOmitted()
     summary: ImpactSummary
     freshness: IndexFreshness

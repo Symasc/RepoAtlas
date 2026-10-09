@@ -598,6 +598,19 @@ export interface EdgeTypeCount {
   type: EdgeType;
 }
 /**
+ * A name imported from the client a Prisma generator writes, bound to its schema.
+ *
+ * The schema file and the module specifier code imports it by (repoatlas.graph.prisma_schema).
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ClientBinding".
+ */
+export interface ClientBinding {
+  decision_ref: string;
+  project: string;
+  specifier: string;
+}
+/**
  * How a generated declaration was generated from the schema definition before it.
  *
  * The evidence a configured-generation link recorded (repoatlas.graph.graphql_codegen),
@@ -1360,6 +1373,8 @@ export interface ImpactCandidate {
  */
 export interface ImpactStep {
   at?: string | null;
+  client?: ClientBinding | null;
+  comparison?: TypedComparison | null;
   composition?: Composition | null;
   crossing?: PackageCrossing | null;
   derived?: string | null;
@@ -1367,7 +1382,10 @@ export interface ImpactStep {
   generation?: CodeGeneration | null;
   http?: HttpCrossing | null;
   lines?: [unknown, unknown] | null;
+  mapping?: ValueMapping | null;
+  migration?: Migration | null;
   parser?: string | null;
+  query?: QueryBinding | null;
   reading: string;
   resolution?: {
     [k: string]: unknown | undefined;
@@ -1376,6 +1394,21 @@ export interface ImpactStep {
   use?: string | null;
   via?: string[];
   via_names?: string[];
+}
+/**
+ * A comparison of a typed field with a value of the enum the field is declared as.
+ *
+ * The model and enum declarations, as ``<repository>/<path>:<line>``, the field and the value
+ * compared (repoatlas.graph.value_mappings).
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "TypedComparison".
+ */
+export interface TypedComparison {
+  enum: string;
+  field: string;
+  model: string;
+  value: string;
 }
 /**
  * How one step crossed from a providing repository into a consuming one.
@@ -1405,6 +1438,70 @@ export interface PackageCrossing {
   provided_by: string;
   subpath?: string | null;
   to_repository: string;
+}
+/**
+ * An explicit typed mapping that maps the member before it to this one.
+ *
+ * The mapping's entry, as ``<repository>/<path>:<line>`` (repoatlas.graph.value_mappings).
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ValueMapping".
+ */
+export interface ValueMapping {
+  decision_ref: string;
+  mapping: string;
+}
+/**
+ * A migration Prisma Migrate wrote from the schema definition before it.
+ *
+ * The project's schema file, the migration and the database type it creates or alters
+ * (repoatlas.graph.prisma_schema). Source evidence: what the migrations leave is compared
+ * with the schema in the ``prisma_migrations`` decision.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "Migration".
+ */
+export interface Migration {
+  decision_ref: string;
+  migration: string;
+  project: string;
+  type: string;
+}
+/**
+ * A query's comparison of a mapped column with one of its enum's database values.
+ *
+ * The database, as the Prisma schema that describes it, and the table, column, operator and
+ * value as the query states them (repoatlas.graph.persistence).
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "QueryBinding".
+ */
+export interface QueryBinding {
+  column: string;
+  database: string;
+  decision_ref: string;
+  op: string;
+  table: string;
+  value?: string | null;
+}
+/**
+ * A link the global pass refused or qualified where the walk went.
+ *
+ * Decided at the seed, a returned candidate, or in a file one of them is in: why something
+ * one might expect is not linked (``mapping-incomplete``, ``sql-dynamic``,
+ * ``snapshot-stale``, ...). A reason a link was not made, never a breakage.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ImpactDecision".
+ */
+export interface ImpactDecision {
+  at: string;
+  decision: string;
+  evidence?: {
+    [k: string]: unknown | undefined;
+  };
+  family: string;
+  subject: string;
 }
 /**
  * What the walk reached or could have reached and did not return, counted.
@@ -1444,6 +1541,10 @@ export interface ImpactRequest {
 export interface ImpactResponse {
   candidates?: ImpactCandidate[];
   context: ContextView;
+  decisions?: ImpactDecision[];
+  decisions_omitted?: {
+    [k: string]: number | undefined;
+  };
   freshness: IndexFreshness;
   hubs?: HubImpact[];
   investigation_id: string;
