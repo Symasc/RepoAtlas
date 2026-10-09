@@ -84,6 +84,11 @@ class EdgeType(StrEnum):
     #: (repoatlas.graph.http_crossings). Its resolution records the evidence on both
     #: sides; the change-impact walk follows it inward, from a handler to its callers.
     CALLS_HTTP_HANDLER = "CALLS_HTTP_HANDLER"
+    #: An explicit, typed value mapping states that one enum member maps to another:
+    #: *key member → value member*, asserted at the mapping's entry
+    #: (repoatlas.graph.value_mappings). The change-impact walk follows it outward, from
+    #: a member to what it is mapped to.
+    MAPS_TO = "MAPS_TO"
 
 
 #: The target key of the one ``USES`` claim per file that is its export table, not a use

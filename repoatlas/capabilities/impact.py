@@ -35,8 +35,10 @@ from repoatlas.graph.http_crossings import HTTP_CROSSING
 from repoatlas.graph.impact import ImpactWalk, Node, Tier, WalkResult, is_test_path
 from repoatlas.graph.keys import file_key, package_key
 from repoatlas.graph.packages import CROSSING, ProviderTargets, stored_targets
+from repoatlas.graph.prisma_schema import MIGRATE_EVIDENCE
 from repoatlas.graph.py_packages import PythonTargets, stored_python_targets
 from repoatlas.graph.units import package_directories, unit_of
+from repoatlas.graph.value_mappings import MAPPING_EVIDENCE
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.impact import (
     MAX_SEED_CANDIDATES,
@@ -73,7 +75,7 @@ from repoatlas.storage.protocols import (
 #: The traversal policy's name and version, reported with every answer. 2: a use crosses
 #: into another repository on a package link's evidence. 3: a schema definition reaches
 #: what a configured generator generated from it (``GENERATES`` on codegen evidence).
-POLICY = "impact/3"
+POLICY = "impact/4"
 
 #: Entity types a change is a *key* change for: they name a value, not code.
 _KEYS = frozenset(
@@ -512,6 +514,12 @@ def assemble(
         composed = node.step.resolution.get(COMPOSITION)
         if isinstance(composed, dict):
             return f"{COMPOSED}, as subgraph {composed.get('graph')} at {composed.get('url')}"
+        migrated = node.step.resolution.get(MIGRATE_EVIDENCE)
+        if isinstance(migrated, dict):
+            return f"{node.step.reading}, by Prisma Migrate from {migrated.get('schema')}"
+        mapped = node.step.resolution.get(MAPPING_EVIDENCE)
+        if isinstance(mapped, dict):
+            return f"{node.step.reading}, by {mapped.get('mapping')}"
         return node.step.reading
 
     tests = [n for n in ranked if is_test_path(n.path) and n.role is not ImpactRole.MEMBER]

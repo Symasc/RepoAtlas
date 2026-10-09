@@ -27,6 +27,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
     Severity,
 )
+from repoatlas.parsers.dashboards import dashboard_references
 from repoatlas.parsers.deploy_compose import compose_references, is_compose_file
 from repoatlas.parsers.deploy_helm import (
     chart_references,
@@ -149,7 +150,8 @@ class StructuredParser:
     #    inputs, documents, plugins and naming options (repoatlas.parsers.graphql_codegen).
     # 9: package.json scripts that fetch a GraphQL schema (repoatlas.parsers.graphql_artifacts),
     #    and graphql-config projects (repoatlas.parsers.graphql_codegen).
-    version = "9"
+    # 10: SQL in Grafana dashboards (repoatlas.parsers.dashboards).
+    version = "10"
     language = "YAML"
 
     def supports(self, path: Path) -> bool:
@@ -207,7 +209,11 @@ class StructuredParser:
             *values_references(posix, documents),
         ]
         generation, generation_diagnostics = codegen_references(posix, documents, content)
-        generation = [*generation, *package_script_references(posix, documents)]
+        generation = [
+            *generation,
+            *package_script_references(posix, documents),
+            *dashboard_references(posix, documents),
+        ]
 
         # ``splitlines()`` deliberately: this array is indexed by PyYAML marks and
         # must use PyYAML's line-break set rather than the source-grammar splitter

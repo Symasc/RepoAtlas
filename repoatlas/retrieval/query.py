@@ -26,7 +26,7 @@ _DOTTED = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b")
 _PATHLIKE = re.compile(
     r"\b[\w./-]+\.(?:"
     r"py|pyi|ts|tsx|mts|cts|js|jsx|mjs|cjs|sh|bash|zsh|rb|rake|gemspec|sls|jinja2?|j2"
-    r"|ya?ml|json|toml|md|markdown|mdx|rst|txt|graphqls?|gql|prisma"
+    r"|ya?ml|json|toml|md|markdown|mdx|rst|txt|graphqls?|gql|prisma|sql"
     r")\b"
 )
 _IDENTIFIER = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b")

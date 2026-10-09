@@ -11,6 +11,7 @@ dependency, and reports precise line ranges including decorators.
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
 from repoatlas.models.parsing import (
@@ -29,6 +30,7 @@ from repoatlas.parsers.http_python import PythonHttp
 from repoatlas.parsers.interpreter import interpreter_tag
 from repoatlas.parsers.marks import whole_file_span
 from repoatlas.parsers.py_graphql import AriadneFacts, schema_download_references
+from repoatlas.parsers.py_persistence import PyPersistence
 from repoatlas.parsers.py_uses import PythonUseAnalysis, python_use_references
 from repoatlas.parsers.setuptools_project import setup_py_facts, setuptools_reference
 
@@ -239,6 +241,7 @@ class _Visitor(ast.NodeVisitor):
                 line_end=node.end_lineno or node.lineno,
                 signature=f"class {node.name}",
                 parent=self._current_symbol,
+                meta=_field_types(node),
             )
         )
         if any(
@@ -412,10 +415,13 @@ class PythonParser:
     #    (repoatlas.parsers.py_graphql).
     # 15: an Enum's members with a plain string value are symbols (``Enum.MEMBER``) that
     #    record the value, which is what a generated enum shares with its schema.
+    # 16: a class records the type each of its annotated fields names (``fields``);
+    #    database clients, queries, typed mappings and comparisons
+    #    (repoatlas.parsers.py_persistence).
     # +pyX.Y: `ast` is the running interpreter's, and what it accepts moves with the
     #    interpreter (repoatlas.parsers.interpreter), so facts parsed by another one
     #    are never kept.
-    version = f"15+{interpreter_tag()}"
+    version = f"16+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
@@ -500,7 +506,41 @@ class PythonParser:
                 *http.claim_references(),
                 *AriadneFacts(tree).references(),
                 *schema_download_references(tree),
+                *PyPersistence(tree).references(),
                 *uses,
                 *(() if setuptools is None else (setuptools_reference(setuptools, content),)),
             ),
         )
+
+
+def _field_types(node: ast.ClassDef) -> dict[str, str]:
+    """``{"fields": {name: type}}`` for a class's annotated fields whose annotation names one
+    type -- ``T``, ``Optional[T]``, ``T | None`` or ``"T"`` -- else nothing."""
+    fields: dict[str, str] = {}
+    for statement in node.body:
+        if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+            named = _one_type(statement.annotation)
+            if named:
+                fields[statement.target.id] = named
+    return {"fields": json.dumps(fields, sort_keys=True)} if fields else {}
+
+
+def _one_type(annotation: ast.expr) -> str | None:
+    if isinstance(annotation, ast.Name):
+        return annotation.id
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        return annotation.value if annotation.value.isidentifier() else None
+    if (
+        isinstance(annotation, ast.Subscript)
+        and isinstance(annotation.value, ast.Name | ast.Attribute)
+        and (
+            annotation.value.id if isinstance(annotation.value, ast.Name) else annotation.value.attr
+        )
+        == "Optional"
+    ):
+        return _one_type(annotation.slice)
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        sides = [annotation.left, annotation.right]
+        named = [s for s in sides if not (isinstance(s, ast.Constant) and s.value is None)]
+        return _one_type(named[0]) if len(named) == 1 else None
+    return None

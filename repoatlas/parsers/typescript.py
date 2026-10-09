@@ -43,6 +43,7 @@ from repoatlas.parsers.treesitter import (
     walk,
 )
 from repoatlas.parsers.ts_graphql import TsGraphQL
+from repoatlas.parsers.ts_persistence import TsPersistence
 from repoatlas.parsers.ts_uses import USE_NODES, UseAnalysis, UseSite, use_references
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -107,9 +108,11 @@ class _Walker:
         injections: Injections | None = None,
         oas3: SpecRoutedApps | None = None,
         graphql: TsGraphQL | None = None,
+        persistence: TsPersistence | None = None,
     ) -> None:
         self._source = source
         self._graphql = graphql
+        self._persistence = persistence
         self._http = http
         self._nest = nest
         self._wrappers = wrappers
@@ -180,6 +183,8 @@ class _Walker:
                 continue
             if kind in {"call_expression", "new_expression"} and self._graphql is not None:
                 self._graphql.visit_call(current, self._binding or self._current or "")
+            if kind == "call_expression" and self._persistence is not None:
+                self._persistence.visit_call(current, self._binding or self._current or "")
             if kind == "call_expression":
                 self._call(current)
             elif kind in {"member_expression", "subscript_expression"}:
@@ -803,7 +808,9 @@ class TypeScriptParser:
     #    record the value, which is what a generated enum shares with its schema.
     # 17: GraphQL documents in ``gql``/``graphql`` templates, schema construction and the
     #    shapes of exported resolver-like objects (repoatlas.parsers.ts_graphql).
-    version = "17"
+    # 18: database clients, Knex chains and SQL handed to a client, and typed value
+    #    mappings (repoatlas.parsers.ts_persistence).
+    version = "18"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
@@ -841,7 +848,10 @@ class TypeScriptParser:
         # lost a declaration: such a file states no uses at all.
         uses = None if has_error(tree) else UseAnalysis(source, tree.root_node)
         graphql = TsGraphQL(source, tree.root_node)
-        walker = _Walker(source, http, nest, wrappers, uses, fastify, injections, oas3, graphql)
+        persistence = TsPersistence(source, tree.root_node)
+        walker = _Walker(
+            source, http, nest, wrappers, uses, fastify, injections, oas3, graphql, persistence
+        )
         walker.run(tree.root_node)
 
         whole_file_start, whole_file_last = whole_file_span(content)
@@ -877,6 +887,7 @@ class TypeScriptParser:
                 *injections.references(),
                 *oas3.references(),
                 *graphql.references(),
+                *persistence.references(),
                 *wrappers.declarations(),
                 *(
                     use_references(walker.uses, walker.symbols, uses.exports)

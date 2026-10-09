@@ -741,6 +741,41 @@ class SqliteKnowledgeStore:
             )
         return [_claim(row) for row in sorted(found, key=lambda row: row["id"])]
 
+    def list_use_claims_from(self, modules: Sequence[str]) -> list[UnresolvedRefRecord]:
+        """The ``USES`` claims of names imported from any of these module specifiers.
+
+        A cheap text prefilter on the recorded specifier, then the exact rule on the
+        decoded claim: what the Prisma client binding reads
+        (:mod:`repoatlas.graph.prisma_schema`).
+        """
+        found: dict[int, UnresolvedRefRecord] = {}
+        sql = (
+            f"SELECT {_CLAIM_COLUMNS} FROM unresolved_refs u "  # noqa: S608 - column names only
+            "WHERE u.edge_type = ? AND u.meta_json LIKE ?"
+        )
+        for module in sorted(set(modules)):
+            rows = self._db.execute(sql, (str(EdgeType.USES), f'%"{module}"%')).fetchall()
+            for row in rows:
+                claim = _claim(row)
+                if json.loads(claim.meta_json or "{}").get("module") == module and claim.id:
+                    found[claim.id] = claim
+        return [found[key] for key in sorted(found)]
+
+    def list_uses_targets(self, src_ids: Sequence[int]) -> list[tuple[int, int, int, str]]:
+        """(user, used, asserting file, producer) of every stored ``USES`` edge from these
+        entities: the per-file pass's and the global pass's."""
+        found: list[tuple[int, int, int, str]] = []
+        for chunk in _chunks(sorted(set(src_ids))):
+            found.extend(
+                (row[0], row[1], row[2], row[3] or "")
+                for row in self._db.execute(
+                    "SELECT src_id, dst_id, file_id, parser FROM edges "  # noqa: S608 - placeholders
+                    f"WHERE type = ? AND src_id IN ({','.join('?' * len(chunk))})",
+                    (str(EdgeType.USES), *chunk),
+                ).fetchall()
+            )
+        return sorted(found)
+
     def list_module_facts(self, file_id: int | None = None) -> list[UnresolvedRefRecord]:
         """Module-resolution facts (:mod:`repoatlas.parsers.module_facts`): all, or one file's.
 

@@ -35,6 +35,8 @@ _EXTENSIONS: dict[str, str] = {
     ".graphql": "GraphQL",
     ".gql": "GraphQL",
     ".graphqls": "GraphQL",
+    ".prisma": "Prisma",
+    ".sql": "SQL",
 }
 
 _FILENAMES: dict[str, str] = {
