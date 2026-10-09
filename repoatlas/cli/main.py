@@ -19,6 +19,7 @@ from repoatlas.errors import ExitCode, RepoAtlasError
 from repoatlas.models.evidence import EvidenceSet
 from repoatlas.models.reports import SyncReport
 from repoatlas.rendering import (
+    render_decisions,
     render_evidence,
     render_repos,
     render_status,
@@ -189,6 +190,30 @@ def repos(json_output: _JsonOption = False) -> None:
         _fail(exc)
         return
     _emit(found, render_repos(found), json_output)
+    workspace.close()
+
+
+@app.command()
+def decisions(
+    family: Annotated[
+        str | None, typer.Option("--family", help="Only this decision family.")
+    ] = None,
+    decision: Annotated[str | None, typer.Option("--decision", help="Only this outcome.")] = None,
+    repo: Annotated[str | None, typer.Option("--repo", help="Only this repository.")] = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, max=500, help="Decisions per page.")] = 50,
+    offset: Annotated[int, typer.Option("--offset", min=0, help="Decisions to skip.")] = 0,
+    json_output: _JsonOption = False,
+) -> None:
+    """List stored link decisions: counts in full, one bounded page of entries."""
+    workspace = _open()
+    try:
+        report = services.list_decisions(
+            workspace, family=family, decision=decision, repository=repo, limit=limit, offset=offset
+        )
+    except RepoAtlasError as exc:
+        _fail(exc)
+        return
+    _emit(report, render_decisions(report), json_output)
     workspace.close()
 
 

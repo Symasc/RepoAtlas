@@ -1,4 +1,5 @@
 from repoatlas.rendering.text import (
+    render_decisions,
     render_dependencies,
     render_evidence,
     render_repos,
@@ -7,6 +8,7 @@ from repoatlas.rendering.text import (
 )
 
 __all__ = [
+    "render_decisions",
     "render_dependencies",
     "render_evidence",
     "render_repos",

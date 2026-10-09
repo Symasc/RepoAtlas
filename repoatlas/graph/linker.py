@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 
 from repoatlas.config.settings import SaltSettings
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
+from repoatlas.graph.ci_facts import plan_ci_facts
 from repoatlas.graph.deploy_identity import DOCKERFILE_UNREAD, NO_BUILD, NOT_IN_IMAGE
 from repoatlas.graph.graphql_artifacts import plan_artifacts
 from repoatlas.graph.graphql_codegen import plan_codegen
@@ -84,10 +85,16 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
 )
 from repoatlas.models.telemetry import LinkTrace, StageTiming, Stopwatch
+from repoatlas.parsers.ci_config import CI_ROLES
 from repoatlas.parsers.graphql import GRAPHQL_DOCUMENT, GRAPHQL_FACTS
 from repoatlas.parsers.graphql_artifacts import GRAPHQL_ARTIFACT
 from repoatlas.parsers.graphql_codegen import GRAPHQL_CODEGEN_OUTPUT
-from repoatlas.parsers.http_facts import PENDING_FACT
+from repoatlas.parsers.http_facts import (
+    HELM_VALUES_FILE,
+    K8S_CONFIGMAP,
+    K8S_WORKLOAD,
+    PENDING_FACT,
+)
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION
 from repoatlas.parsers.py_graphql import GRAPHQL_BINDABLE
 from repoatlas.parsers.py_persistence import TYPED_COMPARISON
@@ -571,6 +578,11 @@ class ReferenceLinker:
                     else:
                         unresolved += 1
                     continue
+                if claim_role(claim) in _DEPLOYMENT_FACT_ROLES:
+                    # CI, workload, ConfigMap and values-file facts: decided by the CI pass
+                    # below (repoatlas.graph.ci_facts), and joined from DF2 -- never handed
+                    # to the HTTP pass, whose accounting they must not change.
+                    continue
                 if claim_role(claim) in _PERSISTENCE_ROLES:
                     # Decided after uses resolve: a mapping's types are what it uses.
                     persistence_claims.append(claim)
@@ -665,6 +677,9 @@ class ReferenceLinker:
                 producer=GLOBAL_PARSER,
             )
             edges.extend((*codegen.edges, *documents.edges, *resolvers.edges, *ownership.edges))
+            # What CI configurations configure, and every step not interpreted: decisions
+            # only, no edge (repoatlas.graph.ci_facts).
+            ci = plan_ci_facts(claims, by_id)
             resolved += (
                 decided.resolved + codegen.resolved + documents.resolved + resolvers.resolved
             )
@@ -678,7 +693,7 @@ class ReferenceLinker:
             watch.detail = (
                 f"{unresolved} still unresolved; {decided.detail}; {crossings.detail}; "
                 f"{codegen.detail}; {documents.detail}; {resolvers.detail}; {ownership.detail}; "
-                f"{artifacts.detail}"
+                f"{artifacts.detail}; {ci.detail}"
             )
         stages.append(_timing(watch))
 
@@ -763,6 +778,7 @@ class ReferenceLinker:
                 *prisma.decisions,
                 *persistence.decisions,
                 *mappings.decisions,
+                *ci.decisions,
             ),
             resolved=resolved,
             unresolved=unresolved,
@@ -1241,6 +1257,8 @@ def _is_graphql_claim(claim: UnresolvedRefRecord) -> bool:
 
 #: Facts a resolver map is followed through, and the constructions that use them.
 _RESOLVER_FACTS = frozenset({GRAPHQL_SCHEMA_CONSTRUCTION, TS_OBJECT_SHAPE, GRAPHQL_BINDABLE})
+#: DF1's deployment facts (repoatlas.parsers.ci_config, repoatlas.parsers.deploy_helm).
+_DEPLOYMENT_FACT_ROLES = CI_ROLES | {K8S_WORKLOAD, K8S_CONFIGMAP, HELM_VALUES_FILE}
 _GRAPHQL_ROLES = GRAPHQL_FACTS | {GRAPHQL_CODEGEN_OUTPUT, GRAPHQL_ARTIFACT} | _RESOLVER_FACTS
 #: Database clients, queries, typed mappings and comparisons: decided after uses resolve.
 _PERSISTENCE_ROLES = frozenset(
