@@ -44,6 +44,7 @@ import json
 import posixpath
 import re
 from collections import defaultdict
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -73,6 +74,13 @@ from repoatlas.parsers.withhold import guarded
 
 #: Leaves one values file may contribute.
 MAX_VALUES = 256
+#: Nodes one values document's walk visits: aliases can make a small file a large tree.
+MAX_VALUE_NODES = 10_000
+#: DF2 (D2-1): a file a release names with ``-f``, read only because it is named.
+REFERENCED_VALUES_KEY = "helm-values:referenced"
+REFERENCED_VALUES = "referenced-values"
+#: Referenced files one repository's releases may have read.
+MAX_REFERENCED = 64
 _NULL_TAG = "tag:yaml.org,2002:null"
 _ACTION = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
 _COMMENT = re.compile(r"\{\{-?\s*/\*.*?\*/\s*-?\}\}", re.DOTALL)
@@ -178,20 +186,9 @@ def values_references(path: PurePosixPath, documents: list[yaml.Node]) -> list[P
     credential, or whose value carries one, is stored as ``<withheld>``."""
     if not _VALUES_FILE.fullmatch(path.name) or not documents or documents[0] is None:
         return []
-    leaves, truncated = _leaves(documents[0])
     if path.name != "values.yaml":
-        return [
-            pending_reference(
-                EdgeType.REFERENCES,
-                EntityType.CONFIG,
-                path.as_posix(),
-                1,
-                1,
-                role=HELM_VALUES_FILE,
-                values=json.dumps(leaves, sort_keys=True),
-                truncated="true" if truncated else "false",
-            )
-        ]
+        return [values_file_reference(path, documents[0])]
+    read = read_values(documents[0])
     return [
         pending_reference(
             EdgeType.REFERENCES,
@@ -201,34 +198,124 @@ def values_references(path: PurePosixPath, documents: list[yaml.Node]) -> list[P
             1,
             role=HELM_VALUES,
             chart=_directory(path),
-            values=json.dumps(leaves, sort_keys=True),
-            truncated="true" if truncated else "false",
+            **read.meta(),
         )
     ]
 
 
-def _leaves(document: yaml.Node) -> tuple[dict[str, str], bool]:
-    leaves: dict[str, str] = {}
-    truncated = False
+def values_file_reference(
+    path: PurePosixPath, document: yaml.Node, **extra: str
+) -> ParsedReference:
+    """The :data:`HELM_VALUES_FILE` claim of a values overlay: one ``values*.y(a)ml`` the
+    index read, or (DF2, ``extra``) a file a release names with ``-f`` whatever its name."""
+    return pending_reference(
+        EdgeType.REFERENCES,
+        EntityType.CONFIG,
+        path.as_posix(),
+        1,
+        1,
+        role=HELM_VALUES_FILE,
+        **read_values(document).meta(),
+        **extra,
+    )
+
+
+def referenced_paths(
+    releases: Iterable[tuple[str, int, Mapping[str, str]]],
+) -> dict[str, list[str]]:
+    """The repository-local files these ``ci-helm-release`` claims name with ``-f`` that no
+    ``values*.y(a)ml`` claim covers, each with where it is named (``<CI file>:<line>``);
+    at most :data:`MAX_REFERENCED`, in path order. A claim is a top-level helm command, so
+    every path here is a proven argument; DF1 left a non-literal or outside path ``null``."""
+    named: dict[str, list[str]] = defaultdict(list)
+    for where, line, meta in releases:
+        for path, _ in json.loads(meta.get("values", "[]")):
+            if (
+                isinstance(path, str)
+                and path
+                and not _VALUES_FILE.fullmatch(PurePosixPath(path).name)
+                and f"{where}:{line}" not in named[path]
+            ):
+                named[path].append(f"{where}:{line}")
+    return {path: sorted(named[path]) for path in sorted(named)[:MAX_REFERENCED]}
+
+
+def referenced_values_meta(path: str, content: str, named_by: Sequence[str]) -> str | None:
+    """The derived :data:`HELM_VALUES_FILE` claim meta of a referenced file, read as the
+    structured parser reads YAML; ``None`` when it is not one YAML mapping document."""
+    try:
+        documents = list(yaml.compose_all(content, Loader=yaml.SafeLoader))
+    except yaml.YAMLError:
+        return None
+    if not documents or not isinstance(documents[0], yaml.MappingNode):
+        return None
+    reference = values_file_reference(
+        PurePosixPath(path),
+        documents[0],
+        derived=REFERENCED_VALUES,
+        referenced_by=json.dumps(list(named_by)),
+    )
+    return json.dumps(reference.meta, sort_keys=True)
+
+
+class Values:
+    """A values document's literal leaves, each one's line, and the paths it clears."""
+
+    def __init__(self) -> None:
+        self.leaves: dict[str, str] = {}
+        self.lines: dict[str, int] = {}
+        #: ``[path, "null"]`` for a null, which deletes the key; ``[path, "list"]`` for an
+        #: empty list, which empties it. An empty map changes nothing and is not recorded.
+        self.cleared: list[list[str]] = []
+        self.truncated = False
+
+    def meta(self) -> dict[str, str]:
+        return {
+            "values": json.dumps(self.leaves, sort_keys=True),
+            "truncated": "true" if self.truncated else "false",
+            "lines": json.dumps(self.lines, sort_keys=True),
+            "cleared": json.dumps(self.cleared),
+        }
+
+
+def read_values(document: yaml.Node) -> Values:
+    """Every literal scalar leaf by dotted path (list items as ``a.b[0].c``), capped; a leaf
+    whose path names a credential, or whose value carries one, is stored as ``<withheld>``."""
+    read = Values()
     stack: list[tuple[str, yaml.Node]] = [("", document)]
+    visited = 0
     while stack:
         prefix, node = stack.pop()
+        visited += 1
+        if visited > MAX_VALUE_NODES:
+            read.truncated = True
+            break
         if isinstance(node, yaml.MappingNode):
             for key, value in reversed(node.value):
                 name = _scalar(key)
                 if name is not None and "." not in name:
                     stack.append((f"{prefix}.{name}" if prefix else name, value))
         elif isinstance(node, yaml.SequenceNode) and prefix:
+            if not node.value:
+                read.cleared.append([prefix, "list"])
             for index in reversed(range(len(node.value))):
                 stack.append((f"{prefix}[{index}]", node.value[index]))
         elif isinstance(node, yaml.ScalarNode) and prefix:
             value = _scalar(node)
-            if value is not None:
-                if len(leaves) >= MAX_VALUES:
-                    truncated = True
-                    break
-                leaves[prefix] = guarded(prefix, value)
-    return leaves, truncated
+            if value is None:
+                read.cleared.append([prefix, "null"])
+                continue
+            if len(read.leaves) >= MAX_VALUES:
+                read.truncated = True
+                break
+            read.leaves[prefix] = guarded(prefix, value)
+            read.lines[prefix] = node.start_mark.line + 1
+        if len(read.cleared) > MAX_VALUES:
+            # A clear left out could leave a key looking set: the file is cut short.
+            del read.cleared[MAX_VALUES:]
+            read.truncated = True
+            break
+    return read
 
 
 def _value(text: str) -> str:
@@ -276,10 +363,14 @@ def service_references(path: PurePosixPath, content: str) -> list[ParsedReferenc
         if name is None:
             continue
         controlled = any(_CONTROL.search(line) for line in document)
+        selector, targets = _service_spec(document)
         meta = {
             "name": name[0],
             "ports": json.dumps([[value, line] for value, line in ports]),
             "chart": _directory(PurePosixPath(_directory(path))),
+            # DF2: the workloads it selects, and the container ports it sends to.
+            "selector": json.dumps(selector),
+            "target_ports": json.dumps(targets),
         }
         if controlled:
             meta["controlled"] = "true"
@@ -295,6 +386,81 @@ def service_references(path: PurePosixPath, content: str) -> list[ParsedReferenc
             )
         )
     return found
+
+
+_LABEL = re.compile(r"""^("[^"]*"|'[^']*'|[A-Za-z0-9][\w./-]*):(?:\s+(.*))?$""")
+_INCLUDE_LINE = re.compile(r"\{\{-?\s*include\s+\"([\w.-]+)\"\s+\.\s*\|\s*nindent\s+\d+\s*-?\}\}")
+_TEMPLATE_COMMENT = re.compile(r"\{\{-?\s*/\*.*?\*/\s*-?\}\}")
+
+
+def _block(document: list[str], key: str, parent: int) -> tuple[int, list[str]] | None:
+    """The lines under ``key:`` among the children of a section at column ``parent``, the
+    key's own column and its body; ``None`` when there is no such key."""
+    inside, child = False, -1
+    for index, line in enumerate(document):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        lead = len(line) - len(line.lstrip())
+        if lead <= parent:
+            if inside and lead <= parent:
+                return None
+            continue
+        if child < 0:
+            child = lead
+        if lead == child and re.fullmatch(rf"{re.escape(key)}:\s*", stripped):
+            body: list[str] = []
+            for after in document[index + 1 :]:
+                text = after.strip()
+                if text and len(after) - len(after.lstrip()) <= child:
+                    break
+                body.append(after)
+            return child, body
+    return None
+
+
+def _service_spec(document: list[str]) -> tuple[list[list[str]] | str | None, list[list[object]]]:
+    """A Service document's selector -- ``[key, value]`` for each literal label and
+    ``["include", helper]`` for each ``include "<helper>" . | nindent n`` line, ``"unread"``
+    for anything else, ``None`` with no selector -- and each port's ``[port, targetPort]``
+    as written (``targetPort`` ``None`` when absent)."""
+    spec = next((i for i, line in enumerate(document) if re.fullmatch(r"spec:\s*", line)), None)
+    if spec is None:
+        return None, []
+    rest = document[spec + 1 :]
+    selector: list[list[str]] | str | None = None
+    found = _block(rest, "selector", 0)
+    if found is not None:
+        selector = []
+        for line in found[1]:
+            text = _TEMPLATE_COMMENT.sub("", line).strip()
+            if not text or text.startswith("#"):
+                continue
+            label = _LABEL.match(text)
+            include = _INCLUDE_LINE.fullmatch(text)
+            if include is not None:
+                selector.append(["include", include.group(1)])
+            elif label is not None and "{{" not in label.group(1):
+                selector.append([_value(label.group(1)), _value(label.group(2) or "")])
+            else:
+                selector = "unread"
+                break
+    targets: list[list[object]] = []
+    ports = _block(rest, "ports", 0)
+    if ports is not None:
+        items: list[dict[str, str]] = []
+        for line in ports[1]:
+            text = line.strip()
+            if not text or text.startswith("#"):
+                continue
+            if text.startswith("- "):
+                items.append({})
+                text = text[2:].strip()
+            label = _LABEL.match(text)
+            if items and label is not None:
+                items[-1][_value(label.group(1))] = _value(label.group(2) or "")
+        targets = [[item["port"], item.get("targetPort")] for item in items if "port" in item]
+    return selector, targets
 
 
 def _body(action: str) -> str:
