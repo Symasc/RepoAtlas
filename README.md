@@ -191,6 +191,7 @@ describes every stage.
 | | |
 |---|---|
 | Code: definitions, imports, calls, environment reads | Python, TypeScript, JavaScript, Bash |
+| GraphQL | Schema coordinates and same-file type links; operations and fragments, also in TypeScript `gql` templates; GraphQL Code Generator configurations; resolver maps (Apollo, graphql-tools, graphql-yoga, Ariadne) |
 | Configuration and deployment | YAML, JSON, Salt states, Jinja templates, Dockerfiles, docker-compose, Helm charts |
 | Packages | PyPI, npm and RubyGems manifests and lockfiles |
 | HTTP routes served | FastAPI, Flask, Express, NestJS, Fastify, OpenAPI 3 and Swagger 2 specs |
@@ -201,6 +202,17 @@ describes every stage.
 Across repositories, RepoAtlas links code through the packages one repository provides and another declares, and
 through HTTP when the source states where a service is reachable. What each extractor reads, and what it does
 not, is in [`docs/ARCHITECTURE.md`](https://github.com/Symasc/RepoAtlas/blob/master/docs/ARCHITECTURE.md).
+
+GraphQL `.graphql`, `.gql` and `.graphqls` files are parsed offline with source spans, each
+definition named by its schema coordinate. Links come from configuration, never from names:
+- generated code is linked to the definitions its GraphQL Code Generator configuration
+  loads;
+- a document is bound to the schema of the configuration whose `documents:` cover it;
+- a resolver is bound to the schema of the construction that uses its map.
+
+Every binding, and every refusal, is a stored decision. Ownership across federated schemas
+and database mappings are not yet linked. Matching names alone never connect schemas or
+repositories.
 
 ## Scope and limitations
 
