@@ -53,6 +53,7 @@ from graphql.language.source import Source
 from graphql.language.token_kind import TokenKind
 
 from repoatlas.models.parsing import (
+    EMBEDDED_DOCUMENT,
     PARSE_BOUND_EXCEEDED,
     PARSE_FAILED,
     SYNTAX_ERROR,
@@ -189,6 +190,46 @@ class GraphQLParser:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class EmbeddedDocument:
+    """What one GraphQL document embedded in another language's source states."""
+
+    symbols: tuple[ParsedSymbol, ...]
+    claims: tuple[ParsedReference, ...]
+    #: Character offsets each definition occupies in the text, to place interpolations.
+    spans: tuple[tuple[int, int], ...]
+    #: Whether the text also held type-system definitions, which are not read when embedded.
+    type_system: bool
+
+
+def read_embedded(text: str, *, first_line: int, owner: str) -> EmbeddedDocument | None:
+    """The operations and fragments of ``text``, a document embedded at ``first_line`` of
+    another file and belonging to the declaration ``owner`` there (``""`` for none).
+
+    ``None`` when the text does not parse or passes a bound: an embedded document is
+    read whole or not at all, and never raises. Text with type-system definitions only
+    (inline SDL) is returned with nothing in it and ``type_system`` set. Its symbols are
+    the owner's members, so they cut no chunk of the host file.
+    """
+    try:
+        if _empty(text):
+            return None
+        document = parse_document(text, max_tokens=MAX_TOKENS)
+        reader = _Reader(text, line_offset=first_line - 1, parent=owner, executable_only=True)
+        reader.walk(document)
+        claims = reader.references()
+    except Exception:
+        return None
+    if not reader.symbols and not claims and not reader.type_system:
+        return None
+    return EmbeddedDocument(
+        symbols=tuple(reader.symbols),
+        claims=claims,
+        spans=tuple(reader.spans),
+        type_system=reader.type_system,
+    )
+
+
 def _empty(content: str) -> bool:
     """Whether ``content`` holds no token at all: only whitespace, commas and comments.
 
@@ -225,8 +266,23 @@ class _Budget:
 class _Reader:
     """One document's definitions, in source order."""
 
-    def __init__(self, content: str) -> None:
+    def __init__(
+        self,
+        content: str,
+        *,
+        line_offset: int = 0,
+        parent: str | None = None,
+        executable_only: bool = False,
+    ) -> None:
         self._starts = line_starts(content)
+        self._offset = line_offset
+        #: The declaration of another language an embedded document belongs to.
+        self._parent = parent
+        self._executable_only = executable_only
+        #: Whether type-system definitions were present and, being embedded, not read.
+        self.type_system = False
+        #: Character offsets each definition occupies.
+        self.spans: list[tuple[int, int]] = []
         self.symbols: list[ParsedSymbol] = []
         self._claims: list[ParsedReference] = []
         self._uses: list[_TypeUse] = []
@@ -241,12 +297,21 @@ class _Reader:
         loc = node.loc
         assert loc is not None, "parsed with locations"
         start = bisect_right(self._starts, loc.start)
-        return start, max(start, bisect_right(self._starts, loc.end - 1))
+        end = max(start, bisect_right(self._starts, loc.end - 1))
+        return start + self._offset, end + self._offset
 
     # -- definitions -------------------------------------------------------------------
 
     def walk(self, document: ast.DocumentNode) -> None:
         for definition in document.definitions:
+            if definition.loc is not None:
+                self.spans.append((definition.loc.start, definition.loc.end))
+            executable = isinstance(
+                definition, (ast.OperationDefinitionNode, ast.FragmentDefinitionNode)
+            )
+            if self._executable_only and not executable:
+                self.type_system = True
+                continue
             if isinstance(definition, tuple(_TYPE_ROLES)):
                 self._type(definition)  # type: ignore[arg-type]
             elif isinstance(definition, (ast.SchemaDefinitionNode, ast.SchemaExtensionNode)):
@@ -261,7 +326,7 @@ class _Reader:
     def _symbol(
         self,
         node: ast.Node,
-        kind: EntityType,
+        entity: EntityType,
         name: str,
         qualified: str,
         *,
@@ -272,7 +337,7 @@ class _Reader:
         start, end = self._lines(node)
         self.symbols.append(
             ParsedSymbol(
-                kind=kind,
+                kind=entity,
                 name=name,
                 qualified_name=qualified,
                 line_start=start,
@@ -432,9 +497,11 @@ class _Reader:
                 name,
                 name,
                 signature=f"{kind} {name}" + (f"({listed})" if listed else ""),
+                parent=self._parent,
                 graphql="operation",
                 operation=kind,
                 directives=_directives(node.directives),
+                kind=EMBEDDED_DOCUMENT if self._parent is not None else None,
             )
         self._document(node, kind, name, variables, document="operation", operation=kind)
 
@@ -447,9 +514,11 @@ class _Reader:
             name,
             name,
             signature=f"fragment {name} on {condition}",
+            parent=self._parent,
             graphql="fragment",
             on=condition,
             directives=_directives(node.directives),
+            kind=EMBEDDED_DOCUMENT if self._parent is not None else None,
         )
         self._document(node, condition, name, (), document="fragment", on=condition)
 

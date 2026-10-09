@@ -20,7 +20,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from repoatlas.models.parsing import ENUM_MEMBER, EntityType
+from repoatlas.models.parsing import EMBEDDED_DOCUMENT, ENUM_MEMBER, EntityType
 from repoatlas.storage.protocols import FileRow, SymbolRow
 
 #: Candidate extensions per import flavor, tried in order.
@@ -297,7 +297,7 @@ class ResolutionIndex:
             for s in matches
             if s.name == name
             and not (python and s.type is EntityType.SYMBOL)
-            and s.meta.get("kind") != ENUM_MEMBER
+            and s.meta.get("kind") not in {ENUM_MEMBER, EMBEDDED_DOCUMENT}
         ]
         return exact[0] if len(exact) == 1 else None
 
