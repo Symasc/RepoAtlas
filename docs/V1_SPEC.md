@@ -1366,6 +1366,24 @@ proof. Salt pillar is the narrow exception: its source-level `GENERATES` edge is
 indexed Salt roots, top-file environment/target mappings, and a unique literal key definition prove the path. This
 does not relax the no-similar-name rule for other languages or relationship types.
 
+**Schema and persistence links across repositories** follow the same rule: each crosses only on evidence the source
+states, never a name.
+- **Generated code** crosses when a code-generator configuration loads a schema file in another repository (§7.10).
+- **A federated supergraph copy** is tied to the repository whose deployment serves the subgraph's URL and whose
+  constructions serve the definition (§7.12).
+- **A Prisma client** binds only within its schema's repository.
+- **A query** binds to a database only when a datasource in the same repository reads the environment variable its
+  client reads (§7.13).
+- **`MAPS_TO`** is not followed across a repository boundary.
+
+**What a change-impact answer says about links not made.** `repoatlas_impact` lists, under `decisions`, the link
+decisions other than a link made, where they were decided: at the seed, a returned candidate, or in a file one of them
+is in.
+- Each has its family, subject, decision, place and stored evidence. At most 25 are listed, and the rest are counted
+  by family in `decisions_omitted`.
+- A step joining a schema definition to code names what it rests on: `generation`, `composition`, `migration`,
+  `client`, `query`, `mapping` or `comparison`.
+
 ---
 
 ## 10. Environment variables

@@ -16,16 +16,16 @@ description: Use when a code change is proposed or under way (a refactor, a rena
 5. **Expand only what you need**: `repoatlas_relationships` from one candidate's exact key for its neighbourhood, `repoatlas_dependencies` when a crossing's provider matters, `repoatlas_http_operations` for the callers or handlers of a route contract.
 6. **Report, then validate.** Check RepoAtlas citations with `repoatlas_verify_grounding`, make the change, run the compiler and tests.
 
-Stop when every candidate you report has been read or is labelled unread. After the seed resolves, do not return to broad searching, and do not rebuild impact from repeated `repoatlas_relationships` walks: one impact call already follows uses, imports, calls, reads, configuration, package crossings and source-backed HTTP handler links.
+Stop when every candidate you report has been read or is labelled unread. After the seed resolves, do not return to broad searching, and do not rebuild impact from repeated `repoatlas_relationships` walks: one impact call already follows every kind of indexed link, across packages and HTTP too.
 
 ## Reading the result
 
 - `basis`: `exact` joins declarations, keys or files by facts about exactly them; `containment` passes through a member of what changes; `file` rests on a file-level import.
 - `step` is one indexed fact (`edge`, `at`, `lines`) or one `derived` from keys and spans; `from` is its predecessor (`0` is the seed) and `chain` the whole path. `role` is `dependent`, `sets` or `member`.
 - `step.crossing` is package evidence for a step into another repository; `step.http` joins a request in one repository to a handler in another (`called_at`, `served_at`, `identity_at`). Report both sides.
+- Schema and persistence steps name their evidence (`generation`, `composition`, `migration`, `client`, `query`, `mapping`, `comparison`). `decisions` lists links refused or qualified on the way: checks, not breakages.
 - `packages` are coarse, and `exact_consumers: "unresolved"` means RepoAtlas does not know which declarations use the change. `hubs` collapse dependents, which are no less affected. `unresolved` lists importers not narrowed to a declaration.
 - `summary.complete: false` or a non-zero `omitted` means the walk stopped early. Say so: a short list is not proof nothing else is affected.
-- Impact records no evidence ids and supplies no files. Inspect a step's lines before citing it, and its file before naming that file in prose.
 
 ## Tools
 

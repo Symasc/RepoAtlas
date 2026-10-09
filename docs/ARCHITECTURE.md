@@ -1631,6 +1631,35 @@ enum reaches the value enum itself: the walk never climbs from a member back to 
 **Impact.** `POLICY` is `impact/4`: the `generates` family (formerly `generates-graphql`) admits `prisma_migrate`
 evidence, and `maps-to` is new.
 
+### What an impact answer says about evidence and refusals
+
+**Typed step evidence.** Each kind of schema-impact evidence an edge records under `resolution` becomes a typed field
+of the step, built by `capabilities/impact.py` (`code_generation`, `graph_composition`, `link_evidence`):
+
+| Field | From |
+|---|---|
+| `generation` | `graphql_codegen` |
+| `composition` | `graphql_composition` |
+| `migration` | `prisma_migrate` |
+| `client` | `prisma_client` |
+| `query` | `persistence` |
+| `mapping` | `value_mapping` |
+| `comparison` | `typed_comparison` |
+
+Chain labels say the same in words ("by a query on parcels.state_code = 'packed'", "through @prisma/client").
+
+**Decisions near the walk.** After the walk, `decisions_near` reads, in the same snapshot, every link decision other
+than a link made (`linked`, `resolved`) whose decided entity is the seed or a returned candidate, or whose file holds
+one (`link_decisions_near`). This is a rule the index can decide, with no name in it: a refusal is listed when the walk
+touched the place it was made, and one made elsewhere is not. At most 25 are listed in family and subject order; the
+rest are counted by family.
+
+> **Invariant.** A decision is a reason a link was not made or is qualified. The answer never presents one as a
+> breakage, and the change-impact skill and the server instructions say so.
+
+**An argument's container.** The walk's derived container of `T.f(a:)` is `T.f`, the field, not `T`: a parenthesised
+suffix is stripped before the last `.` is split. No other language's names contain one.
+
 ### The two link passes
 
 Linking runs twice, and the split is what keeps the trust rule enforceable.
