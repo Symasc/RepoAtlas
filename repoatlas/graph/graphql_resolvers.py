@@ -351,7 +351,9 @@ class _Planner:
             key = entry.get("key")
             line = int(entry.get("line") or 0)
             if not isinstance(key, str):
+                # A computed key: some field of this type is bound, and which is unknown.
                 found.unknown.add(type_name)
+                found.unresolved.append({"type": type_name, "key": "computed", "line": line})
                 continue
             implementation = self._implementation(
                 found, origin, entry.get("value"), holder, depth + 1
