@@ -69,9 +69,79 @@ _STEP_DECISIONS: dict[str, str | None] = {
 
 
 @dataclass(frozen=True, slots=True)
+class Place:
+    """A line of a file in a repository, as the chain cites it."""
+
+    repo_id: int
+    path: str
+    line: int
+
+
+@dataclass(frozen=True, slots=True)
+class CiRelease:
+    """An established release, for DF2's binding (repoatlas.graph.deploy_artifacts): one
+    ``ci_release`` decision and what it read."""
+
+    claim: UnresolvedRefRecord
+    origin: FileRow
+    #: ``bound``, ``values-unresolved`` or ``chart-external``.
+    decision: str
+    basis: str
+    #: The accepted declaration a declared release rests on.
+    declared: Place | None
+    release: tuple[tuple[str, str], ...]
+    chart: str
+    #: Each ``-f`` file in order: its path (``None`` when not read) and how DF1 found it.
+    values: tuple[tuple[str | None, str], ...]
+    #: Each ``--set`` pair in order: its path (``None`` when unread) and value parts.
+    sets: tuple[tuple[str | None, tuple[tuple[str, str], ...]], ...]
+    set_unread: bool
+    namespace: str | None
+    system: str
+    workflow: str
+    job: str
+    requires: tuple[str, ...]
+    domains: Mapping[str, object]
+    #: The variables a scope or the step's script may set, and whether the job writes an
+    #: environment file (DF2_PHASE_A.md §15, E3).
+    overridable: frozenset[str]
+    env_written: bool
+    subject: str
+
+
+@dataclass(frozen=True, slots=True)
+class CiBuild:
+    """One image reference a CI job builds, for DF2's publisher join."""
+
+    claim: UnresolvedRefRecord
+    origin: FileRow
+    #: ``publish-configured``, ``built-not-published``, ``publication-unresolved``, ...
+    decision: str
+    basis: str
+    declared: Place | None
+    image: str
+    key: str | None
+    parts: tuple[tuple[str, str], ...]
+    context: str | None
+    dockerfile: str | None
+    #: Where publishing is configured: the push's line, or the build's own.
+    published_line: int | None
+    system: str
+    workflow: str
+    job: str
+    requires: tuple[str, ...]
+    overridable: frozenset[str]
+    env_written: bool
+    subject: str
+
+
+@dataclass(frozen=True, slots=True)
 class CiFactsPlan:
     decisions: tuple[LinkDecisionRow, ...]
     detail: str
+    #: DF2's inputs: the releases CI establishes and the images it builds.
+    releases: tuple[CiRelease, ...] = ()
+    builds: tuple[CiBuild, ...] = ()
 
 
 def _meta(claim: UnresolvedRefRecord) -> dict[str, str]:
@@ -95,7 +165,7 @@ def _site_evidence(meta: Mapping[str, str]) -> dict[str, object]:
     return found
 
 
-class _Decisions:
+class DecisionRows:
     def __init__(self) -> None:
         self.rows: dict[str, LinkDecisionRow] = {}
 
@@ -151,17 +221,20 @@ def plan_ci_facts(
         role = meta.get(PENDING_FACT, "")
         if role == HELM_CHART:
             charts[claim.repo_id].add(meta.get("chart", ""))
-        elif role in (HELM_VALUES, HELM_VALUES_FILE):
+        elif role in (HELM_VALUES, HELM_VALUES_FILE) and meta.get("derived") is None:
+            # A file read only because a release names it (DF2, D2-1) stays `referenced`.
             discovered[claim.repo_id].add(origin.rel_path)
         elif role in (CI_IMAGE_BUILD, CI_HELM_RELEASE, CI_STEP_UNSUPPORTED, CI_SEMANTICS):
             by_role[role].append((claim, origin, meta))
 
-    decisions = _Decisions()
+    decisions = DecisionRows()
     orbs, projects = _declarations(by_role[CI_SEMANTICS], decisions)
     context = _Context(charts, discovered, paths, decisions, projects)
 
+    built: list[CiBuild] = []
     for claim, origin, meta in by_role[CI_IMAGE_BUILD]:
-        _builds(claim, origin, meta, decisions, basis=meta.get("basis", "source"))
+        _builds(claim, origin, meta, decisions, basis=meta.get("basis", "source"), into=built)
+    context.built = built
     for claim, origin, meta in by_role[CI_HELM_RELEASE]:
         context.release(claim, origin, meta, basis="source")
     for claim, origin, meta in by_role[CI_STEP_UNSUPPORTED]:
@@ -207,17 +280,32 @@ def plan_ci_facts(
         if counts
         else "ci: none"
     )
-    return CiFactsPlan(decisions=ordered, detail=detail)
+    return CiFactsPlan(
+        decisions=ordered,
+        detail=detail,
+        releases=tuple(sorted(context.releases, key=lambda r: r.subject)),
+        builds=tuple(sorted(built, key=lambda b: b.subject)),
+    )
+
+
+def _symbols(meta: Mapping[str, str]) -> frozenset[str]:
+    return frozenset(json.loads(meta.get("overridable", "[]")))
+
+
+def _parts(value: object) -> tuple[tuple[str, str], ...]:
+    return tuple((str(kind), str(text)) for kind, text in (value or []))  # type: ignore[attr-defined]
 
 
 def _builds(
     claim: UnresolvedRefRecord,
     origin: FileRow,
     meta: Mapping[str, str],
-    decisions: _Decisions,
+    decisions: DecisionRows,
     *,
     basis: str,
     declared_in: str | None = None,
+    declared: Place | None = None,
+    into: list[CiBuild] | None = None,
 ) -> None:
     for index, ref in enumerate(json.loads(meta.get("refs", "[]"))):
         evidence: dict[str, object] = {
@@ -240,9 +328,32 @@ def _builds(
         if declared_in:
             evidence["declared_in"] = declared_in
         subject = f"{origin.repo_slug}:{origin.rel_path}::{_site(meta)}@{claim.line_start}/{index}"
-        decisions.add(
-            CI_BUILD, origin, claim, subject, str(ref.get("decision", "image-unresolved")), evidence
-        )
+        decision = str(ref.get("decision", "image-unresolved"))
+        decisions.add(CI_BUILD, origin, claim, subject, decision, evidence)
+        if into is not None:
+            resolved = meta.get("context_resolved", "true") == "true"
+            into.append(
+                CiBuild(
+                    claim=claim,
+                    origin=origin,
+                    decision=decision,
+                    basis=basis,
+                    declared=declared,
+                    image=str(ref.get("image", "")),
+                    key=ref.get("key"),
+                    parts=_parts(ref.get("parts")),
+                    context=meta.get("context", "") if resolved else None,
+                    dockerfile=meta.get("dockerfile") or None,
+                    published_line=ref.get("pushed_line"),
+                    system=meta.get("system", ""),
+                    workflow=meta.get("workflow", ""),
+                    job=meta.get("job", ""),
+                    requires=tuple(json.loads(meta.get("requires", "[]"))),
+                    overridable=_symbols(meta),
+                    env_written=meta.get("env_written") == "true",
+                    subject=subject,
+                )
+            )
 
 
 class _Context:
@@ -251,7 +362,7 @@ class _Context:
         charts: Mapping[int, set[str]],
         discovered: Mapping[int, set[str]],
         paths: Mapping[int, set[str]],
-        decisions: _Decisions,
+        decisions: DecisionRows,
         projects: Mapping[str, _Declaration],
     ) -> None:
         self.charts = charts
@@ -259,6 +370,9 @@ class _Context:
         self.paths = paths
         self.decisions = decisions
         self.projects = projects
+        #: DF2's records of what was decided here.
+        self.releases: list[CiRelease] = []
+        self.built: list[CiBuild] = []
 
     def release(
         self,
@@ -268,6 +382,7 @@ class _Context:
         *,
         basis: str,
         declared_in: str | None = None,
+        declared: Place | None = None,
     ) -> None:
         chart = meta.get("chart", "")
         values = json.loads(meta.get("values", "[]"))
@@ -308,6 +423,33 @@ class _Context:
             decision = "bound"
         subject = f"{origin.repo_slug}:{origin.rel_path}::{_site(meta)}@{claim.line_start}"
         self.decisions.add(CI_RELEASE, origin, claim, subject, decision, evidence)
+        self.releases.append(
+            CiRelease(
+                claim=claim,
+                origin=origin,
+                decision=decision,
+                basis=basis,
+                declared=declared,
+                release=_parts(release),
+                chart=chart,
+                values=tuple(
+                    (str(path) if path is not None else None, str(how)) for path, _, how in listed
+                ),
+                sets=tuple(
+                    (path, _parts(parts)) for path, parts in json.loads(meta.get("set", "[]"))
+                ),
+                set_unread=meta.get("set_unread") == "true",
+                namespace=text_of(namespace) if namespace is not None else None,
+                system=meta.get("system", ""),
+                workflow=meta.get("workflow", ""),
+                job=meta.get("job", ""),
+                requires=tuple(json.loads(meta.get("requires", "[]"))),
+                domains=json.loads(meta.get("domains", "{}")),
+                overridable=_symbols(meta),
+                env_written=meta.get("env_written") == "true",
+                subject=subject,
+            )
+        )
 
     def declared(
         self,
@@ -321,6 +463,7 @@ class _Context:
         parameters = json.loads(meta.get("parameters", "{}"))
         source = declaration.origin
         declared_in = f"{source.repo_slug}/{source.rel_path}:{declaration.claim.line_start}"
+        place = Place(source.repo_id, source.rel_path, declaration.claim.line_start or 1)
         project = self.projects.get(origin.repo_slug)
 
         def parameter(field: str) -> list[list[str]] | None:
@@ -354,6 +497,8 @@ class _Context:
             site["refs"] = json.dumps(
                 [
                     {
+                        "parts": image,
+                        "pushed_line": claim.line_start if publish else None,
                         "image": text_of(image),
                         "key": reference.join_key(),
                         "tag": reference.tag,
@@ -364,7 +509,16 @@ class _Context:
                     }
                 ]
             )
-            _builds(claim, origin, site, self.decisions, basis="declared", declared_in=declared_in)
+            _builds(
+                claim,
+                origin,
+                site,
+                self.decisions,
+                basis="declared",
+                declared_in=declared_in,
+                declared=place,
+                into=self.built,
+            )
             return
         chart = parameter("chart")
         chart_text = (
@@ -398,11 +552,11 @@ class _Context:
                 ]
             ]
         )
-        self.release(claim, origin, site, basis="declared", declared_in=declared_in)
+        self.release(claim, origin, site, basis="declared", declared_in=declared_in, declared=place)
 
 
 def _declarations(
-    entries: Sequence[tuple[UnresolvedRefRecord, FileRow, dict[str, str]]], decisions: _Decisions
+    entries: Sequence[tuple[UnresolvedRefRecord, FileRow, dict[str, str]]], decisions: DecisionRows
 ) -> tuple[dict[tuple[str, str], _Declaration], dict[str, _Declaration]]:
     """The accepted declarations, by orb and job and by project slug; every other one is
     decided here (invalid, conflict, outside-declarations)."""

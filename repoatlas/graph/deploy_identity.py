@@ -92,6 +92,15 @@ BACKEND_UNMATCHED = "its backend is not its chart's own Service, by name and por
 NOT_RENDERED = "no deployment of its chart renders it"
 RENDERED = "rendered"
 BINDING_UNRESOLVED = "no locally established deployment resolves its hosts"
+# DF2: why a CI-established deployment's workload does not tie it to code
+# (repoatlas.graph.deploy_artifacts). Each says what is configured, never what ran.
+IMAGE_UNREAD = "the image its workload runs is not read"
+REGISTRY_UNRESOLVED = "the registry of the image its workload runs is not stated literally"
+PUBLISHER_UNRESOLVED = "no indexed build is configured to publish the image its workload runs"
+ARTIFACT_AMBIGUOUS = "more than one indexed build is configured to publish the image it runs"
+TAG_UNMATCHED = "every indexed build configured to publish its image names another version"
+WORKLOAD_UNMATCHED = "its Service does not select exactly one workload container"
+NAME_DEPENDENT = "what ties it to code depends on a release name that is not resolved"
 
 _PYTHON = re.compile(r"python(\d+(\.\d+)?)?")
 _PYTHON_FLAGS = frozenset({"-u", "-O", "-OO", "-B", "-E", "-s", "-S", "-I"})
@@ -377,6 +386,59 @@ def plan_deployment_exposures(
     return plan
 
 
+@dataclass(frozen=True, slots=True)
+class SourceTie:
+    """How far an image's own files tie it to code: :data:`TIED` and the routes its
+    command's module serves, or why not."""
+
+    outcome: str
+    #: ``<Dockerfile>:<line>`` of the command, once it is read.
+    command_in: str = ""
+    #: Whether the deployment's own override decides the command.
+    overridden: bool = False
+    #: The repository file the command's module is, once found in the image.
+    module: str = ""
+    served: tuple[ServedRoute, ...] = ()
+
+
+def source_tie(
+    files: Mapping[str, int],
+    dockerfile: str,
+    context: str,
+    override: Mapping[str, str],
+    commands: Mapping[int, UnresolvedRefRecord],
+    by_root: Mapping[int, Sequence[ServedRoute]],
+    by_id: Mapping[int, FileRow],
+) -> SourceTie:
+    """The tie of an image built from ``dockerfile`` with build ``context``, both paths in
+    the repository whose files are ``files``, running the command ``override`` (compose's
+    ``entrypoint``/``command``) leaves: its Dockerfile's command, the module that command
+    runs, mapped back through the final stage's copies, and the routes that module serves.
+    Used for a compose service in its own repository and, from DF2, for a workload's image
+    in the repository whose CI build is configured to publish it."""
+    dockerfile_id = files.get(dockerfile)
+    command = commands.get(dockerfile_id) if dockerfile_id is not None else None
+    if command is None or dockerfile_id is None:
+        return SourceTie(DOCKERFILE_UNREAD)
+    command_meta = _meta(command)
+    read = _argv(override, command_meta)
+    paths = _application(read[0], command_meta.get("workdir")) if read is not None else None
+    if read is None or paths is None:
+        return SourceTie(COMMAND_UNREAD)
+    command_in = f"{by_id[dockerfile_id].rel_path}:{command.line_start}"
+    copies = json.loads(command_meta.get("copies", "[]"))
+    module = next(
+        (found for path in paths if (found := _copied(path, copies, context, set(files)))),
+        None,
+    )
+    if module is None:
+        return SourceTie(NOT_IN_IMAGE, command_in, read[1])
+    served = by_root.get(files[module], ())
+    if not served:
+        return SourceTie(NO_ROUTES, command_in, read[1], module)
+    return SourceTie(TIED, command_in, read[1], module, tuple(served))
+
+
 def _tie(
     service: UnresolvedRefRecord,
     origin: FileRow,
@@ -410,27 +472,21 @@ def _tie(
     build = json.loads(meta.get("build", "null"))
     if not isinstance(build, dict):
         return untied(NO_BUILD)
-    dockerfile_id = files.get(str(build.get("dockerfile", "")))
-    command = commands.get(dockerfile_id) if dockerfile_id is not None else None
-    if command is None or dockerfile_id is None:
-        return untied(DOCKERFILE_UNREAD)
-    command_meta = _meta(command)
-    read = _argv(meta, command_meta)
-    paths = _application(read[0], command_meta.get("workdir")) if read is not None else None
-    if read is None or paths is None:
-        return untied(COMMAND_UNREAD)
-    bound_in = identity_in if read[1] else f"{by_id[dockerfile_id].rel_path}:{command.line_start}"
-    copies = json.loads(command_meta.get("copies", "[]"))
-    context = str(build.get("context", ""))
-    module = next(
-        (found for path in paths if (found := _copied(path, copies, context, set(files)))),
-        None,
+    tie = source_tie(
+        files,
+        str(build.get("dockerfile", "")),
+        str(build.get("context", "")),
+        meta,
+        commands,
+        by_root,
+        by_id,
     )
-    if module is None:
-        return untied(NOT_IN_IMAGE, bound_in)
-    served = by_root.get(files[module], ())
-    if not served:
-        return untied(NO_ROUTES, bound_in)
+    if tie.outcome in (DOCKERFILE_UNREAD, COMMAND_UNREAD):
+        return untied(tie.outcome)
+    bound_in = identity_in if tie.overridden else tie.command_in
+    if tie.outcome != TIED:
+        return untied(tie.outcome, bound_in)
+    served = tie.served
     if not origins:
         return NO_PORT
     _expose(
@@ -479,6 +535,37 @@ def helm_fullname(chart: str, release: str, values: Mapping[str, str]) -> str:
     name = values.get("nameOverride", "")
     name = name if name not in _FALSY else chart
     return _trimmed(release if name in release else f"{release}-{name}")
+
+
+class Applications:
+    """Each repository's routes and the applications serving them: what M3's
+    same-repository rule ties a chart to (:meth:`untied`, :meth:`source_in`)."""
+
+    def __init__(self, routes: Sequence[ServedRoute], by_id: Mapping[int, FileRow]) -> None:
+        self._by_id = by_id
+        self.routes: dict[int, list[ServedRoute]] = defaultdict(list)
+        self._roots: dict[int, set[int]] = defaultdict(set)
+        self._untraced: set[int] = set()
+        for route in routes:
+            self.routes[route.repo_id].append(route)
+            self._roots[route.repo_id].update(route.roots)
+            if not route.roots:
+                self._untraced.add(route.repo_id)
+
+    def source_in(self, repo_id: int) -> str:
+        """The module constructing the repository's one application: what ties a chart to
+        code. A whole file, since the tie is that every route comes from it."""
+        roots = sorted(self._roots[repo_id])
+        row = self._by_id.get(roots[0]) if len(roots) == 1 else None
+        return row.rel_path if row is not None else ""
+
+    def untied(self, repo_id: int) -> str | None:
+        """Why the repository's code is not one application to tie a chart to, if it is not."""
+        if not self.routes[repo_id]:
+            return NOTHING_SERVED
+        if repo_id in self._untraced or len(self._roots[repo_id]) != 1:
+            return NOT_ONE_APPLICATION
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -534,14 +621,8 @@ class _Charts:
                 self._services[(claim.repo_id, meta.get("chart", ""))].append(
                     (_spelled(meta.get("name", "")), ports)
                 )
-        self._routes: dict[int, list[ServedRoute]] = defaultdict(list)
-        self._roots: dict[int, set[int]] = defaultdict(set)
-        self._untraced: set[int] = set()
-        for route in routes:
-            self._routes[route.repo_id].append(route)
-            self._roots[route.repo_id].update(route.roots)
-            if not route.roots:
-                self._untraced.add(route.repo_id)
+        self._applications = Applications(routes, by_id)
+        self._routes = self._applications.routes
 
     def tie(self, service: UnresolvedRefRecord, origin: FileRow, plan: DeploymentPlan) -> str:
         meta = _meta(service)
@@ -604,19 +685,10 @@ class _Charts:
         return untied or outcome
 
     def _source_in(self, repo_id: int) -> str:
-        """The module constructing the repository's one application: what ties a chart to
-        code. A whole file, since the tie is that every route comes from it."""
-        roots = sorted(self._roots[repo_id])
-        row = self._by_id.get(roots[0]) if len(roots) == 1 else None
-        return row.rel_path if row is not None else ""
+        return self._applications.source_in(repo_id)
 
     def _untied(self, repo_id: int) -> str | None:
-        """Why the repository's code is not one application to tie a chart to, if it is not."""
-        if not self._routes[repo_id]:
-            return NOTHING_SERVED
-        if repo_id in self._untraced or len(self._roots[repo_id]) != 1:
-            return NOT_ONE_APPLICATION
-        return None
+        return self._applications.untied(repo_id)
 
     def ingress(self, claim: UnresolvedRefRecord, origin: FileRow, plan: DeploymentPlan) -> str:
         """An Ingress's hosts under each locally bound release, tied to its repository's one
@@ -651,7 +723,12 @@ class _Charts:
         for release in self._releases.get(key, []):
             releaser = self._by_id.get(release.file_id)
             bound_in = f"{releaser.rel_path}:{release.line_start}" if releaser else ""
-            rendered = self._rendered(meta, chart, self._values(chart, _meta(release)))
+            values = self._values(chart, _meta(release))
+            rendered = self._rendered(meta, chart, values)
+            if rendered == BINDING_UNRESOLVED or (not isinstance(rendered, str) and rendered[1]):
+                # An established release's own unrendered hosts compete with every other
+                # deployment's, its chart's included (DF2_PHASE_A.md §15, E8).
+                self._release_patterns(plan, claim, meta, chart, values, listen, bound_in, extra)
             if isinstance(rendered, str):
                 bindings.append((bound_in, rendered))
                 continue
@@ -719,6 +796,55 @@ class _Charts:
                     },
                 )
         return outcome
+
+    def _release_patterns(
+        self,
+        plan: DeploymentPlan,
+        claim: UnresolvedRefRecord,
+        meta: Mapping[str, str],
+        chart: _Chart,
+        values: Mapping[str, str] | None,
+        listen: Sequence[tuple[str, int]],
+        bound_in: str,
+        extra: Mapping[str, str],
+    ) -> None:
+        """One release's patterns for the hosts it does not render: every literal value it
+        sets filled in, every other a hole. Never one for a host its values do not render
+        at all (a falsy ``if``)."""
+        condition = meta.get("if", "")
+        if values is not None and condition and values.get(condition) in _FALSY:
+            return
+        iterable = meta.get("range", "")
+        for parts, line in json.loads(meta["hosts"]):
+            filled = [
+                ["text", values[value]]
+                if kind == "value" and values is not None and value in values
+                else [kind, value]
+                for kind, value in parts
+            ]
+            if all(kind in ("text", "chart") for kind, _ in filled):
+                continue  # rendered: an exposure or identity of its own, not a pattern
+            for scheme, port in listen:
+                _pattern(
+                    plan,
+                    claim,
+                    filled,
+                    chart.name,
+                    iterable,
+                    scheme,
+                    port,
+                    {
+                        "identity_source": INGRESS,
+                        "identity_in": f"{self._by_id[claim.file_id].rel_path}:{line}",
+                        **extra,
+                        "chart": chart.name,
+                        "bound_in": bound_in,
+                        "binding_in": bound_in,
+                        "binding_outcome": BINDING_UNRESOLVED,
+                        "source_outcome": "",
+                        "scope": f"release:tilt:{bound_in}",
+                    },
+                )
 
     @staticmethod
     def _rendered(
