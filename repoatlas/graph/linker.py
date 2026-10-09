@@ -38,13 +38,17 @@ that gap published a knowledge base with no cross-repository graph at all while
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from repoatlas.config.settings import SaltSettings
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
+from repoatlas.graph.deploy_identity import DOCKERFILE_UNREAD, NO_BUILD, NOT_IN_IMAGE
+from repoatlas.graph.graphql_artifacts import plan_artifacts
 from repoatlas.graph.graphql_codegen import plan_codegen
 from repoatlas.graph.graphql_documents import plan_documents
+from repoatlas.graph.graphql_ownership import Identity, origin_of, plan_ownership
 from repoatlas.graph.graphql_resolvers import plan_resolvers
 from repoatlas.graph.graphql_schema import symbols_by_file
 from repoatlas.graph.http_claims import HttpClaimPlan, plan_http_claims
@@ -78,6 +82,7 @@ from repoatlas.models.parsing import (
 )
 from repoatlas.models.telemetry import LinkTrace, StageTiming, Stopwatch
 from repoatlas.parsers.graphql import GRAPHQL_DOCUMENT, GRAPHQL_FACTS
+from repoatlas.parsers.graphql_artifacts import GRAPHQL_ARTIFACT
 from repoatlas.parsers.graphql_codegen import GRAPHQL_CODEGEN_OUTPUT
 from repoatlas.parsers.http_facts import PENDING_FACT
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION
@@ -529,6 +534,7 @@ class ReferenceLinker:
             generation: list[UnresolvedRefRecord] = []
             documents_claims: list[UnresolvedRefRecord] = []
             resolver_claims: list[UnresolvedRefRecord] = []
+            artifact_claims: list[UnresolvedRefRecord] = []
             salt_resolutions = {
                 id(result.claim): result
                 for result in resolve_pillar_reads(self._salt, index, claims, by_id)
@@ -550,6 +556,8 @@ class ReferenceLinker:
                         documents_claims.append(claim)
                     elif role in _RESOLVER_FACTS:
                         resolver_claims.append(claim)
+                    elif role == GRAPHQL_ARTIFACT:
+                        artifact_claims.append(claim)
                     else:
                         unresolved += 1
                     continue
@@ -631,7 +639,18 @@ class ReferenceLinker:
             resolvers = plan_resolvers(
                 resolver_claims, index, by_id, ordered_symbols, producer=GLOBAL_PARSER
             )
-            edges.extend((*codegen.edges, *documents.edges, *resolvers.edges))
+            # Federated schema copies tied to the subgraph each coordinate comes from, through
+            # the deployment that serves the subgraph's URL (repoatlas.graph.graphql_ownership).
+            artifacts = plan_artifacts(artifact_claims, index, by_id)
+            ownership = plan_ownership(
+                by_id,
+                ordered_symbols,
+                _deployment_origins((*decided.exposed, *decided.identities)),
+                resolvers.served,
+                artifacts.fetched,
+                producer=GLOBAL_PARSER,
+            )
+            edges.extend((*codegen.edges, *documents.edges, *resolvers.edges, *ownership.edges))
             resolved += (
                 decided.resolved + codegen.resolved + documents.resolved + resolvers.resolved
             )
@@ -644,7 +663,8 @@ class ReferenceLinker:
             watch.candidates_out = resolved
             watch.detail = (
                 f"{unresolved} still unresolved; {decided.detail}; {crossings.detail}; "
-                f"{codegen.detail}; {documents.detail}; {resolvers.detail}"
+                f"{codegen.detail}; {documents.detail}; {resolvers.detail}; {ownership.detail}; "
+                f"{artifacts.detail}"
             )
         stages.append(_timing(watch))
 
@@ -677,14 +697,21 @@ class ReferenceLinker:
             http=decided,
             http_crossings=crossings,
             uses=uses_plan,
-            decisions=(*codegen.decisions, *documents.decisions, *resolvers.decisions),
+            decisions=(
+                *codegen.decisions,
+                *documents.decisions,
+                *resolvers.decisions,
+                *ownership.decisions,
+                *artifacts.decisions,
+            ),
             resolved=resolved,
             unresolved=unresolved,
             cross_repository=cross
             + len(salt_crossings)
             + codegen.crossings
             + documents.crossings
-            + resolvers.crossings,
+            + resolvers.crossings
+            + ownership.crossings,
             claims_considered=len(claims) + uses_plan.work.claims_examined,
             files_indexed=len(file_rows),
             symbols_indexed=len(symbols),
@@ -1119,6 +1146,29 @@ def _is_salt_mapping_claim(claim: UnresolvedRefRecord) -> bool:
     return json.loads(claim.meta_json).get("salt_fact") in {"master_root", "top_entry"}
 
 
+def _deployment_origins(claims: Sequence[UnresolvedRefRecord]) -> dict[str, dict[int, Identity]]:
+    """Origin -> the repositories deployment identity ties it to, each with where the tie is
+    stated: from the exposure and unsourced-identity claims the HTTP plan derived."""
+    found: dict[str, dict[int, Identity]] = defaultdict(dict)
+    for claim in claims:
+        meta = json.loads(claim.meta_json or "{}")
+        origin = origin_of(str(meta.get("deployment") or ""))
+        if origin is None:
+            continue
+        stated = " via ".join(
+            str(meta[key]) for key in ("identity_in", "bound_in") if meta.get(key)
+        )
+        runs_code = meta.get("source_outcome") not in _BUILT_ELSEWHERE
+        known = found[origin].get(claim.repo_id)
+        if known is None or (runs_code and not known.runs_code):
+            found[origin][claim.repo_id] = Identity(stated, runs_code)
+    return {origin: dict(sorted(repos.items())) for origin, repos in sorted(found.items())}
+
+
+#: Identity outcomes that say the service's image is not built from its repository's code.
+_BUILT_ELSEWHERE = frozenset({NO_BUILD, DOCKERFILE_UNREAD, NOT_IN_IMAGE})
+
+
 def _is_graphql_claim(claim: UnresolvedRefRecord) -> bool:
     """A GraphQL type, document or codegen-output claim (repoatlas.parsers.graphql,
     repoatlas.parsers.graphql_codegen): never an HTTP fact, never resolved by name."""
@@ -1127,7 +1177,7 @@ def _is_graphql_claim(claim: UnresolvedRefRecord) -> bool:
 
 #: Facts a resolver map is followed through, and the constructions that use them.
 _RESOLVER_FACTS = frozenset({GRAPHQL_SCHEMA_CONSTRUCTION, TS_OBJECT_SHAPE, GRAPHQL_BINDABLE})
-_GRAPHQL_ROLES = GRAPHQL_FACTS | {GRAPHQL_CODEGEN_OUTPUT} | _RESOLVER_FACTS
+_GRAPHQL_ROLES = GRAPHQL_FACTS | {GRAPHQL_CODEGEN_OUTPUT, GRAPHQL_ARTIFACT} | _RESOLVER_FACTS
 
 
 def _uses_detail(plan: UsesPlan) -> str:
