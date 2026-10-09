@@ -300,12 +300,16 @@ class DockerfileParser:
     #    deployment identities (repoatlas.graph.deploy_identity).
     # 6: no such claim for a stage that states nothing literal (every value
     #    computed, empty or malformed).
-    version = "6"
+    # 7: ``<name>.Dockerfile`` is a Dockerfile whatever the suffix's case, as Docker reads
+    #    ``-f deploy/api.Dockerfile``: a CI build naming one is tied to its code (DF2).
+    version = "7"
     language = "Dockerfile"
 
     def supports(self, path: Path) -> bool:
         name = path.name
-        return name.startswith(("Dockerfile", "Containerfile")) or path.suffix == ".dockerfile"
+        return (
+            name.startswith(("Dockerfile", "Containerfile")) or path.suffix.lower() == ".dockerfile"
+        )
 
     def parse(self, path: Path, content: str) -> ParsedFile:
         symbols: list[ParsedSymbol] = []

@@ -79,7 +79,7 @@ def detect_language(rel_path: str) -> str | None:
 
     if name in _FILENAMES:
         return _FILENAMES[name]
-    if name.startswith("Dockerfile"):
+    if name.startswith("Dockerfile") or pure.suffix.lower() == ".dockerfile":
         return "Dockerfile"
     if name.startswith("requirements") and name.endswith(".txt"):
         return "Text"

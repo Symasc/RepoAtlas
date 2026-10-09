@@ -158,7 +158,10 @@ class StructuredParser:
     #     Helm releases they invoke and every step not interpreted (repoatlas.parsers.ci_config);
     #     operator declarations; chart workload and ConfigMap templates; every values*.y(a)ml;
     #     a chart's appVersion; compose environment names; credential leaves withheld.
-    version = "11"
+    # 12: a Helm Service records its selector and target ports, a values file each leaf's line
+    #     and the paths it clears, and a CI build or release the variables a scope or script
+    #     may set (DF2: release binding and the artifact join, repoatlas.graph.deploy_artifacts).
+    version = "12"
     language = "YAML"
 
     def supports(self, path: Path) -> bool:

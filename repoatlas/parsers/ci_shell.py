@@ -19,6 +19,12 @@ computes. CI expressions (GitHub's ``${{ ... }}``, CircleCI's ``<< ... >>``) are
 by placeholder words before the script is parsed (:func:`hold_expressions`), and come back
 as ``expr`` parts; one that reads ``secrets.`` is ``withheld``. Only the values of the
 flags a recognised command is read for are kept -- never the command's text.
+
+**What a script may change.** A script's variable assignments (``X=1``, ``export``,
+``declare``, ``read``, a ``for`` variable, a command prefix) are recorded by name, and so is
+any mention of ``$GITHUB_ENV`` or ``$BASH_ENV``, through which a step sets variables for the
+steps after it. A version is only *symbolic* when nothing here may change the variable it
+reads (DF2_PHASE_A.md §15, E3); the values are never kept.
 """
 
 from __future__ import annotations
@@ -63,6 +69,10 @@ _NESTING = frozenset(
     }
 )
 _TRANSPARENT = frozenset({"program", "list", "redirected_statement"})
+#: Commands whose plain arguments are variable names they set.
+_SETTERS = frozenset({"read", "mapfile", "readarray", "unset", "getopts"})
+#: The files a step writes to set variables for the steps after it.
+_ENV_FILES = re.compile(r"\b(GITHUB_ENV|BASH_ENV)\b")
 _SCRIPT_RUNNERS = frozenset({"bash", "sh", "source", "."})
 
 
@@ -84,6 +94,10 @@ class Script:
     commands: list[Command] = field(default_factory=list)
     truncated: bool = False
     unreadable: bool = False
+    #: Every variable the script may assign, by name.
+    assigned: set[str] = field(default_factory=set)
+    #: Whether the script mentions ``$GITHUB_ENV`` or ``$BASH_ENV``.
+    env_file: bool = False
 
 
 def hold_expressions(script: str) -> tuple[str, dict[str, Part]]:
@@ -111,12 +125,13 @@ def literal(word: Word) -> str | None:
 def read_script(script: str, *, first_line: int = 1) -> Script:
     """The commands of ``script``, each with its words and whether it is nested."""
     text, held = hold_expressions(script)
-    found = Script()
+    found = Script(env_file=bool(_ENV_FILES.search(script)))
     try:
         tree, source = parse_tree("bash", text)
     except GrammarUnavailable:
         found.unreadable = True
         return found
+    found.assigned = _assigned(tree.root_node, source)
 
     def visit(node, nested: bool) -> None:  # type: ignore[no-untyped-def]
         if len(found.commands) >= MAX_COMMANDS:
@@ -138,6 +153,47 @@ def read_script(script: str, *, first_line: int = 1) -> Script:
 
     visit(tree.root_node, False)
     return found
+
+
+def _assigned(root, source: bytes) -> set[str]:  # type: ignore[no-untyped-def]
+    """The names every assignment in the tree may set, wherever it stands."""
+    names: set[str] = set()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        kind = node.type
+        if kind == "variable_assignment":
+            name = node.child_by_field_name("name")
+            if name is not None:
+                names.add(node_text(source, name).split("[", 1)[0])
+        elif kind == "declaration_command":
+            names.update(
+                node_text(source, child)
+                for child in node.named_children
+                if child.type == "variable_name"
+            )
+        elif kind == "for_statement":
+            variable = node.child_by_field_name("variable")
+            if variable is not None:
+                names.add(node_text(source, variable))
+        elif kind == "unset_command":
+            names.update(
+                node_text(source, child)
+                for child in node.named_children
+                if child.type in ("variable_name", "word")
+            )
+        elif kind == "command":
+            words = [c for c in node.named_children if c.type != "variable_assignment"]
+            if words and node_text(source, words[0]) in _SETTERS:
+                names.update(
+                    text
+                    for child in words[1:]
+                    if (text := node_text(source, child))
+                    and not text.startswith("-")
+                    and text.isidentifier()
+                )
+        stack.extend(node.named_children)
+    return names
 
 
 def _command_words(node):  # type: ignore[no-untyped-def]
