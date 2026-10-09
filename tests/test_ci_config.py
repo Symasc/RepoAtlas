@@ -204,6 +204,22 @@ def test_a_nested_recognised_command_binds_nothing_and_a_script_is_named_only() 
     assert "abc" not in json.dumps(found)
 
 
+def test_a_values_path_outside_the_repository_is_never_recorded_as_one() -> None:
+    text = """
+    on: push
+    jobs:
+      a:
+        steps:
+          - run: helm upgrade --install a charts/a -f ../outside.yaml -f /etc/values.yaml -f env/x.yaml
+    """
+    [release] = [c for c in claims(".github/workflows/x.yml", text) if c["role"] == CI_HELM_RELEASE]
+    assert json.loads(str(release["values"])) == [
+        [None, "../outside.yaml"],
+        [None, "/etc/values.yaml"],
+        ["env/x.yaml", "env/x.yaml"],
+    ]
+
+
 def test_a_credential_setting_and_a_literal_login_are_never_kept() -> None:
     text = """
     on: push
