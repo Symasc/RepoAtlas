@@ -44,6 +44,9 @@ from dataclasses import dataclass, field
 from repoatlas.config.settings import SaltSettings
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
 from repoatlas.graph.graphql_codegen import plan_codegen
+from repoatlas.graph.graphql_documents import plan_documents
+from repoatlas.graph.graphql_resolvers import plan_resolvers
+from repoatlas.graph.graphql_schema import symbols_by_file
 from repoatlas.graph.http_claims import HttpClaimPlan, plan_http_claims
 from repoatlas.graph.http_crossings import (
     HttpCrossingPlan,
@@ -65,6 +68,7 @@ from repoatlas.graph.uses_link import (
 from repoatlas.models import http
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.parsing import (
+    EMBEDDED_DOCUMENT,
     ENUM_MEMBER,
     EdgeType,
     EntityType,
@@ -73,10 +77,12 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
 )
 from repoatlas.models.telemetry import LinkTrace, StageTiming, Stopwatch
-from repoatlas.parsers.graphql import GRAPHQL_FACTS
+from repoatlas.parsers.graphql import GRAPHQL_DOCUMENT, GRAPHQL_FACTS
 from repoatlas.parsers.graphql_codegen import GRAPHQL_CODEGEN_OUTPUT
 from repoatlas.parsers.http_facts import PENDING_FACT
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION
+from repoatlas.parsers.py_graphql import GRAPHQL_BINDABLE
+from repoatlas.parsers.ts_graphql import GRAPHQL_SCHEMA_CONSTRUCTION, TS_OBJECT_SHAPE
 from repoatlas.storage.protocols import (
     EdgeRecord,
     EntityRecord,
@@ -220,8 +226,9 @@ class ReferenceLinker:
 
         qualified: dict[str, int] = {}
         values: dict[str, int] = {}
+        documents: dict[str, int] = {}
         symbol_ids = self._symbol_ids(
-            file_id, repo_slug, rel_path, parsed.symbols, qualified, values
+            file_id, repo_slug, rel_path, parsed.symbols, qualified, values, documents
         )
         # A module value owns the uses in its own statement, and is named by its name
         # before anything else is; it is no callee a CALLS or REFERENCES matches.
@@ -237,12 +244,16 @@ class ReferenceLinker:
                 file_id=file_id,
                 parser=parsed.parser,
             )
-            for entity_id in (*symbol_ids.values(), *values.values())
+            for entity_id in (*symbol_ids.values(), *values.values(), *documents.values())
         ]
 
         claims: list[UnresolvedRefRecord] = []
         for reference in parsed.references:
             source_id = sources.get(reference.source_symbol or "", file_entity_id)
+            if reference.meta.get("embedded") == "true":
+                # A document embedded in another language owns its own claims, and only
+                # them: its name may also be a declaration's of that language.
+                source_id = documents.get(reference.source_symbol or "", source_id)
 
             if reference.edge_type is EdgeType.USES:
                 # A declaration's use of a module-scope name (repoatlas.parsers.ts_uses).
@@ -411,18 +422,26 @@ class ReferenceLinker:
         symbols: tuple[ParsedSymbol, ...],
         qualified: dict[str, int] | None = None,
         values: dict[str, int] | None = None,
+        documents: dict[str, int] | None = None,
     ) -> dict[str, int]:
         """Map qualified symbol name to its persisted entity id.
 
         ``qualified``, when given, receives the qualified names alone, without the
         bare-name fallback below. A module value (``ParsedSymbol.uses_only``) is never
-        in the mapping: it goes to ``qualified`` and to ``values``, when given.
+        in the mapping: it goes to ``qualified`` and to ``values``, when given. A GraphQL
+        document embedded in another language is in none of them, only in ``documents``.
         """
         mapping: dict[str, int] = {}
         for symbol in symbols:
             key = symbol_key(repo_slug, rel_path, symbol.qualified_name, symbol.line_start)
             entity_id = self._knowledge.find_file_entity(file_id, key)
             if entity_id is not None:
+                if symbol.meta.get("kind") == EMBEDDED_DOCUMENT:
+                    # No name of the host language resolves to it, and it owns nothing
+                    # but its own claims (link_file).
+                    if documents is not None:
+                        documents[symbol.qualified_name] = entity_id
+                    continue
                 if qualified is not None:
                     qualified[symbol.qualified_name] = entity_id
                 if symbol.uses_only:
@@ -508,6 +527,8 @@ class ReferenceLinker:
             unresolved = 0
             pending: list[UnresolvedRefRecord] = []
             generation: list[UnresolvedRefRecord] = []
+            documents_claims: list[UnresolvedRefRecord] = []
+            resolver_claims: list[UnresolvedRefRecord] = []
             salt_resolutions = {
                 id(result.claim): result
                 for result in resolve_pillar_reads(self._salt, index, claims, by_id)
@@ -522,8 +543,13 @@ class ReferenceLinker:
                     # document claim stays a claim: one file is no schema, and nothing yet
                     # decides which schema it belongs to. Neither is resolved by name, and
                     # neither is ever handed to the HTTP pass.
-                    if claim_role(claim) == GRAPHQL_CODEGEN_OUTPUT:
+                    role = claim_role(claim)
+                    if role == GRAPHQL_CODEGEN_OUTPUT:
                         generation.append(claim)
+                    elif role == GRAPHQL_DOCUMENT:
+                        documents_claims.append(claim)
+                    elif role in _RESOLVER_FACTS:
+                        resolver_claims.append(claim)
                     else:
                         unresolved += 1
                     continue
@@ -591,13 +617,34 @@ class ReferenceLinker:
             # Generated declarations, from the schema files their configuration loads
             # (repoatlas.graph.graphql_codegen); never from a definition sharing a name.
             codegen = plan_codegen(generation, index, by_id, symbols, producer=GLOBAL_PARSER)
-            edges.extend(codegen.edges)
-            resolved += decided.resolved + codegen.resolved
-            unresolved += decided.unresolved + codegen.unresolved
+            # Documents bound to the schema their configuration validates them against, and
+            # resolvers to the schema their construction loads (repoatlas.graph.graphql_*).
+            ordered_symbols = symbols_by_file(symbols)
+            documents = plan_documents(
+                documents_claims,
+                codegen.projects,
+                index,
+                by_id,
+                ordered_symbols,
+                producer=GLOBAL_PARSER,
+            )
+            resolvers = plan_resolvers(
+                resolver_claims, index, by_id, ordered_symbols, producer=GLOBAL_PARSER
+            )
+            edges.extend((*codegen.edges, *documents.edges, *resolvers.edges))
+            resolved += (
+                decided.resolved + codegen.resolved + documents.resolved + resolvers.resolved
+            )
+            unresolved += (
+                decided.unresolved
+                + codegen.unresolved
+                + documents.unresolved
+                + resolvers.unresolved
+            )
             watch.candidates_out = resolved
             watch.detail = (
                 f"{unresolved} still unresolved; {decided.detail}; {crossings.detail}; "
-                f"{codegen.detail}"
+                f"{codegen.detail}; {documents.detail}; {resolvers.detail}"
             )
         stages.append(_timing(watch))
 
@@ -630,10 +677,14 @@ class ReferenceLinker:
             http=decided,
             http_crossings=crossings,
             uses=uses_plan,
-            decisions=codegen.decisions,
+            decisions=(*codegen.decisions, *documents.decisions, *resolvers.decisions),
             resolved=resolved,
             unresolved=unresolved,
-            cross_repository=cross + len(salt_crossings) + codegen.crossings,
+            cross_repository=cross
+            + len(salt_crossings)
+            + codegen.crossings
+            + documents.crossings
+            + resolvers.crossings,
             claims_considered=len(claims) + uses_plan.work.claims_examined,
             files_indexed=len(file_rows),
             symbols_indexed=len(symbols),
@@ -1074,7 +1125,9 @@ def _is_graphql_claim(claim: UnresolvedRefRecord) -> bool:
     return claim_role(claim) in _GRAPHQL_ROLES
 
 
-_GRAPHQL_ROLES = GRAPHQL_FACTS | {GRAPHQL_CODEGEN_OUTPUT}
+#: Facts a resolver map is followed through, and the constructions that use them.
+_RESOLVER_FACTS = frozenset({GRAPHQL_SCHEMA_CONSTRUCTION, TS_OBJECT_SHAPE, GRAPHQL_BINDABLE})
+_GRAPHQL_ROLES = GRAPHQL_FACTS | {GRAPHQL_CODEGEN_OUTPUT} | _RESOLVER_FACTS
 
 
 def _uses_detail(plan: UsesPlan) -> str:

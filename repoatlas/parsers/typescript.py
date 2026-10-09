@@ -42,6 +42,7 @@ from repoatlas.parsers.treesitter import (
     string_literal,
     walk,
 )
+from repoatlas.parsers.ts_graphql import TsGraphQL
 from repoatlas.parsers.ts_uses import USE_NODES, UseAnalysis, UseSite, use_references
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -105,8 +106,10 @@ class _Walker:
         fastify: FastifyDeclarations | None = None,
         injections: Injections | None = None,
         oas3: SpecRoutedApps | None = None,
+        graphql: TsGraphQL | None = None,
     ) -> None:
         self._source = source
+        self._graphql = graphql
         self._http = http
         self._nest = nest
         self._wrappers = wrappers
@@ -175,6 +178,8 @@ class _Walker:
             if kind == "object" and (current.start_byte, current.end_byte) in self._returned:
                 self._returned_object(current)
                 continue
+            if kind in {"call_expression", "new_expression"} and self._graphql is not None:
+                self._graphql.visit_call(current, self._binding or self._current or "")
             if kind == "call_expression":
                 self._call(current)
             elif kind in {"member_expression", "subscript_expression"}:
@@ -796,7 +801,9 @@ class TypeScriptParser:
     #    base is not (unstated, empty or computed) records a claim with no origin (D2).
     # 16: an enum's members with a plain string value are symbols (``Enum.Member``) that
     #    record the value, which is what a generated enum shares with its schema.
-    version = "16"
+    # 17: GraphQL documents in ``gql``/``graphql`` templates, schema construction and the
+    #    shapes of exported resolver-like objects (repoatlas.parsers.ts_graphql).
+    version = "17"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
@@ -833,7 +840,8 @@ class TypeScriptParser:
         # Uses are proven by scoping, and a tree the grammar had to recover may have
         # lost a declaration: such a file states no uses at all.
         uses = None if has_error(tree) else UseAnalysis(source, tree.root_node)
-        walker = _Walker(source, http, nest, wrappers, uses, fastify, injections, oas3)
+        graphql = TsGraphQL(source, tree.root_node)
+        walker = _Walker(source, http, nest, wrappers, uses, fastify, injections, oas3, graphql)
         walker.run(tree.root_node)
 
         whole_file_start, whole_file_last = whole_file_span(content)
@@ -860,7 +868,7 @@ class TypeScriptParser:
             language=language,
             parser=self.name,
             parser_version=self.version,
-            symbols=(module, *walker.symbols),
+            symbols=(module, *walker.symbols, *graphql.symbols),
             references=(
                 *walker.references,
                 *endpoint_claims(walker.references),
@@ -868,6 +876,7 @@ class TypeScriptParser:
                 *fastify.references(),
                 *injections.references(),
                 *oas3.references(),
+                *graphql.references(),
                 *wrappers.declarations(),
                 *(
                     use_references(walker.uses, walker.symbols, uses.exports)
