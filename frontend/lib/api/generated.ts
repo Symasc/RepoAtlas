@@ -1171,17 +1171,33 @@ export interface GraphPath {
  */
 export interface HttpCrossing {
   base_at?: string | null;
+  binding_basis?: string | null;
+  binding_in?: string | null;
   bound_at?: string | null;
+  build_basis?: string | null;
+  builder_repository?: string | null;
+  built_in?: string | null;
   called_at: string;
   consumer_repository: string;
+  declared_in?: string | null;
   deployment: string;
+  deployment_repository?: string | null;
   endpoint: string;
   identity_at?: string | null;
+  identity_in?: string | null;
   identity_source: string;
+  image?: string | null;
+  image_in?: string | null;
   method: string;
   provider_repository: string;
+  published_in?: string | null;
+  release?: string | null;
   served_at: string;
+  source_rule?: string | null;
   url: string;
+  variant?: string | null;
+  version_relation?: string | null;
+  workload_in?: string | null;
 }
 /**
  * This interface was referenced by `ApiIndex`'s JSON-Schema

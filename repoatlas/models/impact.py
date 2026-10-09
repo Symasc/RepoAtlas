@@ -207,6 +207,28 @@ class HttpCrossing(BaseModel):
     identity_source: str
     identity_at: str | None = None
     bound_at: str | None = None
+    # A CI-established deployment (DF2): who deploys and who builds what the handler is
+    # deployed as, the image between them, and on what basis each is known -- ``source``,
+    # ``builtin`` (RepoAtlas's own version-specific action semantics) or ``declared`` (an
+    # operator declaration). Each place is ``<repository>/<path>[:<line>]`` in the repository
+    # it lies in. The version relation says how far the configured versions are tied:
+    # ``exact``, ``symbolic`` or ``unknown``. All of it configuration, never a deployment seen.
+    deployment_repository: str | None = None
+    builder_repository: str | None = None
+    release: str | None = None
+    variant: str | None = None
+    image: str | None = None
+    version_relation: str | None = None
+    binding_basis: str | None = None
+    build_basis: str | None = None
+    source_rule: str | None = None
+    identity_in: str | None = None
+    binding_in: str | None = None
+    workload_in: str | None = None
+    image_in: str | None = None
+    published_in: str | None = None
+    built_in: str | None = None
+    declared_in: str | None = None
 
 
 class CodeGeneration(BaseModel):

@@ -186,6 +186,9 @@ class ProposedEvidence(BaseModel):
     #: text and not identity: the same span supplied again for another route adds
     #: one, and two spans supplied for one route each record it.
     routes: tuple[str, ...] = ()
+    #: What proves the lines when not the source itself (DF2): ``builtin``, ``declared``
+    #: or ``version-unverified``, as the HTTP chain place supplied here says.
+    bases: tuple[str, ...] = ()
 
 
 class LedgerEntry(BaseModel):
@@ -231,6 +234,9 @@ class LedgerEntry(BaseModel):
     #: unique. Accumulated like :attr:`origins`, and never part of the identity:
     #: which operation a span was fetched for does not change which bytes it is.
     routes: tuple[str, ...] = ()
+    #: Every basis other than source the evidence was supplied under, sorted and unique
+    #: (:attr:`ProposedEvidence.bases`). Accumulated like :attr:`routes`.
+    bases: tuple[str, ...] = ()
 
     @property
     def number(self) -> int:
