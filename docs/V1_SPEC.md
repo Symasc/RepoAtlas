@@ -1095,8 +1095,13 @@ configuration climbs out of its own. Then:
 - **Types.** Each named type the loaded files define `GENERATES` the one top-level declaration of that name in the
   output. The name is taken as written when naming is `keep`, and under the default convention only when that
   convention leaves it unchanged.
-- **Enum values.** Each value `GENERATES` the generated member whose string is the value's name: the wire value, not
-  a spelling match.
+- **Enum values.** Each value `GENERATES` the generated member whose string is what the generator writes for it:
+  the value's name (the wire value, not a spelling match), or the string an `enumValues` mapping states for it. An
+  enum that `enumValues` imports from a module is not declared by the output.
+- **Operations and fragments.** Each document the output's `documents:` cover `GENERATES` the declarations its
+  plugins name after it: `typescript-operations` writes `<Name><Operation>` and `<Name><Operation>Variables`, or
+  `<Name>Fragment`; `typed-document-node` writes `<Name>Document`, or `<Name>FragmentDoc`. A name the convention
+  would change is `naming-unsupported`, and a name two covered documents share is `generated-ambiguous`.
 
 A definition outside the loaded files never links, whatever its name. Every outcome is a stored decision, and so is
 every refusal (`link_decisions`):
@@ -1111,7 +1116,7 @@ every refusal (`link_decisions`):
 | `output-unsupported` | a preset, a directory, or not TypeScript |
 | `output-missing` | |
 | `plugin-unsupported` | no `typescript` plugin |
-| `naming-unsupported` | |
+| `naming-unsupported` | options rename what is generated, or `enumValues` imports the enum |
 | `schema-conflict` | one name, different kinds |
 | `generated-missing` | |
 | `generated-ambiguous` | |
@@ -1161,6 +1166,52 @@ bindables (`set_field`, `@x.field`, lambdas) to the declaration implementing eac
 | `graphql_resolvers` | `linked`, `schema-unsupported`, `schema-missing`, `resolvers-unresolved`; per object field `resolved`, `default-resolver` or `resolver-unknown`; `resolver-orphan` |
 
 Code-first schemas, computed resolver maps and Python `gql(...)` documents are not read.
+
+### 7.12 Other GraphQL configurations, federated copies and fetches
+
+**ariadne-codegen.** A `[tool.ariadne-codegen]` table in `pyproject.toml` is a configuration like a GraphQL Code
+Generator output: `schema_path` (or `remote_schema_url`, which is `schema-remote`) is its schema, `queries_path` its
+documents, and `<target_package_path>/<target_package_name>/<enums_module_name>.py` the file it writes. Only enums
+are bound: each enum the schema defines `GENERATES` the class of the same name, and each value the member whose
+string is the value. A Python `Enum`, `StrEnum` or `IntEnum` member with a plain string value is a declaration of its
+own (`Stage.PACKED`) that records the string. The models and client it writes are not bound.
+
+**graphql-config.** Each project of a `.graphqlrc.{yml,yaml,json}` or `graphql.config.{yml,yaml,json}` file, or the
+file itself when it has no `projects`, binds the documents it includes (`documents` or `include`, less `exclude`) to
+its `schema`, like a codegen output's `documents:`. A `codegen` extension's outputs take the project's schema and
+documents as their own. The project is decided `linked` (subject `<repo>:<file>::<project>`) once its schema
+resolves.
+
+**Federated copies.** A schema file defining `join__Graph`, each value naming a subgraph and its URL
+(`@join__graph(url:)`), is a supergraph. Each of its types, fields and enum values is tied to the provider definition
+it was composed from only through the whole chain the source states:
+
+1. the subgraph's URL is an origin that deployment identity (docker-compose services and Helm charts;
+   ARCHITECTURE.md, "HTTP routes, deployments and endpoints") ties to exactly one repository, through a deployment
+   that runs that repository's own code — never a host name, and never a service whose image is built elsewhere;
+2. that repository's served schema is what its schema constructions load (§7.11);
+3. the provider definition is the same coordinate there, for the subgraphs `@join__type`, `@join__field` or
+   `@join__enumValue` name; an argument goes with its field.
+
+Each tie is a `GENERATES` edge from the provider definition to the copy's, at the copy's lines. Change impact follows
+it outward like generated code, and reads it as "is composed from". A schema file that is neither served nor a
+supergraph states nothing about where it came from.
+
+**Fetches.** A `package.json` script that runs `hive artifact:fetch`, `rover … fetch`, `apollo
+client:download-schema` or `service:download`, `get-graphql-schema`, `graphql-inspector introspect`, or `curl` or
+`wget` into a schema file, and a Python module that both makes an HTTP request and writes a schema file at a path
+anchored to itself, record the file written and the URL, redacted. A schema file is SDL, or JSON written by a
+request that asks an introspection query. A fetch is where a copy came from; it never ties a coordinate to a
+provider.
+
+**Decisions** (`link_decisions`):
+
+| Family | Decisions |
+|---|---|
+| `graphql_ownership` | per supergraph type `linked`, `snapshot-stale` (members differ, each listed), `provider-unproven`, `schema-unserved`, `provider-missing`, `provider-ambiguous` (served schemas define it differently); per type of an unproven copy `composition-unproven` |
+| `graphql_artifacts` | `artifact-remote`, per fetch |
+
+A static `codegen.ts`, preset and directory outputs, and Python `gql(...)` documents are not read.
 
 ---
 

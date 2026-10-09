@@ -121,6 +121,7 @@ RepoAtlas/
 │   │   ├── graphql.py      graphql-core, pinned: schema coordinates; type and document claims
 │   │   ├── graphql_codegen.py  GraphQL Code Generator configuration: one claim per output
 │   │   ├── ts_graphql.py, py_graphql.py  embedded documents, schema construction, resolver maps
+│   │   ├── graphql_artifacts.py  schema fetches in package.json scripts
 │   │   └── dockerwords.py  static-vs-computed classification of Dockerfile operands
 │   ├── dependencies/   manifest and lockfile parsers; declared↔resolved join; name normalization
 │   │   ├── base.py         DependencyParser protocol
@@ -137,6 +138,7 @@ RepoAtlas/
 │   │   ├── http_claims.py, http_crossings.py   HTTP routes matched within and across repositories
 │   │   ├── graphql_codegen.py, globs.py   generated code linked to the schema its configuration loads
 │   │   ├── graphql_documents.py, graphql_resolvers.py, graphql_schema.py   documents and resolvers bound
+│   │   ├── graphql_ownership.py, graphql_artifacts.py   federated copies tied to providers; fetches
 │   │   └── impact.py, traversal.py, neighbourhood.py   the change-impact walk and bounded expansion
 │   ├── retrieval/      query analysis, exact/lexical/graph retrievers, fusion, precedence
 │   ├── grounding.py    citation verification — deterministic, and the whole of §11
@@ -545,7 +547,7 @@ http_call_decisions(               -- derived: the HTTP join's output, rebuilt b
 
 link_decisions(                    -- derived: every link family's decisions, rebuilt by every global commit (§5)
   decision_ref PRIMARY KEY,        -- a hash of family and subject; never a row id
-  family,                          -- the pass that decided: graphql_codegen
+  family,                          -- the pass that decided: graphql_codegen, graphql_ownership, ...
   repo_id, file_id → files ON DELETE CASCADE, src_id → entities ON DELETE CASCADE,
   line_start, line_end,            -- where the decided claim was made
   subject, decision, evidence_json -- the family's spelling of what was decided, and what it read
@@ -1560,6 +1562,38 @@ facts, and no host name resolves to the document.
 **Document edges.** Every edge is a `REFERENCES` edge from the binding declaration to the coordinate, at the line
 that binds it. Change impact follows these edges inward with the existing `references` family, across a repository
 boundary when the configuration crossed one.
+
+**Generated from a document.** An output's operation types and typed document constants are found in the output
+file by the names its plugins give them, and each `GENERATES` from the document it was generated from. This edge
+carries `graphql_codegen` evidence, so impact continues from a selected coordinate, through the document, to the
+constant and the code that passes it to a client.
+
+### Federated copies: tied by deployment, never by name
+
+A supergraph checked into a consumer is a copy of definitions other services provide, and a downloaded copy is
+usually older or newer than what they serve. `graph/graphql_ownership.py` ties each copied coordinate to its provider
+in the resolve stage, after the HTTP plan has derived deployment identities and the resolver plan has recorded what
+each construction serves.
+
+> **Invariant.** A copied coordinate is tied to a provider only when the copy's subgraph URL is an origin exactly one
+> repository's deployment states and runs that repository's code, and that repository's served schema defines the
+> coordinate. Matching names, hosts or repository names never tie anything.
+
+**The chain.** The subgraph URL, as an origin, is looked up among the exposures and the identities that reach no
+route (a GraphQL-only service has none). An identity whose image is built elsewhere still makes an origin
+ambiguous, but never provides it. The repository's served sets come from `ResolversPlan.served`; two sets that
+define the type differently are `provider-ambiguous`.
+
+**Stale copies.** A copy is linked member by member, and every member present on one side only is listed in a
+`snapshot-stale` decision. So impact reaches what the copy still has, and the decision says what it lacks.
+
+**Fetches.** `parsers/graphql_artifacts.py` (in `structured.py`) and `parsers/py_graphql.py` record scripts that
+download a schema, and `graph/graphql_artifacts.py` decides each `artifact-remote`. The file it writes is cited in that
+copy's ownership decisions as provenance. A fetch is never ownership: the composition directives are.
+
+**Impact.** The `generates-graphql` family admits `graphql_composition` evidence as well as `graphql_codegen`
+(`Family.evidence` is a tuple, ORed per edge type in `_impact_scope`). A composition step carries
+`ImpactStep.composition` and reads "is composed from".
 
 ### The two link passes
 

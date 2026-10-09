@@ -448,8 +448,10 @@ class LanguageParser(Protocol):
 | Dockerfile | `parsers/dockerfile.py` | `dockerfile` | 4 | instruction scan + `dockerwords.py` |
 | YAML / JSON | `parsers/structured.py` | `structured-config` | 1 | safe load, key flattening |
 | GraphQL | `parsers/graphql.py` | `graphql` | 1 | graphql-core 3.2.6 parse; schema coordinates; no schema built |
-| GraphQL codegen config | `parsers/graphql_codegen.py` (inside `structured.py`) | `structured-config` | 8 | composed YAML nodes; one claim per output |
-| GraphQL in TS / Python | `parsers/ts_graphql.py`, `parsers/py_graphql.py` (inside the TS and Python parsers) | `tree-sitter-typescript` / `python-ast` | 17 / 14 | embedded documents, schema construction, resolver maps |
+| GraphQL codegen and graphql-config | `parsers/graphql_codegen.py` (inside `structured.py`) | `structured-config` | 9 | composed YAML nodes; one claim per output or project |
+| GraphQL schema fetches | `parsers/graphql_artifacts.py` (inside `structured.py`) | `structured-config` | 9 | `package.json` scripts, `shlex` words; never run |
+| ariadne-codegen | `parsers/python_project.py` | `python-project` | 5 | `[tool.ariadne-codegen]` read as TOML |
+| GraphQL in TS / Python | `parsers/ts_graphql.py`, `parsers/py_graphql.py` (inside the TS and Python parsers) | `tree-sitter-typescript` / `python-ast` | 17 / 15 | embedded documents, schema construction, resolver maps, Python fetch scripts, Python enum members |
 
 Dispatch order matters exactly once: `SaltParser` must precede `StructuredParser` so an `.sls` file is never treated as ordinary YAML. `ParserRegistry.for_path()` returns the first parser that claims the path.
 
