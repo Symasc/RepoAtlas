@@ -40,7 +40,7 @@ from __future__ import annotations
 import json
 import posixpath
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
@@ -77,7 +77,7 @@ from repoatlas.parsers.ci_shell import (
     read_script,
     recognised,
 )
-from repoatlas.parsers.http_facts import pending_reference
+from repoatlas.parsers.http_facts import PENDING_FACT, pending_reference
 from repoatlas.parsers.withhold import credential_named, secret_bearing
 
 #: An image a job builds, its references and whether each is configured to publish.
@@ -286,6 +286,38 @@ def _environment(value: object) -> dict[str, str]:
     return found
 
 
+def _names(value: object) -> set[str]:
+    """Every name an ``env:`` / ``environment:`` mapping defines, whatever its value."""
+    return {str(name) for name in _map(value)}
+
+
+def _image_names(images: object) -> set[str]:
+    """The names CircleCI ``docker:`` images' ``environment`` define."""
+    found: set[str] = set()
+    for image in images.items if isinstance(images, Sequence_) else []:
+        found |= _names(_map(image).get("environment"))
+    return found
+
+
+def symbols(words: Sequence[Word]) -> set[str]:
+    """The variables the words read: ``$X``, ``${X}`` and ``${{ env.X }}`` by name, and every
+    other CI expression by its text (``github.sha``)."""
+    found: set[str] = set()
+    for word in words:
+        for kind, value in word:
+            if kind == VAR:
+                found.add(value)
+            elif kind == EXPR and value:
+                matched = _ENV_EXPR.fullmatch(value)
+                found.add(matched.group(1) if matched is not None else value)
+    return found
+
+
+def _overridable(words: Sequence[Word], names: Set[str]) -> str:
+    """The variables the words read that a scope or the script may set (E3), as JSON."""
+    return json.dumps(sorted(symbols(words) & names))
+
+
 def _substitute(word: Word, environment: Mapping[str, str]) -> Word:
     """A word with each variable (``$X``, ``${{ env.X }}``) a literal environment sets."""
     out: Word = []
@@ -356,6 +388,8 @@ class _Build:
     basis: str
     push: str | None = None  # builtin: "true", "false", "expr"
     pushed_flag: bool = False
+    #: Variable names its scopes define (any value) or its script assigns (E3).
+    names: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -463,20 +497,40 @@ def ci_references(
 class _Job:
     """One job's reading: its images, built and pushed, and the claims of its steps."""
 
-    def __init__(self, claims: _Claims, environment: Mapping[str, str], directory: str) -> None:
+    def __init__(
+        self,
+        claims: _Claims,
+        environment: Mapping[str, str],
+        directory: str,
+        names: Set[str] = frozenset(),
+    ) -> None:
         self.claims = claims
         self.environment = dict(environment)
         self.directory = directory
+        #: The names the workflow's and job's scopes define, whatever their values (E3).
+        self.names = frozenset(names)
+        #: Whether a step writes $GITHUB_ENV or $BASH_ENV, setting variables for later steps.
+        self.env_written = False
+        self.first = len(claims.found)
         self.builds: list[tuple[_Build, _Site]] = []
-        self.pushed: set[str] = set()
+        #: Each reference a ``docker push`` names, and the line of the first such push.
+        self.pushed: dict[str, int] = {}
         self.aliases: list[tuple[str, Word]] = []
 
-    def run(self, script: Scalar, site: _Site, directory: str | None = None) -> None:
+    def run(
+        self,
+        script: Scalar,
+        site: _Site,
+        directory: str | None = None,
+        step_names: Set[str] = frozenset(),
+    ) -> None:
         first = script.line + 1 if script.block else script.line
         read = read_script(script.text, first_line=first)
         where = self.directory if directory is None else directory
         if read.unreadable:
             return
+        self.env_written |= read.env_file
+        names = self.names | step_names | read.assigned
         nested = False
         for command in read.commands:
             kind = recognised(command)
@@ -509,17 +563,18 @@ class _Job:
                     ),
                     basis="source",
                     pushed_flag=has_flag(command, "--push"),
+                    names=names,
                 )
                 self.builds.append((build, site))
             elif kind == DOCKER_PUSH:
                 for word in positionals(command, 2, ("-a", "--all-tags")):
-                    self.pushed.add(text_of(word))
+                    self.pushed.setdefault(text_of(word), command.line)
             elif kind == DOCKER_TAG:
                 words = positionals(command, 2, ())
                 if len(words) >= 2:
                     self.aliases.append((text_of(words[0]), words[1]))
             elif kind == HELM:
-                self._helm(command, site, where)
+                self._helm(command, site, where, names)
             elif kind == KUBECTL_APPLY:
                 self.claims.step(site, command.line, "kubectl-apply", "kubectl apply")
         if nested:
@@ -527,13 +582,14 @@ class _Job:
         if read.truncated:
             self.claims.truncated = True
 
-    def _helm(self, command: Command, site: _Site, where: str) -> None:
+    def _helm(self, command: Command, site: _Site, where: str, names: Set[str]) -> None:
         args = positionals(command, 2, _HELM_VALUED)
         release = args[0] if args else [[EXPR, ""]]
         chart_word = args[1] if len(args) > 1 else [[EXPR, ""]]
         values = [[_inside(where, word), word] for word in flag_values(command, "-f", "--values")]
         namespace = flag_values(command, "-n", "--namespace")
         unread_sets = any(literal(w) in ("--set-file", "--set-json") for w in command.words)
+        set_words = flag_values(command, None, "--set") + flag_values(command, None, "--set-string")
         self.claims.add(
             CI_HELM_RELEASE,
             text_of(release),
@@ -543,17 +599,22 @@ class _Job:
             chart=_inside(where, chart_word) or "",
             chart_text=text_of(chart_word),
             values=json.dumps([[p, text_of(w)] for p, w in values]),
-            set=json.dumps(
-                set_pairs(
-                    flag_values(command, None, "--set") + flag_values(command, None, "--set-string")
-                )
-            ),
+            set=json.dumps(set_pairs(set_words)),
             namespace=json.dumps(namespace[0] if namespace else None),
             set_unread="true" if unread_sets else "false",
+            overridable=_overridable(
+                [release, chart_word, *(w for _, w in values), *set_words], names
+            ),
             **site.meta(),
         )
 
-    def builtin(self, inputs: Mapping[str, object], site: _Site, line: int) -> None:
+    def builtin(
+        self,
+        inputs: Mapping[str, object],
+        site: _Site,
+        line: int,
+        step_names: Set[str] = frozenset(),
+    ) -> None:
         tags_text = _text(inputs.get("tags")) or ""
         tags = [scalar_parts(tag.strip()) for tag in re.split(r"[\n,]", tags_text) if tag.strip()]
         push = _text(inputs.get("push"))
@@ -577,15 +638,16 @@ class _Job:
             ),
             basis="builtin",
             push="true" if state == "true" else ("expr" if state == "expr" else "false"),
+            names=self.names | step_names,
         )
         self.builds.append((build, site))
 
     def finish(self) -> None:
         """Decide each built reference's publication, job-scoped, and record the builds."""
-        pushed = set(self.pushed)
+        pushed = dict(self.pushed)
         for source, alias in self.aliases:
             if text_of(alias) in pushed:
-                pushed.add(source)
+                pushed.setdefault(source, pushed[text_of(alias)])
         for build, site in self.builds:
             refs: list[dict[str, object]] = []
             for word in build.refs or [[]]:
@@ -610,6 +672,12 @@ class _Job:
                         "registry_implicit": bool(reference and reference.registry_implicit),
                         "version_unresolved": bool(reference and reference.version_unresolved),
                         "decision": decision,
+                        # DF2: where publishing is configured (the push, or the build's own line).
+                        "pushed_line": build.line
+                        if build.pushed_flag or build.basis == "builtin"
+                        else pushed.get(text_of(word))
+                        if word
+                        else None,
                     }
                 )
             self.claims.add(
@@ -619,10 +687,21 @@ class _Job:
                 basis=build.basis,
                 refs=json.dumps(refs, sort_keys=True),
                 context=build.context or "",
+                context_resolved="false" if build.context is None else "true",
                 dockerfile=build.dockerfile or "",
+                overridable=_overridable(build.refs, build.names),
                 **site.meta(),
             )
         self.builds.clear()
+        # A step writing $GITHUB_ENV or $BASH_ENV may set any variable for the steps after
+        # it: every build and release of the job says so (E3).
+        written = "true" if self.env_written else "false"
+        self.claims.found[self.first :] = [
+            ref.model_copy(update={"meta": {**ref.meta, "env_written": written}})
+            if ref.meta.get(PENDING_FACT) in (CI_IMAGE_BUILD, CI_HELM_RELEASE)
+            else ref
+            for ref in self.claims.found[self.first :]
+        ]
 
 
 # ------------------------------------------------------------------------- GitHub Actions
@@ -651,6 +730,7 @@ def _github(root: Mapping_, claims: _Claims) -> None:
     definition = names == {"workflow_call"}
     workflow = _text(items.get("name")) or "workflow"
     environment = _environment(items.get("env"))
+    names = _names(items.get("env"))
     defaults = _text(_map(_map(items.get("defaults")).get("run")).get("working-directory")) or ""
     for job_index, (job_name, job_value) in enumerate(_map(items.get("jobs")).items()):
         if job_index >= MAX_JOBS:
@@ -671,6 +751,7 @@ def _github(root: Mapping_, claims: _Claims) -> None:
             claims,
             {**environment, **_environment(job.get("env"))},
             _inside("", scalar_parts(job_directory)) or "" if job_directory else "",
+            names | _names(job.get("env")) | _names(_map(job.get("container")).get("env")),
         )
         steps = job.get("steps")
         for index, step_value in enumerate(steps.items if isinstance(steps, Sequence_) else []):
@@ -687,7 +768,7 @@ def _github(root: Mapping_, claims: _Claims) -> None:
                 if kind == INERT_ACTION:
                     continue
                 if kind == BUILTIN_BUILD and not definition:
-                    reading.builtin(_map(step.get("with")), here, line)
+                    reading.builtin(_map(step.get("with")), here, line, _names(step.get("env")))
                     continue
                 claims.step(here, line, action_kind(uses), uses, action=uses)
             elif isinstance(run, Scalar):
@@ -707,6 +788,7 @@ def _github(root: Mapping_, claims: _Claims) -> None:
                     _inside(reading.directory, scalar_parts(step_directory))
                     if step_directory
                     else None,
+                    _names(step.get("env")),
                 )
                 reading.environment = saved
         reading.finish()
@@ -724,11 +806,17 @@ def _circleci(root: Mapping_, claims: _Claims) -> None:
     inline = {alias: _map(value) for alias, value in orbs.items() if isinstance(value, Mapping_)}
     jobs: dict[str, object] = dict(_map(items.get("jobs")))
     commands: dict[str, object] = dict(_map(items.get("commands")))
+    executors: dict[str, object] = dict(_map(items.get("executors")))
     for alias, body in inline.items():
         jobs.update({f"{alias}/{name}": value for name, value in _map(body.get("jobs")).items()})
         commands.update(
             {f"{alias}/{name}": value for name, value in _map(body.get("commands")).items()}
         )
+        # An inline orb's job names its own executors unprefixed.
+        executors.update(
+            {f"{alias}/{name}": value for name, value in _map(body.get("executors")).items()}
+        )
+        executors.update(dict(_map(body.get("executors"))))
     for workflow_name, workflow in _map(items.get("workflows")).items():
         listed = _map(workflow).get("jobs")
         for invocation, entry in enumerate(listed.items if isinstance(listed, Sequence_) else []):
@@ -744,7 +832,7 @@ def _circleci(root: Mapping_, claims: _Claims) -> None:
                 "circleci", workflow_name, name, invocation, -1, line, domains, tuple(requires)
             )
             if name in jobs:
-                _circle_job(jobs[name], params, site, claims, commands, references)
+                _circle_job(jobs[name], params, site, claims, commands, references, executors)
                 continue
             alias, _, job = name.partition("/")
             if alias in references:
@@ -799,6 +887,7 @@ def _circle_job(
     claims: _Claims,
     commands: Mapping[str, object],
     references: Mapping[str, str | None],
+    executors: Mapping[str, object],
 ) -> None:
     job = _map(job_value)
     values = _parameter_values(job.get("parameters"), params)
@@ -806,7 +895,16 @@ def _circle_job(
     directory = (
         "" if directory in ("", "~/project", ".") else (_inside("", scalar_parts(directory)) or "")
     )
-    reading = _Job(claims, _environment(job.get("environment")), directory)
+    executor = job.get("executor")
+    executor_name = _text(executor) or _text(_map(executor).get("name"))
+    used = _map(executors.get(executor_name)) if executor_name else _map(None)
+    names = (
+        _names(job.get("environment"))
+        | _image_names(job.get("docker"))
+        | _names(used.get("environment"))
+        | _image_names(used.get("docker"))
+    )
+    reading = _Job(claims, _environment(job.get("environment")), directory, names)
     steps = job.get("steps")
     _circle_steps(
         steps.items if isinstance(steps, Sequence_) else [],
@@ -867,6 +965,7 @@ def _circle_steps(
                 Scalar(substituted, script.line, script.block),
                 here,
                 _inside(reading.directory, scalar_parts(directory)) if directory else None,
+                _names(_map(body).get("environment")) if isinstance(body, Mapping_) else set(),
             )
         elif name in _CIRCLE_STEPS:
             continue
