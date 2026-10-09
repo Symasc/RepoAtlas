@@ -61,6 +61,13 @@ from repoatlas.models.parsing import (
 )
 from repoatlas.models.reports import RepositorySyncReport, SyncReport
 from repoatlas.models.repository import IndexedFile, Repository, repository_slug
+from repoatlas.parsers.ci_config import CI_HELM_RELEASE
+from repoatlas.parsers.deploy_helm import (
+    REFERENCED_VALUES_KEY,
+    referenced_paths,
+    referenced_values_meta,
+)
+from repoatlas.parsers.http_facts import PENDING_FACT
 from repoatlas.parsers.registry import ParserRegistry
 from repoatlas.parsers.requirements import REQUIREMENTS_FACTS_VERSION, requirements_facts
 from repoatlas.storage.protocols import (
@@ -319,6 +326,7 @@ class SyncEngine:
         reached = self._materialize_requirements(repo, boundary)
         if reached != requirements and self._uses is not None:
             self._uses.requirements_changed(repo_id)
+        self._materialize_referenced_values(repo, boundary)
         self._knowledge.gc_orphan_entities()
 
         self._repositories.update_detected_metadata(
@@ -427,6 +435,76 @@ class SyncEngine:
             REQUIREMENTS_FACTS, [states[path].file_id for path in (*written, *dropped)], claims
         )
         return wanted
+
+    def _materialize_referenced_values(
+        self, repo: Repository, boundary: RepositoryBoundary
+    ) -> None:
+        """Record the values of every file a CI release of this repository names with ``-f``
+        that no ``values*.y(a)ml`` claim covers, and of no other (DF2_PHASE_A.md §15, E1).
+
+        A file is a values overlay only because a release names it, so no parser can tell
+        from the file alone: this runs once the repository's files are written, on every
+        sync, from the release claims the repository now holds. A named file is read through
+        the repository boundary, and only as the bytes the index holds for it; the claims are
+        replaced whole whenever what is named, or what a named file says, differs. What is
+        recorded is a function of the working tree alone, exactly what a fresh index records.
+        """
+        assert repo.id is not None
+        states = self._files.list_states(repo.id)
+        paths = {state.file_id: path for path, state in states.items()}
+        releases = []
+        for claim in self._knowledge.list_unresolved_refs(repo.id, pending_only=True):
+            meta = json.loads(claim.meta_json or "{}")
+            if meta.get(PENDING_FACT) == CI_HELM_RELEASE and claim.file_id in paths:
+                releases.append((paths[claim.file_id], claim.line_start or 0, meta))
+        named = {path: by for path, by in referenced_paths(releases).items() if path in states}
+        stored = {
+            path: meta
+            for _, path, meta in self._knowledge.list_facts_of_kind(REFERENCED_VALUES_KEY, repo.id)
+        }
+        wanted: dict[str, str] = {}
+        for path, by in named.items():
+            raw = boundary.read_content(path, max_bytes=self._settings.indexing.max_file_bytes).data
+            if (
+                raw is None
+                or hash_bytes(raw) != states[path].content_hash
+                or b"\0" in raw[:BINARY_SNIFF_BYTES]
+            ):
+                continue
+            try:
+                meta = referenced_values_meta(path, raw.decode("utf-8"), by)
+            except UnicodeDecodeError:
+                continue
+            if meta is not None:
+                wanted[path] = meta
+        written = sorted(path for path, meta in wanted.items() if stored.get(path) != meta)
+        dropped = sorted(set(stored) - set(wanted))
+        if not written and not dropped:
+            return
+        claims: list[UnresolvedRefRecord] = []
+        for path in written:
+            file_id = states[path].file_id
+            source = self._knowledge.find_file_entity(file_id, file_key(repo.slug, path))
+            if source is None:
+                continue
+            claims.append(
+                UnresolvedRefRecord(
+                    repo_id=repo.id,
+                    file_id=file_id,
+                    src_id=source,
+                    edge_type=EdgeType.REFERENCES,
+                    target_kind=EntityType.CONFIG,
+                    target_key=REFERENCED_VALUES_KEY,
+                    line_start=1,
+                    line_end=1,
+                    meta_json=wanted[path],
+                )
+            )
+        self._knowledge.replace_facts_of_kind(
+            REFERENCED_VALUES_KEY,
+            [states[path].file_id for path in (*written, *dropped) if path in states],
+            claims,
+        )
 
     def _requirements_of(
         self, boundary: RepositoryBoundary, path: str, content_hash: str, stored: str | None
