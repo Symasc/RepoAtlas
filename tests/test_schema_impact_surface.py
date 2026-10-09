@@ -114,6 +114,25 @@ def test_decisions_list_the_links_not_made_where_the_walk_went(
     assert response.decisions_omitted == {}
 
 
+def test_a_resolver_bound_is_a_link_made_and_never_listed(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    build(workspace, tmp_path, document_repos())
+    bound = {
+        d.subject
+        for d in workspace.knowledge.list_link_decisions(family="graphql_resolvers")
+        if d.decision == "resolved"
+    }
+    assert "depot-api:schema/depot.graphql::Query.parcels" in bound
+
+    response = _impact(workspace, "sym:depot-api:schema/depot.graphql:Stage:1")
+    listed = {(d.subject, d.decision) for d in response.decisions}
+    # the walk reached the file that binds the resolvers: its refusals are listed ...
+    assert ("depot-api:schema/depot.graphql::Parcel.id", "default-resolver") in listed
+    # ... and its bindings, links made, are not
+    assert not [s for s, _ in listed if s in bound]
+
+
 def test_decisions_past_the_bound_are_counted_by_family(
     workspace: Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
