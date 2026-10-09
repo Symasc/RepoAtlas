@@ -618,6 +618,25 @@ export interface CodeGeneration {
   plugin: string;
 }
 /**
+ * How a supergraph coordinate was composed from the provider definition before it.
+ *
+ * The chain an ownership link recorded (repoatlas.graph.graphql_ownership): the subgraph
+ * the supergraph names (``graph``) and the URL it states for it, the deployment that ties
+ * that URL to the provider's repository (``identity``), and the provider definition, as
+ * ``<repository>/<path>:<line>``. Source evidence: the copy may be stale, which the
+ * decision says.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "Composition".
+ */
+export interface Composition {
+  decision_ref: string;
+  graph: string;
+  identity: string;
+  provider: string;
+  url: string;
+}
+/**
  * What the context resolved to, as identities rather than rows.
  *
  * A transport-neutral projection of
@@ -1340,6 +1359,7 @@ export interface ImpactCandidate {
  */
 export interface ImpactStep {
   at?: string | null;
+  composition?: Composition | null;
   crossing?: PackageCrossing | null;
   derived?: string | null;
   edge?: EdgeType | null;

@@ -28,11 +28,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from repoatlas.graph.globs import match_admitted, resolve_file
+from repoatlas.graph import graphql_codegen as codegen
+from repoatlas.graph.globs import match_admitted, resolve_file, tree_files
 from repoatlas.graph.graphql_codegen import CodegenProject
 from repoatlas.graph.graphql_schema import BUILTIN_SCALARS, Schema, build_schema
 from repoatlas.graph.resolution import ResolutionIndex
@@ -55,6 +57,15 @@ DOCUMENT_INVALID = "document-invalid"
 DOCUMENT_BOUND = "document-bound"
 
 _UNREAD = frozenset({"url", "computed"})
+#: A name the default naming convention leaves unchanged (repoatlas.graph.graphql_codegen).
+_PASCAL = re.compile(r"[A-Z][a-z0-9]*(?:[A-Z][a-z0-9]+)*")
+#: What each plugin declares for a document, after its name: ``{}`` is the operation type.
+_GENERATED = {
+    ("operation", "typescript-operations"): ("{}", "{}Variables"),
+    ("operation", "typed-document-node"): ("Document",),
+    ("fragment", "typescript-operations"): ("Fragment",),
+    ("fragment", "typed-document-node"): ("FragmentDoc",),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +153,10 @@ class _Planner:
         )
         #: Per file, owner declaration -> the fragment claims written in it.
         self._owned: dict[tuple[int, str], list[UnresolvedRefRecord]] = defaultdict(list)
+        #: Per project, (operation or fragment, name) -> the covered documents of that name.
+        self._named: dict[int, dict[tuple[str, str], list[UnresolvedRefRecord]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
         self.decisions: dict[str, LinkDecisionRow] = {}
         self.edges: dict[tuple[int, int, int], EdgeRecord] = {}
         self.crossings = 0
@@ -156,6 +171,9 @@ class _Planner:
             if kind == "glob":
                 matched = match_admitted(self._index, project.config, value) or []
                 (excluded if item.get("negated") else included).update(r.file_id for r in matched)
+            elif kind == "tree":
+                rows = tree_files(self._index, project.config, value, (".graphql", ".gql"))
+                included.update(r.file_id for r in rows)
             else:
                 row = resolve_file(self._index, project.config, value)
                 if row is not None:
@@ -165,9 +183,12 @@ class _Planner:
     def register(self, claims: Sequence[UnresolvedRefRecord]) -> None:
         for claim in claims:
             meta = _meta(claim)
-            if meta.get("document") != "fragment":
+            kind, name = meta.get("document"), str(meta.get("name") or "")
+            if kind in {"operation", "fragment"} and name:
+                for number in self._covering.get(claim.file_id, ()):
+                    self._named[number][(str(kind), name)].append(claim)
+            if kind != "fragment":
                 continue
-            name = str(meta.get("name") or "")
             for number in self._covering.get(claim.file_id, ()):
                 self._fragments[number][name].append(claim)
             owner = meta.get("owner")
@@ -236,12 +257,114 @@ class _Planner:
             "config": projects[0].at,
             "schema": [self._at(row) for row in schema_files.values()],
         }
+        for number in numbers:
+            self._generated(claim, origin, number, meta)
         if walk.missing:
             evidence["unresolved"] = sorted(set(walk.missing))
             self._decide(claim, origin, subject, DOCUMENT_UNRESOLVED, evidence)
         else:
             self._decide(claim, origin, subject, LINKED, evidence)
         return not walk.missing
+
+    def _generated(
+        self, claim: UnresolvedRefRecord, origin: FileRow, number: int, meta: Mapping[str, object]
+    ) -> None:
+        """The operation types and document constants an output generates for a document,
+        found by the names its plugins give them: each ``GENERATES`` from the document,
+        decided in the code-generation family, subject ``<output>::<operation> <name>``."""
+        project = self._projects[number]
+        kind, name = str(meta.get("document")), str(meta.get("name") or "")
+        operation = str(meta.get("operation") or "query")
+        expected = [
+            (name + suffix.format(operation.capitalize()), plugin)
+            for plugin in project.plugins
+            for suffix in _GENERATED.get((kind, plugin), ())
+        ]
+        if project.output is None or not name or not expected:
+            return
+        subject = f"{project.subject}::{operation if kind == 'operation' else kind} {name}"
+        place = f"{origin.repo_slug}/{origin.rel_path}:{claim.line_start}"
+        if project.naming is None or (project.naming == "pascal" and not _PASCAL.fullmatch(name)):
+            self._codegen(claim, origin, subject, codegen.NAMING_UNSUPPORTED, {"document": place})
+            return
+        same = self._named[number][(kind, name)]
+        if len(same) > 1:
+            # Names are global within a document set: the generator refuses the duplicate.
+            places = sorted(
+                f"{self._files[c.file_id].repo_slug}/{self._files[c.file_id].rel_path}:{c.line_start}"
+                for c in same
+            )
+            self._codegen(
+                claim, origin, subject, codegen.GENERATED_AMBIGUOUS, {"documents": places}
+            )
+            return
+        declared: dict[str, list[SymbolRow]] = defaultdict(list)
+        for symbol in self._by_file.get(project.output.file_id, ()):
+            if symbol.qualified_name == symbol.name:
+                declared[symbol.name].append(symbol)
+        found = [(declared[n][0], plugin) for n, plugin in expected if len(declared[n]) == 1]
+        missing = [n for n, _ in expected if len(declared[n]) != 1]
+        evidence: dict[str, object] = {
+            "document": place,
+            "generated": sorted(symbol.name for symbol, _ in found),
+        }
+        if missing:
+            evidence["missing"] = missing
+        decision = codegen.GENERATED_MISSING if missing else codegen.LINKED
+        ref = self._codegen(claim, origin, subject, decision, evidence)
+        output = project.output
+        for symbol, plugin in found:
+            key = (claim.src_id, symbol.entity_id, symbol.line_start or 0)
+            if key in self.edges:
+                continue
+            if output.repo_id != origin.repo_id:
+                self.crossings += 1
+            self.edges[key] = EdgeRecord(
+                src_id=claim.src_id,
+                dst_id=symbol.entity_id,
+                type=EdgeType.GENERATES,
+                repo_id=output.repo_id,
+                file_id=output.file_id,
+                line_start=symbol.line_start,
+                line_end=symbol.line_end if symbol.line_end is not None else symbol.line_start,
+                parser=self._producer,
+                resolution=json.dumps(
+                    {
+                        codegen.FAMILY: {
+                            "config": project.at,
+                            "schema": place,
+                            "output": f"{output.repo_slug}/{output.rel_path}",
+                            "plugin": plugin,
+                            "decision_ref": ref,
+                        }
+                    },
+                    sort_keys=True,
+                ),
+            )
+
+    def _codegen(
+        self,
+        claim: UnresolvedRefRecord,
+        origin: FileRow,
+        subject: str,
+        decision: str,
+        evidence: dict[str, object],
+    ) -> str:
+        """A decision of the code-generation family, made while binding documents."""
+        ref = hashlib.sha256(f"{codegen.FAMILY}\0{subject}".encode()).hexdigest()[:24]
+        self.decisions[ref] = LinkDecisionRow(
+            decision_ref=ref,
+            family=codegen.FAMILY,
+            repo_id=origin.repo_id,
+            file_id=origin.file_id,
+            src_id=claim.src_id,
+            line_start=claim.line_start,
+            line_end=claim.line_end,
+            subject=subject,
+            decision=decision,
+            evidence_json=json.dumps(evidence, sort_keys=True, separators=(",", ":")),
+        )
+        return ref
 
     def _holes(
         self, claim: UnresolvedRefRecord, origin: FileRow, meta: Mapping[str, object]

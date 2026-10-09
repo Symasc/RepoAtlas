@@ -14,6 +14,7 @@ import ast
 from pathlib import Path
 
 from repoatlas.models.parsing import (
+    ENUM_MEMBER,
     PARSE_FAILED,
     SYNTAX_ERROR,
     EdgeType,
@@ -27,7 +28,7 @@ from repoatlas.models.parsing import (
 from repoatlas.parsers.http_python import PythonHttp
 from repoatlas.parsers.interpreter import interpreter_tag
 from repoatlas.parsers.marks import whole_file_span
-from repoatlas.parsers.py_graphql import AriadneFacts
+from repoatlas.parsers.py_graphql import AriadneFacts, schema_download_references
 from repoatlas.parsers.py_uses import PythonUseAnalysis, python_use_references
 from repoatlas.parsers.setuptools_project import setup_py_facts, setuptools_reference
 
@@ -56,6 +57,10 @@ def _call_name(node: ast.expr) -> str | None:
 
 def _string_value(node: ast.expr) -> str | None:
     return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+#: Base classes whose class-level string assignments are members.
+_ENUM_BASES = frozenset({"Enum", "StrEnum", "IntEnum"})
 
 
 class _Visitor(ast.NodeVisitor):
@@ -236,6 +241,10 @@ class _Visitor(ast.NodeVisitor):
                 parent=self._current_symbol,
             )
         )
+        if any(
+            (_decorator_name(base) or "").rsplit(".", 1)[-1] in _ENUM_BASES for base in node.bases
+        ):
+            self._enum_members(node, qualified)
         for base in node.bases:
             name = _decorator_name(base)
             if name:
@@ -253,6 +262,35 @@ class _Visitor(ast.NodeVisitor):
         self._scope.append(node.name)
         self.generic_visit(node)
         self._scope.pop()
+
+    def _enum_members(self, node: ast.ClassDef, enum: str) -> None:
+        """An enum's members with a plain string value, as ``Enum.MEMBER``: what the member
+        *is* at run time, which a generated enum shares with the schema it came from. A
+        member is reached through its enum, never by its bare name."""
+        for statement in node.body:
+            if not (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+                and isinstance(statement.value, ast.Constant)
+                and isinstance(statement.value.value, str)
+            ):
+                continue
+            name = statement.targets[0].id
+            if name.startswith("_"):
+                continue
+            self.symbols.append(
+                ParsedSymbol(
+                    kind=EntityType.SYMBOL,
+                    name=name,
+                    qualified_name=f"{enum}.{name}",
+                    line_start=statement.lineno,
+                    line_end=statement.end_lineno or statement.lineno,
+                    signature=f"{name} = {statement.value.value!r}",
+                    parent=enum,
+                    meta={"kind": ENUM_MEMBER, "value": statement.value.value},
+                )
+            )
 
     # -- calls and environment variables -------------------------------------
 
@@ -372,10 +410,12 @@ class PythonParser:
     #    branch records one claim per literal, each decided on its own.
     # 14: Ariadne bindables, their resolvers and schema construction
     #    (repoatlas.parsers.py_graphql).
+    # 15: an Enum's members with a plain string value are symbols (``Enum.MEMBER``) that
+    #    record the value, which is what a generated enum shares with its schema.
     # +pyX.Y: `ast` is the running interpreter's, and what it accepts moves with the
     #    interpreter (repoatlas.parsers.interpreter), so facts parsed by another one
     #    are never kept.
-    version = f"14+{interpreter_tag()}"
+    version = f"15+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
@@ -459,6 +499,7 @@ class PythonParser:
                 *http.deployment_references(),
                 *http.claim_references(),
                 *AriadneFacts(tree).references(),
+                *schema_download_references(tree),
                 *uses,
                 *(() if setuptools is None else (setuptools_reference(setuptools, content),)),
             ),
