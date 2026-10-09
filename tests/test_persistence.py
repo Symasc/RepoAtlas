@@ -228,9 +228,11 @@ def test_each_statement_form_is_read_or_skipped(
 
 
 def test_sqlglot_never_logs_the_source(caplog: pytest.LogCaptureFixture) -> None:
-    quoted = "ALTER TYPE t RENAME VALUE 'private-token' TO 'b';"
     with caplog.at_level(logging.DEBUG):
-        SqlParser().parse(Path("m.sql"), quoted)
+        # statements sqlglot falls back on, which it logs with their text
+        SqlParser().parse(Path("m.sql"), "CREATE TABLE `m` (`private-token` INT);")
+        sql_predicates("ALTER TYPE t RENAME VALUE 'private-token' TO 'b'")
+        SqlParser().parse(Path("m.sql"), "ALTER TYPE t RENAME VALUE 'private-token' TO 'b';")
         sql_predicates("SELECT 'private-token' FROM x WHERE a = ((")
     assert "private-token" not in caplog.text
 
