@@ -210,13 +210,24 @@ class AriadneFacts:
             return [found for item in node.elts for found in self._type_defs(item, depth + 1)]
         if isinstance(node, ast.Call):
             if self._is(node.func, "load_schema_from_path") and node.args:
-                path: dict[str, object] = dict(_path(node.args[0]))
+                path: dict[str, object] = dict(_path(self._constant(node.args[0])))
                 return [path if "unsupported" in path else {"tree": path["path"]}]
             if self._is(node.func, "gql"):
                 return [{"unsupported": "inline-sdl"}]
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return [{"unsupported": "inline-sdl"}]
         return [{"unsupported": "computed"}]
+
+    def _constant(self, node: ast.expr) -> ast.expr:
+        """``node``, or the value a module-level name bound once is assigned."""
+        for _ in range(4):
+            if not (isinstance(node, ast.Name) and self._bound.get(node.id) == 1):
+                break
+            value = self._assigned.get(node.id)
+            if value is None:
+                break
+            node = value
+        return node
 
     # -- claims ----------------------------------------------------------------------
 
