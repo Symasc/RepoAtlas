@@ -295,6 +295,11 @@ def test_impact_spells_each_place_in_its_repository_and_says_how_it_is_configure
     assert crossing.binding_in == "deployer/ci.yml:12"
     assert crossing.published_in == "api/ci.yml:8; api/ci.yml:9"
     assert crossing.declared_in == "@declarations/orbs.yml:3"
+    assert (crossing.binding_basis, crossing.build_basis, crossing.version_relation) == (
+        "declared",
+        "builtin",
+        "unknown",
+    )
     qualifiers = deployment_qualifiers(record)
     assert qualifiers == [
         "deployment configured in deployer (declared)",
@@ -329,3 +334,41 @@ def test_impact_spells_each_place_in_its_repository_and_says_how_it_is_configure
         "client",
     )
     assert plain is not None and plain.deployment_repository is None and plain.identity_in is None
+
+
+#: ROADMAP §13's wording audit: what configuration never shows as a fact about runtime.
+WORDING = (
+    "currently deployed",
+    "is running",
+    "this build",
+    "created this record",
+    "was pushed",
+    "is published",
+    "exists in the registry",
+    "unpublished",
+    "never published",
+)
+
+
+def test_no_reason_or_outcome_text_claims_a_push_a_registry_or_a_running_version() -> None:
+    from repoatlas.graph import deploy_identity
+    from repoatlas.graph.deploy_artifacts import DOCKERFILE_UNREAD_TIE
+
+    texts = [
+        *http_chain.REASONS.values(),
+        DOCKERFILE_UNREAD_TIE,
+        *(
+            getattr(deploy_identity, name)
+            for name in (
+                "IMAGE_UNREAD",
+                "REGISTRY_UNRESOLVED",
+                "PUBLISHER_UNRESOLVED",
+                "ARTIFACT_AMBIGUOUS",
+                "TAG_UNMATCHED",
+                "WORKLOAD_UNMATCHED",
+                "NAME_DEPENDENT",
+            )
+        ),
+    ]
+    for text in texts:
+        assert not any(phrase in text.lower() for phrase in WORDING), text
