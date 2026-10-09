@@ -82,7 +82,9 @@ INSTRUCTIONS = (
     "a definition, not its source: inspect its entity key to read the source. "
     "For a change-impact question, call repoatlas_impact with what changes, then "
     "read the source each step names. Impact supplies no evidence: inspect a step's "
-    "file in the same investigation before a grounded answer names that file."
+    "file in the same investigation before a grounded answer names that file. Its "
+    "decisions list links refused or qualified where the walk went: reasons a link "
+    "was not made, never breakages."
 )
 
 
