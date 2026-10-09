@@ -96,6 +96,7 @@ from repoatlas.capabilities.impact import (
     Assembled,
     SeedResolver,
     assemble,
+    decisions_near,
     http_crossing,
     package_crossing,
     package_dependents,
@@ -233,6 +234,7 @@ from repoatlas.models.http_inventory import (
     OperationBasis,
 )
 from repoatlas.models.impact import (
+    ImpactDecision,
     ImpactOmitted,
     ImpactRequest,
     ImpactResponse,
@@ -1011,6 +1013,8 @@ class CapabilityService:
             slugs = {repo.id: repo.slug for repo in registered if repo.id is not None}
             answer: Assembled | None = None
             packages: tuple[PackageImpact, ...] = ()
+            decisions: tuple[ImpactDecision, ...] = ()
+            decisions_omitted: dict[str, int] = {}
             # The seed, the walk and every row it reads are one indexed snapshot.
             with self._workspace.database.read_snapshot():
                 seeds = SeedResolver(self._workspace.knowledge, self._workspace.search, scope)
@@ -1058,6 +1062,13 @@ class CapabilityService:
                         reasons = dict(answer.omitted.by_reason)
                         reasons["budget"] = reasons.get("budget", 0) + more
                         answer.omitted = answer.omitted.model_copy(update={"by_reason": reasons})
+                    decisions, decisions_omitted = decisions_near(
+                        self._workspace.knowledge,
+                        [
+                            seed.model.entity or "",
+                            *(c.entity for c in (*answer.candidates, *answer.tests)),
+                        ],
+                    )
             candidates = answer.candidates if answer is not None else ()
             tests = answer.tests if answer is not None else ()
             facts = current_facts_version(self._workspace)
@@ -1087,6 +1098,8 @@ class CapabilityService:
                 packages=packages,
                 hubs=answer.hubs if answer is not None else (),
                 unresolved=answer.unresolved if answer is not None else (),
+                decisions=decisions,
+                decisions_omitted=decisions_omitted,
                 omitted=answer.omitted if answer is not None else ImpactOmitted(),
                 summary=answer.summary
                 if answer is not None

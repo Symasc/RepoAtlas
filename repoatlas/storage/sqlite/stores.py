@@ -1241,6 +1241,50 @@ class SqliteKnowledgeStore:
                 ],
             )
 
+    def link_decisions_near(
+        self, entity_keys: Sequence[str]
+    ) -> list[tuple[str, str, str, str, str, int | None]]:
+        """Every decision other than a link made (``linked``, ``resolved``) decided at one of
+        these entities or in a file one of them is in: (family, subject, decision,
+        ``<repository>/<path>``, evidence, line), in family and subject order. What the
+        change-impact answer lists."""
+        if not entity_keys:
+            return []
+        entity_ids: set[int] = set()
+        file_ids: set[int] = set()
+        keys = sorted(set(entity_keys))
+        for start in range(0, len(keys), 500):
+            chunk = keys[start : start + 500]
+            marks = ",".join("?" * len(chunk))
+            for row in self._db.execute(
+                f"SELECT id, file_id FROM entities WHERE key IN ({marks})",  # noqa: S608
+                chunk,
+            ).fetchall():
+                entity_ids.add(row[0])
+                if row[1] is not None:
+                    file_ids.add(row[1])
+        found: dict[str, tuple[str, str, str, str, str, int | None]] = {}
+        for column, ids in (("src_id", entity_ids), ("file_id", file_ids)):
+            for chunk in _chunks(sorted(ids)):
+                marks = ",".join("?" * len(chunk))
+                sql = (
+                    "SELECT d.decision_ref, d.family, d.subject, d.decision, d.evidence_json, "  # noqa: S608 - the column is one of two fixed names
+                    "d.line_start, r.slug || '/' || f.rel_path AS place "
+                    "FROM link_decisions d JOIN files f ON f.id = d.file_id "
+                    "JOIN repositories r ON r.id = f.repo_id "
+                    f"WHERE d.decision NOT IN ('linked', 'resolved') AND d.{column} IN ({marks})"
+                )
+                for row in self._db.execute(sql, chunk).fetchall():
+                    found[row["decision_ref"]] = (
+                        row["family"],
+                        row["subject"],
+                        row["decision"],
+                        row["place"],
+                        row["evidence_json"] or "{}",
+                        row["line_start"],
+                    )
+        return sorted(found.values(), key=lambda d: (d[0], d[1], d[2]))
+
     def list_link_decisions(
         self, family: str | None = None, repo_id: int | None = None
     ) -> list[LinkDecisionRow]:
