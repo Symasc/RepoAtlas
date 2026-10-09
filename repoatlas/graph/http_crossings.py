@@ -382,9 +382,12 @@ def plan_http_crossings(
         elif distinct:
             exposure = next(iter(distinct.values()))
             # A pattern of the chart whose rendering made this exposure is that same
-            # service under other values; another chart's pattern is a rival.
-            scope = exposure.meta.get("scope", "")
-            unbound = [p.claim for p in fitting if p.scope != scope]
+            # service under other values; another chart's pattern is a rival. So is an
+            # established release's own unrendered host, whatever its chart, except the
+            # very release variant that made this exposure (DF2_PHASE_A.md §15, E8).
+            own = {exposure.meta.get("scope", ""), exposure.meta.get("release_scope", "")}
+            own.discard("")
+            unbound = [p.claim for p in fitting if p.scope not in own]
             if rivals or unbound:
                 decision = PROVIDER_AMBIGUOUS
                 found.update(_identities([exposure.claim, *rivals, *unbound], by_file))
@@ -408,15 +411,22 @@ def plan_http_crossings(
             decision = SOURCE_UNRESOLVED
             found.update(_identities(rivals, by_file))
             evidence = hops.merged([_evidence(claim, by_file) for claim in rivals])
+            # A CI-established deployment's artifact refusal names its own reason (E6).
+            reasons = {_meta(claim).get("source_reason", "source_unresolved") for claim in rivals}
+            reason = reasons.pop() if len(reasons) == 1 else "source_unresolved"
             chain = [
                 *start,
                 Hop(hops.SERVICE_IDENTITY, hops.PROVEN, evidence.identity, detail=evidence.detail),
-                Hop(hops.DEPLOYMENT_BINDING, hops.PROVEN, evidence.binding or evidence.identity),
+                Hop(
+                    hops.DEPLOYMENT_BINDING,
+                    evidence.binding_status,
+                    evidence.binding or evidence.identity,
+                ),
                 Hop(
                     hops.SOURCE_BINDING,
-                    hops.UNRESOLVED,
+                    hops.AMBIGUOUS if reason == "artifact_ambiguous" else hops.UNRESOLVED,
                     evidence.source,
-                    reason="source_unresolved",
+                    reason=reason,
                     detail=_joined(rivals, "source_outcome"),
                 ),
                 *hops.unreached(hops.ROUTE, hops.HANDLER),
@@ -581,6 +591,32 @@ def _ambiguous(
     ]
 
 
+#: What a CI-established deployment's link and refusals carry (DF2_PHASE_A.md §6.3): the
+#: repositories, release and variant, the image and its version relation, the bases, and
+#: the places of the binding, the workload, the build and the code.
+DEPLOYMENT_KEYS = (
+    "deployed_by",
+    "built_by",
+    "release",
+    "variant",
+    "namespace",
+    "image",
+    "version_relation",
+    "binding_basis",
+    "build_basis",
+    "source_rule",
+    "artifact_ref",
+    "binding_in",
+    "values_in",
+    "workload_in",
+    "image_in",
+    "published_in",
+    "built_in",
+    "source_in",
+    "declared_in",
+)
+
+
 def _joined(claims: list[UnresolvedRefRecord], key: str) -> str:
     return "; ".join(dict.fromkeys(v for c in claims if (v := _meta(c).get(key, ""))))
 
@@ -611,6 +647,12 @@ def _edge(
     for key in ("identity_in", "bound_in", "scheme_in", "backend_in"):
         if key in exposure.meta:
             record[key] = exposure.meta[key]
+    # A CI-established deployment (DF2): who deploys and builds it, on what basis, and the
+    # artifact between them. Only such a link carries these.
+    if "binding_basis" in exposure.meta:
+        for key in DEPLOYMENT_KEYS:
+            if key in exposure.meta:
+                record[key] = exposure.meta[key]
     for key, line in (
         ("base_at", _line(request.meta.get("base_at"))),
         ("identity_at", _line(exposure.meta.get("identity_at"))),
@@ -673,6 +715,10 @@ def _identities(claims: list[UnresolvedRefRecord], by_file: dict[int, FileRow]) 
             )
         }
         values["provider"] = provider.repo_slug if provider is not None else ""
+        if "binding_basis" in meta:
+            values.update({key: meta[key] for key in DEPLOYMENT_KEYS if key in meta})
+            if "source_reason" in meta:
+                values["reason"] = meta["source_reason"]
         for key, value in values.items():
             if value and value not in rows[key]:
                 rows[key].append(value)

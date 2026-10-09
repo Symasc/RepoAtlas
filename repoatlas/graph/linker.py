@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from repoatlas.config.settings import SaltSettings
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
 from repoatlas.graph.ci_facts import plan_ci_facts
+from repoatlas.graph.deploy_artifacts import plan_deployment_artifacts
 from repoatlas.graph.deploy_identity import DOCKERFILE_UNREAD, NO_BUILD, NOT_IN_IMAGE
 from repoatlas.graph.graphql_artifacts import plan_artifacts
 from repoatlas.graph.graphql_codegen import plan_codegen
@@ -640,10 +641,23 @@ class ReferenceLinker:
                 route_servers=self._knowledge.list_route_servers(exclude_parser=GLOBAL_PARSER),
             )
             edges.extend(decided.edges)
+            # What CI configurations configure, and every step not interpreted
+            # (repoatlas.graph.ci_facts); then the releases they establish, rendered and
+            # joined to the builds configured to publish their images -- the one place that
+            # join is made (repoatlas.graph.deploy_artifacts, DF2_PHASE_A.md §15 E7).
+            ci = plan_ci_facts(claims, by_id)
+            deployed = plan_deployment_artifacts(claims, by_id, decided.code_routes, ci)
             # The one HTTP decision that joins two repositories: exposure and request
             # claims, both per file or derived from them, never this pass's previous output.
             crossings = plan_http_crossings(
-                [*pending, *decided.injected, *decided.exposed, *decided.identities],
+                [
+                    *pending,
+                    *decided.injected,
+                    *decided.exposed,
+                    *decided.identities,
+                    *deployed.exposures,
+                    *deployed.identities,
+                ],
                 file_rows,
                 producer=GLOBAL_PARSER,
             )
@@ -677,9 +691,6 @@ class ReferenceLinker:
                 producer=GLOBAL_PARSER,
             )
             edges.extend((*codegen.edges, *documents.edges, *resolvers.edges, *ownership.edges))
-            # What CI configurations configure, and every step not interpreted: decisions
-            # only, no edge (repoatlas.graph.ci_facts).
-            ci = plan_ci_facts(claims, by_id)
             resolved += (
                 decided.resolved + codegen.resolved + documents.resolved + resolvers.resolved
             )
@@ -693,7 +704,7 @@ class ReferenceLinker:
             watch.detail = (
                 f"{unresolved} still unresolved; {decided.detail}; {crossings.detail}; "
                 f"{codegen.detail}; {documents.detail}; {resolvers.detail}; {ownership.detail}; "
-                f"{artifacts.detail}; {ci.detail}"
+                f"{artifacts.detail}; {ci.detail}; {deployed.detail}"
             )
         stages.append(_timing(watch))
 
@@ -779,6 +790,7 @@ class ReferenceLinker:
                 *persistence.decisions,
                 *mappings.decisions,
                 *ci.decisions,
+                *deployed.decisions,
             ),
             resolved=resolved,
             unresolved=unresolved,
