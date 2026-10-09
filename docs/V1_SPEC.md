@@ -1120,6 +1120,48 @@ every refusal (`link_decisions`):
 
 Change impact follows `GENERATES` outward on this evidence alone (ARCHITECTURE.md, "Generated code: linked by its configuration").
 
+### 7.11 GraphQL documents and resolvers
+
+**Documents in other languages.** A template or string passed to a tag or call named `gql` or `graphql` in
+TypeScript is read as a GraphQL document. Its operations and fragments are symbols of the declaration they are
+written in, at their lines in the host file.
+- A substitution `${X}` *between* definitions splices in another document's definitions. It is recorded by what `X`
+  names: a constant of the module, or a relative import.
+- A substitution inside a definition makes the document something only run time decides. Nothing it selects is
+  recorded, not even its name.
+
+**Binding documents.** A document, whether in a `.graphql` file or embedded, is bound only through a GraphQL Code
+Generator output:
+- the output's `documents:` inputs must cover the document's file;
+- the output's schema must resolve to admitted files.
+
+Each selection, argument, enum literal, input field, variable type and default, inline fragment and fragment spread
+is then a `REFERENCES` edge from the document to the schema coordinate, at its own line. A spread names a fragment
+spliced in by a static substitution, else the one fragment of that name among the configuration's documents.
+
+A document is never bound through an endpoint, a URL or a name.
+
+**Resolvers.** These constructions are recorded with their type definitions and resolver maps:
+- `buildSubgraphSchema`, `makeExecutableSchema`, `createSchema` and `new ApolloServer`, each imported from its
+  library;
+- Ariadne's `make_executable_schema`.
+
+Type definitions count only when anchored to the constructing file: `__dirname`, `import.meta.url`,
+`Path(__file__).parent`. A working-directory-relative path, inline SDL, or anything computed is unsupported.
+
+The map is followed through module constants, exported objects of relative modules, aliased imports and Ariadne
+bindables (`set_field`, `@x.field`, lambdas) to the declaration implementing each field. That declaration
+`REFERENCES` the field's coordinate.
+
+**Decisions** (`link_decisions`):
+
+| Family | Decisions |
+|---|---|
+| `graphql_documents` | `linked`, `document-unresolved`, `schema-unknown`, `document-dynamic`, `document-invalid`, `document-bound` |
+| `graphql_resolvers` | `linked`, `schema-unsupported`, `schema-missing`, `resolvers-unresolved`; per object field `resolved`, `default-resolver` or `resolver-unknown`; `resolver-orphan` |
+
+Code-first schemas, computed resolver maps and Python `gql(...)` documents are not read.
+
 ---
 
 ## 8. Knowledge representation

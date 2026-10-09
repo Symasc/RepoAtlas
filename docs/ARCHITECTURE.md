@@ -120,6 +120,7 @@ RepoAtlas/
 │   │   ├── dockerfile.py   instruction extraction; asks dockerwords.py for proof
 │   │   ├── graphql.py      graphql-core, pinned: schema coordinates; type and document claims
 │   │   ├── graphql_codegen.py  GraphQL Code Generator configuration: one claim per output
+│   │   ├── ts_graphql.py, py_graphql.py  embedded documents, schema construction, resolver maps
 │   │   └── dockerwords.py  static-vs-computed classification of Dockerfile operands
 │   ├── dependencies/   manifest and lockfile parsers; declared↔resolved join; name normalization
 │   │   ├── base.py         DependencyParser protocol
@@ -135,6 +136,7 @@ RepoAtlas/
 │   │   ├── uses*.py, py_*.py, modules.py, packages.py   declaration uses, module and package resolution
 │   │   ├── http_claims.py, http_crossings.py   HTTP routes matched within and across repositories
 │   │   ├── graphql_codegen.py, globs.py   generated code linked to the schema its configuration loads
+│   │   ├── graphql_documents.py, graphql_resolvers.py, graphql_schema.py   documents and resolvers bound
 │   │   └── impact.py, traversal.py, neighbourhood.py   the change-impact walk and bounded expansion
 │   ├── retrieval/      query analysis, exact/lexical/graph retrievers, fusion, precedence
 │   ├── grounding.py    citation verification — deterministic, and the whole of §11
@@ -1539,6 +1541,25 @@ it read. The subject is `<repo>:<config>-><output>[::<coordinate>]`.
 **Impact.** The `generates-graphql` family follows these edges outward, from a definition to what was generated from
 it. `Family.evidence` admits only edges whose resolution records `graphql_codegen`, in every count, page and hub
 query, so Salt's `GENERATES` edges stay outside the walk.
+
+### Documents and resolvers: bound by configuration and construction
+
+`parsers/ts_graphql.py` and `parsers/py_graphql.py` record documents embedded in TypeScript (through the GraphQL
+parser's `read_embedded`), schema constructions, the shapes of exported resolver-like objects, and Ariadne bindables.
+`graph/graphql_documents.py` and `graph/graphql_resolvers.py` decide them in the resolve stage, over schemas
+assembled from indexed SDL symbols (`graph/graphql_schema.py`).
+
+> **Invariant.** A document is bound only to the schema of a configuration whose `documents:` inputs cover it, and
+> a resolver only to the schema of the construction that uses its map. An endpoint, a URL or a shared name never
+> binds either.
+
+**Embedded documents.** An embedded document's symbols belong to the declaration they are written in. So they cut no
+chunk, and the linker keeps them in a source map of their own. A host declaration with the same name keeps its own
+facts, and no host name resolves to the document.
+
+**Document edges.** Every edge is a `REFERENCES` edge from the binding declaration to the coordinate, at the line
+that binds it. Change impact follows these edges inward with the existing `references` family, across a repository
+boundary when the configuration crossed one.
 
 ### The two link passes
 
