@@ -35,8 +35,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from repoatlas.config.settings import DiscoverySettings
+from repoatlas.config.settings import DECLARATIONS_SLUG, DiscoverySettings, declarations_directory
 from repoatlas.discovery.finder import discover_repositories
+from repoatlas.gitstate.client import is_git_repository
 from repoatlas.models.repository import Repository, RepositoryCandidate
 from repoatlas.storage.sqlite.stores import SqliteRepositoryStore
 
@@ -203,6 +204,11 @@ def plan_repository_set(
     """
     unreadable: list[Path] = []
     discovered = discover_repositories(root, settings, unreadable=unreadable)
+    declarations = declarations_candidate()
+    if declarations is not None and all(
+        _canonical(candidate.path) != _canonical(declarations.path) for candidate in discovered
+    ):
+        discovered = [*discovered, declarations]
 
     found = {_canonical(candidate.path): candidate for candidate in discovered}
     by_path = {_canonical(repo.path): repo for repo in registered}
@@ -231,6 +237,29 @@ def plan_repository_set(
         conflicts=conflicts,
         unreadable=tuple(unreadable),
     )
+
+
+def declarations_candidate() -> RepositoryCandidate | None:
+    """The operator declarations source, as the reserved repository ``@declarations``.
+
+    Only when its directory (:func:`~repoatlas.config.settings.declarations_directory`)
+    exists and is a git repository the operator made: RepoAtlas never initialises,
+    commits to, or publishes it, and a plain directory there is not read (``status`` says
+    so). It is enumerated, hashed, synced and checked for freshness like any repository,
+    under a slug that is not a path, and kept apart from the workspace's own (DF1, D1-1).
+    """
+    directory = declarations_directory()
+    if not directory.is_dir() or not is_git_repository(directory):
+        return None
+    return RepositoryCandidate(
+        name=directory.name, slug=DECLARATIONS_SLUG, path=directory.resolve()
+    )
+
+
+def declarations_ignored() -> Path | None:
+    """The declarations directory, when it exists but is not a git repository."""
+    directory = declarations_directory()
+    return directory if directory.is_dir() and not is_git_repository(directory) else None
 
 
 def register(

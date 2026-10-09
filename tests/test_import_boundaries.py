@@ -264,6 +264,7 @@ def test_the_exported_names_are_the_deterministic_ones() -> None:
     assert sorted(services.__all__) == [
         "Workspace",
         "initialize",
+        "list_decisions",
         "list_repositories",
         "locate",
         "locate_diagnostic",

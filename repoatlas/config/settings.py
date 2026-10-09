@@ -57,6 +57,23 @@ def config_path() -> Path:
     return _xdg_dir("XDG_CONFIG_HOME", ".config") / "config.yaml"
 
 
+#: The reserved repository slug of the operator declarations source (DF1, U6, D1-1). Not a
+#: path, so a citation into it never carries a home directory.
+DECLARATIONS_SLUG = "@declarations"
+
+
+def declarations_directory() -> Path:
+    """``$XDG_CONFIG_HOME/repoatlas/.env-declarations``, or ``$REPOATLAS_DECLARATIONS``.
+
+    A git repository the operator creates and maintains by hand; RepoAtlas never
+    initialises it, commits to it or publishes it. Indexed as the reserved source
+    :data:`DECLARATIONS_SLUG` when it exists and is a git repository."""
+    override = os.environ.get("REPOATLAS_DECLARATIONS")
+    if override:
+        return Path(override)
+    return _xdg_dir("XDG_CONFIG_HOME", ".config") / ".env-declarations"
+
+
 def database_path(settings: Settings | None = None) -> Path:
     """``$XDG_DATA_HOME/repoatlas/atlas.db``, or the configured override."""
     if settings is not None and settings.storage.database is not None:

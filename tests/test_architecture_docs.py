@@ -151,7 +151,17 @@ def test_the_document_describes_the_commands_the_cli_registers(document: str) ->
         callback = command.callback
         assert callback is not None, "every registered command has a callback"
         registered.add(command.name or callback.__name__)
-    assert registered == {"init", "sync", "status", "repos", "locate", "mcp", "serve", "ui"}
+    assert registered == {
+        "init",
+        "sync",
+        "status",
+        "repos",
+        "decisions",
+        "locate",
+        "mcp",
+        "serve",
+        "ui",
+    }
 
     # And the reverse direction: nothing removed is offered as a command.
     for retired in ("ask", "debug"):
