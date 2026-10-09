@@ -191,6 +191,7 @@ describes every stage.
 | | |
 |---|---|
 | Code: definitions, imports, calls, environment reads | Python, TypeScript, JavaScript, Bash |
+| Persistence | Prisma schemas and their migrations and generated client; PostgreSQL DDL; Knex and SQL queries in TypeScript and Python; typed value mappings |
 | GraphQL | Schema coordinates and same-file type links; operations and fragments, also in TypeScript `gql` templates; GraphQL Code Generator, ariadne-codegen and graphql-config configurations; resolver maps (Apollo, graphql-tools, graphql-yoga, Ariadne); federated supergraph copies; schema fetch scripts |
 | Configuration and deployment | YAML, JSON, Salt states, Jinja templates, Dockerfiles, docker-compose, Helm charts |
 | Packages | PyPI, npm and RubyGems manifests and lockfiles |
@@ -212,8 +213,12 @@ definition named by its schema coordinate. Links come from configuration, never 
 - a federated supergraph copy is tied to the service that provides each coordinate, through
   the deployment that serves the subgraph's URL and the schema that service loads.
 
-Every binding, and every refusal, is a stored decision. Database mappings are not yet linked.
-Matching names alone never connect schemas or repositories.
+Prisma schemas and PostgreSQL migrations are read too. A query is bound to a column only when
+its client reads the environment variable the repository's own Prisma datasource reads, and an
+explicit typed mapping (`Record<A, B>`, `dict[A, B]`) maps one enum's members to another's.
+
+Every binding, and every refusal, is a stored decision. Matching names alone never connect
+schemas, databases or repositories.
 
 ## Scope and limitations
 
