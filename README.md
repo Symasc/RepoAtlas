@@ -135,6 +135,7 @@ repoatlas init ~/work/repos        # index every repository under a directory
 repoatlas sync                     # update the index
 repoatlas status                   # how the index stands against the working tree
 repoatlas repos                    # list indexed repositories
+repoatlas decisions --family ci_step   # stored link decisions, counted, one page at a time
 repoatlas locate "Where is SERVICE_HOST configured?"   # ranked file-and-line evidence
 repoatlas ui                       # open the graph explorer
 repoatlas mcp                      # serve the tools to an agent
