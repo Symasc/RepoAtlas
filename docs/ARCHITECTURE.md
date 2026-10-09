@@ -2207,8 +2207,8 @@ The global pass renders a read Ingress under each release a Tiltfile binds, with
 a falsy or absent `if` value means it is not rendered; a missing list or a values file cut at the cap leaves it
 unresolved; each host substitution must read a literal value. A rendered host is an identity tied as the chart's
 Service is (`identity_source: kubernetes-ingress`, citing the host, `listen-ports`, backend and release lines), or an
-identity that reaches no code. No CI job binds a release: a CircleCI orb's parameters mean what the orb says, and the
-orb is not in any repository.
+identity that reaches no code. No CI job binds a release yet: the CI facts below decide which releases a CI
+configuration establishes, and the deployment pass reads them from DF2.
 
 Every read Ingress also yields a host pattern per rule and scheme, for the deployments no local source establishes:
 the literal text and the chart's name match exactly, and each value or item substitution is a hole. A hole bounded by
@@ -2220,6 +2220,66 @@ that link ambiguous.
 **Security.** HTTP extraction reads only files the sync already admitted, so an excluded `.env` holding `API_URL`
 declares nothing and is not cross-resolved. Nothing resolves DNS, fetches a specification or `$ref`, probes an
 endpoint, starts a server, or imports repository code.
+
+### CI configurations, images and operator declarations
+
+> **Invariant.** A CI configuration is read for what it *configures*, never run. Configured publishing is not a push,
+> a bound release is not a deployment, and nothing here is evidence of what is running.
+
+> **Invariant.** An action, orb or command RepoAtlas gives no semantics to infers none. It is recorded and decided as
+> `unsupported-action`, whatever its job and however its name reads.
+
+**What is read.** `.circleci/config.yml` and `.github/workflows/*.y(a)ml` at a repository's root, by path
+(`repoatlas/parsers/ci_config.py`); any other file under `.github` is not a workflow. The YAML is walked from
+PyYAML's composed nodes, never constructed: `on` is the key's text, `<<` merges apply local keys first, an alias
+cycle is cut, and the walk, jobs, steps and claims are capped, with the cut reported. Each step is one of:
+
+* an **action** -- recognised only at an exact listed revision (`repoatlas/parsers/ci_semantics.py`): a small
+  *inert* table (checkout, the official `setup-*`, cache, artifacts, registry login) and one *builtin*,
+  `docker/build-push-action` v5/v6, whose literal `push: true` configures publishing. A SHA pin, a branch, an
+  unlisted major, a `docker://` or a local action is unsupported, and only its reference is kept, never its inputs;
+* a **run script** -- read from the bash syntax tree (`repoatlas/parsers/ci_shell.py`) for `docker build/push/tag`,
+  `helm upgrade/install` and `kubectl apply` at the top level (list members included). Inside a loop, conditional,
+  function, subshell, pipeline or substitution a recognised command is *nested* and binds nothing. A top-level
+  `./script` is recorded as a delegation, by its path only. CI expressions become parts (`${{ secrets.* }}` is
+  withheld) and only recognised flag values are kept, never command text;
+* a **CircleCI orb job or command** -- an inline orb is source; another orb's job is unsupported unless an operator
+  declaration gives it meaning, so its parameters are kept as parts, credentials withheld;
+* a step of a **reusable workflow definition** (`workflow_call` only) depends on its caller's inputs: a recognised
+  command there is `caller-dependent`, never a build or release.
+
+**Images.** A reference is parsed by the distribution grammar (`repoatlas/models/container_image.py`): the registry
+is the first component only when it holds `.` or `:` or is `localhost`, the port is its own field, the digest is
+split before the tag, and an implied Docker Hub is flagged. Its join key is host, port and path, only when all three
+are literal; a registry host is never dropped to make one. Publication is decided per job: a later `docker push` of
+the reference (or of a `docker tag` alias), `--push`, or the builtin's literal `push: true`.
+
+**Templates and values.** Chart workloads (Deployment, StatefulSet, DaemonSet) are read as text, like Services: under
+at most one `if .Values.<path>` around the document; a `range` or `with` leaves it unread. A control action around
+a container field leaves that field unread; an action that can add fields where it stands leaves the field it sits
+under unread. An image is read only as literal text with `.Values`/`.Chart` substitutions (the `helm create` image
+line included); environment entries record a name and where the value comes from, never the value. ConfigMaps
+record their keys. Every `values*.y(a)ml` records its literal leaves, and a release also records each `-f` file it
+names, whatever its name, for the deployment pass to evaluate. Compose services record environment names.
+
+**Decisions** (`repoatlas/graph/ci_facts.py`, stored in `link_decisions`, no edge):
+
+| Family | Decisions |
+|---|---|
+| `ci_build` | `publish-configured`, `built-not-published`, `publication-unresolved`, `image-unresolved`, `registry-unresolved` |
+| `ci_release` | `bound`, `chart-external`, `values-unresolved` (only for an established release) |
+| `ci_step` | `unsupported-action`, `delegated-to-script`, `control-flow-unsupported`, `dynamic-config`, `caller-dependent` |
+| `ci_semantics` | `accepted`, `unused`, `conflict`, `invalid`, `outside-declarations` |
+
+`repoatlas decisions` lists them read-only, counted in full and one bounded page at a time; impact lists those near a
+walk within its cap.
+
+**Operator declarations.** A private orb's semantics can be declared in YAML files carrying
+`repoatlas: ci-semantics/v1`, mapping an exact `namespace/name@major.minor.patch` and job to a Helm release or an
+image build, and a slug to its CircleCI project name. They count only from the reserved source `@declarations`
+(§6); one found in an ordinary repository is `outside-declarations` and ignored, two for one orb job are a
+`conflict` and both are ignored. A release a declaration establishes cites it (`declared_in`) and carries the basis
+`declared`, never `source`.
 
 ## 6. The indexing pipeline
 
@@ -2318,6 +2378,12 @@ set and its order depend on the tree, never on filesystem enumeration order.
 > **Invariant.** Discovery never reports a subtree it could not read as a subtree that held nothing.
 
 ### Repository-set reconciliation
+
+**The declarations source.** When `~/.config/repoatlas/.env-declarations/` (or `$REPOATLAS_DECLARATIONS`) exists and
+is a git repository, reconciliation adds it as the reserved repository `@declarations`: enumerated by `git ls-files`,
+hashed, synced and checked for freshness like any repository, under a slug that is not a path. RepoAtlas never
+initialises, commits to or publishes it; a plain directory there is not read, and `status` says so. It is not
+discovered under the root, and listings (`repos`, `repositories`) leave it out unless a call names it.
 
 > **Invariant.** A managed root is authoritative for repository membership; registration is not a permanent
 > snapshot taken only at `init` time.
@@ -3994,6 +4060,12 @@ symlinks and reads the diagnostics would learn which paths exist outside the tre
 information the boundary exists to withhold.
 
 ### Secrets
+
+**Deployment facts.** CI, values, ConfigMap and compose readers never keep a credential
+(`repoatlas/parsers/withhold.py`): a value whose name is credential-like -- split at separators and camelCase, so
+`auth.rootPassword` and `API_TOKEN` alike -- whose text carries user information in a URL, or that references
+`secrets.*`, is stored as `<withheld>`; environment and ConfigMap values are not stored at all. The audit's
+guarantee covers facts, decisions, tool outputs and logs; raw indexed search text (the chunks) is outside it.
 
 Three invariants, all tested:
 
