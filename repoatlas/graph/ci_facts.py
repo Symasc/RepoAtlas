@@ -165,9 +165,15 @@ def _site_evidence(meta: Mapping[str, str]) -> dict[str, object]:
     return found
 
 
+def ref_of(family: str, subject: str) -> str:
+    """A decision's stable ref: its family and subject, hashed."""
+    return hashlib.sha256(f"{family}\0{subject}".encode()).hexdigest()[:24]
+
+
 class DecisionRows:
     def __init__(self) -> None:
         self.rows: dict[str, LinkDecisionRow] = {}
+        self._owners: dict[str, tuple[object, ...]] = {}
 
     def add(
         self,
@@ -177,8 +183,18 @@ class DecisionRows:
         subject: str,
         decision: str,
         evidence: Mapping[str, object],
-    ) -> None:
-        ref = hashlib.sha256(f"{family}\0{subject}".encode()).hexdigest()[:24]
+    ) -> str:
+        """Record one decision, and return the subject it is recorded under: the given one,
+        or -- when another claim already holds it (two helm commands of one step, on one
+        line) -- that subject numbered, so neither overwrites the other (E11)."""
+        owner = (claim.id, claim.file_id, claim.target_key, claim.line_start)
+        base, number = subject, 1
+        ref = ref_of(family, subject)
+        while ref in self.rows and self._owners[ref] != owner:
+            number += 1
+            subject = f"{base}~{number}"
+            ref = ref_of(family, subject)
+        self._owners[ref] = owner
         self.rows[ref] = LinkDecisionRow(
             decision_ref=ref,
             family=family,
@@ -191,6 +207,7 @@ class DecisionRows:
             decision=decision,
             evidence_json=json.dumps(evidence, sort_keys=True, separators=(",", ":")),
         )
+        return subject
 
 
 @dataclass
@@ -329,7 +346,7 @@ def _builds(
             evidence["declared_in"] = declared_in
         subject = f"{origin.repo_slug}:{origin.rel_path}::{_site(meta)}@{claim.line_start}/{index}"
         decision = str(ref.get("decision", "image-unresolved"))
-        decisions.add(CI_BUILD, origin, claim, subject, decision, evidence)
+        subject = decisions.add(CI_BUILD, origin, claim, subject, decision, evidence)
         if into is not None:
             resolved = meta.get("context_resolved", "true") == "true"
             into.append(
@@ -422,7 +439,7 @@ class _Context:
         else:
             decision = "bound"
         subject = f"{origin.repo_slug}:{origin.rel_path}::{_site(meta)}@{claim.line_start}"
-        self.decisions.add(CI_RELEASE, origin, claim, subject, decision, evidence)
+        subject = self.decisions.add(CI_RELEASE, origin, claim, subject, decision, evidence)
         self.releases.append(
             CiRelease(
                 claim=claim,

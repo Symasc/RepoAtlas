@@ -39,7 +39,6 @@ an image was pushed or exists, or which version runs: only what the files config
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from collections import defaultdict
@@ -48,7 +47,14 @@ from dataclasses import dataclass, field
 
 import yaml
 
-from repoatlas.graph.ci_facts import CiBuild, CiFactsPlan, CiRelease, DecisionRows, Place
+from repoatlas.graph.ci_facts import (
+    CiBuild,
+    CiFactsPlan,
+    CiRelease,
+    DecisionRows,
+    Place,
+    ref_of,
+)
 from repoatlas.graph.deploy_identity import (
     _FALSY,
     _INCLUDE,
@@ -793,7 +799,7 @@ class _Planner:
         decision: str,
         evidence: Mapping[str, object],
     ) -> str:
-        self.decisions.add(
+        subject = self.decisions.add(
             CONTAINER_ARTIFACT,
             origin,
             workload.model_copy(update={"line_start": line, "line_end": line}),
@@ -801,7 +807,7 @@ class _Planner:
             decision,
             evidence,
         )
-        return hashlib.sha256(f"{CONTAINER_ARTIFACT}\0{subject}".encode()).hexdigest()[:24]
+        return ref_of(CONTAINER_ARTIFACT, subject)
 
     def select(
         self, service: UnresolvedRefRecord, chart: _Chart, release: _Release
