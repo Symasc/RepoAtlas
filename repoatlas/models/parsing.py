@@ -102,6 +102,11 @@ USES_ONLY_KINDS = frozenset({"variable", "type-alias"})
 #: ``meta["value"]`` is the string it stands for.
 ENUM_MEMBER = "enum-member"
 
+#: The ``kind`` of a GraphQL operation or fragment embedded in another language's source
+#: (repoatlas.parsers.ts_graphql). It belongs to the declaration it is written in, and no
+#: name in that language ever resolves to it.
+EMBEDDED_DOCUMENT = "graphql-document"
+
 
 class EdgeDirection(StrEnum):
     """Which end of an edge the queried entity is required to sit on.

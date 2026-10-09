@@ -87,6 +87,19 @@ _UNREAD_KINDS = frozenset({"code", "introspection", "computed", "other"})
 
 
 @dataclass(frozen=True, slots=True)
+class CodegenProject:
+    """One configured output whose schema resolved to admitted files: what its
+    documents are validated against (repoatlas.graph.graphql_documents)."""
+
+    config: FileRow
+    #: Where the output's entry is, as ``<repository>/<path>:<line>``.
+    at: str
+    #: The documents inputs, root first, as the configuration reader recorded them.
+    documents: tuple[dict[str, object], ...]
+    schema: tuple[FileRow, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CodegenPlan:
     edges: tuple[EdgeRecord, ...] = ()
     decisions: tuple[LinkDecisionRow, ...] = ()
@@ -94,6 +107,7 @@ class CodegenPlan:
     unresolved: int = 0
     crossings: int = 0
     detail: str = ""
+    projects: tuple[CodegenProject, ...] = ()
 
 
 def plan_codegen(
@@ -137,6 +151,7 @@ def plan_codegen(
         unresolved=unresolved,
         crossings=planner.crossings,
         detail=f"codegen: {detail or 'nothing configured'}",
+        projects=tuple(planner.projects),
     )
 
 
@@ -165,6 +180,7 @@ class _Planner:
         self.decisions: dict[str, LinkDecisionRow] = {}
         self.edges: list[EdgeRecord] = []
         self.crossings = 0
+        self.projects: list[CodegenProject] = []
 
     # -- one output ----------------------------------------------------------------
 
@@ -193,6 +209,14 @@ class _Planner:
             return self._refuse(current, SCHEMA_UNSUPPORTED, unsupported=unread)
         if missing or not schema:
             return self._refuse(current, SCHEMA_MISSING, missing=missing)
+        self.projects.append(
+            CodegenProject(
+                config=origin,
+                at=here,
+                documents=tuple(_list(meta.get("documents"))),
+                schema=tuple(schema),
+            )
+        )
 
         if meta.get("preset") is not None:
             return self._refuse(current, OUTPUT_UNSUPPORTED, reason="preset")
