@@ -82,12 +82,39 @@ BROKEN_GRAPHQL: dict[str, str] = {
 }
 
 
+BROKEN_PRISMA: dict[str, str] = {
+    "unclosed-block": "model Parcel {\n  id String @id\n",
+    "unterminated-string": 'datasource db {\n  url = "open\n}\n',
+    "unterminated-comment": "/* never closed\nmodel A {}\n",
+    "attribute-without-name": "model A {\n  id String @\n}\n",
+    "stray-close-brace": "}\n",
+    "binary-ish": "\x00\x01\x02 not text at all\n",
+    "empty": "",
+    "only-a-comment": "// nothing here\n",
+    "very-deep-arguments": "model A {\n  id String @default(" + "f(" * 500 + ")" * 501 + "\n}\n",
+    "very-deep-list": "model A {\n  id String @default(" + "[" * 500 + "]" * 500 + ")\n}\n",
+}
+
+BROKEN_SQL: dict[str, str] = {
+    "unterminated-string": "CREATE TYPE t AS ENUM ('open);\n",
+    "unclosed-paren": "CREATE TABLE t (id int;\n",
+    "alter-without-name": "ALTER TYPE ;\n",
+    "binary-ish": "\x00\x01\x02 not text at all\n",
+    "empty": "",
+    "only-a-comment": "-- nothing here\n",
+    "very-deep-parens": "SELECT " + "(" * 2000 + "1" + ")" * 2000 + ";\n",
+    "mysql": "CREATE TABLE `t` (`a` ENUM('x'));\n",
+}
+
+
 def _every_broken_input() -> list[tuple[str, str, str]]:
     return [
         *[("broken.yaml", name, text) for name, text in BROKEN_YAML.items()],
         *[("broken.sls", name, text) for name, text in BROKEN_SALT.items()],
         *[("broken.jinja", name, text) for name, text in BROKEN_JINJA.items()],
         *[("broken.graphql", name, text) for name, text in BROKEN_GRAPHQL.items()],
+        *[("broken.prisma", name, text) for name, text in BROKEN_PRISMA.items()],
+        *[("broken.sql", name, text) for name, text in BROKEN_SQL.items()],
     ]
 
 

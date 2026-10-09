@@ -23,6 +23,25 @@ from tests.impact_corpus import DIRECTION, HTTP_API, HTTP_WEB, build, verify_ste
 from tests.schema_corpus import API as CODEGEN_API
 
 GLOBAL = CapabilityContext(scope=CapabilityScope.GLOBAL)
+
+#: Two enums and a typed mapping between them (repoatlas.graph.value_mappings).
+VALUE_MAP = {
+    "package.json": '{"name": "value-map", "private": true}',
+    "src/stages.ts": (
+        "export enum Stage {\n"  # 1
+        "  Packed = 'PACKED',\n"  # 2
+        "  Sent = 'SENT',\n"  # 3
+        "}\n"  # 4
+        "export enum Column {\n"  # 5
+        "  packed = 'packed',\n"  # 6
+        "  sent = 'sent',\n"  # 7
+        "}\n"  # 8
+        "export const toColumn: Record<Stage, Column> = {\n"  # 9
+        "  [Stage.Packed]: Column.packed,\n"  # 10
+        "  [Stage.Sent]: Column.sent,\n"  # 11
+        "};\n"  # 12
+    ),
+}
 D = "sym:direction:"
 
 
@@ -127,7 +146,7 @@ CASES: dict[str, Case] = {
         ImpactRole.DEPENDENT,
         ("IMPORTS", "file:direction:src/b.ts", "file:direction:src/a.ts"),
     ),
-    "generates-graphql": Case(
+    "generates": Case(
         "sym:parcel-api:schema/parcels.graphql:Stage:1",
         "sym:parcel-api:src/gen/types.ts:Stage:2",
         ImpactRole.DEPENDENT,
@@ -135,6 +154,16 @@ CASES: dict[str, Case] = {
             "GENERATES",
             "sym:parcel-api:schema/parcels.graphql:Stage:1",
             "sym:parcel-api:src/gen/types.ts:Stage:2",
+        ),
+    ),
+    "maps-to": Case(
+        "sym:value-map:src/stages.ts:Stage.Packed:2",
+        "sym:value-map:src/stages.ts:Column.packed:6",
+        ImpactRole.DEPENDENT,
+        (
+            "MAPS_TO",
+            "sym:value-map:src/stages.ts:Stage.Packed:2",
+            "sym:value-map:src/stages.ts:Column.packed:6",
         ),
     ),
     MEMBER: Case("file:direction:src/a.ts", f"{D}src/a.ts:A:1", ImpactRole.MEMBER, None),
@@ -159,6 +188,7 @@ def indexed(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Workspace]:
             "http-api": HTTP_API,
             "http-web": HTTP_WEB,
             "parcel-api": CODEGEN_API,
+            "value-map": VALUE_MAP,
         },
     )
     yield workspace

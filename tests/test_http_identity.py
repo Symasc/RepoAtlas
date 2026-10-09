@@ -484,4 +484,6 @@ def test_edge_types_are_appended_and_existing_values_are_unchanged() -> None:
         "USES",
         # A request reaching the handler another repository serves it with.
         "CALLS_HTTP_HANDLER",
+        # One enum member mapped to another by an explicit typed mapping.
+        "MAPS_TO",
     )
