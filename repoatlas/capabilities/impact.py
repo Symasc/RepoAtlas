@@ -30,6 +30,7 @@ from pathlib import PurePosixPath
 from repoatlas.dependencies.normalize import PYPI
 from repoatlas.graph.declared import REFUSED_AS, TargetKind, classify_dependency_target
 from repoatlas.graph.graphql_codegen import FAMILY as GENERATION
+from repoatlas.graph.graphql_ownership import EVIDENCE as COMPOSITION
 from repoatlas.graph.http_crossings import HTTP_CROSSING
 from repoatlas.graph.impact import ImpactWalk, Node, Tier, WalkResult, is_test_path
 from repoatlas.graph.keys import file_key, package_key
@@ -40,6 +41,7 @@ from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.impact import (
     MAX_SEED_CANDIDATES,
     CodeGeneration,
+    Composition,
     Granularity,
     HttpCrossing,
     HubImpact,
@@ -507,6 +509,9 @@ def assemble(
         generated = node.step.resolution.get(GENERATION)
         if isinstance(generated, dict):
             return f"{node.step.reading}, by {generated.get('config')}"
+        composed = node.step.resolution.get(COMPOSITION)
+        if isinstance(composed, dict):
+            return f"{COMPOSED}, as subgraph {composed.get('graph')} at {composed.get('url')}"
         return node.step.reading
 
     tests = [n for n in ranked if is_test_path(n.path) and n.role is not ImpactRole.MEMBER]
@@ -568,6 +573,7 @@ def assemble(
         crossing = _crossing(resolution, walk.slug_of(row.file_repo_id) if row else None, row)
         http = http_crossing(resolution, walk.slug_of(row.file_repo_id) if row else None)
         generation = code_generation(resolution)
+        composition = graph_composition(resolution)
         via = tuple(str(v) for v in _list(resolution.get("via")))
         if crossing is not None:
             via = tuple(f"{crossing.from_repository}/{v}" for v in via)
@@ -587,7 +593,9 @@ def assemble(
             step=ImpactStep(
                 edge=step.edge_type,
                 derived=step.derived,
-                reading=step.reading,
+                # One family follows both kinds of GENERATES evidence; a composition reads
+                # as what it is.
+                reading=COMPOSED if composition is not None else step.reading,
                 use=_text(resolution.get("use")),
                 at=at,
                 lines=lines,
@@ -598,6 +606,7 @@ def assemble(
                 crossing=crossing,
                 http=http,
                 generation=generation,
+                composition=composition,
                 resolution=(resolution or None) if full else None,
             ),
             boundaries=tuple(boundaries),
@@ -1135,6 +1144,24 @@ def code_generation(resolution: Mapping[str, object]) -> CodeGeneration | None:
         output=str(record.get("output")),
         plugin=str(record.get("plugin")),
         member_value=str(value) if value is not None else None,
+        decision_ref=str(record.get("decision_ref")),
+    )
+
+
+#: How a step from a provider definition to a supergraph copy of it reads.
+COMPOSED = "is composed from"
+
+
+def graph_composition(resolution: Mapping[str, object]) -> Composition | None:
+    """An edge's federation-composition evidence, or ``None``."""
+    record = resolution.get(COMPOSITION)
+    if not isinstance(record, dict):
+        return None
+    return Composition(
+        graph=str(record.get("graph")),
+        url=str(record.get("url")),
+        identity=str(record.get("identity")),
+        provider=str(record.get("provider")),
         decision_ref=str(record.get("decision_ref")),
     )
 
