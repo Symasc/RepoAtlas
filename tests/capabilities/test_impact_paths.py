@@ -171,6 +171,8 @@ def test_compact_leaves_out_empty_fields_and_full_adds_resolutions(indexed: Work
         "packages",
         "hubs",
         "unresolved",
+        "decisions",
+        "decisions_omitted",
         "omitted",
         "summary",
         "freshness",
