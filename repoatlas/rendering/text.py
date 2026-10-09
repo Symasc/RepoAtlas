@@ -16,7 +16,7 @@ from pathlib import Path
 
 from repoatlas.models.dependencies import Agreement, DependencyPackage
 from repoatlas.models.evidence import EvidenceSet
-from repoatlas.models.reports import StatusReport, SyncReport
+from repoatlas.models.reports import DecisionsReport, StatusReport, SyncReport
 from repoatlas.models.repository import Repository
 
 
@@ -121,6 +121,11 @@ def _drift_notice(report: StatusReport) -> list[str]:
             ]
         )
     lines.extend(_unreadable_notice(report.unreadable_paths))
+    if report.declarations_ignored is not None:
+        lines.append(
+            f"Declarations directory {report.declarations_ignored} is not a git repository; "
+            "it is not read (run `git init` there to use it)."
+        )
     return lines
 
 
@@ -371,3 +376,27 @@ def _format_time(value: object) -> str:
     if value is None:
         return "never"
     return str(value).split(".")[0].replace("+00:00", "Z")
+
+
+def render_decisions(report: DecisionsReport) -> str:
+    """The total, the counts by family and outcome, then one page of decisions."""
+    if report.total == 0:
+        return "No stored decisions match."
+    lines = [f"{report.total} decision(s)"]
+    for count in report.counts:
+        lines.append(f"  {count.count:>6}  {count.family}  {count.decision}")
+    lines.append("")
+    for entry in report.decisions:
+        place = f"{entry.repository}/{entry.path}" + (
+            f":{entry.line}" if entry.line is not None else ""
+        )
+        lines.append(f"{place}  {entry.family}  {entry.decision}")
+        lines.append(f"    {entry.subject}")
+    shown = len(report.decisions)
+    if report.remaining:
+        lines.append("")
+        lines.append(
+            f"{shown} shown from offset {report.offset}; {report.remaining} more "
+            f"(--offset {report.offset + shown})"
+        )
+    return "\n".join(lines)

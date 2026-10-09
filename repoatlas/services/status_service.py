@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+from repoatlas.config.settings import DECLARATIONS_SLUG
+from repoatlas.discovery.reconcile import declarations_ignored
+from repoatlas.errors import ContextResolutionError
 from repoatlas.freshness import legacy_index_state
 from repoatlas.models.context import ContextScope, RepositoryContext
 from repoatlas.models.freshness import FreshnessDepth
-from repoatlas.models.reports import RepositoryStatus, StatusReport
+from repoatlas.models.reports import (
+    DecisionCount,
+    DecisionEntry,
+    DecisionsReport,
+    RepositoryStatus,
+    StatusReport,
+)
 from repoatlas.models.repository import Repository
 from repoatlas.services.freshness_service import (
     current_facts_version,
@@ -104,6 +113,7 @@ def status(workspace: Workspace, context: RepositoryContext) -> StatusReport:
         missing_repositories=tuple(r.slug or r.name for r in drift.missing) if drift else (),
         conflicting_repositories=tuple(c.candidate.slug for c in drift.conflicts) if drift else (),
         unreadable_paths=drift.unreadable if drift else (),
+        declarations_ignored=declarations_ignored(),
         index_state=overall,
     )
 
@@ -118,4 +128,80 @@ def list_repositories(workspace: Workspace) -> list[Repository]:
     about. Drift is reported where it is actionable: ``status`` names the
     unregistered repositories, and a global ``sync`` registers them.
     """
-    return workspace.repositories.list_all()
+    # The operator declarations source is the workspace's configuration, not one of its
+    # repositories: `status` shows it, a listing does not (DF1, D1-1).
+    return [repo for repo in workspace.repositories.list_all() if repo.slug != DECLARATIONS_SLUG]
+
+
+#: The most decisions one ``repoatlas decisions`` page lists.
+MAX_DECISIONS_PAGE = 500
+
+
+def list_decisions(
+    workspace: Workspace,
+    *,
+    family: str | None = None,
+    decision: str | None = None,
+    repository: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> DecisionsReport:
+    """The stored link decisions the filters select: their total, their counts by family
+    and outcome, and one page of them in a fixed order (repository, path, line, family,
+    subject, ref). Reads only; every decision stays countable however many there are."""
+    slugs = {
+        repo.id: repo.slug for repo in workspace.repositories.list_all() if repo.id is not None
+    }
+    repo_id = None
+    if repository is not None:
+        repo_id = next((rid for rid, slug in slugs.items() if slug == repository), None)
+        if repo_id is None:
+            raise ContextResolutionError(
+                f"no managed repository is {repository!r}",
+                detail="`repoatlas repos` lists the managed repositories",
+            )
+    rows = [
+        row
+        for row in workspace.knowledge.list_link_decisions(family=family, repo_id=repo_id)
+        if decision is None or row.decision == decision
+    ]
+    rows.sort(
+        key=lambda r: (
+            slugs.get(r.repo_id, ""),
+            r.path or "",
+            r.line_start or 0,
+            r.family,
+            r.subject,
+            r.decision_ref,
+        )
+    )
+    counts: dict[tuple[str, str], int] = {}
+    for row in rows:
+        counts[(row.family, row.decision)] = counts.get((row.family, row.decision), 0) + 1
+    limit = max(1, min(limit, MAX_DECISIONS_PAGE))
+    offset = max(0, offset)
+    page = rows[offset : offset + limit]
+    return DecisionsReport(
+        family=family,
+        decision=decision,
+        repository=repository,
+        total=len(rows),
+        counts=tuple(
+            DecisionCount(family=f, decision=d, count=n) for (f, d), n in sorted(counts.items())
+        ),
+        offset=offset,
+        limit=limit,
+        decisions=tuple(
+            DecisionEntry(
+                repository=slugs.get(row.repo_id, ""),
+                path=row.path or "",
+                line=row.line_start,
+                family=row.family,
+                decision=row.decision,
+                subject=row.subject,
+                decision_ref=row.decision_ref,
+            )
+            for row in page
+        ),
+        remaining=max(0, len(rows) - offset - len(page)),
+    )

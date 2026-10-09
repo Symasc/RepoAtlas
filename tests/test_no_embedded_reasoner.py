@@ -183,7 +183,7 @@ def test_no_deterministic_entry_point_loads_anything_named_llm() -> None:
 
 #: What `repoatlas` is, after the removal. Pinned as a set rather than described,
 #: so that adding an undocumented entry point is a test failure (§22).
-EXPECTED_COMMANDS = {"init", "sync", "status", "repos", "locate", "mcp", "serve", "ui"}
+EXPECTED_COMMANDS = {"init", "sync", "status", "repos", "decisions", "locate", "mcp", "serve", "ui"}
 
 
 def _registered_commands() -> set[str]:
