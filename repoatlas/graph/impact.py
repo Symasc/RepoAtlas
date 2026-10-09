@@ -198,14 +198,25 @@ FAMILIES: tuple[Family, ...] = (
     # A generated declaration changes with the schema definition its configuration loads it
     # from: outward, from the definition, and only on that evidence.
     Family(
-        "generates-graphql",
+        "generates",
         EdgeType.GENERATES,
         OUT,
         ImpactRole.DEPENDENT,
         Tier.EXACT,
         "is generated from",
-        # the configuration that generated it, or the composition that copied it
-        evidence=("graphql_codegen", "graphql_composition"),
+        # the configuration that generated it, the composition that copied it, or the
+        # Prisma Migrate migration written from it
+        evidence=("graphql_codegen", "graphql_composition", "prisma_migrate"),
+    ),
+    # An explicit typed mapping maps one enum member to another: what the key maps to
+    # changes with it. Outward only, from the key.
+    Family(
+        "maps-to",
+        EdgeType.MAPS_TO,
+        OUT,
+        ImpactRole.DEPENDENT,
+        Tier.EXACT,
+        "is mapped from",
     ),
     Family(
         "imports",
