@@ -243,6 +243,18 @@ If several repositories serve or expose the same node, they are all candidates. 
 
 An endpoint a specification composes from a server URL and a path has no single source span, so its edge is not citable. Cite the server and route lines, which are separately citable.
 
+**Schema and persistence steps, and the links not made.** A `repoatlas_impact` step joining a schema definition to code says what it rests on, each with the `decision_ref` of the decision that made it:
+
+- `generation`: the code-generator configuration, the definition, the output and plugin, and the value of a generated enum member;
+- `composition`: the supergraph's subgraph and URL, the deployment that serves it, and the provider definition;
+- `migration`: the Prisma schema, the migration, and the database type it creates or alters;
+- `client`: the Prisma schema and the specifier its generated client is imported by;
+- `query`: the database (as the Prisma schema that describes it), table, column, operator and value a query compares;
+- `mapping`: the entry of the typed mapping (`Record<A, B>`, `dict[A, B]`) that maps one member to another;
+- `comparison`: the model, field, declared enum and value of a typed comparison.
+
+`decisions` lists the links the index refused or qualified where the walk went: each decision other than a link made, decided at the seed, a returned candidate, or in a file one of them is in. Each has its `family`, `subject`, `decision`, place (`at`) and evidence; `decisions_omitted` counts those past 25, by family. A decision is a reason a link was not made or is qualified (`sql-dynamic`, `receiver-unproven`, `database-identity-unproven`, `mapping-incomplete`, `migration-drift`, `snapshot-stale`, `provider-unproven`, `generated-missing`, `document-dynamic`, …): something to check, never a breakage. A decision made where the walk did not go is not listed.
+
 **A request joined to a handler in another repository.** When a Python service's own source states where it is published (a flasgger Swagger 2 template) and a request in another repository names the same origin, method and route shape, RepoAtlas records one `CALLS_HTTP_HANDLER` edge from the calling declaration to the handler, and only when exactly one handler agrees. `repoatlas_impact` follows it from the handler (or anything the handler depends on) to the request, never the other way. The step's `http` block names both sides by role, each part as `repository/path:line`:
 
 - `consumer_repository`, `called_at` (the request) and `base_at` (the module constant its URL or base came from);
