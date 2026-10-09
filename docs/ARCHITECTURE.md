@@ -2062,9 +2062,13 @@ The scope contract applies hop by hop. Under repository scope, a place another r
 the hop's detail, and so are a link's handler and provider; the hop keeps its kind, status and reason code, says it
 was `withheld`, and a link keeps its shared `http-endpoint:` node, the way out. `cross_repository: true` shows them,
 and the response's freshness then covers every repository a crossing shows. Evidence follows the same line: with
-`include_provenance`, a proven hop's lines are rebuilt from indexed chunks at read time and supplied when they are
-in the row's own repository, or in any repository under global scope; a place a file proves as a whole is never
-evidence, and no evidence id is stored. The `basis` says a crossing establishes a source-backed deployment identity
+`include_provenance`, an established hop's lines -- proven or declared -- are rebuilt from indexed chunks at read time
+and supplied when they are in the row's own repository, or in any repository under global scope; a place a file
+proves as a whole is never evidence, and no evidence id is stored. Each supplied span keeps the bases its places
+rest on, and a grounding citation of it reports them (`basis`). A CI-established crossing also carries its
+`artifact` -- deploying and building repositories, release, variant, image, version relation and bases -- of which
+repository scope withholds what another repository states (the repositories, release, variant and image), keeping
+the bases and the relation. Crossings are always the stored decisions: no read joins again. The `basis` says a crossing establishes a source-backed deployment identity
 chain, and never that the request runs or the deployment does.
 
 **Search** generates the exact keys a question spells, then feeds them to the existing exact-name lookup. A key hit
@@ -2122,13 +2126,20 @@ linker's materialized output, never an input. Each row has a `decision_ref`: `hc
 the caller's repository slug, path and lines, the request's target key and its variant, with an ordinal for exact
 duplicates. It holds no row or claim id, so the same request has the same ref after any sync and in a fresh index.
 Each row keeps its chain of seven hops — `caller`, `origin`, `service_identity`, `deployment_binding`,
-`source_binding`, `route`, `handler` — each `proven`, `unresolved`, `ambiguous` or `not_reached`. A proven hop cites
-the places that prove it; an unresolved or ambiguous hop a reason code and whatever partial places there are; a hop
-not reached cites nothing. The identity claims name those places under source-agnostic keys (`identity_in`,
+`source_binding`, `route`, `handler` — each `proven`, `declared`, `version_unverified`, `unresolved`, `ambiguous`
+or `not_reached`. A proven hop cites the places that prove it; a declared hop the places of the operator declaration
+that supplies it, and of the job it gives meaning to, each with the basis `declared` (`version_unverified` is
+accepted everywhere and written by no stage yet); an unresolved or ambiguous hop a reason code and whatever partial
+places there are; a hop not reached cites nothing. A place resting on anything but the source itself names its
+`basis` (`builtin`, `declared`); a source place has none, so every chain written before DF2 reads byte for byte as
+it did. The identity claims name those places under source-agnostic keys (`identity_in`,
 `binding_in`, `source_in`), so the chain never asks which kind of deployment stated them; a claim with no
 `binding_in` (a compose service, a specification's host) states its deployment where it states its identity.
 `source_in` may be a whole path with no line (the one application root a chart's repository serves), which names a
-file but grounds no span.
+file but grounds no span. A CI-established deployment's places lie in several repositories -- the chart and release
+in one, the build and the code in another, a declaration in `@declarations` -- and each claim names a place's
+repository (`<key>_repo`) and basis (`<key>_basis`) beside it; a claim without them files every place in its own
+repository, as before.
 
 > **Invariant.** Every `CALLS_HTTP_HANDLER` edge names, in its resolution, the `decision_ref` of exactly one stored
 > `linked` decision, and every stored `linked` decision is named by its edge. A refusal never has an edge.
@@ -2137,7 +2148,9 @@ A link is one `CALLS_HTTP_HANDLER` edge, *consumer caller → provider handler*,
 provenanced by the request's own file and lines, whose resolution records under `http` the method, the URL as
 written, the endpoint, the deployment, both repositories, the `decision_ref` of its stored decision, and `called_at`,
 `base_at`, `served_at`, `identity_at` and `bound_at` (or `identity_in` and `bound_in`, path and line, for an identity
-in another file). That record is the evidence that lets the change-impact walk (`repoatlas/graph/impact.py`) cross it, inward only: a handler's
+in another file). A CI-established link adds who deploys and who builds it (`deployed_by`, `built_by`), the release
+and variant, the image, its `version_relation`, both bases, the rule tying it to code (`source_rule`), its artifact
+decision's ref, and the places of the binding, the workload, the image's values, the build and the code. That record is the evidence that lets the change-impact walk (`repoatlas/graph/impact.py`) cross it, inward only: a handler's
 change may reach the requests, a request's change never reaches the handler. It says the source on both sides names
 the same operation; it does not say the request is sent, or that it reaches this deployment.
 
@@ -2207,11 +2220,14 @@ The global pass renders a read Ingress under each release a Tiltfile binds, with
 a falsy or absent `if` value means it is not rendered; a missing list or a values file cut at the cap leaves it
 unresolved; each host substitution must read a literal value. A rendered host is an identity tied as the chart's
 Service is (`identity_source: kubernetes-ingress`, citing the host, `listen-ports`, backend and release lines), or an
-identity that reaches no code. No CI job binds a release yet: the CI facts below decide which releases a CI
-configuration establishes, and the deployment pass reads them from DF2.
+identity that reaches no code. A release a CI configuration establishes is rendered by the artifact join, in the
+global pass alone (*CI-established deployments*, below).
 
 Every read Ingress also yields a host pattern per rule and scheme, for the deployments no local source establishes:
-the literal text and the chart's name match exactly, and each value or item substitution is a hole. A hole bounded by
+the literal text and the chart's name match exactly, and each value or item substitution is a hole. An established
+release -- Tilt or CI -- also yields, for each host it does not fully render, a pattern of its own with every value
+it does set filled in: that release is a deployment the source states, so its pattern competes with every exposure
+but its own variant's, its chart's included. A hole bounded by
 dots or the host's ends matches one or more DNS labels; any other matches part of one label. A pattern with neither
 the chart's name nor a whole literal label would fit any host and is not used. Patterns never link. They only say
 which hop a refused request failed, and a pattern of a chart other than the one a link's exposure came from makes
@@ -2270,6 +2286,7 @@ names, whatever its name, for the deployment pass to evaluate. Compose services 
 | `ci_release` | `bound`, `chart-external`, `values-unresolved` (only for an established release) |
 | `ci_step` | `unsupported-action`, `delegated-to-script`, `control-flow-unsupported`, `dynamic-config`, `caller-dependent` |
 | `ci_semantics` | `accepted`, `unused`, `conflict`, `invalid`, `outside-declarations` |
+| `container_artifact` | `linked`, `artifact-ambiguous`, `tag-unmatched`, `publisher-unresolved`, `image-unresolved`, `registry-unresolved` (the artifact join, below) |
 
 `repoatlas decisions` lists them read-only, counted in full and one bounded page at a time; impact lists those near a
 walk within its cap.
@@ -2280,6 +2297,57 @@ image build, and a slug to its CircleCI project name. They count only from the r
 (§6); one found in an ordinary repository is `outside-declarations` and ignored, two for one orb job are a
 `conflict` and both are ignored. A release a declaration establishes cites it (`declared_in`) and carries the basis
 `declared`, never `source`.
+
+### CI-established deployments: the artifact join
+
+> **Invariant.** One stage joins a CI-established deployment to code: `repoatlas/graph/deploy_artifacts.py`, called
+> only by the global pass. Every reader -- `http_operations`, impact, grounding -- reads what it stored.
+
+> **Invariant.** A link through an image says that the files configure the same image repository on both sides, and
+> how far the versions are tied. It never says an image was built, pushed or exists, or which version runs.
+
+**Binding.** A `bound` release renders its chart -- a literal directory with a `Chart.yaml` in the same repository --
+with Helm's precedence: the chart's `values.yaml`, each `-f` file in order, then each `--set`. Maps merge, a later
+list replaces an earlier one, a null deletes; a file not read (a variable path, one not indexed, one cut at the cap)
+or an unread `--set` leaves every value it could set unknown. A value is a literal, a CI symbol or unknown, and only
+a literal renders: a symbol in a host leaves it a pattern, a withheld value never becomes text. A branch symbol --
+`CIRCLE_BRANCH` over a literal `filters.branches.only`, `github.ref_name` over `on.push.branches` when push is the
+only trigger -- gives one variant per branch, at most 16 (past that the release renders nothing); a condition never
+adds or narrows one, nor does a symbol a scope or script may set. A file a release names with `-f`, whatever its
+name, is read for it at the end of its repository's sync (`helm-values-file` claims marked `derived:
+referenced-values`), from the release claims stored then, and replaced whole on every sync.
+
+**Workload and container.** A Service selects a workload only when the templates prove it: every helper the
+selector includes, the workload's labels include, and every literal label agrees once rendered; a literal label with
+another value excludes it. Exactly one must be selected and every other excluded, then the one container every
+target port names (a name to a port name, a number to a `containerPort`; a lone container reaches a number). A
+release whose name is not literal renders no Service name and no selection through a helper, which may read it.
+
+**Artifact** (`container_artifact` in `link_decisions`). Each container of each rendered workload of a bound release
+variant: its image renders to a join key, and the `publish-configured` builds with that key are its candidate
+publishers -- never a build not configured to publish, never by name. Two literal tags (or digests) that differ are
+incompatible.
+
+| Decision | When |
+|---|---|
+| `linked` | exactly one compatible publisher, with the `version_relation` |
+| `artifact-ambiguous` | several; all listed, none chosen |
+| `tag-unmatched` | only incompatible ones |
+| `publisher-unresolved` | none configured to publish this key (any not configured to publish are listed) |
+| `image-unresolved` | the image is not read, or renders no literal path |
+| `registry-unresolved` | a literal path, but the registry host or port is not literal |
+
+The version relation is `exact` for the same literal tag or digest; `symbolic` only for the same execution-stable CI
+built-in (a commit, ref or run identity every job of one run shares) in one CI system and workflow, the deploy job
+requiring the build job, nothing in either job able to set it, and no `default` around the deploy side's tag;
+otherwise `unknown`.
+
+**Source.** A linked artifact ties to the code its build's Dockerfile and context put in the image, in the builder's
+repository, exactly as a compose service's build is tied in its own (`deploy_identity.source_tie`). A chart stating no
+workload at all ties as before, to its repository's one application (`source_rule: same-repository`); any workload
+evidence, read or not, forbids that. A refusal at the artifact fails the source hop with its own reason
+(`publisher_unresolved`, `artifact_ambiguous`, `tag_unmatched`, `image_unread`, `registry_unresolved`,
+`workload_unmatched`).
 
 ## 6. The indexing pipeline
 
@@ -4513,5 +4581,7 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | `repoatlas ui` runs the API in-process and the explorer as a child | Two daemons; or a launcher that shells out to `repoatlas serve` | One process owns the API's lifetime and the explorer's, so stopping either stops both, and the connection file is written in the process that knows where it is. No pidfile, no daemon, nothing to clean up after a crash beyond a file the next start replaces (§12) |
 | The launcher has its own connection file (`ui-api.json`) | Reuse `api.json` | A `repoatlas serve` running beside it keeps working, and stopping one never removes the other's file |
 | A release ships the explorer as a static export in the wheel, served by the local API; a checkout installs and builds it on first use, and again only when its inputs change | Require Node.js wherever the explorer runs; or build on every start | An installed RepoAtlas should need nothing beyond Python, so the release workflow builds the export once and the API sends it, answering the pages at the door the explorer's own server keeps, with that server's checks. A checkout runs the sources a developer is editing: rebuilding every time would cost a minute per start, while comparing modification times costs a directory walk and reads no file (§12) |
+| A CI-established deployment is joined to code in the global pass alone, and read from what it stored | Plan it with the other HTTP claims, so a repository's replan includes it | Its evidence spans repositories -- the release, the build, an operator declaration -- so no repository's replan can equal its share of the global one, which `http_operations` relies on. One join, persisted, keeps every read equal to it (§5) |
+| A values file a release names is read at the end of its repository's sync, its claims replaced whole every time | Read it in the global pass; or read every YAML file as values | The global pass reads stored state only, and reading every YAML file would make configuration that is not values look like it. A file named by a stored claim, read through the sync's own boundary, keeps incremental equal to fresh by construction (§5) |
 | The local API reads each connection on its own thread, and runs every capability call on one index thread | One thread for everything | A browser opens spare connections it may never send on; read one at a time, such a connection holds the server until its socket timeout. The index's connection is bound to the thread that opened it, so calls still run there, one at a time (§12, docs/local-api.md) |
 | `install.sh` reruns safely and replaces nothing it did not create | An installer that overwrites existing links and registrations | Running it again is how an installation is updated, and the operator's own `repoatlas` on PATH, their skills and their MCP registration are theirs (docs/installation.md) |
