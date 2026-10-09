@@ -62,8 +62,10 @@ MAX_TOKENS = 200_000
 MAX_EMBEDDED = 64 * 1024
 
 # sqlglot logs a statement it falls back on with the statement's text. RepoAtlas never
-# echoes source, so its log goes nowhere.
+# echoes source, so its log goes nowhere: dropped below any level a handler could want,
+# whatever handlers anything attaches, and never passed up.
 _LOG = logging.getLogger("sqlglot")
+_LOG.setLevel(logging.CRITICAL + 1)
 _LOG.addHandler(logging.NullHandler())
 _LOG.propagate = False
 
