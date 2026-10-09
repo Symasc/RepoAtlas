@@ -154,6 +154,14 @@ HELM_RELEASE = "helm-release"
 #: A chart template's ``kind: Ingress``: its wrapping ``if`` and ``range``, its hosts as
 #: literal text and substitutions, its scheme and its backend, or why it is not read.
 HELM_INGRESS = "helm-ingress"
+#: A ``values*.y(a)ml`` file other than a chart's own ``values.yaml``: its literal leaves,
+#: credentials withheld -- an overlay a release may name with ``-f``.
+HELM_VALUES_FILE = "helm-values-file"
+#: A chart template's Deployment, StatefulSet or DaemonSet: its containers' images, ports,
+#: commands and environment as written, its labels and selector, or why it is not read.
+K8S_WORKLOAD = "k8s-workload"
+#: A chart template's ConfigMap: its name and data keys (never their values).
+K8S_CONFIGMAP = "k8s-configmap"
 
 #: ``transport`` values of :data:`HTTP_LOCAL_CALL`.
 TRANSPORT_WRAPPER = "wrapper"
