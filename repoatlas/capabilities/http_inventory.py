@@ -44,6 +44,7 @@ from repoatlas.models.http_inventory import (
     MAX_COUNTERPARTS,
     MAX_PAGE_SIZE,
     CoverageLimitation,
+    CrossingArtifact,
     CrossingHop,
     CrossingStatus,
     DeclaredMatch,
@@ -537,6 +538,7 @@ def _crossing(
                         line_start=place.line_start,
                         line_end=place.line_end,
                         role=place.role,
+                        basis=place.basis or None,
                     )
                     for place in hop.provenance
                 ),
@@ -549,6 +551,17 @@ def _crossing(
     evidence = json.loads(row.evidence_json or "{}")
     linked = row.decision == CrossingStatus.LINKED
     endpoint = str(evidence.get("endpoint", "")) if linked else ""
+    artifact = (
+        CrossingArtifact.model_validate(
+            {
+                key: str(evidence[key])
+                for key in _ARTIFACT_KEYS
+                if isinstance(evidence.get(key), str) and evidence[key]
+            }
+        )
+        if "binding_basis" in evidence
+        else None
+    )
     return HttpCrossing(
         decision_ref=row.decision_ref,
         status=CrossingStatus(row.decision),
@@ -559,7 +572,22 @@ def _crossing(
         handler=handler,
         provider=str(evidence.get("provider", "")) or None if linked else None,
         endpoint=http.endpoint_key(endpoint) if endpoint else None,
+        artifact=artifact,
     )
+
+
+#: The stored evidence a crossing's artifact shows, by the join's own key (DF2).
+_ARTIFACT_KEYS = (
+    "deployed_by",
+    "built_by",
+    "release",
+    "variant",
+    "image",
+    "version_relation",
+    "binding_basis",
+    "build_basis",
+    "source_rule",
+)
 
 
 def _path_of(url: str) -> str:
@@ -589,6 +617,8 @@ class Span:
     routes: set[str] = field(default_factory=set)
     #: A row's own lines, rather than only a place a crossing's hop cites.
     written: bool = False
+    #: Every basis other than source a hop place here rests on (DF2).
+    bases: set[str] = field(default_factory=set)
 
 
 def evidence_spans(
@@ -596,9 +626,10 @@ def evidence_spans(
 ) -> dict[str, dict[tuple[str, int, int], Span]]:
     """The spans a page supplies as evidence, by repository.
 
-    Each row's own lines, and the lines its crossings' proven hops cite: in the row's own
-    repository, or in any under global scope (``everywhere``). A hop not proven cites
-    nothing to supply, and a place a file proves as a whole is no span.
+    Each row's own lines, and the lines its crossings' established hops cite -- proven, or
+    declared by an operator declaration (DF2), each place keeping its basis: in the row's
+    own repository, or in any under global scope (``everywhere``). A hop not established
+    cites nothing to supply, and a place a file proves as a whole is no span.
     """
     found: dict[str, dict[tuple[str, int, int], Span]] = {}
     for row in rows:
@@ -614,16 +645,19 @@ def evidence_spans(
                 span.routes.add(f"{row.method} {row.route}" if row.method else row.route)
         for crossing in row.crossings:
             for hop in crossing.chain:
-                if hop.status != http_chain.PROVEN:
+                # A declared hop supplies its places too, each labelled with its basis (DF2).
+                if hop.status not in http_chain.ESTABLISHED:
                     continue
                 for place in hop.provenance:
                     if place.line_start is None or place.line_end is None:
                         continue
                     if not everywhere and place.repository != own:
                         continue
-                    found.setdefault(place.repository, {}).setdefault(
+                    span = found.setdefault(place.repository, {}).setdefault(
                         (place.path, place.line_start, place.line_end), Span()
                     )
+                    if place.basis:
+                        span.bases.add(place.basis)
     return found
 
 
@@ -711,10 +745,33 @@ def project(row: HttpOperation, home: str | None, shown: bool) -> HttpOperation:
                     "chain": tuple(chain),
                     "handler": None if away else crossing.handler,
                     "provider": None if away else crossing.provider,
+                    "artifact": _projected(crossing.artifact, home),
                 }
             )
         )
     return row.model_copy(update={"crossings": tuple(crossings)})
+
+
+def _projected(artifact: CrossingArtifact | None, home: str) -> CrossingArtifact | None:
+    """A crossing's artifact under repository scope: what a repository other than ``home``
+    states -- its name, the release, variant and image it configures -- is withheld; the
+    bases and the version relation, labels rather than source, stay (DF2, E7)."""
+    if artifact is None:
+        return None
+    foreign = {artifact.deployed_by, artifact.built_by} - {home, None}
+    if not foreign:
+        return artifact
+    deployment_away = artifact.deployed_by not in (home, None)
+    return artifact.model_copy(
+        update={
+            "deployed_by": None if deployment_away else artifact.deployed_by,
+            "built_by": None if artifact.built_by not in (home, None) else artifact.built_by,
+            "release": None if deployment_away else artifact.release,
+            "variant": None if deployment_away else artifact.variant,
+            "image": None,
+            "withheld": True,
+        }
+    )
 
 
 def _caller(

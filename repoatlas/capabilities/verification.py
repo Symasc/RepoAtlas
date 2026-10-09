@@ -162,6 +162,8 @@ class CitationOutcome:
     #: tell where the slug ends.
     repository_slug: str | None = None
     path: str | None = None
+    #: The bases other than source the evidence was supplied under (DF2), comma-joined.
+    basis: str | None = None
 
 
 def _candidate_for(entry: LedgerEntry) -> EvidenceCandidate:
@@ -327,6 +329,7 @@ def resolve_citation(
         confidence=probe.answer.hypotheses[0].confidence,
         repository_slug=kept.repository_slug,
         path=kept.path,
+        basis=", ".join(entry.bases) or None,
     )
 
 
