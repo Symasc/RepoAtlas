@@ -1,4 +1,4 @@
-import type { ImpactCandidate, ImpactResponse } from "@/lib/api/generated";
+import type { ImpactCandidate, ImpactDecision, ImpactResponse, ImpactStep } from "@/lib/api/generated";
 
 import { relationOf, type Family, type LinkData, type Relation, type ViewEdge } from "./graph";
 
@@ -290,3 +290,49 @@ export function splitAt(at: string | null | undefined, repositories: readonly st
   const owner = [...repositories].sort((a, b) => b.length - a.length).find((r) => at.startsWith(`${r}/`));
   return owner ? { repository: owner, path: at.slice(owner.length + 1) } : null;
 }
+
+// -- why a step links, and what was not linked ------------------------------------------
+
+/** One titled set of facts a step rests on: a configuration, a migration, a query… */
+export interface StepEvidence {
+  title: string;
+  fields: [string, string][];
+}
+
+function fieldsOf(record: object | null | undefined, labels: [string, string][]): [string, string][] {
+  if (!record) return [];
+  const values = record as Record<string, unknown>;
+  return labels.flatMap(([key, label]) => {
+    const value = values[key];
+    return value === null || value === undefined || value === "" ? [] : [[label, String(value)] as [string, string]];
+  });
+}
+
+/** What a step rests on, beyond its edge and lines: one section per kind of evidence. */
+export function stepEvidence(step: ImpactStep): StepEvidence[] {
+  const sections: [string, object | null | undefined, [string, string][]][] = [
+    ["Generated from a configuration", step.generation, [["config", "Configuration"], ["definition", "Definition"], ["output", "Output"], ["plugin", "Plugin"], ["member_value", "Value"]]],
+    ["Composed into a supergraph", step.composition, [["graph", "Subgraph"], ["url", "URL"], ["identity", "Deployed by"], ["provider", "Provider"]]],
+    ["Written by Prisma Migrate", step.migration, [["project", "Schema"], ["migration", "Migration"], ["type", "Database type"]]],
+    ["Through the generated Prisma client", step.client, [["project", "Schema"], ["specifier", "Imported from"]]],
+    ["Compared by a query", step.query, [["database", "Database"], ["table", "Table"], ["column", "Column"], ["op", "Operator"], ["value", "Value"]]],
+    ["Mapped by a typed mapping", step.mapping, [["mapping", "Entry"]]],
+    ["Compared with a typed field", step.comparison, [["model", "Model"], ["field", "Field"], ["enum", "Declared as"], ["value", "Value"]]],
+  ];
+  return sections
+    .map(([title, record, labels]) => ({ title, fields: fieldsOf(record, labels) }))
+    .filter((section) => section.fields.length > 0);
+}
+
+/** The links refused or qualified where the walk went, and how many more were left out. */
+export interface DecisionsView {
+  shown: ImpactDecision[];
+  more: number;
+}
+
+export function decisionsOf(impact: ImpactResponse): DecisionsView {
+  const shown = impact.decisions ?? [];
+  const more = Object.values(impact.decisions_omitted ?? {}).reduce<number>((sum, n) => sum + (n ?? 0), 0);
+  return { shown, more };
+}
+

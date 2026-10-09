@@ -10,12 +10,14 @@ import {
   boundaryLabel,
   buildTrace,
   chainOf,
+  decisionsOf,
   nameFromKey,
   reachOf,
   relationOfRow,
   rowId,
   SEED_ID,
   splitAt,
+  stepEvidence,
   unitLabel,
   type TraceGraph,
 } from "@/lib/model/trace";
@@ -393,3 +395,56 @@ describe("going into a trace", () => {
     expect(traceSeed(file)).toBeNull();
   });
 });
+
+// -- why a step links, and the links not made ----------------------------------------
+
+describe("step evidence", () => {
+  it("names what each kind of link rests on, and nothing for a plain edge", () => {
+    expect(stepEvidence({ reading: "uses", edge: "USES" })).toEqual([]);
+    expect(
+      stepEvidence({
+        reading: "references",
+        edge: "REFERENCES",
+        query: { database: "api/prisma/schema.prisma", table: "parcels", column: "state_code", op: "=", value: "packed", decision_ref: "r1" },
+      }),
+    ).toEqual([
+      {
+        title: "Compared by a query",
+        fields: [
+          ["Database", "api/prisma/schema.prisma"],
+          ["Table", "parcels"],
+          ["Column", "state_code"],
+          ["Operator", "="],
+          ["Value", "packed"],
+        ],
+      },
+    ]);
+    const sections = stepEvidence({
+      reading: "is mapped from",
+      edge: "MAPS_TO",
+      mapping: { mapping: "api/src/mapping.ts:5", decision_ref: "r2" },
+      migration: { project: "api/prisma/schema.prisma", migration: "api/m.sql", type: "parcel_state", decision_ref: "r3" },
+    });
+    expect(sections.map((s) => s.title)).toEqual(["Written by Prisma Migrate", "Mapped by a typed mapping"]);
+  });
+
+  it("leaves out a field the evidence does not state", () => {
+    const [query] = stepEvidence({
+      reading: "references",
+      query: { database: "d", table: "t", column: "c", op: "in", value: null, decision_ref: "r" },
+    });
+    expect(query?.fields.map(([label]) => label)).toEqual(["Database", "Table", "Column", "Operator"]);
+  });
+});
+
+describe("decisions", () => {
+  it("lists what the answer lists and counts the rest", () => {
+    const impact = {
+      decisions: [{ family: "persistence", subject: "api:src/q.ts::inState", decision: "sql-dynamic", at: "api/src/q.ts:21" }],
+      decisions_omitted: { persistence: 2, value_mappings: 1 },
+    } as unknown as ImpactResponse;
+    expect(decisionsOf(impact)).toEqual({ shown: impact.decisions, more: 3 });
+    expect(decisionsOf({} as ImpactResponse)).toEqual({ shown: [], more: 0 });
+  });
+});
+
