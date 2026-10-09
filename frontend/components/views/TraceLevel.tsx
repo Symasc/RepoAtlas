@@ -23,11 +23,13 @@ import {
   boundaryLabel,
   buildTrace,
   chainOf,
+  decisionsOf,
   nameFromKey,
   reachOf,
   relationOfRow,
   SEED_ID,
   splitAt,
+  stepEvidence,
   traceEdgeId,
   unitLabel,
   type TraceGraph,
@@ -331,6 +333,9 @@ function traceNote(impact: ImpactResponse, graph: TraceGraph): ReactNode {
   if (reach.beyond > 0) notes.push(`Showing the nearest ${formatCount(graph.listed)} of ${formatCount(reach.outside)} things a change reaches.`);
   if (impact.summary.complete === false) notes.push("The walk stopped at its limits; there may be more.");
   if (graph.repositories.length > 1) notes.push(`Crosses into ${plural(graph.repositories.length - 1, "other repository", "other repositories")}.`);
+  const decided = decisionsOf(impact);
+  const refused = decided.shown.length + decided.more;
+  if (refused > 0) notes.push(`${plural(refused, "link")} not made where it went; see the summary.`);
   if (notes.length === 0) return null;
   return <p>{notes.join(" ")}</p>;
 }
@@ -465,6 +470,19 @@ function TraceInspector({
                 </dl>
               </section>
             )}
+            {stepEvidence(c.step).map((section) => (
+              <section key={section.title} className={inspectorClasses.section}>
+                <h3 className={inspectorClasses.sectionTitle}>{section.title}</h3>
+                <dl className={inspectorClasses.crossing}>
+                  {section.fields.map(([label, value]) => (
+                    <span key={label} style={{ display: "contents" }}>
+                      <dt>{label}</dt>
+                      <dd>{value}</dd>
+                    </span>
+                  ))}
+                </dl>
+              </section>
+            ))}
             {http && (
               <section className={inspectorClasses.section}>
                 <h3 className={inspectorClasses.sectionTitle}>Over HTTP</h3>
@@ -591,6 +609,7 @@ function TraceInspector({
   const packages = impact.packages ?? [];
   const hubs = impact.hubs ?? [];
   const unresolved = impact.unresolved ?? [];
+  const decisions = decisionsOf(impact);
   const cameFrom = origin?.path ? `${origin.repository}/${origin.path}` : null;
   const reach = reachOf(impact);
   return (
@@ -684,6 +703,26 @@ function TraceInspector({
               )}
               {hubs.length > 0 && <Quiet>{plural(hubs.length, "hub")} reached: depended on too widely to list one by one, so counted instead.</Quiet>}
               {unresolved.length > 0 && <Quiet>{plural(unresolved.length, "importer")} could be named only as a file, not as the declaration involved.</Quiet>}
+              {decisions.shown.length > 0 && (
+                <section className={inspectorClasses.section}>
+                  <h3 className={inspectorClasses.sectionTitle}>
+                    Links not made where it went <span className={inspectorClasses.sectionCount}>{decisions.shown.length + decisions.more}</span>
+                  </h3>
+                  <ul className={inspectorClasses.rows}>
+                    {decisions.shown.map((d) => (
+                      <li key={`${d.family}-${d.subject}`} className={classes.summaryRow}>
+                        <span className={inspectorClasses.rowText}>
+                          <span className={inspectorClasses.rowLabel}>{d.subject.slice(d.subject.indexOf(":") + 1)}</span>
+                          <span className={inspectorClasses.rowDetail}>{d.at}</span>
+                        </span>
+                        <span className={classes.summaryNote}>{d.decision}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  {decisions.more > 0 && <Quiet>{plural(decisions.more, "more decision")} not listed.</Quiet>}
+                  <Quiet>A decision says why a link was not made or is qualified. It is not a breakage.</Quiet>
+                </section>
+              )}
             </div>
           ),
         },
