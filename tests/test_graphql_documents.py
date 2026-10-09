@@ -208,6 +208,9 @@ def test_a_document_named_like_a_declaration_takes_nothing_from_it(
     }
     assert ("WithCard", "function", "helper", "CALLS") in calls
     assert not [c for c in calls if c[1] == EMBEDDED_DOCUMENT and c[3] != "REFERENCES"]
+    # ...and what the query selects is the query's, never the function's.
+    assert ("WithCard", EMBEDDED_DOCUMENT, "Query.parcel", "REFERENCES") in calls
+    assert not [c for c in calls if c[3] == "REFERENCES" and c[1] != EMBEDDED_DOCUMENT]
 
 
 def test_embedded_documents_cut_no_chunk() -> None:
