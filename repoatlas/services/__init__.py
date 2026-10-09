@@ -57,6 +57,7 @@ from typing import TYPE_CHECKING, Any
 _EXPORTS: dict[str, str] = {
     "Workspace": "workspace",
     "initialize": "init_service",
+    "list_decisions": "status_service",
     "list_repositories": "status_service",
     "locate": "retrieval_service",
     "locate_diagnostic": "retrieval_service",
@@ -68,6 +69,7 @@ _EXPORTS: dict[str, str] = {
 __all__ = [
     "Workspace",
     "initialize",
+    "list_decisions",
     "list_repositories",
     "locate",
     "locate_diagnostic",
@@ -81,7 +83,7 @@ if TYPE_CHECKING:
     # through `__getattr__`, so nothing here is imported when the package is.
     from repoatlas.services.init_service import initialize
     from repoatlas.services.retrieval_service import locate, locate_diagnostic
-    from repoatlas.services.status_service import list_repositories, status
+    from repoatlas.services.status_service import list_decisions, list_repositories, status
     from repoatlas.services.sync_service import sync
     from repoatlas.services.workspace import Workspace, open_workspace
 

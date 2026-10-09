@@ -151,4 +151,49 @@ class StatusReport(BaseModel):
     #: repositories, so completeness is unestablished rather than confirmed — which
     #: is a different statement from "current" and is printed as one (V1_SPEC §5).
     unreadable_paths: tuple[Path, ...] = ()
+    #: The operator declarations directory, when it exists but is not a git repository:
+    #: nothing in it is read until the operator makes it one (DF1, D1-1).
+    declarations_ignored: Path | None = None
     index_state: str = "unknown"
+
+
+class DecisionCount(BaseModel):
+    """How many stored decisions one family made with one outcome."""
+
+    model_config = ConfigDict(frozen=True)
+
+    family: str
+    decision: str
+    count: int
+
+
+class DecisionEntry(BaseModel):
+    """One stored link decision, where it was made."""
+
+    model_config = ConfigDict(frozen=True)
+
+    repository: str
+    path: str
+    line: int | None
+    family: str
+    decision: str
+    subject: str
+    decision_ref: str
+
+
+class DecisionsReport(BaseModel):
+    """``repoatlas decisions``: the stored link decisions a filter selects, counted in full
+    and listed one bounded page at a time (DF1, D1-2). Read-only."""
+
+    model_config = ConfigDict(frozen=True)
+
+    family: str | None = None
+    decision: str | None = None
+    repository: str | None = None
+    total: int
+    counts: tuple[DecisionCount, ...] = ()
+    offset: int = 0
+    limit: int
+    decisions: tuple[DecisionEntry, ...] = ()
+    #: Matching decisions after this page.
+    remaining: int = 0

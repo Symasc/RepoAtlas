@@ -179,7 +179,7 @@ from repoatlas.capabilities.verification import (
     validate_grounding_request,
     verdict_for,
 )
-from repoatlas.config.settings import Settings
+from repoatlas.config.settings import DECLARATIONS_SLUG, Settings
 from repoatlas.containment import RepositoryBoundary
 from repoatlas.discovery.reconcile import RepositorySetPlan
 from repoatlas.errors import (
@@ -620,6 +620,8 @@ class CapabilityService:
                     include_host_path=request.include_host_paths,
                 )
                 for repo in sorted(resolution.repositories, key=lambda r: r.slug)
+                # The declarations source is listed only when a call names it (DF1, D1-1).
+                if repo.slug != DECLARATIONS_SLUG or resolution.scope is CapabilityScope.REPOSITORY
             ]
             return RepositoriesResponse(
                 context=request.context,
