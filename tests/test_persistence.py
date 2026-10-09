@@ -26,9 +26,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
-import tomllib
 import yaml
 from repoatlas.capabilities.service import CapabilityService
+from repoatlas.compat import tomllib
 from repoatlas.config.settings import Settings
 from repoatlas.graph.linker import GLOBAL_PARSER, ReferenceLinker
 from repoatlas.graph.persistence import FAMILY as PERSISTENCE
