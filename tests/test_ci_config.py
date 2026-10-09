@@ -96,6 +96,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with: {tags: "registry.example:5000/a/none:1.0"}
       - uses: docker/metadata-action@v5
+        with: {api-key: CANARY_INPUT, images: registry.example/x}
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - run: helm upgrade --install api charts/api -f charts/api/values.yaml --set image.tag=${{ github.sha }} -n prod
 """
@@ -118,8 +119,9 @@ def test_unknown_and_sha_pinned_actions_are_unsupported_whatever_the_job() -> No
         ("action", "docker/metadata-action@v5"),
         ("action", "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"),
     ]
-    # an unsupported action's inputs are never kept
+    # an unsupported action's inputs are never kept, nor an inert one's
     assert all("with" not in c and "password" not in json.dumps(c) for c in found)
+    assert "CANARY_INPUT" not in json.dumps(found) and "registry.example/x" not in json.dumps(found)
 
 
 def test_a_release_records_chart_values_settings_and_its_branch_domain() -> None:
