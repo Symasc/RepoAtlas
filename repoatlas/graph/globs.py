@@ -63,6 +63,26 @@ def resolve_file(index: ResolutionIndex, origin: FileRow, raw: str) -> FileRow |
     return index.file(*found) if found is not None else None
 
 
+def tree_files(
+    index: ResolutionIndex, origin: FileRow, raw: str, suffixes: tuple[str, ...]
+) -> list[FileRow]:
+    """What a tool that takes "a file or a directory" reads: the admitted file ``raw``
+    names, or else every admitted file below that directory with one of ``suffixes``."""
+    found = resolve_file(index, origin, raw)
+    if found is not None:
+        return [found]
+    directory = locate(index, origin, raw)
+    if directory is None:
+        return []
+    repo_id, prefix = directory
+    lead = f"{prefix}/" if prefix else ""
+    return [
+        row
+        for rel, row in sorted(index.files_by_repo.get(repo_id, {}).items())
+        if rel.startswith(lead) and rel.endswith(suffixes)
+    ]
+
+
 def match_admitted(index: ResolutionIndex, origin: FileRow, pattern: str) -> list[FileRow] | None:
     """Every admitted file ``pattern`` matches, in path order; ``None`` when the pattern
     uses syntax this module does not translate."""

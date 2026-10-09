@@ -51,6 +51,19 @@ from repoatlas.parsers.marks import node_span
 GRAPHQL_CODEGEN_OUTPUT = "graphql-codegen-output"
 
 CONFIG_NAMES = frozenset({"codegen.yml", "codegen.yaml", "codegen.json"})
+#: graphql-config files read here; a bare ``.graphqlrc`` has no format to read it by.
+GRAPHQL_CONFIG_NAMES = frozenset(
+    {
+        ".graphqlrc.yml",
+        ".graphqlrc.yaml",
+        ".graphqlrc.json",
+        "graphql.config.yml",
+        "graphql.config.yaml",
+        "graphql.config.json",
+    }
+)
+#: The ``generator`` of a claim read from a graphql-config project.
+GRAPHQL_CONFIG = "graphql-config"
 
 MAX_BYTES = 256 * 1024
 MAX_ENTRIES = 512
@@ -87,8 +100,9 @@ class _Refused(Exception):
 def codegen_references(
     path: PurePosixPath, documents: Sequence[yaml.Node | None], content: str
 ) -> tuple[list[ParsedReference], list[ParseDiagnostic]]:
-    """One claim per output a GraphQL Code Generator configuration declares."""
-    if path.name not in CONFIG_NAMES or not documents:
+    """One claim per output a GraphQL Code Generator configuration declares, or, in a
+    graphql-config file, one per project and one per output its codegen extension declares."""
+    if path.name not in CONFIG_NAMES | GRAPHQL_CONFIG_NAMES or not documents:
         return [], []
     root = documents[0]
     if not isinstance(root, yaml.MappingNode):
@@ -97,24 +111,88 @@ def codegen_references(
         return [], [_bound()]
     lines = content.splitlines()
     try:
+        if path.name in GRAPHQL_CONFIG_NAMES:
+            return _projects(root, lines), []
         return _outputs(root, lines), []
     except _Refused:
         return [], [_bound()]
+
+
+def _projects(root: yaml.MappingNode, lines: Sequence[str]) -> list[ParsedReference]:
+    """graphql-config: each project's schema and documents, as a documents-binding claim,
+    and the outputs of a ``codegen`` extension, which take the project's as their root."""
+    fields = _fields(root)
+    projects = fields.get("projects")
+    if isinstance(projects, yaml.MappingNode):
+        _check(projects.value)
+        entries = [
+            (str(k.value), v, k)
+            for k, v in projects.value
+            if isinstance(k, yaml.ScalarNode) and isinstance(v, yaml.MappingNode)
+        ]
+    else:
+        entries = [("default", root, root)]
+    claims: list[ParsedReference] = []
+    for name, node, anchor in entries:
+        own = _fields(node)  # type: ignore[arg-type]
+        schema = _inputs(own.get("schema"), "root")
+        documents = [
+            *_inputs(own.get("documents") or own.get("include"), "root"),
+            *(
+                {
+                    **item,
+                    "negated": True,
+                    "kind": "glob" if item.get("kind") in {"glob", "path"} else item.get("kind"),
+                }
+                for item in _inputs(own.get("exclude"), "root")
+            ),
+        ]
+        start, _ = node_span(anchor, lines)
+        _, end = node_span(node, lines)
+        claims.append(
+            pending_reference(
+                EdgeType.GENERATES,
+                EntityType.FILE,
+                name,
+                start,
+                end,
+                role=GRAPHQL_CODEGEN_OUTPUT,
+                generator=GRAPHQL_CONFIG,
+                project=name,
+                schema=_json(schema),
+                documents=_json(documents),
+                plugins="[]",
+                options="{}",
+            )
+        )
+        extensions = own.get("extensions")
+        codegen = (
+            _fields(extensions).get("codegen") if isinstance(extensions, yaml.MappingNode) else None
+        )
+        if isinstance(codegen, yaml.MappingNode):
+            claims.extend(_outputs(codegen, lines, schema=schema, documents=documents))
+    return claims
 
 
 def _bound() -> ParseDiagnostic:
     return ParseDiagnostic(severity=Severity.WARNING, message=PARSE_BOUND_EXCEEDED)
 
 
-def _outputs(root: yaml.MappingNode, lines: Sequence[str]) -> list[ParsedReference]:
+def _outputs(
+    root: yaml.MappingNode,
+    lines: Sequence[str],
+    *,
+    schema: list[dict[str, object]] | None = None,
+    documents: list[dict[str, object]] | None = None,
+) -> list[ParsedReference]:
     fields = _fields(root)
     generates = fields.get("generates")
     if not isinstance(generates, yaml.MappingNode):
         return []
     entries = [(k, v) for k, v in generates.value if isinstance(k, yaml.ScalarNode)]
     _check(entries)
-    root_schema = _inputs(fields.get("schema"), "root")
-    root_documents = _inputs(fields.get("documents"), "root")
+    root_schema = _inputs(fields.get("schema"), "root") or list(schema or [])
+    root_documents = _inputs(fields.get("documents"), "root") or list(documents or [])
     root_options = _options(fields.get("config"))
     merged = _has_merge(root)
 

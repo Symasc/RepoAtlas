@@ -58,11 +58,14 @@ The file is ``tomllib``'s to read, so the parser's version carries the interpret
 from __future__ import annotations
 
 import json
+import posixpath
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from repoatlas.compat import tomllib
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedFile, ParsedReference
+from repoatlas.parsers.graphql_codegen import GRAPHQL_CODEGEN_OUTPUT, redact
+from repoatlas.parsers.http_facts import pending_reference
 from repoatlas.parsers.interpreter import interpreter_tag
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION, PYTHON_PROJECT
 from repoatlas.parsers.setuptools_project import SETUPTOOLS_BACKENDS, project_path
@@ -283,6 +286,72 @@ def project_facts(document: dict[str, Any]) -> dict[str, Any] | None:
     return facts
 
 
+#: ``[tool.ariadne-codegen]``: the defaults ariadne-codegen documents.
+_ARIADNE_TABLE = ("tool", "ariadne-codegen")
+_ARIADNE_DEFAULTS = {
+    "target_package_name": "graphql_client",
+    "target_package_path": ".",
+    "enums_module_name": "enums",
+}
+
+
+def ariadne_codegen_references(document: dict[str, Any], content: str) -> list[ParsedReference]:
+    """``[tool.ariadne-codegen]`` as one code-generation claim: its schema, its queries, and
+    the enums module it writes (repoatlas.graph.graphql_codegen)."""
+    table = _table(document, _ARIADNE_TABLE)
+    if table is None:
+        return []
+    header = content.find("[tool.ariadne-codegen]")
+    line = content.count("\n", 0, header) + 1 if header >= 0 else 1
+    settings = {key: table.get(key, default) for key, default in _ARIADNE_DEFAULTS.items()}
+    if not all(isinstance(value, str) and value for value in settings.values()):
+        return []
+    package = posixpath.normpath(
+        posixpath.join(settings["target_package_path"], settings["target_package_name"])
+    )
+    output = f"{package}/{settings['enums_module_name']}.py"
+    schema: list[dict[str, object]] = []
+    if isinstance(table.get("schema_path"), str):
+        schema.append(_input(table["schema_path"], line))
+    if isinstance(table.get("remote_schema_url"), str):
+        schema.append(
+            {
+                "kind": "url",
+                "value": redact(table["remote_schema_url"]),
+                "line": line,
+                "level": "root",
+            }
+        )
+    documents = (
+        [_input(table["queries_path"], line)] if isinstance(table.get("queries_path"), str) else []
+    )
+    return [
+        pending_reference(
+            EdgeType.GENERATES,
+            EntityType.FILE,
+            output,
+            line,
+            line,
+            role=GRAPHQL_CODEGEN_OUTPUT,
+            generator="ariadne-codegen",
+            output=output,
+            schema=json.dumps(schema, sort_keys=True, separators=(",", ":")),
+            documents=json.dumps(documents, sort_keys=True, separators=(",", ":")),
+            plugins=json.dumps(["ariadne-codegen"]),
+            options="{}",
+        )
+    ]
+
+
+def _input(value: str, line: int) -> dict[str, object]:
+    """A path ariadne-codegen reads: a schema or query file, or a directory of them."""
+    lowered = value.lower()
+    kind = "path" if lowered.endswith((".graphql", ".gql", ".graphqls")) else "tree"
+    if lowered.startswith(("http://", "https://")):
+        return {"kind": "url", "value": redact(value), "line": line, "level": "root"}
+    return {"kind": kind, "value": value, "line": line, "level": "root"}
+
+
 class PythonProjectParser:
     """``pyproject.toml``: the module-resolution fact a Python project states, and nothing else.
 
@@ -295,8 +364,9 @@ class PythonProjectParser:
     name = "python-project"
     # 2: flit's module, a virtual workspace root, Poetry's declared names. 3: whether
     # [project] states its dependencies. 4: setuptools' `find` and hatchling's `only-include`
-    # layouts. +pyX.Y: read with the running interpreter's `tomllib`.
-    version = f"4+{interpreter_tag()}"
+    # layouts. 5: [tool.ariadne-codegen], as a GraphQL code-generation claim
+    # (repoatlas.parsers.graphql_codegen). +pyX.Y: read with the running interpreter's `tomllib`.
+    version = f"5+{interpreter_tag()}"
     language = ""
 
     def supports(self, path: Path) -> bool:
@@ -311,12 +381,14 @@ class PythonProjectParser:
         except (tomllib.TOMLDecodeError, RecursionError):
             # Invalid TOML is already a diagnostic of the dependency layer's.
             return empty
+        generation = ariadne_codegen_references(document, content)
         facts = project_facts(document)
         if facts is None:
-            return empty
+            return empty.model_copy(update={"references": tuple(generation)})
         return empty.model_copy(
             update={
                 "references": (
+                    *generation,
                     ParsedReference(
                         edge_type=EdgeType.CONFIGURES,
                         target_kind=EntityType.CONFIG,

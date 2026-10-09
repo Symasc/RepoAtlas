@@ -1497,14 +1497,19 @@ class SqliteKnowledgeStore:
                 f" AND (e.type != ? OR {far}.type IN ({','.join('?' * len(entity_types))}))"
             )
             params.extend([str(edge_type), *(str(t) for t in entity_types)])
+        keys_by_type: dict[EdgeType, list[str]] = {}
         for edge_type, key in rule.evidence:
             # Only the edges one pass made on its own evidence (repoatlas.graph.impact,
             # Family.evidence). The key is a constant of the rule, never input.
             if not _EVIDENCE_KEY.fullmatch(key):
                 raise ValueError(f"not an evidence key: {key!r}")
-            constrained += (
-                f" AND (e.type != ? OR json_extract(e.resolution, '$.{key}') IS NOT NULL)"
+            keys_by_type.setdefault(edge_type, []).append(key)
+        for edge_type, keys in keys_by_type.items():
+            # Any one of the type's evidence keys admits an edge of it.
+            recorded = " OR ".join(
+                f"json_extract(e.resolution, '$.{key}') IS NOT NULL" for key in keys
             )
+            constrained += f" AND (e.type != ? OR {recorded})"
             params.append(str(edge_type))
         if rule.uses_replace_file_facts:
             # The far end is a file asserting a file-level import or call; its own USES,

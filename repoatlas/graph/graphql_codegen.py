@@ -16,18 +16,20 @@ is decided in order, and the first that applies is the decision:
    does not write;
 6. ``output-missing``: the output is not an admitted file;
 7. ``plugin-unsupported``: no ``typescript`` plugin declares the schema's types;
-8. ``naming-unsupported``: options rename what is generated, or map its enum values.
+8. ``naming-unsupported``: options rename what is generated, or ``enumValues`` names a
+   module the enums are imported from.
 
 An output that passes is decided type by type. A named type defined in the loaded files
 (the definitions GraphQL Code Generator merges, and their extensions) is ``linked`` to the
 one top-level declaration of the generated file its naming produces, and every definition
 and extension of it ``GENERATES`` that declaration. Otherwise it is ``schema-conflict``
 (defined with different kinds), ``naming-unsupported`` (a name the default convention
-would change), ``generated-missing`` or ``generated-ambiguous``. A linked enum's values
-are decided one by one, by **value**: the generated member whose string is the value's
-name -- the wire value, which is what the generator writes -- is linked, and a value with
-none is ``member-stale``. A generated declaration that is not an ``enum`` declares no
-members (``member-undeclared``).
+would change, or an enum ``enumValues`` imports), ``generated-missing`` or
+``generated-ambiguous``. A linked enum's values are decided one by one, by **value**: the
+generated member whose string is what the generator writes for the value -- its explicit
+``enumValues`` mapping when the configuration states one, otherwise the value's name, the
+wire value -- is linked, and a value with none is ``member-stale``. A generated declaration
+that is not an ``enum`` declares no members (``member-undeclared``).
 
 Every decision is a ``link_decisions`` row (family ``graphql_codegen``) whose subject is
 ``<repository>:<config>-><output>[::<coordinate>]``, anchored at the output's entry in the
@@ -44,7 +46,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from repoatlas.graph.globs import match_admitted, resolve_file
+from repoatlas.graph.globs import match_admitted, resolve_file, tree_files
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models.parsing import ENUM_MEMBER, EdgeType, EntityType
 from repoatlas.storage.protocols import (
@@ -56,6 +58,10 @@ from repoatlas.storage.protocols import (
 )
 
 FAMILY = "graphql_codegen"
+#: The ``generator`` of a claim read from ``[tool.ariadne-codegen]``, and of one read from a
+#: graphql-config project (repoatlas.parsers.graphql_codegen).
+ARIADNE_CODEGEN = "ariadne-codegen"
+GRAPHQL_CONFIG = "graphql-config"
 
 LINKED = "linked"
 CONFIG_UNSUPPORTED = "config-unsupported"
@@ -97,6 +103,14 @@ class CodegenProject:
     #: The documents inputs, root first, as the configuration reader recorded them.
     documents: tuple[dict[str, object], ...]
     schema: tuple[FileRow, ...]
+    #: The file the output writes, when it is admitted, and what writes it: the operation
+    #: types and document constants generated for each document are found there.
+    output: FileRow | None = None
+    plugins: tuple[str, ...] = ()
+    #: ``pascal``, ``keep``, or ``None`` when the output's naming is not modelled.
+    naming: str | None = None
+    #: ``<repository>:<config>-><output>``: the subject prefix of its decisions.
+    subject: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +210,8 @@ class _Planner:
             f"{origin.repo_slug}:{origin.rel_path}->{output}",
             {"config": here, "output": written},
         )
+        if meta.get("generator") == GRAPHQL_CONFIG:
+            current.subject = f"{origin.repo_slug}:{origin.rel_path}::{meta.get('project')}"
         refused = meta.get("refused")
         if refused:
             return self._refuse(current, CONFIG_UNSUPPORTED, reason=refused)
@@ -209,15 +225,38 @@ class _Planner:
             return self._refuse(current, SCHEMA_UNSUPPORTED, unsupported=unread)
         if missing or not schema:
             return self._refuse(current, SCHEMA_MISSING, missing=missing)
+        typescript_output = written.endswith(_OUTPUT_SUFFIXES) and meta.get("preset") is None
         self.projects.append(
             CodegenProject(
                 config=origin,
                 at=here,
                 documents=tuple(_list(meta.get("documents"))),
                 schema=tuple(schema),
+                output=resolve_file(self._index, origin, written) if typescript_output else None,
+                plugins=tuple(
+                    str(name).removeprefix(_PLUGIN_PACKAGE)
+                    for name in _list_of_str(meta.get("plugins"))
+                ),
+                naming=_naming(_mapping(meta.get("options"))),
+                subject=current.subject,
             )
         )
 
+        if meta.get("generator") == GRAPHQL_CONFIG:
+            # A graphql-config project generates nothing: it says which schema its documents
+            # are written against.
+            self._decide(current, current.subject, LINKED, schema=[self._file(r) for r in schema])
+            return True
+        if meta.get("generator") == ARIADNE_CODEGEN:
+            # ariadne-codegen writes the schema's enums, under their GraphQL names, into one
+            # module; its models and client are other modules this pass does not bind.
+            generated = resolve_file(self._index, origin, written)
+            if generated is None:
+                return self._refuse(current, OUTPUT_MISSING)
+            current.evidence["schema_files"] = [
+                f"{self._slugs.get(row.repo_id)}/{row.rel_path}" for row in schema
+            ]
+            return self._types(current, schema, generated, keep=True, enums_only=True)
         if meta.get("preset") is not None:
             return self._refuse(current, OUTPUT_UNSUPPORTED, reason="preset")
         if written.endswith("/"):
@@ -234,13 +273,14 @@ class _Planner:
             return self._refuse(current, PLUGIN_UNSUPPORTED, plugins=plugins)
         options = _mapping(meta.get("options"))
         naming = _naming(options)
-        if naming is None:
+        mapped = _enum_values(options.get("enumValues"))
+        if naming is None or mapped is None:
             return self._refuse(current, NAMING_UNSUPPORTED, options=options)
 
         current.evidence["schema_files"] = [
             f"{self._slugs.get(row.repo_id)}/{row.rel_path}" for row in schema
         ]
-        return self._types(current, schema, generated, keep=naming == "keep")
+        return self._types(current, schema, generated, keep=naming == "keep", mapped=mapped)
 
     def _schema(
         self, origin: FileRow, inputs: list[dict[str, object]]
@@ -261,6 +301,13 @@ class _Planner:
                 if row is None:
                     missing.append(value)
                 else:
+                    loaded.setdefault(row.file_id, row)
+                continue
+            if kind == "tree":
+                rows = tree_files(self._index, origin, value, _SDL_SUFFIXES)
+                if not rows:
+                    missing.append(value)
+                for row in rows:
                     loaded.setdefault(row.file_id, row)
                 continue
             matched = match_admitted(self._index, origin, value)
@@ -285,8 +332,16 @@ class _Planner:
     # -- types and members ---------------------------------------------------------
 
     def _types(
-        self, current: _Output, schema: list[FileRow], generated: FileRow, *, keep: bool
+        self,
+        current: _Output,
+        schema: list[FileRow],
+        generated: FileRow,
+        *,
+        keep: bool,
+        enums_only: bool = False,
+        mapped: Mapping[str, Mapping[str, str] | None] | None = None,
     ) -> bool:
+        mapped = mapped or {}
         definitions: dict[str, list[tuple[SymbolRow, str]]] = defaultdict(list)
         extensions: dict[str, list[SymbolRow]] = defaultdict(list)
         values: dict[str, dict[str, list[SymbolRow]]] = defaultdict(lambda: defaultdict(list))
@@ -313,6 +368,8 @@ class _Planner:
 
         linked = False
         for name in sorted(definitions):
+            if enums_only and {role for _, role in definitions[name]} != {"enum"}:
+                continue
             sources = [symbol for symbol, _ in definitions[name]] + extensions.get(name, [])
             at = [self._at(symbol) for symbol in sources]
             subject = f"{current.subject}::{name}"
@@ -322,6 +379,10 @@ class _Planner:
                 continue
             if not keep and not _PASCAL_FIXED_POINT.fullmatch(name):
                 self._decide(current, subject, NAMING_UNSUPPORTED, schema=at)
+                continue
+            if name in mapped and mapped[name] is None:
+                # Imported from where enumValues says, not declared by this output.
+                self._decide(current, subject, NAMING_UNSUPPORTED, schema=at, reason="enumValues")
                 continue
             candidates = by_name.get(name, [])
             if len(candidates) != 1:
@@ -340,7 +401,9 @@ class _Planner:
                 self._edge(current, source, target, generated, ref)
             linked = True
             if kinds == ["enum"]:
-                self._members(current, name, values.get(name, {}), target, generated)
+                self._members(
+                    current, name, values.get(name, {}), target, generated, mapped.get(name) or {}
+                )
         return linked
 
     def _members(
@@ -350,8 +413,8 @@ class _Planner:
         values: Mapping[str, list[SymbolRow]],
         target: SymbolRow,
         generated: FileRow,
+        mapping: Mapping[str, str],
     ) -> None:
-        enumerated = target.meta.get("kind") == "enum"
         prefix = f"{target.qualified_name}."
         members = [
             s
@@ -360,6 +423,8 @@ class _Planner:
             and s.qualified_name.startswith(prefix)
             and s.meta.get("kind") == ENUM_MEMBER
         ]
+        # A TypeScript enum, or a class whose members state their values (a Python Enum).
+        enumerated = target.meta.get("kind") == "enum" or bool(members)
         for value in sorted(values):
             sources = values[value]
             subject = f"{current.subject}::{enum}.{value}"
@@ -369,7 +434,9 @@ class _Planner:
                     current, subject, MEMBER_UNDECLARED, schema=at, generated=self._at(target)
                 )
                 continue
-            matches = [m for m in members if m.meta.get("value") == value]
+            written = mapping.get(value, value)
+            stated = {"mapped": written} if value in mapping else {}
+            matches = [m for m in members if m.meta.get("value") == written]
             if len(matches) != 1:
                 decision = MEMBER_STALE if not matches else GENERATED_AMBIGUOUS
                 self._decide(
@@ -380,13 +447,20 @@ class _Planner:
                     value=value,
                     generated=[self._at(m) for m in matches],
                     declared=sorted(str(m.meta.get("value")) for m in members),
+                    **stated,
                 )
                 continue
             ref = self._decide(
-                current, subject, LINKED, schema=at, value=value, generated=self._at(matches[0])
+                current,
+                subject,
+                LINKED,
+                schema=at,
+                value=value,
+                generated=self._at(matches[0]),
+                **stated,
             )
             for source in sources:
-                self._edge(current, source, matches[0], generated, ref, value=value)
+                self._edge(current, source, matches[0], generated, ref, value=written)
 
     # -- records -------------------------------------------------------------------
 
@@ -427,7 +501,9 @@ class _Planner:
             "config": current.evidence["config"],
             "schema": self._at(source),
             "output": f"{self._slugs.get(generated.repo_id)}/{generated.rel_path}",
-            "plugin": _PLUGIN,
+            "plugin": ARIADNE_CODEGEN
+            if current.meta.get("generator") == ARIADNE_CODEGEN
+            else _PLUGIN,
             "decision_ref": ref,
         }
         if value is not None:
@@ -448,6 +524,9 @@ class _Planner:
             )
         )
 
+    def _file(self, row: FileRow) -> str:
+        return f"{self._slugs.get(row.repo_id)}/{row.rel_path}"
+
     def _at(self, symbol: SymbolRow) -> str:
         row = self._files.get(symbol.file_id)
         return _place(
@@ -459,7 +538,7 @@ def _naming(options: Mapping[str, object]) -> str | None:
     """``pascal`` (the default convention), ``keep``, or ``None`` for anything else."""
     if any(options.get(key) not in (None, "") for key in ("typesPrefix", "typesSuffix")):
         return None
-    if "enumValues" in options or options.get("numericEnums") == "true":
+    if options.get("numericEnums") == "true":
         return None
     if options.get("enumType") == "native-numeric":
         return None
@@ -469,6 +548,22 @@ def _naming(options: Mapping[str, object]) -> str | None:
     if convention == "keep":
         return "keep"
     return "pascal" if convention == _DEFAULT_CONVENTION else None
+
+
+def _enum_values(option: object) -> dict[str, dict[str, str] | None] | None:
+    """``enumValues`` as stated: enum -> (value -> what is written for it), or ``None`` for
+    an enum imported from a module. ``None`` when every enum is imported (a module path)."""
+    if option is None:
+        return {}
+    if not isinstance(option, dict):
+        return None
+    mapped: dict[str, dict[str, str] | None] = {}
+    for enum, values in option.items():
+        if isinstance(values, dict) and all(isinstance(v, str) for v in values.values()):
+            mapped[str(enum)] = {str(k): str(v) for k, v in values.items()}
+        else:
+            mapped[str(enum)] = None
+    return mapped
 
 
 def _subject_path(origin: FileRow, written: str) -> str:

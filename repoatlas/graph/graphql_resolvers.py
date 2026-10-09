@@ -70,6 +70,8 @@ class ResolversPlan:
     unresolved: int = 0
     crossings: int = 0
     detail: str = ""
+    #: Per repository, the schema files each of its constructions loads: what it serves.
+    served: Mapping[int, tuple[tuple[FileRow, ...], ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +147,7 @@ class _Planner:
         self.decisions: dict[str, LinkDecisionRow] = {}
         self.edges: dict[tuple[int, int, int, int], EdgeRecord] = {}
         self.crossings = 0
+        self.served: dict[int, list[tuple[FileRow, ...]]] = defaultdict(list)
         #: (schema file, coordinate) -> (implementing ids, unknown) across constructions.
         self._fields: dict[
             tuple[int, str], tuple[set[int], bool, SymbolRow, UnresolvedRefRecord, FileRow]
@@ -192,6 +195,10 @@ class _Planner:
             unresolved=unresolved,
             crossings=self.crossings,
             detail=f"resolvers: {detail or 'none'}",
+            served={
+                repo: tuple(sorted(set(sets), key=lambda s: [r.rel_path for r in s]))
+                for repo, sets in sorted(self.served.items())
+            },
         )
 
     # -- one construction ----------------------------------------------------------
@@ -211,6 +218,9 @@ class _Planner:
             self._decide(claim, origin, subject, SCHEMA_MISSING, {"missing": missing})
             return False
         schema = build_schema(schema_files, self._by_file)
+        self.served[origin.repo_id].append(
+            tuple(sorted(schema_files, key=lambda row: row.rel_path))
+        )
         found = _Construction()
         if meta.get("library") == "ariadne":
             for ref in _decode_list(meta.get("bindables")):

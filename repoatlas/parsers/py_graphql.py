@@ -22,6 +22,8 @@ import json
 import posixpath
 
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedReference
+from repoatlas.parsers.graphql_artifacts import GRAPHQL_ARTIFACT, introspects, schema_output
+from repoatlas.parsers.graphql_codegen import redact
 from repoatlas.parsers.http_facts import pending_reference
 from repoatlas.parsers.ts_graphql import GRAPHQL_SCHEMA_CONSTRUCTION
 
@@ -249,6 +251,92 @@ class AriadneFacts:
         return [*bindables, *self._claims]
 
 
+_HTTP_CALLS = frozenset(
+    {
+        "requests.get",
+        "requests.post",
+        "requests.request",
+        "httpx.get",
+        "httpx.post",
+        "urllib.request.urlopen",
+        "urlopen",
+    }
+)
+
+
+def schema_download_references(tree: ast.Module) -> list[ParsedReference]:
+    """A module that both requests something over HTTP and writes a schema file at a path
+    anchored to itself: a schema fetch (repoatlas.parsers.graphql_artifacts)."""
+    assigned: dict[str, ast.expr] = {}
+    for statement in tree.body:
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+        ):
+            assigned[statement.targets[0].id] = statement.value
+
+    def constant(node: ast.expr) -> ast.expr:
+        for _ in range(4):
+            if isinstance(node, ast.Name) and node.id in assigned:
+                node = assigned[node.id]
+        return node
+
+    requests = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _dotted(node.func) in _HTTP_CALLS
+    ]
+    if not requests:
+        return []
+    # An introspection query, as text or as the library function that writes one.
+    asks = any(
+        (isinstance(node, ast.Constant) and isinstance(node.value, str) and introspects(node.value))
+        or (isinstance(node, ast.Call) and introspects(_dotted(node.func) or ""))
+        for node in ast.walk(tree)
+    )
+    for node in ast.walk(tree):
+        target: ast.expr | None = None
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"write_text", "write_bytes"}
+        ):
+            target = node.func.value
+        elif (
+            isinstance(node, ast.Call)
+            and _dotted(node.func) == "open"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and str(node.args[1].value).startswith(("w", "a"))
+        ):
+            target = node.args[0]
+        if target is None:
+            continue
+        path = _path(constant(target))
+        output = path.get("path")
+        if output is None or not schema_output(output, introspects=asks):
+            continue
+        request = requests[0]
+        meta = {"source": "python-script", "tool": _dotted(request.func), "output": output}
+        if request.args:
+            url = constant(request.args[0])
+            if isinstance(url, ast.Constant) and isinstance(url.value, str):
+                meta["url"] = redact(url.value)
+        return [
+            pending_reference(
+                EdgeType.REFERENCES,
+                EntityType.FILE,
+                output,
+                getattr(node, "lineno", 1),
+                getattr(node, "end_lineno", None) or getattr(node, "lineno", 1),
+                role=GRAPHQL_ARTIFACT,
+                **meta,
+            )
+        ]
+    return []
+
+
 def _path(node: ast.expr) -> dict[str, str]:
     """A path anchored to this module's directory, or why it is not one."""
     if (
@@ -270,6 +358,10 @@ def _anchored(node: ast.expr) -> list[str] | None:
     """The literal parts after this module's directory, or ``None``."""
     if _is_directory(node):
         return []
+    if isinstance(node, ast.Attribute) and node.attr == "parent":
+        inner = _anchored(node.value)
+        if inner is not None:
+            return [*inner, ".."]
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
         left = _anchored(node.left)
         right = node.right

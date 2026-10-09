@@ -229,6 +229,25 @@ class CodeGeneration(BaseModel):
     decision_ref: str
 
 
+class Composition(BaseModel):
+    """How a supergraph coordinate was composed from the provider definition before it.
+
+    The chain an ownership link recorded (repoatlas.graph.graphql_ownership): the subgraph
+    the supergraph names (``graph``) and the URL it states for it, the deployment that ties
+    that URL to the provider's repository (``identity``), and the provider definition, as
+    ``<repository>/<path>:<line>``. Source evidence: the copy may be stale, which the
+    decision says.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    graph: str
+    url: str
+    identity: str
+    provider: str
+    decision_ref: str
+
+
 class ImpactStep(BaseModel):
     """The one fact connecting a candidate to its predecessor.
 
@@ -259,6 +278,8 @@ class ImpactStep(BaseModel):
     #: The configured generation behind a step from a schema definition to what was
     #: generated from it.
     generation: CodeGeneration | None = None
+    #: The federation composition behind a step from a provider definition to a supergraph's.
+    composition: Composition | None = None
     #: The edge's recorded resolution; ``full`` only.
     resolution: dict[str, object] | None = None
 
