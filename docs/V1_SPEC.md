@@ -1213,6 +1213,61 @@ provider.
 
 A static `codegen.ts`, preset and directory outputs, and Python `gql(...)` documents are not read.
 
+### 7.13 Prisma, SQL and persistence (`.prisma`, `.sql`)
+
+**Prisma schemas** are read by a bounded parser of the documented grammar (there is no maintained Python one); nothing is
+generated, migrated or connected to. Each `datasource`, `generator`, `model`, `view`, `type` and `enum` is a class; each
+field and enum value a symbol under it. Every symbol records the name the database uses for it (`db_name`): the `@map` /
+`@@map` argument, else its own name. A constraint's `map:` (`@@index(…, map:)`, `@id(map:)`) names the constraint, not a
+table or column. A field records its type, modifier (`?`, `[]`) and `@default`; a datasource its `provider` and the
+`env("X")` its `url` reads; a generator its `provider` and `output`. A field typed by a model or enum the file defines
+once `REFERENCES` it.
+
+**SQL files** are read with sqlglot 30.19.0 (pinned; THIRD_PARTY_NOTICES.md) under its PostgreSQL dialect. Each
+`CREATE TYPE … AS ENUM`, `ALTER TYPE … ADD VALUE / RENAME VALUE / RENAME TO` (a bounded grammar over sqlglot's tokens,
+which leaves these opaque), `DROP TYPE`, `CREATE TABLE` and `ALTER TABLE … ADD COLUMN` defines symbols at its lines: the
+type, its values, the table, its columns with their types and defaults. A column typed by a type the file creates once
+`REFERENCES` it. Any other statement is skipped; nothing sqlglot reads is ever echoed.
+
+**Code.** TypeScript and Python record, as claims for the global pass:
+- database clients: `knex(...)`, `pg` `Pool`/`Client`, `PrismaClient`, `psycopg.connect`, SQLAlchemy `create_engine`,
+  each with the one environment variable it reads;
+- queries: Knex chains (`R('t as a').where/whereIn/whereNot…`, joins) and SQL passed to `query`, `raw`,
+  `$queryRaw`/`$executeRaw` (a substitution is a parameter), `$queryRawUnsafe`, psycopg `execute`, SQLAlchemy `text`,
+  with the comparisons (`=`, `<>`, `IN`) of columns with string literals. SQL built at run time is `dynamic`;
+- typed mappings: `Record<A, B>` / `satisfies Record<A, B>` objects, and `dict[A, B]` / `Mapping[A, B]` literals;
+- typed comparisons (Python): `v.f == "lit"` where `v` is a parameter annotated `T`, or drawn from one annotated
+  `list[T]` and the like; a class records the type each annotated field names.
+
+Grafana dashboards (`panels[].targets[].rawSql`, `templating.list[].query`) are read like code's SQL.
+
+**Binding** (ARCHITECTURE.md, "Persistence: bound by the database the source names"):
+- **Prisma projects.** Migrations beside a schema are `GENERATES` from the enum whose type they create or alter
+  (evidence `prisma_migrate`), and folded in order against it. A name imported from the client a generator writes
+  (`@prisma/client`, or the package an `output` under `node_modules` names), in that repository, `REFERENCES` the model
+  or enum of that name.
+- **Queries.** A query binds only through its client, a database identity in the same repository (the client's
+  environment variable is exactly one datasource's `env`), PostgreSQL, and readable SQL. Each comparison's table and
+  column resolve through `@@map` / `@map` to a field, and its literal to an enum value by database name: the querying
+  declaration `REFERENCES` both.
+- **Mappings.** Each entry of a typed mapping whose key type is an enum is `MAPS_TO` from key member to value member,
+  and the key enum `MAPS_TO` the value enum.
+- **Comparisons.** The comparing declaration `REFERENCES` the member of the field's declared enum whose value the
+  literal is.
+
+**Decisions** (`link_decisions`):
+
+| Family | Decisions |
+|---|---|
+| `prisma_migrations` | per enum `linked`, `migration-drift` (differences listed), `migration-missing`; per migration file `dialect-unsupported`, `dialect-unknown` |
+| `prisma_client` | per repository and specifier `linked`, `client-ambiguous` |
+| `persistence` | per querying declaration `linked`, `receiver-unproven`, `database-identity-unproven`, `dialect-unsupported`, `sql-dynamic`, `sql-unsupported`, `column-unknown` |
+| `value_mappings` | per mapping `linked`, `mapping-incomplete` (members without an entry listed) |
+
+Not read: drizzle schemas and configuration, Prisma Client query arguments, `switch`/`match` mappings, TypeScript
+wire-value comparisons, a client generated into a source directory, and any database not described by a Prisma
+schema in the same repository.
+
 ---
 
 ## 8. Knowledge representation
@@ -1260,6 +1315,7 @@ WRITES
 CONFIGURES
 MANAGES
 GENERATES
+MAPS_TO
 ```
 
 **Do not overengineer the ontology.** Add a type only when a concrete retrieval need requires distinguishing it.
