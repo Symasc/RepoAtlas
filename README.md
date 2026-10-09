@@ -191,7 +191,7 @@ describes every stage.
 | | |
 |---|---|
 | Code: definitions, imports, calls, environment reads | Python, TypeScript, JavaScript, Bash |
-| GraphQL | Schema coordinates and same-file type links; operations and fragments, also in TypeScript `gql` templates; GraphQL Code Generator configurations; resolver maps (Apollo, graphql-tools, graphql-yoga, Ariadne) |
+| GraphQL | Schema coordinates and same-file type links; operations and fragments, also in TypeScript `gql` templates; GraphQL Code Generator, ariadne-codegen and graphql-config configurations; resolver maps (Apollo, graphql-tools, graphql-yoga, Ariadne); federated supergraph copies; schema fetch scripts |
 | Configuration and deployment | YAML, JSON, Salt states, Jinja templates, Dockerfiles, docker-compose, Helm charts |
 | Packages | PyPI, npm and RubyGems manifests and lockfiles |
 | HTTP routes served | FastAPI, Flask, Express, NestJS, Fastify, OpenAPI 3 and Swagger 2 specs |
@@ -208,11 +208,12 @@ definition named by its schema coordinate. Links come from configuration, never 
 - generated code is linked to the definitions its GraphQL Code Generator configuration
   loads;
 - a document is bound to the schema of the configuration whose `documents:` cover it;
-- a resolver is bound to the schema of the construction that uses its map.
+- a resolver is bound to the schema of the construction that uses its map;
+- a federated supergraph copy is tied to the service that provides each coordinate, through
+  the deployment that serves the subgraph's URL and the schema that service loads.
 
-Every binding, and every refusal, is a stored decision. Ownership across federated schemas
-and database mappings are not yet linked. Matching names alone never connect schemas or
-repositories.
+Every binding, and every refusal, is a stored decision. Database mappings are not yet linked.
+Matching names alone never connect schemas or repositories.
 
 ## Scope and limitations
 
