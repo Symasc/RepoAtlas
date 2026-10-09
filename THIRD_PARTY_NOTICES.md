@@ -34,10 +34,10 @@ commit and installs as a wheel, after the parser's output is re-characterized.
 GraphQL schema files and documents are read with graphql-core, the Python port of
 the GraphQL reference implementation. Only its parser is used
 (`graphql.language.parse`, under a token bound): no schema is built, no document is
-validated or executed, and nothing is fetched. It is pure Python, pinned exactly in
-`pyproject.toml` and hashed in `uv.lock`. The GraphQL parser's tests hold this row,
-the pin, the lockfile hash and the installed license to one another, and tie the
-pin to the parser's version.
+validated or executed, and nothing is fetched. It is installed, not vendored: pure
+Python, pinned exactly in `pyproject.toml` and hashed in `uv.lock`. The GraphQL
+parser's tests hold this row, the pin, the lockfile hash and the installed license to
+one another, and tie the pin to the parser's version.
 
 | Library | Distribution | Version | Upstream | Tag | Commit | License | sdist SHA-256 |
 |---|---|---|---|---|---|---|---|
