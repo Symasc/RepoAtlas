@@ -409,9 +409,11 @@ def verify_steps(workspace: Workspace, response: Any) -> int:
                     )
         elif step.derived == "member-of":
             assert before is not None and before.path == candidate.path
-            member_key = before.entity.split(":")
-            container = candidate.entity.split(":")
-            assert member_key[-2].startswith(container[-2] + ".")
+            # sym:<repository>:<path>:<qualified name>:<line>, the name possibly holding ":"
+            member = before.entity.rsplit(":", 1)[0].split(":", 3)[3]
+            container = candidate.entity.rsplit(":", 1)[0].split(":", 3)[3]
+            # an argument (`T.f(a:)`) belongs to what it is an argument of (`T.f`)
+            assert member.startswith((container + ".", container + "("))
             assert candidate.lines and before.lines
             assert candidate.lines[0] <= before.lines[0] <= before.lines[1] <= candidate.lines[1]
         else:
