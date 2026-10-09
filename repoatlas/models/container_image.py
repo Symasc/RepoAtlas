@@ -153,3 +153,37 @@ def text_of(parts: Sequence[Sequence[str]]) -> str:
         else:
             shown.append(f"<{kind}:{value}>")
     return "".join(shown)
+
+
+def version_parts(
+    parts: Sequence[Sequence[str]],
+) -> tuple[list[list[str]] | None, list[list[str]] | None]:
+    """The tag's and the digest's own parts, as written (DF2's version relation): split
+    exactly where :func:`parse_reference` splits, each unresolved part kept whole; ``None``
+    for one not written."""
+    cells: list[tuple[str, list[str] | None]] = []
+    for kind, value in parts:
+        if kind == TEXT:
+            cells.extend((char, None) for char in value)
+        else:
+            cells.append((_HOLE, [kind, value]))
+    text = "".join(char for char, _ in cells)
+    at = text.find("@")
+    name_end = at if at >= 0 else len(text)
+    name = text[:name_end]
+    slash, colon = name.rfind("/"), name.rfind(":")
+
+    def grouped(start: int, end: int) -> list[list[str]]:
+        found: list[list[str]] = []
+        for char, part in cells[start:end]:
+            if part is not None:
+                found.append(list(part))
+            elif found and found[-1][0] == TEXT:
+                found[-1][1] += char
+            else:
+                found.append([TEXT, char])
+        return found
+
+    tag = grouped(colon + 1, name_end) if colon > slash else None
+    digest = grouped(at + 1, len(text)) if at >= 0 else None
+    return tag, digest

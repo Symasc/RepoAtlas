@@ -142,6 +142,9 @@ def test_a_service_template_records_its_name_and_ports_as_written() -> None:
         "name": '{{ include "devices.fullname" . }}',
         "ports": json.dumps([["{{ .Values.service.port }}", 10]]),
         "chart": "charts/devices",
+        # DF2: what it selects (none written here) and the port each one sends to.
+        "selector": "null",
+        "target_ports": json.dumps([["{{ .Values.service.port }}", "8080"]]),
     }
 
 
