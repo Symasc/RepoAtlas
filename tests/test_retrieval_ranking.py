@@ -369,7 +369,7 @@ def test_the_trace_never_changes_the_answer(initialized: Workspace) -> None:
 
 
 def test_the_global_link_pass_is_instrumented(initialized: Workspace) -> None:
-    """The stages are the phases: four that compute, then the one that commits.
+    """The stages are the phases: five that compute, then the one that commits.
 
     ``swap`` is last and alone because it is the only stage that writes. The old
     shape opened with a ``reset`` that deleted the previous graph before any of the
@@ -383,6 +383,7 @@ def test_the_global_link_pass_is_instrumented(initialized: Workspace) -> None:
         "index",
         "resolve",
         "uses",
+        "persistence",
         "dependencies",
         "swap",
     ]
