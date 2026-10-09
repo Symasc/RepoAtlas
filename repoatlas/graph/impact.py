@@ -678,12 +678,15 @@ class ImpactWalk:
     def _container(self, node: Node) -> None:
         """The declaration a reached member belongs to: its behaviour changes with it."""
         qualified = node.qualified_name or ""
-        if "." not in qualified or node.path is None or node.repo_id is None:
+        # An argument's container is what it is an argument of: `Type.field(arg:)` belongs
+        # to `Type.field`, and `@directive(arg:)` to `@directive`. No other name has a "(".
+        base, paren, _ = qualified.partition("(")
+        if node.path is None or node.repo_id is None or not (paren or "." in qualified):
             return
         slug = next((s for s, i in self._slug_ids.items() if i == node.repo_id), None)
         if slug is None:
             return
-        parent_name = qualified.rsplit(".", 1)[0]
+        parent_name = base if paren else qualified.rsplit(".", 1)[0]
         found = [
             m
             for m in self._neighbourhood.members(

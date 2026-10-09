@@ -23,6 +23,7 @@ in every scope; anything else must belong to a repository the call named.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -35,31 +36,39 @@ from repoatlas.graph.http_crossings import HTTP_CROSSING
 from repoatlas.graph.impact import ImpactWalk, Node, Tier, WalkResult, is_test_path
 from repoatlas.graph.keys import file_key, package_key
 from repoatlas.graph.packages import CROSSING, ProviderTargets, stored_targets
-from repoatlas.graph.prisma_schema import MIGRATE_EVIDENCE
+from repoatlas.graph.persistence import EVIDENCE as QUERY_EVIDENCE
+from repoatlas.graph.prisma_schema import CLIENT_EVIDENCE, MIGRATE_EVIDENCE
 from repoatlas.graph.py_packages import PythonTargets, stored_python_targets
 from repoatlas.graph.units import package_directories, unit_of
-from repoatlas.graph.value_mappings import MAPPING_EVIDENCE
+from repoatlas.graph.value_mappings import COMPARISON_EVIDENCE, MAPPING_EVIDENCE
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.impact import (
+    MAX_DECISIONS,
     MAX_SEED_CANDIDATES,
+    ClientBinding,
     CodeGeneration,
     Composition,
     Granularity,
     HttpCrossing,
     HubImpact,
     ImpactCandidate,
+    ImpactDecision,
     ImpactOmitted,
     ImpactRole,
     ImpactSeed,
     ImpactStep,
     ImpactSummary,
     ImpactWork,
+    Migration,
     PackageCrossing,
     PackageImpact,
+    QueryBinding,
     SeedBasis,
     SeedCandidate,
     SeedStatus,
+    TypedComparison,
     UnresolvedImpact,
+    ValueMapping,
 )
 from repoatlas.models.parsing import EdgeDirection, EdgeType, EntityType
 from repoatlas.storage.protocols import (
@@ -520,6 +529,20 @@ def assemble(
         mapped = node.step.resolution.get(MAPPING_EVIDENCE)
         if isinstance(mapped, dict):
             return f"{node.step.reading}, by {mapped.get('mapping')}"
+        queried = node.step.resolution.get(QUERY_EVIDENCE)
+        if isinstance(queried, dict):
+            value = f" '{queried.get('value')}'" if queried.get("value") is not None else ""
+            return (
+                f"{node.step.reading}, by a query on {queried.get('table')}.{queried.get('column')}"
+                f" {queried.get('op')}{value}"
+            )
+        bound = node.step.resolution.get(CLIENT_EVIDENCE)
+        if isinstance(bound, dict):
+            return f"{node.step.reading}, through {bound.get('specifier')}"
+        compared = node.step.resolution.get(COMPARISON_EVIDENCE)
+        if isinstance(compared, dict):
+            field_name, value = compared.get("field"), compared.get("value")
+            return f"{node.step.reading}, comparing {field_name} with '{value}'"
         return node.step.reading
 
     tests = [n for n in ranked if is_test_path(n.path) and n.role is not ImpactRole.MEMBER]
@@ -582,6 +605,7 @@ def assemble(
         http = http_crossing(resolution, walk.slug_of(row.file_repo_id) if row else None)
         generation = code_generation(resolution)
         composition = graph_composition(resolution)
+        evidence = link_evidence(resolution)
         via = tuple(str(v) for v in _list(resolution.get("via")))
         if crossing is not None:
             via = tuple(f"{crossing.from_repository}/{v}" for v in via)
@@ -615,6 +639,11 @@ def assemble(
                 http=http,
                 generation=generation,
                 composition=composition,
+                migration=evidence.migration,
+                client=evidence.client,
+                query=evidence.query,
+                mapping=evidence.mapping,
+                comparison=evidence.comparison,
                 resolution=(resolution or None) if full else None,
             ),
             boundaries=tuple(boundaries),
@@ -1154,6 +1183,87 @@ def code_generation(resolution: Mapping[str, object]) -> CodeGeneration | None:
         member_value=str(value) if value is not None else None,
         decision_ref=str(record.get("decision_ref")),
     )
+
+
+def decisions_near(
+    knowledge: KnowledgeStore, entity_keys: Sequence[str]
+) -> tuple[tuple[ImpactDecision, ...], dict[str, int]]:
+    """The link decisions other than a link made (``linked``, ``resolved``) made where the
+    walk went -- at the seed or a
+    returned candidate, or in a file one is in -- at most :data:`MAX_DECISIONS`, the rest
+    counted by family. A decision is listed because the walk touched where it was made,
+    never because a name suggests it is relevant."""
+    rows = knowledge.link_decisions_near([key for key in entity_keys if key])
+    listed = tuple(
+        ImpactDecision(
+            family=family,
+            subject=subject,
+            decision=decision,
+            at=f"{place}:{line}" if line is not None else place,
+            evidence=json.loads(evidence),
+        )
+        for family, subject, decision, place, evidence, line in rows[:MAX_DECISIONS]
+    )
+    omitted: dict[str, int] = {}
+    for family, *_ in rows[MAX_DECISIONS:]:
+        omitted[family] = omitted.get(family, 0) + 1
+    return listed, omitted
+
+
+@dataclass(frozen=True, slots=True)
+class LinkEvidence:
+    """An edge's schema-impact evidence beyond generation and composition, as typed step
+    fields: a migration, a client binding, a query, a mapping or a comparison."""
+
+    migration: Migration | None = None
+    client: ClientBinding | None = None
+    query: QueryBinding | None = None
+    mapping: ValueMapping | None = None
+    comparison: TypedComparison | None = None
+
+
+def link_evidence(resolution: Mapping[str, object]) -> LinkEvidence:
+    """The :class:`LinkEvidence` an edge's resolution records."""
+    found: dict[str, object] = {}
+    record = resolution.get(MIGRATE_EVIDENCE)
+    if isinstance(record, dict):
+        found["migration"] = Migration(
+            project=str(record.get("schema")),
+            migration=str(record.get("migration")),
+            type=str(record.get("type")),
+            decision_ref=str(record.get("decision_ref")),
+        )
+    record = resolution.get(CLIENT_EVIDENCE)
+    if isinstance(record, dict):
+        found["client"] = ClientBinding(
+            project=str(record.get("schema")),
+            specifier=str(record.get("specifier")),
+            decision_ref=str(record.get("decision_ref")),
+        )
+    record = resolution.get(QUERY_EVIDENCE)
+    if isinstance(record, dict):
+        found["query"] = QueryBinding(
+            database=str(record.get("database")),
+            table=str(record.get("table")),
+            column=str(record.get("column")),
+            op=str(record.get("op")),
+            value=None if record.get("value") is None else str(record.get("value")),
+            decision_ref=str(record.get("decision_ref")),
+        )
+    record = resolution.get(MAPPING_EVIDENCE)
+    if isinstance(record, dict):
+        found["mapping"] = ValueMapping(
+            mapping=str(record.get("mapping")), decision_ref=str(record.get("decision_ref"))
+        )
+    record = resolution.get(COMPARISON_EVIDENCE)
+    if isinstance(record, dict):
+        found["comparison"] = TypedComparison(
+            model=str(record.get("type")),
+            field=str(record.get("field")),
+            enum=str(record.get("enum")),
+            value=str(record.get("value")),
+        )
+    return LinkEvidence(**found)  # type: ignore[arg-type]
 
 
 #: How a step from a provider definition to a supergraph copy of it reads.
