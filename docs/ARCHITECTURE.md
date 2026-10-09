@@ -122,6 +122,8 @@ RepoAtlas/
 │   │   ├── graphql_codegen.py  GraphQL Code Generator configuration: one claim per output
 │   │   ├── ts_graphql.py, py_graphql.py  embedded documents, schema construction, resolver maps
 │   │   ├── graphql_artifacts.py  schema fetches in package.json scripts
+│   │   ├── prisma.py, sql.py   Prisma schemas (own bounded parser); SQL with sqlglot, pinned
+│   │   ├── ts_persistence.py, py_persistence.py, dashboards.py   clients, queries, typed mappings
 │   │   └── dockerwords.py  static-vs-computed classification of Dockerfile operands
 │   ├── dependencies/   manifest and lockfile parsers; declared↔resolved join; name normalization
 │   │   ├── base.py         DependencyParser protocol
@@ -139,6 +141,7 @@ RepoAtlas/
 │   │   ├── graphql_codegen.py, globs.py   generated code linked to the schema its configuration loads
 │   │   ├── graphql_documents.py, graphql_resolvers.py, graphql_schema.py   documents and resolvers bound
 │   │   ├── graphql_ownership.py, graphql_artifacts.py   federated copies tied to providers; fetches
+│   │   ├── prisma_schema.py, persistence.py, value_mappings.py   databases, queries, mappings
 │   │   └── impact.py, traversal.py, neighbourhood.py   the change-impact walk and bounded expansion
 │   ├── retrieval/      query analysis, exact/lexical/graph retrievers, fusion, precedence
 │   ├── grounding.py    citation verification — deterministic, and the whole of §11
@@ -1540,7 +1543,7 @@ strings are the schema's. So a renamed value in a stale output is `member-stale`
 **Decisions.** Every subject the pass decides is a `link_decisions` row (§3), `linked` or refused, with the evidence
 it read. The subject is `<repo>:<config>-><output>[::<coordinate>]`.
 
-**Impact.** The `generates-graphql` family follows these edges outward, from a definition to what was generated from
+**Impact.** The `generates` family follows these edges outward, from a definition to what was generated from
 it. `Family.evidence` admits only edges whose resolution records `graphql_codegen`, in every count, page and hub
 query, so Salt's `GENERATES` edges stay outside the walk.
 
@@ -1591,9 +1594,42 @@ define the type differently are `provider-ambiguous`.
 download a schema, and `graph/graphql_artifacts.py` decides each `artifact-remote`. The file it writes is cited in that
 copy's ownership decisions as provenance. A fetch is never ownership: the composition directives are.
 
-**Impact.** The `generates-graphql` family admits `graphql_composition` evidence as well as `graphql_codegen`
+**Impact.** The `generates` family admits `graphql_composition` evidence as well as `graphql_codegen`
 (`Family.evidence` is a tuple, ORed per edge type in `_impact_scope`). A composition step carries
 `ImpactStep.composition` and reads "is composed from".
+
+### Persistence: bound by the database the source names
+
+`parsers/prisma.py` and `parsers/sql.py` read schemas and migrations; `parsers/ts_persistence.py`,
+`parsers/py_persistence.py` and `parsers/dashboards.py` record clients, queries, typed mappings and typed comparisons
+as claims. The global pass decides them in a `persistence` stage after `uses`, because a mapping's or a comparison's
+types are what its declaration uses: `graph/prisma_schema.py`, `graph/persistence.py` and `graph/value_mappings.py`.
+
+> **Invariant.** A query is bound to a column only when the source states the whole chain: a client construction, a
+> database identity *in the same repository* (the client reads the environment variable exactly one Prisma datasource
+> reads), PostgreSQL, and a column `@@map`/`@map` names. A shared table name, an environment variable of the same name
+> in another repository, or a value that equals another enum's never binds anything.
+
+**Effective uses.** The stage reads a declaration's `USES` targets as they will be once the uses plan is applied:
+stored edges of files outside the plan's scope, plus the plan's own (`_effective_uses` in `graph/linker.py`). It is
+computed whole every pass, from claims, symbols and those edges, so incremental equals fresh.
+
+**The Prisma client.** A generator's output gives the specifier code imports; a `USES` claim of a name imported from it
+binds to the schema's model or enum of that name in the same repository (`REFERENCES`, evidence `prisma_client`). These
+are not `USES` edges: those belong to the uses stage and its incremental store.
+
+**Migrations.** Prisma Migrate writes them from the schema, so each statement creating or altering an enum's mapped type
+is `GENERATES` from the enum (evidence `prisma_migrate`), and the values the migrations leave are compared with the
+enum's. Migrations say what was applied in source, never what a database holds.
+
+**Mappings.** `MAPS_TO` is its own edge type: a typed mapping states that a key member maps to a value member, which
+neither a reference nor a generation says. The `maps-to` family follows it outward ("is mapped from"), within one repository:
+`MAPS_TO` is not a cross-repository edge type, so a mapping between two repositories' enums is recorded but not walked
+across. Between two enums the types are mapped too, so a change to the key
+enum reaches the value enum itself: the walk never climbs from a member back to its container.
+
+**Impact.** `POLICY` is `impact/4`: the `generates` family (formerly `generates-graphql`) admits `prisma_migrate`
+evidence, and `maps-to` is new.
 
 ### The two link passes
 

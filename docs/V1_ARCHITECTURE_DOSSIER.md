@@ -451,7 +451,10 @@ class LanguageParser(Protocol):
 | GraphQL codegen and graphql-config | `parsers/graphql_codegen.py` (inside `structured.py`) | `structured-config` | 9 | composed YAML nodes; one claim per output or project |
 | GraphQL schema fetches | `parsers/graphql_artifacts.py` (inside `structured.py`) | `structured-config` | 9 | `package.json` scripts, `shlex` words; never run |
 | ariadne-codegen | `parsers/python_project.py` | `python-project` | 5 | `[tool.ariadne-codegen]` read as TOML |
-| GraphQL in TS / Python | `parsers/ts_graphql.py`, `parsers/py_graphql.py` (inside the TS and Python parsers) | `tree-sitter-typescript` / `python-ast` | 17 / 15 | embedded documents, schema construction, resolver maps, Python fetch scripts, Python enum members |
+| GraphQL in TS / Python | `parsers/ts_graphql.py`, `parsers/py_graphql.py` (inside the TS and Python parsers) | `tree-sitter-typescript` / `python-ast` | 18 / 16 | embedded documents, schema construction, resolver maps, Python fetch scripts, Python enum members |
+| Prisma | `parsers/prisma.py` | `prisma` | 1 | bounded tokenizer and recursive descent of the documented grammar |
+| SQL | `parsers/sql.py` | `sql` | 1 | sqlglot 30.19.0 (PostgreSQL), bounded `ALTER TYPE` grammar over its tokens |
+| Persistence in TS / Python / dashboards | `parsers/ts_persistence.py`, `parsers/py_persistence.py`, `parsers/dashboards.py` (inside the TS, Python and structured parsers) | `tree-sitter-typescript` / `python-ast` / `structured-config` | 18 / 16 / 10 | clients, queries, typed mappings and comparisons |
 
 Dispatch order matters exactly once: `SaltParser` must precede `StructuredParser` so an `.sls` file is never treated as ordinary YAML. `ParserRegistry.for_path()` returns the first parser that claims the path.
 
