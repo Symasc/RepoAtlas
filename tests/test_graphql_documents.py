@@ -96,7 +96,14 @@ def test_each_document_is_decided_by_the_configuration_that_covers_it(
         "depot-web:src/hooks.ts::BROKEN": "document-invalid",
         # excluded by the configuration's negation, and covered by no configuration
         "depot-web:src/ignored/old.ts::Old": "schema-unknown",
+        "depot-web:src/lib/shared.ts::SharedFields": "schema-unknown",
         "depot-web:scripts/probe.ts::Probe": "schema-unknown",
+        "depot-web:scripts/probe.ts::ProbeFields": "schema-unknown",
+        # its fragment is in a covered module only through the substitution that splices it
+        "depot-web:src/spliced.ts::WithShared": "linked",
+        "depot-web:src/spliced.ts::partial": "document-dynamic",
+        # a spread of a fragment no configured document defines
+        "depot-web:src/queries/orphan.graphql::UsesProbe": "document-unresolved",
     }
     broken = next(
         r
@@ -152,10 +159,15 @@ def test_an_embedded_document_cites_its_own_lines_and_follows_a_spliced_fragment
         "src/fragments.ts",
         5,
     ) in found
+    assert (
+        "src/spliced.ts#WithShared",
+        "src/lib/shared.ts#SharedFields",
+        "src/spliced.ts",
+        4,
+    ) in found
     # Text only run time decides states nothing, not even its operation's name.
-    assert not [
-        r for r in found if r[0].startswith(("src/hooks.ts#Dyn", "scripts/", "src/ignored/"))
-    ]
+    unbound = ("src/hooks.ts#Dyn", "src/spliced.ts#Partial", "scripts/", "src/ignored/")
+    assert not [r for r in found if r[0].startswith(unbound)]
     names = {
         r["qualified_name"]
         for r in workspace.database.execute(
@@ -164,6 +176,14 @@ def test_an_embedded_document_cites_its_own_lines_and_follows_a_spliced_fragment
         ).fetchall()
     }
     assert "Dyn" not in names
+    spliced = {
+        r["qualified_name"]
+        for r in workspace.database.execute(
+            "SELECT e.qualified_name FROM entities e JOIN files f ON f.id = e.file_id "
+            "WHERE f.rel_path = 'src/spliced.ts'"
+        ).fetchall()
+    }
+    assert "Partial" not in spliced
 
 
 def test_a_document_named_like_a_declaration_takes_nothing_from_it(
@@ -257,7 +277,7 @@ def test_a_resolver_is_the_declaration_that_implements_the_field(
     found = {
         (s, t, at, line)
         for s, t, at, line in references(workspace)
-        if not at.startswith(("src/queries", "src/hooks", "src/fragments"))
+        if not at.startswith(("src/queries", "src/hooks", "src/fragments", "src/spliced"))
     }
     assert found == {
         # an imported function, through an imported object

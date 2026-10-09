@@ -37,12 +37,19 @@ SCHEMA = (
     "type Mutation {\n"  # 20
     "  ship(id: ID!): Parcel\n"  # 21
     "}\n"  # 22
+    # a value whose name another enum shares: a literal binds by its argument's type only
+    "enum Lane {\n"  # 23
+    "  FAST\n"  # 24
+    "  LOST\n"  # 25
+    "}\n"  # 26
 )
 
 API = {
     "package.json": json.dumps({"name": "depot-api", "private": True}),
     "schema/depot.graphql": SCHEMA,
     "schema/extra.graphql": "type Crate {\n  id: ID!\n}\ntype Query {\n  crates: [Crate!]!\n}\n",
+    # Defines the type the resolver map's stray entry names; no construction loads it.
+    "schema/ghost.graphql": "type Ghost {\n  boo: Int\n}\n",
     "src/server.ts": (
         "import { readFileSync } from 'node:fs';\n"  # 1
         "import { join } from 'node:path';\n"  # 2
@@ -127,6 +134,7 @@ WEB = {
         "  - src/**/*.graphql\n"
         "  - src/**/*.ts\n"
         "  - '!src/ignored/**'\n"
+        "  - '!src/lib/**'\n"
         "generates:\n"
         "  src/gen.ts:\n"
         "    plugins: [typescript, typescript-operations]\n"
@@ -182,6 +190,25 @@ WEB = {
         "}\n"  # 19
         "export const BROKEN = gql`query {`;\n"  # 20
     ),
+    # A fragment only a static substitution brings in: its module is no configured document.
+    "src/lib/shared.ts": (
+        "import { gql } from '@apollo/client';\n"
+        "export const SHARED = gql`fragment SharedFields on Parcel { id }`;\n"
+    ),
+    "src/spliced.ts": (
+        "import { gql } from '@apollo/client';\n"  # 1
+        "import { SHARED } from './lib/shared';\n"  # 2
+        "export const WITH_SHARED = gql`\n"  # 3
+        '  query WithShared { parcel(id: "1") { ...SharedFields } }\n'  # 4
+        "  ${SHARED}\n"  # 5
+        "`;\n"  # 6
+        # inside a definition, and still parseable once removed: only run time decides it
+        "export function partial(extra: string) {\n"  # 7
+        "  return gql`query Partial { parcels { id ${extra} } }`;\n"  # 8
+        "}\n"  # 9
+    ),
+    # A spread of a fragment only a file no configuration covers defines.
+    "src/queries/orphan.graphql": "query UsesProbe {\n  parcels {\n    ...ProbeFields\n  }\n}\n",
     "src/ignored/old.ts": (
         "import { gql } from '@apollo/client';\n"
         "export const OLD = gql`query Old { parcels { id } }`;\n"
@@ -189,6 +216,7 @@ WEB = {
     "scripts/probe.ts": (
         "import { gql } from '@apollo/client';\n"
         "export const PROBE = gql`query Probe { parcels { id stage } }`;\n"
+        "export const FIELDS = gql`fragment ProbeFields on Parcel { id }`;\n"
     ),
 }
 
