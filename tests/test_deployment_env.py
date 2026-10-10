@@ -378,6 +378,38 @@ def test_a_reader_reaches_each_effective_setter_as_a_leaf(corpus: Workspace) -> 
     assert not any(key.startswith(("sym:namesake:", "file:namesake:")) for key in reached)
 
 
+def test_a_configures_edge_without_its_record_never_crosses(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    build(workspace, tmp_path, repos())
+    database = workspace.database
+    setter = f"{VALUES}:env.VALUES_DEFAULT:5"
+    planted = "sym:namesake:config.py:OVERLAY:3"
+    [(src, repo_id, file_id)] = database.execute(
+        "SELECT id, repo_id, file_id FROM entities WHERE key = ?", (setter,)
+    ).fetchall()
+    [(dst,)] = database.execute("SELECT id FROM entities WHERE key = ?", (planted,)).fetchall()
+    # as Salt's and a project's CONFIGURES edges are: no deployment_env record
+    with database.transaction() as conn:
+        conn.execute(
+            "INSERT INTO edges (src_id, dst_id, type, confidence, repo_id, file_id,"
+            " line_start, line_end, parser, resolution)"
+            " VALUES (?, ?, 'CONFIGURES', 1.0, ?, ?, 5, 5, 'linker:global', NULL)",
+            (src, dst, repo_id, file_id),
+        )
+    reached = by_entity(impact(workspace, setter))
+    assert planted not in reached
+    assert f"{SETTINGS}:VALUES_DEFAULT:3" in reached  # the recorded crossing still is
+
+
+def test_a_setter_reached_from_a_reader_is_a_leaf(corpus: Workspace) -> None:
+    reached = by_entity(impact(corpus, f"{SETTINGS}:SET_LITERAL:5"))
+    assert reached[STEP].role is ImpactRole.SETS
+    # the step sets other variables too; none of their readers depends on this one
+    assert f"{SETTINGS}:SET_SYMBOLIC:6" not in reached
+    assert f"{SETTINGS}:SET_SECRET:7" not in reached
+
+
 def test_a_symbolic_value_is_never_presented_as_a_value(corpus: Workspace) -> None:
     reached = by_entity(impact(corpus, STEP))
     step = reached[f"{SETTINGS}:SET_SYMBOLIC:6"]
