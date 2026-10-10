@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from repoatlas.models.parsing import (
+    FIELD,
     USES_EXPORT_TABLE,
     EdgeType,
     EntityType,
@@ -57,6 +58,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 #: The ``meta`` key marking a reference as a file's export table (see the module docstring).
 USES_EXPORTS = "uses_exports"
+#: The ``meta`` key of a use's model-field members, ``[[field, line, access], ...]`` (DF3b):
+#: what the declaration reads through a parameter typed by the used name, or sets in an
+#: object literal (Python: a construction) of that type. Resolved with the use.
+FIELD_MEMBERS = "fields"
+#: The most distinct fields one use carries: a guard, since each is a written member.
+MAX_FIELD_MEMBERS = 256
 
 #: Node kinds a use can be read from.
 USE_NODES = frozenset({"identifier", "type_identifier", "shorthand_property_identifier"})
@@ -209,6 +216,8 @@ class UseSite:
     line: int
     #: A namespace import's member the use reaches (``ns.X``), if it names one.
     member: str | None = None
+    #: The model fields read or set through this use of a type (:func:`field_members`).
+    members: tuple[tuple[str, int, str], ...] = ()
 
     @property
     def target_key(self) -> str:
@@ -226,6 +235,8 @@ class UseAnalysis:
         #: Uses refused, by reason; measurement only.
         self.rejected: Counter[str] = Counter()
         self._depth: Counter[str] = Counter()
+        #: Model-field members by the type name node they ride on (DF3b).
+        self._members = field_members(source, root)
         self._module_bindings(root)
         self.exports = self._export_table(root)
         for index, child in enumerate(root.children):
@@ -531,8 +542,15 @@ class UseAnalysis:
                 use, form = "call", "call"
         else:
             member = None
-        self.sites[(node.start_byte, node.end_byte, node.type)] = UseSite(
-            name=name, binding=binding, use=use, form=form, line=line_range(node)[0], member=member
+        key = (node.start_byte, node.end_byte, node.type)
+        self.sites[key] = UseSite(
+            name=name,
+            binding=binding,
+            use=use,
+            form=form,
+            line=line_range(node)[0],
+            member=member,
+            members=tuple(self._members.get(key, ())) if member is None else (),
         )
 
     def _classify(
@@ -766,7 +784,10 @@ def use_references(
     rather than a use and is dropped. Repeats of one (declaration, target, use) are
     one reference at the first occurrence, with the count kept.
     """
-    counted = Counter(symbol.qualified_name for symbol in symbols)
+    # A field owns no use, so it never makes a declaration's name ambiguous (DF3b).
+    counted = Counter(
+        symbol.qualified_name for symbol in symbols if symbol.meta.get("kind") != FIELD
+    )
     signatures = Counter(
         symbol.qualified_name for symbol in symbols if symbol.meta.get("kind") == "declaration"
     )
@@ -774,6 +795,7 @@ def use_references(
         name for name, count in counted.items() if count > 1 and count - signatures[name] != 1
     }
     merged: dict[tuple[str | None, str, str], tuple[UseSite, int]] = {}
+    members: dict[tuple[str | None, str, str], dict[str, tuple[int, str]]] = {}
     for source, site in raw:
         owner = None if source in ambiguous else source
         if (
@@ -787,9 +809,14 @@ def use_references(
         key = (owner, site.target_key, site.use)
         first, count = merged.get(key, (site, 0))
         merged[key] = (first, count + 1)
+        seen = members.setdefault(key, {})
+        for name, line, access in site.members:
+            if name not in seen or (line, access) < seen[name]:
+                seen[name] = (line, access)
 
     references: list[ParsedReference] = []
-    for (owner, target, _), (site, count) in merged.items():
+    for key, (site, count) in merged.items():
+        owner, target, _ = key
         binding = site.binding
         meta = {
             "use": site.use,
@@ -798,6 +825,14 @@ def use_references(
             "local": site.name,
             "occurrences": str(count),
         }
+        if members.get(key):
+            # The model's fields this declaration reads or sets through this use (DF3b):
+            # resolved with the use, never copied into its own edge's record.
+            listed = sorted(members[key].items(), key=lambda kv: (kv[1], kv[0]))
+            meta[FIELD_MEMBERS] = json.dumps(
+                [[name, line, access] for name, (line, access) in listed][:MAX_FIELD_MEMBERS],
+                separators=(",", ":"),
+            )
         if binding.kind != "local":
             meta["module"] = binding.module or ""
             imported = site.member if binding.kind == "namespace" else binding.imported
@@ -828,3 +863,303 @@ def use_references(
             )
         )
     return references
+
+
+# -- model fields (DF3b) --------------------------------------------------------
+
+#: Functions with a body whose parameters and return type a field use is read from.
+_FIELD_FUNCTIONS = frozenset(
+    {
+        "function_declaration",
+        "generator_function_declaration",
+        "function_expression",
+        "function",
+        "generator_function",
+        "arrow_function",
+        "method_definition",
+    }
+)
+_TYPE_PARAMETER_HOLDERS = frozenset(
+    {
+        *_FIELD_FUNCTIONS,
+        "class_declaration",
+        "abstract_class_declaration",
+        "interface_declaration",
+        "type_alias_declaration",
+        "function_signature",
+        "method_signature",
+    }
+)
+#: (parent kind) under which an identifier named like a parameter binds or writes it.
+_BINDING_PARENTS = frozenset(
+    {
+        "required_parameter",
+        "optional_parameter",
+        "rest_pattern",
+        "array_pattern",
+        "object_pattern",
+        "pair_pattern",
+        "object_assignment_pattern",
+        "assignment_pattern",
+        "catch_clause",
+    }
+)
+
+_ASSIGNING = frozenset(
+    {"assignment_expression", "augmented_assignment_expression", "for_in_statement"}
+)
+
+_Key = tuple[int, int, str]
+
+
+def field_members(source: bytes, root: Node) -> dict[_Key, list[tuple[str, int, str]]]:
+    """The model fields each type annotation's one named type is read or set through.
+
+    Keyed by that type name node, where its use is recorded. Three places name one type
+    (``T``, ``T | null``, ``T | undefined``; a return type also ``Promise<T>``), never a
+    function's own type parameter:
+
+    * a parameter of a function with a body: ``p.f`` and ``p?.f`` read ``f`` when nothing
+      in the function binds or writes ``p`` again, as does ``const {f} = p``; a destructured
+      parameter ``({f, g: h}: T)`` reads each key;
+    * a function's return type: each identifier key of an object literal it returns;
+    * a variable's annotation: each identifier key of the object literal it is given.
+
+    The keys are written members, never matched by name: whether ``T`` resolves to one
+    declaration owning such a field is its use's to decide.
+    """
+    found: dict[_Key, list[tuple[str, int, str]]] = {}
+
+    def add(node: Node | None, name: str, line: int, access: str) -> None:
+        if node is not None:
+            found.setdefault((node.start_byte, node.end_byte, node.type), []).append(
+                (name, line, access)
+            )
+
+    for node in _walk(root):
+        kind = node.type
+        if kind in _FIELD_FUNCTIONS:
+            generic = _type_parameters(source, node)
+            parameters = node.child_by_field_name("parameters")
+            for parameter in parameters.named_children if parameters is not None else ():
+                if parameter.type not in {"required_parameter", "optional_parameter"}:
+                    continue
+                pattern = parameter.child_by_field_name("pattern")
+                named = _annotated_type(source, parameter.child_by_field_name("type"))
+                if pattern is None or named is None or node_text(source, named) in generic:
+                    continue
+                if pattern.type == "object_pattern":
+                    for key, line in _pattern_keys(source, pattern):
+                        add(named, key, line, "parameter")
+                    continue
+                if pattern.type != "identifier":
+                    continue
+                name = node_text(source, pattern)
+                if _rebinds(source, node, parameter, name):
+                    continue
+                for inner in _walk(node):
+                    if inner.type == "member_expression":
+                        target = inner.child_by_field_name("object")
+                        prop = inner.child_by_field_name("property")
+                        if (
+                            target is not None
+                            and target.type == "identifier"
+                            and node_text(source, target) == name
+                            and prop is not None
+                            and prop.type == "property_identifier"
+                        ):
+                            add(named, node_text(source, prop), line_range(inner)[0], "parameter")
+                    elif inner.type == "variable_declarator":
+                        left = inner.child_by_field_name("name")
+                        value = inner.child_by_field_name("value")
+                        if (
+                            left is not None
+                            and left.type == "object_pattern"
+                            and value is not None
+                            and value.type == "identifier"
+                            and node_text(source, value) == name
+                        ):
+                            for key, line in _pattern_keys(source, left):
+                                add(named, key, line, "parameter")
+            returned = _returned_type(source, node)
+            if returned is not None and node_text(source, returned) not in generic:
+                body = node.child_by_field_name("body")
+                expression = body is not None and body.type != "statement_block"
+                literal = _unwrap(body) if expression else None
+                if literal is not None and literal.type == "object":
+                    for key, line in _object_keys(source, literal):
+                        add(returned, key, line, "construction")
+        elif kind == "return_statement":
+            argument = _unwrap(next((c for c in node.named_children if c.type != "comment"), None))
+            if argument is None or argument.type != "object":
+                continue
+            owner = node.parent
+            while owner is not None and owner.type not in _FIELD_FUNCTIONS:
+                owner = owner.parent
+            if owner is None:
+                continue
+            returned = _returned_type(source, owner)
+            if returned is not None and node_text(source, returned) not in _type_parameters(
+                source, owner
+            ):
+                for key, line in _object_keys(source, argument):
+                    add(returned, key, line, "construction")
+        elif kind == "variable_declarator":
+            named = _annotated_type(source, node.child_by_field_name("type"))
+            value = _unwrap(node.child_by_field_name("value"))
+            if (
+                named is not None
+                and value is not None
+                and value.type == "object"
+                and node_text(source, named) not in _type_parameters(source, node)
+            ):
+                for key, line in _object_keys(source, value):
+                    add(named, key, line, "construction")
+    return found
+
+
+def _walk(node: Node) -> list[Node]:
+    found, pending = [], [node]
+    while pending:
+        current = pending.pop()
+        found.append(current)
+        pending.extend(reversed(current.children))
+    return found
+
+
+def _annotated_type(source: bytes, annotation: Node | None) -> Node | None:
+    """The type name node of a ``: T`` annotation naming one type, else ``None``."""
+    if annotation is None:
+        return None
+    inner = [c for c in annotation.named_children if c.type != "comment"]
+    return _named_type(source, inner[0]) if len(inner) == 1 else None
+
+
+def _named_type(source: bytes, node: Node) -> Node | None:
+    if node.type == "type_identifier":
+        return node
+    if node.type == "union_type":
+        parts = _union(node)
+        named = [
+            p
+            for p in parts
+            if not (
+                p.type in {"literal_type", "predefined_type"}
+                and node_text(source, p) in {"null", "undefined"}
+            )
+        ]
+        return named[0] if len(named) == 1 and named[0].type == "type_identifier" else None
+    return None
+
+
+def _union(node: Node) -> list[Node]:
+    parts: list[Node] = []
+    for child in node.named_children:
+        parts.extend(_union(child) if child.type == "union_type" else [child])
+    return parts
+
+
+def _returned_type(source: bytes, function: Node) -> Node | None:
+    """The type name node of a return type naming one type, or ``Promise<T>``'s."""
+    annotation = function.child_by_field_name("return_type")
+    if annotation is None:
+        return None
+    inner = [c for c in annotation.named_children if c.type != "comment"]
+    if len(inner) != 1:
+        return None
+    node = inner[0]
+    if node.type == "generic_type":
+        name = node.child_by_field_name("name")
+        arguments = node.child_by_field_name("type_arguments")
+        listed = [c for c in (arguments.named_children if arguments else []) if c.type != "comment"]
+        if name is not None and node_text(source, name) == "Promise" and len(listed) == 1:
+            return _named_type(source, listed[0])
+        return None
+    return _named_type(source, node)
+
+
+def _pattern_keys(source: bytes, pattern: Node) -> list[tuple[str, int]]:
+    keys: list[tuple[str, int]] = []
+    for child in pattern.named_children:
+        if child.type == "shorthand_property_identifier_pattern":
+            keys.append((node_text(source, child), line_range(child)[0]))
+        elif child.type == "pair_pattern":
+            key = child.child_by_field_name("key")
+            if key is not None and key.type == "property_identifier":
+                keys.append((node_text(source, key), line_range(key)[0]))
+        elif child.type == "object_assignment_pattern":
+            left = child.child_by_field_name("left")
+            if left is not None and left.type == "shorthand_property_identifier_pattern":
+                keys.append((node_text(source, left), line_range(left)[0]))
+    return keys
+
+
+def _object_keys(source: bytes, literal: Node) -> list[tuple[str, int]]:
+    keys: list[tuple[str, int]] = []
+    for child in literal.named_children:
+        if child.type == "pair":
+            key = child.child_by_field_name("key")
+            if key is not None and key.type == "property_identifier":
+                keys.append((node_text(source, key), line_range(key)[0]))
+        elif child.type == "shorthand_property_identifier":
+            keys.append((node_text(source, child), line_range(child)[0]))
+    return keys
+
+
+def _unwrap(node: Node | None) -> Node | None:
+    while node is not None and node.type == "parenthesized_expression":
+        inner = [c for c in node.named_children if c.type != "comment"]
+        node = inner[0] if len(inner) == 1 else None
+    return node
+
+
+def _rebinds(source: bytes, scope: Node, parameter: Node, name: str) -> bool:
+    """Whether anything in ``scope`` but ``parameter`` binds or writes ``name``."""
+    for node in _walk(scope):
+        if node.start_byte >= parameter.start_byte and node.end_byte <= parameter.end_byte:
+            continue
+        if node.type not in {"identifier", "shorthand_property_identifier_pattern"}:
+            continue
+        if node_text(source, node) != name or node.parent is None:
+            continue
+        parent = node.parent
+        above = parent.type
+        if above in _BINDING_PARENTS or above == "update_expression":
+            return True
+        if above == "variable_declarator" and parent.child_by_field_name("name") == node:
+            return True
+        if (
+            above
+            in {
+                "function_declaration",
+                "generator_function_declaration",
+                "class_declaration",
+                "function_expression",
+                "class",
+            }
+            and parent.child_by_field_name("name") == node
+        ):
+            return True
+        if (
+            above in _ASSIGNING
+            and parent.child_by_field_name("left") == node
+        ):
+            return True
+        if above == "arrow_function" and parent.child_by_field_name("parameter") == node:
+            return True
+    return False
+
+
+def _type_parameters(source: bytes, node: Node) -> set[str]:
+    """The type parameters ``node`` and every declaration around it bind."""
+    names: set[str] = set()
+    current: Node | None = node
+    while current is not None:
+        if current.type in _TYPE_PARAMETER_HOLDERS:
+            params = current.child_by_field_name("type_parameters")
+            for child in params.named_children if params is not None else ():
+                name = child.child_by_field_name("name")
+                if name is not None:
+                    names.add(node_text(source, name))
+        current = current.parent
+    return names

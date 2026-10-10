@@ -16,6 +16,7 @@ from pathlib import Path
 
 from repoatlas.models.parsing import (
     ENUM_MEMBER,
+    FIELD,
     PARSE_FAILED,
     SYNTAX_ERROR,
     EdgeType,
@@ -422,7 +423,11 @@ class PythonParser:
     # +pyX.Y: `ast` is the running interpreter's, and what it accepts moves with the
     #    interpreter (repoatlas.parsers.interpreter), so facts parsed by another one
     #    are never kept.
-    version = f"17+{interpreter_tag()}"
+    # 18: a model's own fields are symbols (``Model.field``, kind ``field``, with ``init`` when its
+    #    class's initializer is proven to bind it by keyword), and a use of a class carries the
+    #    fields read through a parameter it annotates or set by constructing it (DF3b,
+    #    repoatlas.parsers.py_uses).
+    version = f"18+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
@@ -482,10 +487,23 @@ class PythonParser:
             ]
             declared = {value.name for value in analysis.declarations}
             owners = [(name, statement) for name, statement in analysis.owned if name in declared]
+            fields = [
+                ParsedSymbol(
+                    kind=EntityType.SYMBOL,
+                    name=field.name,
+                    qualified_name=f"{field.model}.{field.name}",
+                    line_start=field.line,
+                    line_end=field.end_line,
+                    signature=field.signature,
+                    parent=field.model,
+                    meta={"kind": FIELD, **({"init": field.init} if field.init else {})},
+                )
+                for field in analysis.fields
+            ]
         except RecursionError:
             # Nesting deeper than the analysis can walk costs the file its uses and its
             # module values, never its other facts.
-            uses, values, owners = [], [], []
+            uses, values, owners, fields = [], [], [], []
 
         whole_file_start, whole_file_last = whole_file_span(content)
         module_symbol = ParsedSymbol(
@@ -503,7 +521,7 @@ class PythonParser:
             parser=self.name,
             parser_version=self.version,
             # Module values last: a name one shares with the module itself names the value.
-            symbols=(module_symbol, *visitor.symbols, *values),
+            symbols=(module_symbol, *visitor.symbols, *values, *fields),
             references=(
                 *owned,
                 *http.deployment_references(),
