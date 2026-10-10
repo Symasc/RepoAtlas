@@ -33,7 +33,9 @@ DF1 decided which releases CI configurations establish and which images their jo
   not fully render as a pattern of its own, a rival to every exposure but its own (E8).
 
 The results are exposure and identity claims for the HTTP join -- in memory, never stored
--- and ``container_artifact`` link decisions. Nothing here says that a deployment ran, that
+-- and ``container_artifact`` link decisions; and each rendered container with its artifact
+decision and the values it rendered with, for DF3a's configuration crossings
+(:mod:`repoatlas.graph.deployment_env`). Nothing here says that a deployment ran, that
 an image was pushed or exists, or which version runs: only what the files configure.
 """
 
@@ -167,22 +169,14 @@ _OUTCOMES = {
 _DOLLAR_ROOT = re.compile(r"(?<![\w$])\$\.")
 
 
-@dataclass(slots=True)
-class ArtifactPlan:
-    #: ``http-exposed-endpoint`` claims, one per CI-bound identity and route.
-    exposures: list[UnresolvedRefRecord] = field(default_factory=list)
-    #: Identities that reach no code, and every established release's unrendered hosts.
-    identities: list[UnresolvedRefRecord] = field(default_factory=list)
-    decisions: list[LinkDecisionRow] = field(default_factory=list)
-    detail: str = "artifacts: none"
-
-
 # -- values, with Helm's precedence ------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
 class _Value:
-    #: ``lit``, ``sym`` (CI parts, a symbol among them) or ``unknown``.
+    #: ``lit``, ``sym`` (CI parts, a symbol among them), ``withheld`` (a credential leaf or
+    #: ``--set``: where it is set is known, never what) or ``unknown``. Only a literal
+    #: renders; anything else is read as unknown here.
     kind: str
     text: str = ""
     parts: tuple[tuple[str, str], ...] = ()
@@ -251,14 +245,19 @@ class _Effective:
                 self.absent.add(key)
         for key, text in leaves.items():
             place = Place(repo_id, path, int(lines[key])) if key in lines else None
-            self.put(key, _UNKNOWN if text == "<withheld>" else _Value("lit", text, place=place))
+            self.put(
+                key,
+                _Value("withheld", place=place)
+                if text == "<withheld>"
+                else _Value("lit", text, place=place),
+            )
 
     def setting(self, key: str | None, parts: Sequence[tuple[str, str]], place: Place) -> None:
         if key is None:
             self.unknown("set-unread")
             return
         if any(kind == WITHHELD for kind, _ in parts):
-            self.put(key, _UNKNOWN)
+            self.put(key, _Value("withheld", place=place))
         elif all(kind == TEXT for kind, _ in parts):
             text = "".join(value for _, value in parts)
             if text in ("null", "Null", "NULL", "~"):
@@ -294,6 +293,61 @@ class _Effective:
                 return None
             found[key] = value.text
         return found
+
+
+def _holds(values: _Effective, path: str) -> bool | None:
+    """Whether an ``if .Values.<path>`` holds under ``values``; ``None`` when not known."""
+    value = values.get(path)
+    if value is None:
+        return values.nested(path)
+    if value.kind != "lit":
+        return None
+    return value.text not in _FALSY
+
+
+@dataclass(frozen=True, slots=True)
+class DeployedContainer:
+    """One container of a rendered workload of one release variant, with its artifact decision
+    and the values the release renders with: what DF3a reads a container's configuration from
+    (:mod:`repoatlas.graph.deployment_env`)."""
+
+    release: CiRelease
+    variant: str
+    #: The release's name, or ``None`` when not literal.
+    release_name: str | None
+    values: _Effective
+    chart_repo_id: int
+    chart_directory: str
+    workload: UnresolvedRefRecord
+    #: The workload claim's container, as DF1 read it.
+    container: Mapping[str, object]
+    decision: str
+    evidence: Mapping[str, object]
+    artifact_ref: str
+    artifact_subject: str
+    build: CiBuild | None
+    relation: str
+
+    def value(self, path: str) -> _Value | None:
+        """What the release renders ``.Values.<path>`` with, by Helm's precedence; ``None``
+        when no layer sets it."""
+        return self.values.get(path)
+
+    def holds(self, path: str) -> bool | None:
+        """Whether an ``if .Values.<path>`` holds for the release; ``None`` when not known."""
+        return _holds(self.values, path)
+
+
+@dataclass(slots=True)
+class ArtifactPlan:
+    #: ``http-exposed-endpoint`` claims, one per CI-bound identity and route.
+    exposures: list[UnresolvedRefRecord] = field(default_factory=list)
+    #: Identities that reach no code, and every established release's unrendered hosts.
+    identities: list[UnresolvedRefRecord] = field(default_factory=list)
+    decisions: list[LinkDecisionRow] = field(default_factory=list)
+    detail: str = "artifacts: none"
+    #: Every rendered container of a bound release variant, decided (DF3a reads these).
+    containers: list[DeployedContainer] = field(default_factory=list)
 
 
 # -- charts -------------------------------------------------------------------------------
@@ -334,6 +388,8 @@ class _Artifact:
     decision: str
     evidence: dict[str, object]
     ref: str
+    #: The decision's subject, as recorded.
+    subject: str = ""
     build: CiBuild | None = None
     relation: str = ""
     #: The values places that set the image (its repository and tag).
@@ -417,6 +473,7 @@ class _Planner:
         self.releases = [r for r in ci.releases if r.decision in ("bound", "values-unresolved")]
         self.plan = DeploymentPlan()
         self.decisions = DecisionRows()
+        self.deployed: list[DeployedContainer] = []
 
     # -- variants ------------------------------------------------------------------------
 
@@ -511,12 +568,7 @@ class _Planner:
 
     def condition(self, path: str, release: _Release) -> bool | None:
         """Whether an ``if .Values.<path>`` holds; ``None`` when not known."""
-        value = release.values.get(path)
-        if value is None:
-            return release.values.nested(path)
-        if value.kind != "lit":
-            return None
-        return value.text not in _FALSY
+        return _holds(release.values, path)
 
     # -- workload, container, artifact ---------------------------------------------------
 
@@ -600,8 +652,8 @@ class _Planner:
                     defaulted,
                     "; ".join(dict.fromkeys(places)),
                 )
-        ref = self.decide(origin, workload, line, subject, decision, evidence)
-        return _Artifact(decision, evidence, ref, workload_in=workload_in)
+        ref, subject = self.decide(origin, workload, line, subject, decision, evidence)
+        return _Artifact(decision, evidence, ref, subject, workload_in=workload_in)
 
     def image(
         self, written: object, chart: _Chart, release: _Release
@@ -702,11 +754,12 @@ class _Planner:
             evidence["unmatched"] = [self.entry(b) for b in unmatched]
         else:
             decision = PUBLISHER_UNRESOLVED_DECISION
-        ref = self.decide(origin, workload, line, subject, decision, evidence)
+        ref, subject = self.decide(origin, workload, line, subject, decision, evidence)
         return _Artifact(
             decision,
             evidence,
             ref,
+            subject,
             build,
             relation,
             image_in,
@@ -798,7 +851,7 @@ class _Planner:
         subject: str,
         decision: str,
         evidence: Mapping[str, object],
-    ) -> str:
+    ) -> tuple[str, str]:
         subject = self.decisions.add(
             CONTAINER_ARTIFACT,
             origin,
@@ -807,7 +860,7 @@ class _Planner:
             decision,
             evidence,
         )
-        return ref_of(CONTAINER_ARTIFACT, subject)
+        return ref_of(CONTAINER_ARTIFACT, subject), subject
 
     def select(
         self, service: UnresolvedRefRecord, chart: _Chart, release: _Release
@@ -998,6 +1051,29 @@ class _Planner:
             )
             bound = ci.decision == "bound"
             artifacts = self.artifacts(chart, release) if bound else {}
+            for workload in chart.workloads:
+                listed = json.loads(_meta(workload).get("containers", "[]"))
+                for index, container in enumerate(listed if isinstance(listed, list) else []):
+                    artifact = artifacts.get((workload.id or 0, index))
+                    if artifact is not None and isinstance(container, dict):
+                        self.deployed.append(
+                            DeployedContainer(
+                                ci,
+                                label,
+                                name,
+                                release.values,
+                                chart.repo_id,
+                                chart.directory,
+                                workload,
+                                container,
+                                artifact.decision,
+                                artifact.evidence,
+                                artifact.ref,
+                                artifact.subject,
+                                artifact.build,
+                                artifact.relation,
+                            )
+                        )
             ties: dict[int, _Tie] = {}
             for service in chart.services:
                 meta = _meta(service)
@@ -1343,4 +1419,5 @@ def plan_deployment_artifacts(
         identities=[*plan.identities, *plan.patterns],
         decisions=rows,
         detail=detail,
+        containers=list(planner.deployed),
     )
