@@ -725,6 +725,8 @@ class _Walker:
             # A computed key cannot be resolved statically, so nothing is recorded.
             return
         start, end = line_range(node)
+        # As a use is attributed (:meth:`_use`): the enclosing named declaration, else the
+        # module-scope binding whose initializer holds it (DF3a), else the file.
         self.references.append(
             ParsedReference(
                 edge_type=EdgeType.READS,
@@ -732,7 +734,7 @@ class _Walker:
                 target_key=name,
                 line_start=start,
                 line_end=end,
-                source_symbol=self._current,
+                source_symbol=self._current if self._scope else self._binding,
                 meta={"via": "process.env"},
             )
         )
@@ -810,7 +812,10 @@ class TypeScriptParser:
     #    shapes of exported resolver-like objects (repoatlas.parsers.ts_graphql).
     # 18: database clients, Knex chains and SQL handed to a client, and typed value
     #    mappings (repoatlas.parsers.ts_persistence).
-    version = "18"
+    # 19: an environment read in a module-scope binding's initializer is that binding's, as a
+    #    use there is; one in a binding nested in a callback, or anywhere else at module
+    #    scope, stays the file's (DF3a).
+    version = "19"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
