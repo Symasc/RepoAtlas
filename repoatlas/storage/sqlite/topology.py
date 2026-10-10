@@ -47,6 +47,14 @@ _STORED_EDGE_SELECT = """
 """
 
 
+#: An edge whose target is a model field joins no pair of files its model's use does not
+#: already join, so the topology leaves it out and draws what it drew before (DF3b). A file's
+#: own declarations and references still list fields and their uses.
+_NOT_A_FIELD = (
+    "NOT ({alias}.type = 'symbol' AND json_extract({alias}.meta_json, '$.kind') = 'field')"
+)
+
+
 def _placeholders(values: Sequence[object]) -> str:
     return ",".join("?" * len(values))
 
@@ -79,6 +87,7 @@ class SqliteTopologyStore:
               AND d.repo_id IS NOT NULL
               AND s.repo_id <> d.repo_id
               AND e.type NOT IN ({_placeholders(exclude)})
+              AND {_NOT_A_FIELD.format(alias="d")}
             LIMIT ?
             """,  # noqa: S608 - placeholders only
             (*[str(t) for t in exclude], limit),
@@ -198,6 +207,7 @@ class SqliteTopologyStore:
             LEFT JOIN files df ON df.id = d.file_id
             WHERE sf.repo_id = ? AND {where}
               AND e.type NOT IN ({_placeholders(exclude)})
+              AND {_NOT_A_FIELD.format(alias="d" if outgoing else "s")}
             LIMIT ?
             """,  # noqa: S608 - near/far are two fixed column names, never input
             tuple(params),
@@ -245,6 +255,7 @@ class SqliteTopologyStore:
             WHERE af.repo_id = ? AND {where}
               AND s.file_id IS NULL AND s.repo_id = ?
               AND e.type NOT IN ({_placeholders(exclude)})
+              AND {_NOT_A_FIELD.format(alias="d")}
             LIMIT ?
             """,  # noqa: S608 - a fixed clause and placeholders only
             tuple(params),
@@ -317,6 +328,7 @@ class SqliteTopologyStore:
             LEFT JOIN repositories r ON r.id = e.repo_id
             WHERE e.type IN ({_placeholders(types)})
               AND (e.repo_id IN ({_placeholders(repo_ids)}) OR e.repo_id IS NULL)
+              AND NOT (e.type = 'symbol' AND json_extract(e.meta_json, '$.kind') = 'field')
               AND {contains}
             ORDER BY
                 CASE

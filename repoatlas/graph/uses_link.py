@@ -71,6 +71,16 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from repoatlas.dependencies.normalize import NPM, PYPI, normalize
+from repoatlas.graph.fields import (
+    FIELD_USE,
+    FieldUse,
+    field_meta,
+    field_record,
+    fields_of_rows,
+    members_of,
+    model_of_row,
+    resolve_members,
+)
 from repoatlas.graph.modules import ModuleResolver, binding_pairs, declared_constraints
 from repoatlas.graph.packages import CROSSING, PackageLinks
 from repoatlas.graph.py_modules import PythonModules
@@ -93,7 +103,7 @@ from repoatlas.storage.sqlite.stores import SqliteDependencyStore, SqliteKnowled
 
 #: Changed whenever what a use resolves to changes for the same facts, so edges kept
 #: from before the change are never trusted: the next sync resolves every use again.
-USES_RESOLUTION_VERSION = "11"
+USES_RESOLUTION_VERSION = "12"
 COMPLETE = f"complete:{USES_RESOLUTION_VERSION}"
 #: The ecosystems whose declarations and provisions a package link reads.
 LINKED_ECOSYSTEMS = (NPM, PYPI)
@@ -576,6 +586,9 @@ def plan_uses(
     by_id = {row.file_id: row for rows in index.files_by_repo.values() for row in rows.values()}
 
     edges: list[EdgeRecord] = []
+    models = _Models(index)
+    field_uses: set[tuple[int, int]] = set()
+    resolved = 0
     for claim in uses:
         origin = by_id.get(claim.file_id)
         if origin is None:
@@ -586,6 +599,7 @@ def plan_uses(
         if found is None:
             continue
         entity_id, fields = found
+        resolved += 1
         crossing = fields.get(CROSSING)
         if isinstance(crossing, dict):
             line = _import_line(imports.get(claim.file_id, []), meta)
@@ -605,6 +619,32 @@ def plan_uses(
                 resolution=use_resolution(meta, **fields),
             )
         )
+        members = members_of(meta)
+        if not members or fields.get("namespace"):
+            continue
+        # The resolved model's own fields the declaration reads or sets (DF3b): each one more
+        # edge from the same declaration, carrying the use's own resolution.
+        for use in models.resolve(entity_id, members, python=python):
+            key = (claim.src_id, use.field.entity_id)
+            if key in field_uses:
+                continue
+            field_uses.add(key)
+            edges.append(
+                EdgeRecord(
+                    src_id=claim.src_id,
+                    dst_id=use.field.entity_id,
+                    type=claim.edge_type,
+                    confidence=claim.confidence,
+                    repo_id=origin.repo_id,
+                    file_id=origin.file_id,
+                    line_start=use.line,
+                    line_end=use.line,
+                    parser=producer,
+                    resolution=use_resolution(
+                        field_meta(meta, use), **fields, **{FIELD_USE: field_record(use)}
+                    ),
+                )
+            )
 
     consumers = {claim.file_id for claim in uses}
     read_by: dict[int, set[int]] = {}
@@ -626,7 +666,7 @@ def plan_uses(
         repositories_invalidated=scope.repositories,
         packages_invalidated=scope.packages,
         claims_examined=len(uses),
-        claims_resolved=len(edges),
+        claims_resolved=resolved,
         reads_written=len(reads),
         repositories_touched=len({by_id[f].repo_id for f in consumers if f in by_id}),
     )
@@ -675,6 +715,41 @@ def apply_uses(knowledge: SqliteKnowledgeStore, plan: UsesPlan, *, producer: str
         update={"edges_deleted": deleted, "edges_inserted": len(plan.edges)}
     )
     return UsesApplied(work=work, edges=edges, claims=claims)
+
+
+class _Models:
+    """The declarations uses resolve to, by entity id, and their files' fields (DF3b).
+
+    Built on the first use that carries members, from the pass's own symbol index.
+    """
+
+    def __init__(self, index: ResolutionIndex) -> None:
+        self._index = index
+        self._rows: dict[int, SymbolRow] | None = None
+
+    def resolve(
+        self, entity_id: int, members: list[tuple[str, int, str]], *, python: bool
+    ) -> list[FieldUse]:
+        if self._rows is None:
+            self._rows = {
+                row.entity_id: row
+                for named in self._index.symbols_by_file.values()
+                for rows in named.values()
+                for row in rows
+            }
+        row = self._rows.get(entity_id)
+        if row is None:
+            return []
+        model = model_of_row(row)
+        named = self._index.symbols_by_file.get(row.file_id, {})
+        candidates = fields_of_rows(
+            {
+                field.entity_id: field
+                for name, _, _ in members
+                for field in named.get(f"{model.qualified_name}.{name}", [])
+            }.values()
+        )
+        return resolve_members(model, members, candidates, python=python)
 
 
 class _Tables:

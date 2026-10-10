@@ -156,7 +156,12 @@ class Neighbourhood:
         return rows
 
     def members(
-        self, prefix: str, *, exclude_types: Sequence[EntityType] = (), limit: int
+        self,
+        prefix: str,
+        *,
+        exclude_types: Sequence[EntityType] = (),
+        exclude_kinds: Sequence[str] = (),
+        limit: int,
     ) -> list[EntityIdentity]:
         """Entities whose key extends ``prefix``: a declaration's or a file's members."""
         allowed = min(limit, self.work.rows_left)
@@ -164,7 +169,7 @@ class Neighbourhood:
             self.work.charge_rows(0)
             return []
         found = self._knowledge.entities_with_key_prefix(
-            prefix, exclude_types=exclude_types, limit=allowed
+            prefix, exclude_types=exclude_types, exclude_kinds=exclude_kinds, limit=allowed
         )
         self.work.charge_rows(len(found))
         return found

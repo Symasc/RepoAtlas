@@ -42,13 +42,16 @@ from repoatlas.storage.sqlite.database import Database
 #: "did someone remember this script?" rather than "is this a word character?".
 _TOKEN_RE = re.compile(r"[\w.@$/-]+")
 
-#: Leaves Python module values out of an entity lookup (``module_values=False``). They are
-#: declarations a ``USES`` lands on and nothing else (``USES_ONLY_KINDS``), and retrieval
-#: never names one. A Python file's only ``symbol`` entities are its module values; the
-#: suffixes are ``flavor_for``'s, and ``GLOB`` because a suffix is case-sensitive.
+#: Leaves Python module values and model fields out of an entity lookup
+#: (``module_values=False``). They are declarations a ``USES`` lands on and nothing else
+#: (``USES_ONLY_KINDS``, ``FIELD``), and retrieval never names one. A Python file's only
+#: ``symbol`` entities are its module values and fields; the suffixes are ``flavor_for``'s,
+#: and ``GLOB`` because a suffix is case-sensitive. Any other language's field is told by its
+#: kind (DF3b).
 _NO_MODULE_VALUES = (
     " AND NOT (e.type = 'symbol' AND f.rel_path IS NOT NULL"
     " AND (f.rel_path GLOB '*.py' OR f.rel_path GLOB '*.pyi'))"
+    " AND NOT (e.type = 'symbol' AND json_extract(e.meta_json, '$.kind') = 'field')"
 )
 
 
@@ -823,6 +826,14 @@ class SqliteSearchIndex:
         scope += path_scope("f", path_prefix, params)
         if not module_values:
             scope += _NO_MODULE_VALUES
+        # A model field answers to its qualified name or its key, never to its bare name, as
+        # an enum member answers through its enum (DF3b).
+        scope += (
+            " AND NOT (e.type = 'symbol' AND json_extract(e.meta_json, '$.kind') = 'field'"
+            f" AND e.qualified_name NOT IN ({name_placeholders})"
+            f" AND e.key NOT IN ({key_placeholders}))"
+        )
+        params.extend([*wanted, *keys])
         params.append(limit)
 
         rows = self._db.execute(
