@@ -1629,7 +1629,8 @@ across. Between two enums the types are mapped too, so a change to the key
 enum reaches the value enum itself: the walk never climbs from a member back to its container.
 
 **Impact.** `POLICY` was `impact/4` here: the `generates` family (formerly `generates-graphql`) admits
-`prisma_migrate` evidence, and `maps-to` is new. It is `impact/5` from DF3a's configuration crossings (§5).
+`prisma_migrate` evidence, and `maps-to` is new. It is `impact/5` from DF3a's configuration crossings, and `impact/6`
+from DF3b's model fields (§5).
 
 ### What an impact answer says about evidence and refusals
 
@@ -2395,6 +2396,48 @@ setters, a leaf) cross on that record (`EVIDENCE_PATHS[CONFIGURES]`). A step car
 an environment-variable seed from one repository's readers: the seed's home is that repository, and a seed is never
 reached again, so nothing returns through the shared node; a seed that is no variable, a repository outside the scope
 or one reading nothing of it is refused (`INVALID_IMPACT_REQUEST`).
+
+### Model fields: reached through the use that names their model
+
+> **Invariant.** A field is reached only through a use that already names its model, and only as the resolved model's
+> own field. No field is joined to another by its name, in one file or across repositories.
+
+> **Invariant.** A field changes nothing that answered before: no search, locate or names search lists one, no call,
+> reference or local use resolves to one by name, value mappings never take one for a type, no class, file or
+> directory seed takes one as a member, and the topology draws no field use.
+
+**Fields** (python-ast 18, typescript 20). A `symbol` of kind `field`, qualified `Model.field`, keyed by its own line.
+Python: an annotated name a class body writes once, not `ClassVar`. TypeScript: a property signature with an
+identifier name directly in an interface body or in the object type a type alias is, and a class field with a type
+annotation that is not `static` and holds no function. A field owns nothing: the uses and reads in its statement stay
+its class's. It is written after the file's other symbols and kept out of every name map in `link_file`.
+
+**Members.** A declaration's use of a model's name carries `fields`, `[[field, line, access], ...]` once per field at
+its first line (`repoatlas/parsers/py_uses.py`, `ts_uses.py`): `parameter` for `p.f` (TypeScript also `p?.f`,
+`({f}: T)` and `const {f} = p`) through a parameter annotated with exactly one named type (`T`, `"T"`, `Optional[T]`,
+`T | None`, `Annotated[T, ...]`; `T | null`, `T | undefined`) that nothing in the function binds again; `construction`
+for `T(f=...)` and for an object literal whose contextual type is `T` (a variable annotated `T`, a value returned from
+a function declared to return `T` or `Promise<T>`). Only the first attribute counts: `p.a.b` reads `a`. Aliases,
+unions of two types, generics, attribute-qualified annotations and locals typed by assignment carry nothing.
+
+**Resolution** (`repoatlas/graph/fields.py`; `USES_RESOLUTION_VERSION` 12). When the use resolves -- in `link_file`
+for a name the file declares, in the global `USES` stage for an import -- each member that is one of the resolved
+declaration's own fields (declared inside it, named `Model.field`) is one more `USES` edge from the same declaration,
+recording `field_use` (`field`, `model`, `access`) beside the use's own resolution, a package crossing included. The
+resolved declaration must be a class (TypeScript: or an interface or object type alias). A Python construction
+reaches a field only when the field records `init`: its class's initializer is proven to bind it by that keyword --
+`dataclass` (the `dataclasses` or `pydantic.dataclasses` decorator, its one decorator, not `init=False`) or
+`pydantic` (pydantic's `BaseModel` its one base), proven by the file's own binding of the name, with no `__init__` or
+`__new__`, no model or root validator, no alias generator, and the field neither aliased, `field(init=False)` nor
+private. A keyword alone proves nothing: attrs maps `_x` to `x`, an ORM model's initializer is its own. The use's own
+edge is written as before; the member list is the claim's, never its record's. Because every field edge rides on a use
+landing in the model's file, the incremental stage re-resolves it whenever that file is written.
+
+**Impact** (`POLICY` `impact/6`). A field seed's exact users come first, then -- once, at the containment tier -- its
+model (`member-of`) and the model's users. A step through a field use reads "uses, field `Model.field` through a
+typed parameter" or "by construction"; the steps after it, an HTTP caller's included, say nothing about the field: a
+caller is reached because it calls a handler that uses it, not because it reads it. A field answers to its qualified
+name or its key, never to its bare name, and is no member of a class, file or directory seed.
 
 ## 6. The indexing pipeline
 
@@ -4633,4 +4676,6 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | The local API reads each connection on its own thread, and runs every capability call on one index thread | One thread for everything | A browser opens spare connections it may never send on; read one at a time, such a connection holds the server until its socket timeout. The index's connection is bound to the thread that opened it, so calls still run there, one at a time (§12, docs/local-api.md) |
 | A deployment's setting crosses to code only through the artifact join's proven image, or inside one compose repository | Link a setter to every reader of the variable's name | A name is not evidence: two repositories reading `LIMIT` share nothing, and a deployment configures only the image it runs. Crossing through the proven artifact keeps a same-named reader elsewhere out, and a refusal says why a variable did not cross (§5) |
 | An environment seed may name the repository it starts from (`seed_repository`) | Scope the call to that repository; or seed the reading declaration | A repository scope is a boundary, so it can never reach the deployment or the downstream caller; a declaration seed starts below the variable. Restricting only the first step keeps the walk global and the shared node closed behind it (§5) |
+| A model field is reached only through a use that already names its model, as one more `USES` edge resolved with it | Match `p.f` to every field named `f`; or record a field use as a claim of its own, or as `REFERENCES` | A name is not evidence: `measurement` is a field of many models. Riding on the model's use keeps the field the resolved declaration's own, keeps search expansion out (`USES` is not followed by it) and keeps incremental equal to fresh, since a model's file being written re-resolves every use landing in it (§5) |
+| A Python construction binds a field only through a proven dataclass or pydantic initializer | Take every keyword of `T(...)` as `T`'s field of that name | An initializer decides what a keyword means: attrs renames private attributes, aliases and alias generators rename keywords, an ORM or a hand-written `__init__` does anything. Only a proven mapping says the keyword is the field (§5) |
 | `install.sh` reruns safely and replaces nothing it did not create | An installer that overwrites existing links and registrations | Running it again is how an installation is updated, and the operator's own `repoatlas` on PATH, their skills and their MCP registration are theirs (docs/installation.md) |
