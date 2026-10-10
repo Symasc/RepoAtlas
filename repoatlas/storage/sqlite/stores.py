@@ -1584,7 +1584,7 @@ class SqliteKnowledgeStore:
             params.extend(str(t) for t in exclude_types)
         if exclude_kinds:
             excluded += (
-                " AND NOT (type = 'symbol' AND json_extract(meta_json, '$.kind')"
+                " AND NOT (type = 'symbol' AND COALESCE(json_extract(meta_json, '$.kind'), '')"
                 f" IN ({','.join('?' * len(exclude_kinds))}))"
             )
             params.extend(exclude_kinds)
@@ -1610,7 +1610,7 @@ class SqliteKnowledgeStore:
             params.extend(str(t) for t in exclude_types)
         if exclude_kinds:
             excluded += (
-                " AND NOT (e.type = 'symbol' AND json_extract(e.meta_json, '$.kind')"
+                " AND NOT (e.type = 'symbol' AND COALESCE(json_extract(e.meta_json, '$.kind'), '')"
                 f" IN ({','.join('?' * len(exclude_kinds))}))"
             )
             params.extend(exclude_kinds)

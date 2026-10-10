@@ -100,6 +100,8 @@ API: dict[str, str] = {
         "def local(item: Local) -> str:\n"  # 39
         "    return item.name\n"  # 40 USES Local.name (a model this file declares)
     ),
+    # entities that record no kind at all (SQL columns): never taken for fields
+    "api/schema.sql": "CREATE TABLE rows (\n    id INTEGER PRIMARY KEY,\n    measurement REAL\n);\n",
     "api/nested.py": (
         "class Outer:\n"  # 1
         "    class Inner:\n"  # 2
