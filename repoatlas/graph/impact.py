@@ -55,7 +55,7 @@ from enum import IntEnum
 from repoatlas.graph.neighbourhood import Neighbourhood, Work, WorkLimits
 from repoatlas.graph.traversal import CROSS_REPOSITORY_EDGES
 from repoatlas.models.impact import ImpactRole
-from repoatlas.models.parsing import EdgeDirection, EdgeType, EntityType
+from repoatlas.models.parsing import FIELD, EdgeDirection, EdgeType, EntityType
 from repoatlas.storage.protocols import (
     Confinement,
     EntityIdentity,
@@ -321,6 +321,8 @@ class Node:
     went_up: bool = False
     leaf: bool = False
     seed: bool = False
+    #: A model field seed: it climbs once to its model (DF3b, :meth:`ImpactWalk.run`).
+    climbs: bool = False
     #: It changes as a whole (see :attr:`Family.whole_only`).
     whole: bool = False
     expanded: bool = False
@@ -437,6 +439,7 @@ class ImpactWalk:
         self.work = Work(limits or WorkLimits())
         #: The repositories the caller's scope names; ``None`` for all of them.
         self._scope = scope
+        self._knowledge = knowledge
         self._neighbourhood = Neighbourhood(knowledge, self.work)
         self._slug_ids = {slug: repo_id for repo_id, slug in repo_slugs.items()}
         self._max_distance = max_distance
@@ -450,6 +453,12 @@ class ImpactWalk:
         self._unit = unit or (lambda key, slug, path: f"{slug}:." if slug else key)
 
     # -- seeds ------------------------------------------------------------------
+
+    def is_field(self, identity: EntityIdentity) -> bool:
+        """Whether the entity is a model field (DF3b)."""
+        if identity.type is not EntityType.SYMBOL:
+            return False
+        return self._knowledge.entity_kinds([identity.entity_id]).get(identity.entity_id) == FIELD
 
     def node_of(self, identity: EntityIdentity, home: int | None) -> Node:
         return Node(
@@ -480,6 +489,11 @@ class ImpactWalk:
             self._push(seed)
         for parent, member in members:
             self._member(parent, member)
+        for seed in seeds:
+            if seed.climbs:
+                # A field changes its model's shape: the model, once, at the containment tier,
+                # after every exact use of the field itself (DF3b).
+                self._container(seed)
         while self._heap:
             _, _, node = heapq.heappop(self._heap)
             if node.expanded:
@@ -511,9 +525,13 @@ class ImpactWalk:
     def members(
         self, prefix: str, *, exclude_types: Sequence[EntityType] = ()
     ) -> list[EntityIdentity]:
-        """A seed's members, read within the budget; more than :data:`MAX_MEMBERS` is a cut."""
+        """A seed's members, read within the budget; more than :data:`MAX_MEMBERS` is a cut.
+
+        A model field is never one: it changes only when its model's source does, and every
+        declaration using it uses its model too (DF3b).
+        """
         found = self._neighbourhood.members(
-            prefix, exclude_types=exclude_types, limit=MAX_MEMBERS + 1
+            prefix, exclude_types=exclude_types, exclude_kinds=(FIELD,), limit=MAX_MEMBERS + 1
         )
         if len(found) > MAX_MEMBERS:
             self._members_cut = True
