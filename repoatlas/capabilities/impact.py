@@ -31,6 +31,7 @@ from pathlib import PurePosixPath
 from repoatlas.config.settings import DECLARATIONS_SLUG
 from repoatlas.dependencies.normalize import PYPI
 from repoatlas.graph.declared import REFUSED_AS, TargetKind, classify_dependency_target
+from repoatlas.graph.deployment_env import DEPLOYMENT_ENV_EVIDENCE
 from repoatlas.graph.graphql_codegen import FAMILY as GENERATION
 from repoatlas.graph.graphql_ownership import EVIDENCE as COMPOSITION
 from repoatlas.graph.http_crossings import HTTP_CROSSING
@@ -49,6 +50,7 @@ from repoatlas.models.impact import (
     ClientBinding,
     CodeGeneration,
     Composition,
+    ConfigurationCrossing,
     Granularity,
     HttpCrossing,
     HubImpact,
@@ -85,7 +87,9 @@ from repoatlas.storage.protocols import (
 #: The traversal policy's name and version, reported with every answer. 2: a use crosses
 #: into another repository on a package link's evidence. 3: a schema definition reaches
 #: what a configured generator generated from it (``GENERATES`` on codegen evidence).
-POLICY = "impact/4"
+#: 5: a deployment's effective setter crosses to the readers in the image its artifact join
+#: proved it runs (``CONFIGURES`` on deployment_env evidence, DF3a).
+POLICY = "impact/5"
 
 #: Entity types a change is a *key* change for: they name a value, not code.
 _KEYS = frozenset(
@@ -512,6 +516,9 @@ def assemble(
                 f"{node.step.reading}, {crossing.get('provider')} -> {consumer}"
                 f" via {crossing.get('package')}"
             )
+        configured = node.step.resolution.get(DEPLOYMENT_ENV_EVIDENCE)
+        if isinstance(configured, dict):
+            return f"{node.step.reading}, {configuration_reading(configured)}"
         request = node.step.resolution.get(HTTP_CROSSING)
         if isinstance(request, dict):
             return (
@@ -604,6 +611,7 @@ def assemble(
                 lines = (row.line_start, row.line_end or row.line_start)
         crossing = _crossing(resolution, walk.slug_of(row.file_repo_id) if row else None, row)
         http = http_crossing(resolution, walk.slug_of(row.file_repo_id) if row else None)
+        configuration = configuration_crossing(resolution)
         generation = code_generation(resolution)
         composition = graph_composition(resolution)
         evidence = link_evidence(resolution)
@@ -638,6 +646,7 @@ def assemble(
                 via_names=tuple(str(v) for v in _list(resolution.get("via_names"))),
                 crossing=crossing,
                 http=http,
+                configuration=configuration,
                 generation=generation,
                 composition=composition,
                 migration=evidence.migration,
@@ -1313,6 +1322,83 @@ def deployment_qualifiers(record: Mapping[str, object]) -> list[str]:
     if relation is not None:
         found.append(relation)
     return found
+
+
+#: Where a setter is, in a step's words (DF3a).
+_SETTERS = {
+    "values-file": "values file",
+    "set": "--set on the release",
+    "configmap-key": "ConfigMap key",
+    "env-from": "ConfigMap, through envFrom",
+    "compose-environment": "compose environment",
+}
+#: What a setter's value is known to be, in a step's words: never the value itself (D3-4).
+_VALUES = {
+    "symbolic": "value from a variable, not established",
+    "withheld": "value withheld",
+}
+
+
+def configuration_reading(record: Mapping[str, object]) -> str:
+    """How a configuration crossing reads: from the deployment's repository to the builder's
+    through the variable, with where it is set, the deployment, any basis but source, the image
+    version relation, and what is known of the value. Configuration, never what runs."""
+    deployed, built = record.get("deployed_by"), record.get("built_by")
+    route = f"{deployed} -> {built}" if deployed != built else f"in {deployed}"
+    parts = [_SETTERS.get(str(record.get("setter_kind")), str(record.get("setter_kind")))]
+    if record.get("release"):
+        variant = f" ({record['variant']})" if record.get("variant") else ""
+        parts.append(f"release {record['release']}{variant}")
+    elif record.get("service"):
+        parts.append(f"service {record['service']}")
+    if record.get("binding_basis") not in (None, "source"):
+        parts.append(f"deployment {record['binding_basis']}")
+    if record.get("build_basis") not in (None, "source"):
+        parts.append(f"image built ({record['build_basis']})")
+    relation = _RELATIONS.get(str(record.get("version_relation", "")))
+    if relation is not None:
+        parts.append(relation)
+    value = _VALUES.get(str(record.get("value", "")))
+    if value is not None:
+        parts.append(value)
+    return f"{route} via {record.get('variable')} ({'; '.join(parts)})"
+
+
+def configuration_crossing(resolution: Mapping[str, object]) -> ConfigurationCrossing | None:
+    """An edge's configuration-crossing evidence, each place spelled in its repository, or
+    ``None``. Public for the reason :func:`package_crossing` is."""
+    record = resolution.get(DEPLOYMENT_ENV_EVIDENCE)
+    if not isinstance(record, dict):
+        return None
+
+    def text(key: str) -> str | None:
+        value = record.get(key)
+        return str(value) if isinstance(value, str) and value else None
+
+    deployed, built = text("deployed_by") or "", text("built_by") or ""
+    workload = text("workload_in")
+    declared = text("declared_in")
+    return ConfigurationCrossing(
+        variable=str(record.get("variable")),
+        setter_kind=str(record.get("setter_kind")),
+        setter_at=f"{deployed}/{record.get('setter_at')}",
+        reader_at=f"{built}/{record.get('reader_at')}",
+        deployment_repository=deployed,
+        builder_repository=built,
+        value=str(record.get("value")),
+        release=text("release"),
+        variant=text("variant"),
+        container=text("container"),
+        service=text("service"),
+        image=text("image"),
+        version_relation=text("version_relation"),
+        binding_basis=text("binding_basis"),
+        build_basis=text("build_basis"),
+        workload_in=f"{deployed}/{workload}" if workload else None,
+        declared_in=f"{DECLARATIONS_SLUG}/{declared}" if declared else None,
+        deployments=tuple(str(d) for d in _list(record.get("deployments"))),
+        decision_ref=str(record.get("decision_ref")),
+    )
 
 
 def http_crossing(resolution: Mapping[str, object], consumer: str | None) -> HttpCrossing | None:

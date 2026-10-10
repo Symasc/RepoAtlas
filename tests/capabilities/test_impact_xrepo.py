@@ -21,6 +21,7 @@ from repoatlas.graph.impact import FAMILIES
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.impact import ImpactCandidate, ImpactRequest, ImpactResponse, ImpactRole
 from repoatlas.services.workspace import Workspace, open_workspace
+from tests.deployment_env_corpus import BUILDER, SHIPPER
 from tests.impact_corpus import HTTP_API, HTTP_WEB, build, verify_steps
 from tests.xrepo_corpus import LINKING
 
@@ -39,7 +40,18 @@ def _open(root: Path) -> Workspace:
         }
     )
     workspace = open_workspace(settings=settings, require_root=False)
-    return build(workspace, root, {**LINKING, "http-api": HTTP_API, "http-web": HTTP_WEB})
+    return build(
+        workspace,
+        root,
+        {
+            **LINKING,
+            "http-api": HTTP_API,
+            "http-web": HTTP_WEB,
+            # a deployment's setter and the reader its proven image holds (DF3a)
+            "shipper": SHIPPER,
+            "builder": BUILDER,
+        },
+    )
 
 
 @pytest.fixture(scope="module")
@@ -131,17 +143,27 @@ def test_n6_an_edge_joining_repositories_without_its_evidence_is_never_followed(
 # -- the crossing family, in its stored direction --------------------------------------
 
 #: Each family that crosses on evidence: (seed, reached, the stored edge).
+SETTER = "sym:shipper:env/prod.yaml:env.VALUES_OVERLAY:2"
+READER = "sym:builder:app/settings.py:VALUES_OVERLAY:4"
+CONFIGURED = ("CONFIGURES", SETTER, READER)
+#: Per crossing family: the seed, what it reaches and in which role, the stored edge, and the
+#: role the seed has when walked back from what it reached (``None``: not reached). A use and
+#: a request never flow back; a configuration's setter is reached back only as what sets it.
 CROSSING_CASES = {
-    "uses": (COURSE_ROLE, CAN_EDIT, ("USES", CAN_EDIT, COURSE_ROLE)),
+    "uses": (COURSE_ROLE, CAN_EDIT, ImpactRole.DEPENDENT, ("USES", CAN_EDIT, COURSE_ROLE), None),
     "http": (
         "sym:http-api:app.py:get_item:9",
         "sym:http-web:client.py:load_item:4",
+        ImpactRole.DEPENDENT,
         (
             "CALLS_HTTP_HANDLER",
             "sym:http-web:client.py:load_item:4",
             "sym:http-api:app.py:get_item:9",
         ),
+        None,
     ),
+    "configures": (SETTER, READER, ImpactRole.DEPENDENT, CONFIGURED, ImpactRole.SETS),
+    "configures-setter": (READER, SETTER, ImpactRole.SETS, CONFIGURED, ImpactRole.DEPENDENT),
 }
 
 
@@ -151,7 +173,7 @@ def test_every_family_that_crosses_has_a_crossing_case() -> None:
 
 @pytest.mark.parametrize("family", sorted(CROSSING_CASES))
 def test_a_crossing_family_travels_in_its_stored_direction(indexed: Workspace, family: str) -> None:
-    seed, reached, (edge_type, source, target) = CROSSING_CASES[family]
+    seed, reached, role, (edge_type, source, target), back = CROSSING_CASES[family]
     [stored] = indexed.database.execute(
         """
         SELECT COUNT(*) FROM edges e
@@ -162,9 +184,12 @@ def test_a_crossing_family_travels_in_its_stored_direction(indexed: Workspace, f
     ).fetchall()
     assert stored[0] > 0
     forward = by_entity(impact(indexed, seed))
-    assert forward[reached].role is ImpactRole.DEPENDENT
-    # the dependent's own change does not flow back to what it uses
-    assert seed not in by_entity(impact(indexed, reached))
+    assert forward[reached].role is role
+    assert forward[reached].boundaries  # it crossed into another repository
+    # a dependent's own change does not flow back to what it uses; a setter is reached back
+    # only as what sets the reader, and a reader from its setter only as its dependent
+    walked_back = by_entity(impact(indexed, reached))
+    assert (walked_back[seed].role if seed in walked_back else None) is back
 
 
 def test_a_whole_module_use_across_repositories_follows_only_a_whole_file_change(
@@ -254,7 +279,7 @@ def test_xr1_the_answer_says_how_the_change_crossed_and_where_to_read_it(
     assert all(
         c.step.crossing is None for c in (*response.candidates, *response.tests) if c.distance > 1
     )
-    assert response.summary.policy == "impact/4"
+    assert response.summary.policy == "impact/5"
 
 
 def test_xr2_every_name_on_the_way_is_in_the_answer(indexed: Workspace) -> None:
