@@ -33,7 +33,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
-from repoatlas.models.parsing import ENUM_MEMBER, EdgeType, EntityType
+from repoatlas.models.parsing import ENUM_MEMBER, FIELD, EdgeType, EntityType
 from repoatlas.parsers.py_persistence import TYPED_COMPARISON
 from repoatlas.parsers.ts_persistence import VALUE_MAPPING
 from repoatlas.storage.protocols import (
@@ -131,7 +131,7 @@ class _Planner:
             if target is not None
             and target.name == name
             and target.type in _DECLARATIONS
-            and target.meta.get("kind") != ENUM_MEMBER
+            and target.meta.get("kind") not in {ENUM_MEMBER, FIELD}
         }
         prisma = self._bound.get((declaration, name))
         if prisma is not None:

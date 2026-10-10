@@ -1564,7 +1564,11 @@ class SqliteKnowledgeStore:
         ]
 
     def count_keys_with_prefix(
-        self, prefix: str, *, exclude_types: Sequence[EntityType] = ()
+        self,
+        prefix: str,
+        *,
+        exclude_types: Sequence[EntityType] = (),
+        exclude_kinds: Sequence[str] = (),
     ) -> int:
         """How many entities have a natural key beginning with ``prefix``.
 
@@ -1578,6 +1582,12 @@ class SqliteKnowledgeStore:
         if exclude_types:
             excluded = f" AND type NOT IN ({','.join('?' * len(exclude_types))})"
             params.extend(str(t) for t in exclude_types)
+        if exclude_kinds:
+            excluded += (
+                " AND NOT (type = 'symbol' AND json_extract(meta_json, '$.kind')"
+                f" IN ({','.join('?' * len(exclude_kinds))}))"
+            )
+            params.extend(exclude_kinds)
         row = self._db.execute(
             f"SELECT COUNT(*) FROM entities WHERE key >= ? AND key < ?{excluded}",  # noqa: S608
             tuple(params),
@@ -1585,7 +1595,12 @@ class SqliteKnowledgeStore:
         return int(row[0])
 
     def entities_with_key_prefix(
-        self, prefix: str, *, exclude_types: Sequence[EntityType] = (), limit: int
+        self,
+        prefix: str,
+        *,
+        exclude_types: Sequence[EntityType] = (),
+        exclude_kinds: Sequence[str] = (),
+        limit: int,
     ) -> list[EntityIdentity]:
         """At most ``limit`` entities whose natural key begins with ``prefix``, by key."""
         params: list[object] = [prefix, prefix + "\U0010ffff"]
@@ -1593,6 +1608,12 @@ class SqliteKnowledgeStore:
         if exclude_types:
             excluded = f" AND e.type NOT IN ({','.join('?' * len(exclude_types))})"
             params.extend(str(t) for t in exclude_types)
+        if exclude_kinds:
+            excluded += (
+                " AND NOT (e.type = 'symbol' AND json_extract(e.meta_json, '$.kind')"
+                f" IN ({','.join('?' * len(exclude_kinds))}))"
+            )
+            params.extend(exclude_kinds)
         params.append(limit)
         rows = self._db.execute(
             f"""{_ENTITY_IDENTITY_SELECT}
@@ -2019,6 +2040,20 @@ class SqliteKnowledgeStore:
             tuple(entity_ids),
         ).fetchall()
         return {int(row["id"]): _entity_identity(row) for row in rows}
+
+    def entity_kinds(self, entity_ids: Sequence[int]) -> dict[int, str]:
+        """Each entity's recorded ``kind`` (``meta["kind"]``), for those that record one."""
+        if not entity_ids:
+            return {}
+        placeholders = ",".join("?" * len(entity_ids))
+        rows = self._db.execute(
+            f"""
+            SELECT id, json_extract(meta_json, '$.kind') FROM entities
+            WHERE id IN ({placeholders}) AND json_extract(meta_json, '$.kind') IS NOT NULL
+            """,  # noqa: S608 - placeholders only
+            tuple(entity_ids),
+        ).fetchall()
+        return {int(row[0]): str(row[1]) for row in rows}
 
     def file_locations(self, file_ids: Sequence[int]) -> dict[int, tuple[str, str]]:
         """Each file id's repository slug and path, in one query.
