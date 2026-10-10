@@ -651,6 +651,44 @@ export interface Composition {
   url: string;
 }
 /**
+ * How one step crossed from where a deployment sets an environment variable to code
+ * reading it (DF3a, :mod:`repoatlas.graph.deployment_env`).
+ *
+ * The setter is the one place the variable is effectively set, by the narrow precedence
+ * RepoAtlas reads: a values-file key, the CI step carrying a ``--set``, a ConfigMap key
+ * (``configMapKeyRef`` or ``envFrom``), or a compose ``environment`` entry. The reader holds
+ * the read, in the image the deployment's artifact join proved it runs (or the compose
+ * service builds). Each place is ``<repository>/<path>:<line>`` in the repository it lies in.
+ * ``value`` is only the value's kind -- ``literal``, ``symbolic`` (a CI variable or a compose
+ * interpolation, not established) or ``withheld`` -- never the value. The release, image,
+ * version relation and bases are the artifact join's (:class:`HttpCrossing`). All of it
+ * configuration, never a deployment seen.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ConfigurationCrossing".
+ */
+export interface ConfigurationCrossing {
+  binding_basis?: string | null;
+  build_basis?: string | null;
+  builder_repository: string;
+  container?: string | null;
+  decision_ref: string;
+  declared_in?: string | null;
+  deployment_repository: string;
+  deployments?: string[];
+  image?: string | null;
+  reader_at: string;
+  release?: string | null;
+  service?: string | null;
+  setter_at: string;
+  setter_kind: string;
+  value: string;
+  variable: string;
+  variant?: string | null;
+  version_relation?: string | null;
+  workload_in?: string | null;
+}
+/**
  * What the context resolved to, as identities rather than rows.
  *
  * A transport-neutral projection of
@@ -1392,6 +1430,7 @@ export interface ImpactStep {
   client?: ClientBinding | null;
   comparison?: TypedComparison | null;
   composition?: Composition | null;
+  configuration?: ConfigurationCrossing | null;
   crossing?: PackageCrossing | null;
   derived?: string | null;
   edge?: EdgeType | null;
@@ -1549,6 +1588,10 @@ export interface ImpactRequest {
    * What changes: an entity key a tool returned, a declaration's name or qualified name, an `env:` or `module:` key, a configuration key's qualified name, or a repository-relative file or directory path. It must name exactly one thing in scope; otherwise the response lists the candidates and follows nothing.
    */
   seed: string;
+  /**
+   * For an environment-variable seed only: the repository whose reads of it the change starts from. The first step follows that repository's readers alone; every later step is the ordinary walk. Under a repository scope it must be that repository.
+   */
+  seed_repository?: string | null;
 }
 /**
  * This interface was referenced by `ApiIndex`'s JSON-Schema

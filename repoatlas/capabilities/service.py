@@ -82,6 +82,7 @@ from repoatlas.capabilities.errors import (
     FileNotIndexedError,
     IndexChangedError,
     IndexInconsistencyError,
+    InvalidImpactRequestError,
     InvalidTopologyRequestError,
     InvestigationRequiredError,
     PathNotFoundError,
@@ -94,6 +95,7 @@ from repoatlas.capabilities.evidence_shaping import LINE_SEPARATOR
 from repoatlas.capabilities.impact import POLICY as IMPACT_POLICY
 from repoatlas.capabilities.impact import (
     Assembled,
+    Seed,
     SeedResolver,
     assemble,
     decisions_near,
@@ -260,7 +262,7 @@ from repoatlas.models.investigation import (
     LedgerEntry,
     ProposedEvidence,
 )
-from repoatlas.models.parsing import NeighborOrder
+from repoatlas.models.parsing import EntityType, NeighborOrder
 from repoatlas.models.relationships import (
     MAX_NEIGHBORS_CEILING,
     AppliedGraphLimits,
@@ -1018,6 +1020,17 @@ class CapabilityService:
             decisions: tuple[ImpactDecision, ...] = ()
             decisions_omitted: dict[str, int] = {}
             # The seed, the walk and every row it reads are one indexed snapshot.
+            origin = None
+            if request.seed_repository is not None:
+                # D3-1: the repository whose reads of a shared seed the change starts from. A
+                # repository scope stays a boundary: nothing outside it can be named.
+                origin = scope.get(request.seed_repository)
+                if origin is None:
+                    raise InvalidImpactRequestError(
+                        f"seed_repository {request.seed_repository!r} names a repository outside "
+                        "this call's scope",
+                        field="seed_repository",
+                    )
             with self._workspace.database.read_snapshot():
                 seeds = SeedResolver(self._workspace.knowledge, self._workspace.search, scope)
                 seed = seeds.resolve(request.seed)
@@ -1027,6 +1040,8 @@ class CapabilityService:
                         # A shared seed (an environment variable, a route) walked from
                         # inside one repository stays in it.
                         home = resolution.primary.id if resolution.primary else None
+                    if origin is not None:
+                        home = self._seed_origin(seed, origin, request)
                     manifests = self._workspace.knowledge.provided_manifests(sorted(slugs.values()))
                     directories = {
                         slug: package_directories(paths) for slug, paths in manifests.items()
@@ -1108,6 +1123,24 @@ class CapabilityService:
                 else ImpactSummary(policy=IMPACT_POLICY),
                 freshness=freshness,
             )
+
+    def _seed_origin(self, seed: Seed, origin: int, request: ImpactRequest) -> int:
+        """The home a ``seed_repository`` gives a walk: that repository, whose readers alone the
+        first step from the shared environment-variable node reaches. The seed node is never
+        expanded again (repoatlas.graph.impact), so no later step returns through it to a
+        same-named read elsewhere."""
+        identity = seed.identity
+        if identity is None or identity.type is not EntityType.ENV_VAR:
+            raise InvalidImpactRequestError(
+                "seed_repository applies only to an environment variable seed",
+                field="seed_repository",
+            )
+        if not self._workspace.knowledge.reads_in(identity.entity_id, origin):
+            raise InvalidImpactRequestError(
+                f"no file or declaration in {request.seed_repository} reads {identity.key}",
+                field="seed_repository",
+            )
+        return origin
 
     def dependencies(self, request: DependenciesRequest) -> DependenciesResponse:
         """What the index records about declared, resolved and provided packages.
