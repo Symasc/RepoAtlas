@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from repoatlas.models.parsing import (
     ENUM_MEMBER,
+    FIELD,
     GRAMMAR_UNAVAILABLE,
     EdgeType,
     EntityType,
@@ -54,6 +55,8 @@ _TSX_SUFFIXES = frozenset({".tsx"})
 _JS_SUFFIXES = frozenset({".js", ".mjs", ".cjs", ".jsx"})
 
 _FUNCTION_VALUES = frozenset({"arrow_function", "function_expression", "function"})
+#: A class field holding one of these is a function, not a model field (DF3b).
+_FIELD_FUNCTION_VALUES = frozenset({*_FUNCTION_VALUES, "generator_function"})
 
 #: Where a function's own body ends: what a nested function or class returns is
 #: its own, never the enclosing function's.
@@ -120,6 +123,8 @@ class _Walker:
         self._injections = injections
         self._oas3 = oas3
         self.symbols: list[ParsedSymbol] = []
+        #: Models' own fields (DF3b), kept apart: they are written after every other symbol.
+        self.fields: list[ParsedSymbol] = []
         self.references: list[ParsedReference] = []
         self._scope: list[str] = []
         self._exported: set[str] = set()
@@ -402,6 +407,7 @@ class _Walker:
             )
         )
         self._record_heritage(node, self._qualify(name))
+        self.fields.extend(self._fields(node, self._qualify(name)))
         if node.type == "enum_declaration":
             self._enum_members(node, self._qualify(name))
         if entity_type is EntityType.FUNCTION:
@@ -409,6 +415,62 @@ class _Walker:
         self._scope.append(name)
         self._visit_children(node)
         self._scope.pop()
+
+    def _fields(self, node: Node, model: str) -> list[ParsedSymbol]:
+        """A model's own fields, as ``Model.field`` (DF3b): each property signature with an
+        identifier name directly in an interface body, or directly in the object type a type
+        alias is; each class field with a type annotation and an identifier name that is not
+        ``static`` and holds no function. A name written twice in one declaration is none.
+        """
+        members: list[Node] = []
+        if node.type == "interface_declaration":
+            body = node.child_by_field_name("body")
+            members = [
+                c for c in (body.named_children if body else []) if c.type == "property_signature"
+            ]
+        elif node.type == "type_alias_declaration":
+            value = node.child_by_field_name("value")
+            if value is not None and value.type == "object_type":
+                members = [c for c in value.named_children if c.type == "property_signature"]
+        elif node.type in {"class_declaration", "abstract_class_declaration"}:
+            body = node.child_by_field_name("body")
+            for child in body.named_children if body else []:
+                if child.type != "public_field_definition":
+                    continue
+                if child.child_by_field_name("type") is None:
+                    continue
+                if any(k.type == "static" for k in child.children):
+                    continue
+                value = child.child_by_field_name("value")
+                if value is not None and value.type in _FIELD_FUNCTION_VALUES:
+                    continue
+                members.append(child)
+        named = [
+            (node_text(self._source, key), member)
+            for member in members
+            if (key := member.child_by_field_name("name")) is not None
+            and key.type == "property_identifier"
+        ]
+        counts = Counter(name for name, _ in named)
+        fields: list[ParsedSymbol] = []
+        for name, member in named:
+            if counts[name] != 1:
+                continue
+            start, end = line_range(member)
+            text = node_text(self._source, member).splitlines()[0].strip()
+            fields.append(
+                ParsedSymbol(
+                    kind=EntityType.SYMBOL,
+                    name=name,
+                    qualified_name=f"{model}.{name}",
+                    line_start=start,
+                    line_end=end,
+                    signature=text[:200],
+                    parent=model,
+                    meta={"kind": FIELD},
+                )
+            )
+        return fields
 
     def _enum_members(self, node: Node, enum: str) -> None:
         """An enum's members whose value is a plain string literal, as ``Enum.Member``.
@@ -815,7 +877,10 @@ class TypeScriptParser:
     # 19: an environment read in a module-scope binding's initializer is that binding's, as a
     #    use there is; one in a binding nested in a callback, or anywhere else at module
     #    scope, stays the file's (DF3a).
-    version = "19"
+    # 20: a model's own fields are symbols (``Model.field``, kind ``field``), and a use of a type
+    #    carries the fields read through a parameter it annotates or set in an object literal
+    #    it types (DF3b, repoatlas.parsers.ts_uses).
+    version = "20"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
@@ -883,7 +948,7 @@ class TypeScriptParser:
             language=language,
             parser=self.name,
             parser_version=self.version,
-            symbols=(module, *walker.symbols, *graphql.symbols),
+            symbols=(module, *walker.symbols, *graphql.symbols, *walker.fields),
             references=(
                 *walker.references,
                 *endpoint_claims(walker.references),

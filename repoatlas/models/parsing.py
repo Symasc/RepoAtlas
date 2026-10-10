@@ -102,6 +102,16 @@ USES_EXPORT_TABLE = "export-table"
 #: declarations. Impact and relationships reach it by name or key.
 USES_ONLY_KINDS = frozenset({"variable", "type-alias"})
 
+#: The ``kind`` of a model's own field (repoatlas.parsers.py_uses, repoatlas.parsers.typescript):
+#: ``Model.field``, a declaration a ``USES`` lands on when a typed read or a proven
+#: construction names it, and nothing else. Unlike a module value no use belongs to it. It is
+#: in no name map a ``CALLS``, ``REFERENCES`` or local ``USES`` resolves through, no member of
+#: another impact seed, and no entity search, locate or names search lists it; impact,
+#: relationships and a file's declarations reach it by name or key. ``meta["init"]``, when
+#: present, is the initializer proven to bind it by its name as a keyword (``dataclass`` or
+#: ``pydantic``): only then does a construction ``Model(field=...)`` use it.
+FIELD = "field"
+
 #: The ``kind`` of an enum member that states a string value (repoatlas.parsers.typescript).
 #: It is reached through its enum (``Phase.Draft``), never by its bare name, and its
 #: ``meta["value"]`` is the string it stands for.
