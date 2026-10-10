@@ -416,16 +416,23 @@ def test_a_field_is_no_callee_a_name_matches(corpus: Workspace) -> None:
 
 def test_search_locate_and_names_never_name_a_field(corpus: Workspace) -> None:
     service = CapabilityService(corpus)
-    for question in ("measurement", "Out.measurement", "limit", "Item"):
-        found = service.search(SearchRequest(context=GLOBAL, question=question))
-        keys = [item.entity.key for item in found.evidence if item.entity is not None]
-        assert not [k for k in keys if ".measurement:" in k or ".limit:" in k or ".id:" in k], (
-            question
+    fields = {
+        r[0]
+        for r in corpus.database.execute(
+            "SELECT key FROM entities WHERE json_extract(meta_json, '$.kind') = 'field'"
         )
+    }
+    for question in ("measurement", "Out.measurement", "limit", "Item", "id"):
+        found = service.search(SearchRequest(context=GLOBAL, question=question))
+        keys = {item.entity.key for item in found.evidence if item.entity is not None}
+        assert not keys & fields, question
     names = service.topology_names(TopologyNamesRequest(context=GLOBAL, query="measurement"))
-    assert not [n for n in names.names if "." in (n.qualified_name or "")]
+    assert names.names and not {n.entity.key for n in names.names} & fields
     search = corpus.search
-    assert not search.find_entities_by_name(["measurement"], None, 50)
+    # a field answers to its qualified name or key, never its bare name; retrieval, never
+    assert [h.qualified_name for h in search.find_entities_by_name(["measurement"], None, 50)] == [
+        "rows.measurement"  # a SQL column, which records no kind: no field
+    ]
     assert [
         h.qualified_name for h in search.find_entities_by_name(["Out.measurement"], None, 50)
     ] == ["Out.measurement"]
@@ -450,6 +457,47 @@ def test_the_topology_draws_no_field_use_and_a_file_lists_its_fields_and_their_u
     ).fetchall()
     declared = {row[4] for row in store.declarations_in(models_id)}
     assert {"Out.measurement", "Row.note", "Query._secret"} <= declared
+
+
+def test_what_records_no_kind_is_still_found_counted_and_drawn(corpus: Workspace) -> None:
+    """A field is told by its kind; an entity that records none is no field, in every query."""
+    kindless = corpus.database.execute(
+        """SELECT e.key, e.qualified_name FROM entities e JOIN files f ON f.id = e.file_id
+           WHERE f.rel_path = 'api/schema.sql' AND e.type = 'symbol'"""
+    ).fetchall()
+    assert ("sym:api:api/schema.sql:rows.measurement:3", "rows.measurement") in {
+        tuple(r) for r in kindless
+    }
+    search = corpus.search
+    found = search.find_entities_by_name(["rows.measurement"], None, 50, module_values=False)
+    assert [(h.path, h.qualified_name) for h in found] == [("api/schema.sql", "rows.measurement")]
+    names = CapabilityService(corpus).topology_names(
+        TopologyNamesRequest(context=GLOBAL, query="rows.measurement")
+    )
+    assert [n.entity.key for n in names.names] == ["sym:api:api/schema.sql:rows.measurement:3"]
+    whole = impact(corpus, "api/schema.sql")
+    [(declared,)] = corpus.database.execute(
+        "SELECT COUNT(*) FROM entities WHERE key LIKE 'sym:api:api/schema.sql:%' AND type <> 'module'"
+    ).fetchall()
+    assert whole.seed.members == declared == len(kindless) + 1  # the table and its columns
+    listed = corpus.knowledge.entities_with_key_prefix(
+        "sym:api:api/schema.sql:", exclude_kinds=("field",), limit=50
+    )
+    assert {key for key, _ in kindless} <= {i.key for i in listed}
+    store = corpus.topology()
+    [(repo_id,)] = corpus.database.execute(
+        "SELECT id FROM repositories WHERE slug = 'api'"
+    ).fetchall()
+    drawn = store.edges_under(
+        repo_id, prefix=None, file_id=None, outgoing=True, exclude=(), limit=5000
+    )
+    [expected] = corpus.database.execute(
+        """SELECT COUNT(*) FROM edges e JOIN entities s ON s.id = e.src_id JOIN files sf ON sf.id = s.file_id
+           JOIN entities d ON d.id = e.dst_id
+           WHERE sf.repo_id = ? AND json_extract(d.meta_json, '$.kind') IS NOT 'field'""",
+        (repo_id,),
+    ).fetchone()
+    assert len(drawn) == expected
 
 
 # -- impact ----------------------------------------------------------------------------------

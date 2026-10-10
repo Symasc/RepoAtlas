@@ -49,9 +49,10 @@ _STORED_EDGE_SELECT = """
 
 #: An edge whose target is a model field joins no pair of files its model's use does not
 #: already join, so the topology leaves it out and draws what it drew before (DF3b). A file's
-#: own declarations and references still list fields and their uses.
+#: own declarations and references still list fields and their uses. ``IS``, never ``=``: an
+#: entity that records no kind must compare false, not NULL, or ``NOT`` would drop it too.
 _NOT_A_FIELD = (
-    "NOT ({alias}.type = 'symbol' AND json_extract({alias}.meta_json, '$.kind') = 'field')"
+    "NOT ({alias}.type = 'symbol' AND json_extract({alias}.meta_json, '$.kind') IS 'field')"
 )
 
 
@@ -328,7 +329,7 @@ class SqliteTopologyStore:
             LEFT JOIN repositories r ON r.id = e.repo_id
             WHERE e.type IN ({_placeholders(types)})
               AND (e.repo_id IN ({_placeholders(repo_ids)}) OR e.repo_id IS NULL)
-              AND NOT (e.type = 'symbol' AND json_extract(e.meta_json, '$.kind') = 'field')
+              AND NOT (e.type = 'symbol' AND json_extract(e.meta_json, '$.kind') IS 'field')
               AND {contains}
             ORDER BY
                 CASE
