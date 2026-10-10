@@ -36,6 +36,8 @@ EXPECTED = {
     ("src/spaces.ts#withMember", LIMIT, "value"),
     ("src/spaces.ts#whole", "src/limits.ts", "value"),
     ("src/area.ts#area", "src/types.ts#Shape", "type"),
+    # DF3b: the field it reads through its typed parameter
+    ("src/area.ts#area", "src/types.ts#Shape.side", "field"),
     # the unrelated importer reaches only the name it imports
     ("src/other.ts#other", "src/limits.ts#unrelated", "value"),
     # the one use no shadowing covers
