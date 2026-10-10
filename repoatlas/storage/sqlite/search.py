@@ -47,11 +47,12 @@ _TOKEN_RE = re.compile(r"[\w.@$/-]+")
 #: (``USES_ONLY_KINDS``, ``FIELD``), and retrieval never names one. A Python file's only
 #: ``symbol`` entities are its module values and fields; the suffixes are ``flavor_for``'s,
 #: and ``GLOB`` because a suffix is case-sensitive. Any other language's field is told by its
-#: kind (DF3b).
+#: kind (DF3b): ``IS``, never ``=``, so an entity that records no kind compares false rather
+#: than NULL, which ``NOT`` would turn into a dropped row.
 _NO_MODULE_VALUES = (
     " AND NOT (e.type = 'symbol' AND f.rel_path IS NOT NULL"
     " AND (f.rel_path GLOB '*.py' OR f.rel_path GLOB '*.pyi'))"
-    " AND NOT (e.type = 'symbol' AND json_extract(e.meta_json, '$.kind') = 'field')"
+    " AND NOT (e.type = 'symbol' AND json_extract(e.meta_json, '$.kind') IS 'field')"
 )
 
 
@@ -829,8 +830,8 @@ class SqliteSearchIndex:
         # A model field answers to its qualified name or its key, never to its bare name, as
         # an enum member answers through its enum (DF3b).
         scope += (
-            " AND NOT (e.type = 'symbol' AND json_extract(e.meta_json, '$.kind') = 'field'"
-            f" AND e.qualified_name NOT IN ({name_placeholders})"
+            " AND NOT (e.type = 'symbol' AND json_extract(e.meta_json, '$.kind') IS 'field'"
+            f" AND COALESCE(e.qualified_name, '') NOT IN ({name_placeholders})"
             f" AND e.key NOT IN ({key_placeholders}))"
         )
         params.extend([*wanted, *keys])
