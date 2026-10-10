@@ -308,14 +308,15 @@ def test_confinement_applies_before_the_limit(mixed: Workspace) -> None:
     shared = entity(mixed, "env:SHARED_URL")
     reads = NeighborRule(edge_types=(EdgeType.READS,), direction=EdgeDirection.IN)
     everywhere = knowledge.impact_page(shared, reads, Confinement(), after=None, limit=10)
+    # each read is its module binding's (typescript 19, DF3a), as a use there is
     assert [r.far_key for r in everywhere] == [
-        "file:alpha:src/config.ts",
-        "file:zeta:src/config.ts",
+        "sym:alpha:src/config.ts:alphaUrl:1",
+        "sym:zeta:src/config.ts:zetaUrl:1",
     ]
     # alpha's reader sorts first; standing in zeta, the one row a page of one holds is zeta's
     home = Confinement(home_repo_id=repo(mixed, "zeta"))
     [only] = knowledge.impact_page(shared, reads, home, after=None, limit=1)
-    assert only.far_key == "file:zeta:src/config.ts"
+    assert only.far_key == "sym:zeta:src/config.ts:zetaUrl:1"
     assert knowledge.impact_counts([shared], reads, home)[shared].far == 1
 
 

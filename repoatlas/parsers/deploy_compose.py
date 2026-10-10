@@ -19,8 +19,13 @@ For a service under ``services:`` with a literal key, the claim records:
   context, ``Dockerfile`` by default); a path leaving the repository is not read;
 * ``command`` and ``entrypoint``, which replace the image's ``CMD`` and ``ENTRYPOINT``:
   a list, or a string split on whitespace; and ``image``;
-* its ``environment``: each variable's **name** and line, in the mapping or the list
-  form -- never a value (DF1_PHASE_A.md §7, §11).
+* its ``environment``: each variable's **name**, line and **kind**, in the mapping or the
+  list form -- never a value (DF1_PHASE_A.md §7, §11). The kind says only whether the file
+  gives the variable a value (DF3A_PHASE_A.md §12.4): ``literal``; ``symbolic``, a value
+  compose interpolates from the environment it runs in (``$VAR``, ``${VAR...}``; ``$$`` is a
+  literal dollar); ``passthrough``, no value at all (``NAME:``, ``NAME: null``, a bare
+  ``- NAME``), which takes the invoking shell's; ``unread``, anything else. An empty string
+  (``NAME: ""``, ``- NAME=``) is a value.
 
 Compose interpolates ``${VAR}`` and ``$VAR`` in values from the environment it runs in,
 so a value holding one is not read: that field is left out, never guessed.
@@ -42,6 +47,13 @@ from repoatlas.parsers.http_facts import COMPOSE_SERVICE, pending_reference
 
 _COMPOSE_NAMES = re.compile(r"(docker-)?compose([.-][\w.-]+)?\.ya?ml")
 _INTERPOLATION = re.compile(r"\$")
+#: A substitution compose makes in a value, once ``$$`` (a literal dollar) is set aside.
+_SUBSTITUTED = re.compile(r"\$(\{|[A-Za-z_])")
+
+LITERAL = "literal"
+SYMBOLIC = "symbolic"
+PASSTHROUGH = "passthrough"
+UNREAD = "unread"
 _PORT = re.compile(r"\d{1,5}")
 _NULL_TAG = "tag:yaml.org,2002:null"
 
@@ -109,19 +121,30 @@ def _inside(directory: str, relative: str) -> str | None:
     return "" if joined == "." else joined
 
 
+def _value_kind(text: str) -> str:
+    return SYMBOLIC if _SUBSTITUTED.search(text.replace("$$", "")) else LITERAL
+
+
 def _environment(node: yaml.Node) -> list[list[object]]:
-    """A service's environment variable names with their lines; values are never kept."""
+    """A service's environment variables: each name, line and kind (whether and how the file
+    gives it a value); values are never kept."""
     found: list[list[object]] = []
     if isinstance(node, yaml.MappingNode):
-        for key, _ in node.value:
+        for key, value in node.value:
             if isinstance(key, yaml.ScalarNode) and not _INTERPOLATION.search(str(key.value)):
-                found.append([str(key.value), key.start_mark.line + 1])
+                if isinstance(value, yaml.ScalarNode):
+                    kind = PASSTHROUGH if value.tag == _NULL_TAG else _value_kind(str(value.value))
+                else:
+                    kind = UNREAD
+                found.append([str(key.value), key.start_mark.line + 1, kind])
     elif isinstance(node, yaml.SequenceNode):
         for item in node.value:
             if isinstance(item, yaml.ScalarNode):
-                name = str(item.value).split("=", 1)[0].strip()
+                name, equals, value = str(item.value).partition("=")
+                name = name.strip()
                 if name and not _INTERPOLATION.search(name):
-                    found.append([name, item.start_mark.line + 1])
+                    kind = _value_kind(value) if equals else PASSTHROUGH
+                    found.append([name, item.start_mark.line + 1, kind])
     return found
 
 

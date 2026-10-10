@@ -161,7 +161,12 @@ class StructuredParser:
     # 12: a Helm Service records its selector and target ports, a values file each leaf's line
     #     and the paths it clears, and a CI build or release the variables a scope or script
     #     may set (DF2: release binding and the artifact join, repoatlas.graph.deploy_artifacts).
-    version = "12"
+    # 13: a compose environment entry records whether the file gives it a value (literal,
+    #     symbolic, pass-through); a workload env entry a ``default`` around the value it
+    #     reads, a block-form ConfigMap or Secret key reference as such, and an ``envFrom``
+    #     source its line (DF3a: deployment configuration crossings,
+    #     repoatlas.graph.deployment_env).
+    version = "13"
     language = "YAML"
 
     def supports(self, path: Path) -> bool:

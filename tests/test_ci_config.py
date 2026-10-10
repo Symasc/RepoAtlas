@@ -482,7 +482,7 @@ def test_values_files_withhold_credentials_and_an_overlay_is_its_own_claim() -> 
     assert values_references(PurePosixPath("environments/query.yaml"), documents) == []
 
 
-def test_a_chart_records_its_app_version_and_compose_its_environment_names() -> None:
+def test_a_chart_records_its_app_version_and_compose_its_environment_entries() -> None:
     [chart] = chart_references(
         PurePosixPath("charts/api/Chart.yaml"),
         list(
@@ -500,8 +500,9 @@ def test_a_chart_records_its_app_version_and_compose_its_environment_names() -> 
     found = compose_references(
         PurePosixPath("docker-compose.yml"), list(yaml.compose_all(compose, Loader=yaml.SafeLoader))
     )
+    # structured-config 13 (DF3a): each entry says whether the file gives it a value
     assert [json.loads(r.meta.get("environment", "[]")) for r in found] == [
-        [["URL", 5], ["LIMIT", 6]],
-        [["MODE", 10]],
+        [["URL", 5, "literal"], ["LIMIT", 6, "literal"]],
+        [["MODE", 10, "literal"]],
     ]
     assert "CANARY" not in json.dumps([r.meta for r in found])

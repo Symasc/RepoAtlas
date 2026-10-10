@@ -73,6 +73,9 @@ class _Visitor(ast.NodeVisitor):
         self._http = http
         self.symbols: list[ParsedSymbol] = []
         self.references: list[ParsedReference] = []
+        #: Each environment read outside every declaration, with the node read: the module
+        #: value whose statement holds it owns it, once the module's values are known.
+        self.module_reads: list[tuple[int, ast.expr]] = []
         self._scope: list[str] = []
 
     # -- scope helpers -------------------------------------------------------
@@ -329,6 +332,20 @@ class _Visitor(ast.NodeVisitor):
             # A non-literal name cannot be resolved deterministically, so nothing is
             # recorded. Guessing here would be inventing evidence.
             return
+        self._env_read(node, var, {"via": name})
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        """Record ``os.environ["X"]`` as an env read."""
+        base = _decorator_name(node.value)
+        if base and base.endswith("environ"):
+            var = _string_value(node.slice)
+            if var:
+                self._env_read(node, var, {"via": f"{base}[]"})
+        self.generic_visit(node)
+
+    def _env_read(self, node: ast.expr, var: str, meta: dict[str, str]) -> None:
+        if self._current_symbol is None:
+            self.module_reads.append((len(self.references), node))
         self.references.append(
             ParsedReference(
                 edge_type=EdgeType.READS,
@@ -337,28 +354,9 @@ class _Visitor(ast.NodeVisitor):
                 line_start=node.lineno,
                 line_end=node.end_lineno or node.lineno,
                 source_symbol=self._current_symbol,
-                meta={"via": name},
+                meta=meta,
             )
         )
-
-    def visit_Subscript(self, node: ast.Subscript) -> None:
-        """Record ``os.environ["X"]`` as an env read."""
-        base = _decorator_name(node.value)
-        if base and base.endswith("environ"):
-            var = _string_value(node.slice)
-            if var:
-                self.references.append(
-                    ParsedReference(
-                        edge_type=EdgeType.READS,
-                        target_kind=EntityType.ENV_VAR,
-                        target_key=var,
-                        line_start=node.lineno,
-                        line_end=node.end_lineno or node.lineno,
-                        source_symbol=self._current_symbol,
-                        meta={"via": f"{base}[]"},
-                    )
-                )
-        self.generic_visit(node)
 
     # -- helpers -------------------------------------------------------------
 
@@ -418,10 +416,13 @@ class PythonParser:
     # 16: a class records the type each of its annotated fields names (``fields``);
     #    database clients, queries, typed mappings and comparisons
     #    (repoatlas.parsers.py_persistence).
+    # 17: an environment read at module scope inside the statement that declares one module
+    #    value is that value's (``owner: value``), as the uses in its statement are (DF3a);
+    #    any other module-scope read stays the file's.
     # +pyX.Y: `ast` is the running interpreter's, and what it accepts moves with the
     #    interpreter (repoatlas.parsers.interpreter), so facts parsed by another one
     #    are never kept.
-    version = f"16+{interpreter_tag()}"
+    version = f"17+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
@@ -479,10 +480,12 @@ class PythonParser:
                 )
                 for value in analysis.declarations
             ]
+            declared = {value.name for value in analysis.declarations}
+            owners = [(name, statement) for name, statement in analysis.owned if name in declared]
         except RecursionError:
             # Nesting deeper than the analysis can walk costs the file its uses and its
             # module values, never its other facts.
-            uses, values = [], []
+            uses, values, owners = [], [], []
 
         whole_file_start, whole_file_last = whole_file_span(content)
         module_symbol = ParsedSymbol(
@@ -494,6 +497,7 @@ class PythonParser:
         )
 
         setuptools = setup_py_facts(tree) if path.name == "setup.py" else None
+        owned = _owned_reads(visitor, owners)
         return ParsedFile(
             language=self.language,
             parser=self.name,
@@ -501,7 +505,7 @@ class PythonParser:
             # Module values last: a name one shares with the module itself names the value.
             symbols=(module_symbol, *visitor.symbols, *values),
             references=(
-                *visitor.references,
+                *owned,
                 *http.deployment_references(),
                 *http.claim_references(),
                 *AriadneFacts(tree).references(),
@@ -511,6 +515,34 @@ class PythonParser:
                 *(() if setuptools is None else (setuptools_reference(setuptools, content),)),
             ),
         )
+
+
+def _owned_reads(visitor: _Visitor, owners: list[tuple[str, ast.stmt]]) -> list[ParsedReference]:
+    """The visitor's references, each module-scope environment read inside a statement that
+    declares one module value given to that value (``owner: value``), as the uses in its
+    statement are (:class:`~repoatlas.parsers.py_uses.PythonUseAnalysis`). A read outside
+    every such statement -- in an ``if`` test, a call at module level, ``a = b = f()`` --
+    stays the file's."""
+    references = list(visitor.references)
+    for index, node in visitor.module_reads:
+        start = (node.lineno, node.col_offset)
+        end = (node.end_lineno or node.lineno, node.end_col_offset or node.col_offset)
+        holding = [
+            name
+            for name, statement in owners
+            if (statement.lineno, statement.col_offset) <= start
+            and end
+            <= (
+                statement.end_lineno or statement.lineno,
+                statement.end_col_offset or statement.col_offset,
+            )
+        ]
+        if len(holding) == 1:
+            read = references[index]
+            references[index] = read.model_copy(
+                update={"source_symbol": holding[0], "meta": {**read.meta, "owner": "value"}}
+            )
+    return references
 
 
 def _field_types(node: ast.ClassDef) -> dict[str, str]:
