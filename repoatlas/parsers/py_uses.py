@@ -74,7 +74,7 @@ from repoatlas.models.parsing import (
     ParsedReference,
     ParsedSymbol,
 )
-from repoatlas.parsers.ts_uses import USES_EXPORTS
+from repoatlas.parsers.ts_uses import FIELD_MEMBERS, USES_EXPORTS
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 _COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
@@ -124,6 +124,38 @@ class UseSite:
     @property
     def target_key(self) -> str:
         return f"{self.name}.{self.member}" if self.member else self.name
+
+
+@dataclass(frozen=True, slots=True)
+class FieldDeclaration:
+    """A model's own field: an annotated name in a class body (DF3b, ``Model.field``)."""
+
+    #: The class, qualified as the parser qualifies symbols.
+    model: str
+    name: str
+    line: int
+    end_line: int
+    signature: str
+    #: The initializer proven to bind it by its name as a keyword (:func:`_init_binding`).
+    init: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FieldMember:
+    """A model field a declaration reads through a typed parameter or sets by constructing it.
+
+    It rides on the declaration's use of the model's name (``use``: ``type`` for the
+    parameter's annotation, ``call`` for the construction): it resolves only through that
+    use, to one of the resolved declaration's own fields (DF3B_PHASE_A.md §4).
+    """
+
+    owner: str | None
+    name: str
+    use: str
+    field: str
+    line: int
+    #: ``parameter`` (``p.f``) or ``construction`` (``T(f=...)``).
+    access: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,6 +395,10 @@ class PythonUseAnalysis:
         #: Each module-level statement that owns the uses in it, with the one value it declares
         #: (:meth:`_declares`): what else in the statement belongs to that value (DF3a).
         self.owned: list[tuple[str, ast.stmt]] = []
+        #: The models' own fields, in source order, and the members read or set through a
+        #: typed parameter or a construction (DF3b).
+        self.fields: list[FieldDeclaration] = []
+        self.members: list[FieldMember] = []
         self._guards, rebinds = _survey(tree)
         self._module_bindings(tree, rebinds=rebinds)
         self.exports = self._export_table()
@@ -693,6 +729,7 @@ class PythonUseAnalysis:
         for statement in node.body:
             names._one(statement)
         scope = names.scope("function", _parameters(node.args))
+        self.members.extend(_field_members(node, qualified))
         self._body(node.body, [*inner, scope], qualified)
 
     def _class(self, node: ast.ClassDef, stack: list[_Scope], owner: str | None) -> None:
@@ -708,10 +745,80 @@ class PythonUseAnalysis:
             self._expr(base, inner, qualified, _Ctx(form="base"))
         for keyword in node.keywords:
             self._expr(keyword.value, inner, qualified, _Ctx(form="keyword"))
+        self.fields.extend(_fields(node, qualified, self._init_binding(node, inner)))
         names = _Names()
         for statement in node.body:
             names._one(statement)
         self._body(node.body, [*inner, _Scope("class", frozenset(names.bound))], qualified)
+
+    def _init_binding(self, node: ast.ClassDef, stack: list[_Scope]) -> str | None:
+        """How the class's own initializer binds its fields by keyword, when that is proven.
+
+        ``pydantic``: its one base is pydantic's ``BaseModel`` and it has no decorator;
+        ``dataclass``: its one decorator is the ``dataclasses`` (or ``pydantic.dataclasses``)
+        ``dataclass``, not ``init=False``. Either is proven by what the name is bound to where
+        the class is written, as any use's binding is (an import of the module or of the name,
+        bound once, out of a star import's reach). Refused, for the whole class, when it
+        defines ``__init__`` or ``__new__``, has a ``model_validator`` or ``root_validator``
+        method, or mentions an ``alias_generator``: each can make a keyword mean another field
+        (DF3B_PHASE_A.md §13.1). Anything else -- attrs, an ORM model, a ``NamedTuple``, a
+        subclass of a model -- binds nothing proven.
+        """
+        pydantic = (
+            len(node.bases) == 1
+            and not node.decorator_list
+            and self._names(node.bases[0], stack, _PYDANTIC, "BaseModel")
+        )
+        dataclass = False
+        if len(node.decorator_list) == 1:
+            decorator = node.decorator_list[0]
+            called = decorator.func if isinstance(decorator, ast.Call) else decorator
+            dataclass = self._names(called, stack, _DATACLASSES, "dataclass") and not (
+                isinstance(decorator, ast.Call)
+                and any(
+                    k.arg == "init"
+                    and not (isinstance(k.value, ast.Constant) and k.value.value is True)
+                    for k in decorator.keywords
+                )
+            )
+        if pydantic == dataclass:
+            return None
+        for statement in node.body:
+            if not isinstance(statement, _FUNCTIONS):
+                continue
+            if statement.name in {"__init__", "__new__"}:
+                return None
+            for decorator in statement.decorator_list:
+                called = decorator.func if isinstance(decorator, ast.Call) else decorator
+                if _last_name(called) in _VALIDATORS:
+                    return None
+        if _mentions_alias_generator(node):
+            return None
+        return "pydantic" if pydantic else "dataclass"
+
+    def _names(
+        self, node: ast.expr, stack: list[_Scope], modules: frozenset[str], name: str
+    ) -> bool:
+        """Whether ``node`` is ``name`` of one of ``modules``: ``N`` bound by ``from M import
+        name``, or ``M.name`` with ``M`` bound by ``import M`` -- resolved where it is written."""
+        if isinstance(node, ast.Name):
+            found = self._resolve(node.id, stack)
+            return (
+                isinstance(found, Binding)
+                and found.kind == "import"
+                and found.module in modules
+                and found.imported == name
+            )
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == name
+            and isinstance(node.value, ast.Name)
+        ):
+            found = self._resolve(node.value.id, stack)
+            return (
+                isinstance(found, Binding) and found.kind == "namespace" and found.module in modules
+            )
+        return False
 
     def _pattern(self, pattern: ast.pattern, stack: list[_Scope], owner: str | None) -> None:
         """A class pattern's class and a value pattern's value are reads; captures bind."""
@@ -909,6 +1016,212 @@ class PythonUseAnalysis:
         self.uses.append((owner, UseSite(name, found, use, form, node.lineno, member or None)))
 
 
+#: The modules whose ``BaseModel`` and ``dataclass`` bind a model's fields by keyword.
+_PYDANTIC = frozenset({"pydantic", "pydantic.v1"})
+_DATACLASSES = frozenset({"dataclasses", "pydantic.dataclasses"})
+#: A field's keyword is another name when its value or annotation calls with one of these.
+_ALIASES = frozenset({"alias", "validation_alias"})
+_VALIDATORS = frozenset({"model_validator", "root_validator"})
+#: The most distinct fields one use carries: a guard, since each is a written member.
+MAX_FIELD_MEMBERS = 256
+
+
+def _class_var(annotation: ast.expr) -> bool:
+    head = annotation.value if isinstance(annotation, ast.Subscript) else annotation
+    return _last_name(head) == "ClassVar"
+
+
+def _fields(node: ast.ClassDef, model: str, init: str | None) -> list[FieldDeclaration]:
+    """A class body's own annotated names, each annotated once in it and not ``ClassVar``."""
+    annotated = [
+        s for s in node.body if isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name)
+    ]
+    counts = Counter(s.target.id for s in annotated if isinstance(s.target, ast.Name))
+    found: list[FieldDeclaration] = []
+    for statement in annotated:
+        assert isinstance(statement.target, ast.Name)
+        name = statement.target.id
+        if counts[name] != 1 or _class_var(statement.annotation):
+            continue
+        found.append(
+            FieldDeclaration(
+                model=model,
+                name=name,
+                line=statement.lineno,
+                end_line=statement.end_lineno or statement.lineno,
+                signature=f"{name}: {ast.unparse(statement.annotation)}",
+                init=init if _keyword_bound(init, statement) else None,
+            )
+        )
+    return found
+
+
+def _keyword_bound(init: str | None, statement: ast.AnnAssign) -> bool:
+    """Whether the initializer ``init`` binds this field by its own name as a keyword."""
+    if init is None or not isinstance(statement.target, ast.Name):
+        return False
+    if init == "pydantic" and statement.target.id.startswith("_"):
+        return False  # a private attribute, never an initializer argument
+    if _calls_with(statement.value, _ALIASES) or _calls_with(statement.annotation, _ALIASES):
+        return False
+    value = statement.value
+    return not (
+        isinstance(value, ast.Call)
+        and _last_name(value.func) == "field"
+        and any(
+            k.arg == "init" and isinstance(k.value, ast.Constant) and k.value.value is False
+            for k in value.keywords
+        )
+    )
+
+
+def _calls_with(node: ast.AST | None, keywords: frozenset[str]) -> bool:
+    return node is not None and any(
+        isinstance(n, ast.Call) and any(k.arg in keywords for k in n.keywords)
+        for n in ast.walk(node)
+    )
+
+
+def _mentions_alias_generator(node: ast.ClassDef) -> bool:
+    """An ``alias_generator`` keyword, assigned name or key in the class keywords or body,
+    outside its methods."""
+    pending: list[ast.AST] = [
+        *node.keywords,
+        *(s for s in node.body if not isinstance(s, _FUNCTIONS)),
+    ]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, ast.keyword) and current.arg == "alias_generator":
+            return True
+        if isinstance(current, ast.Name) and current.id == "alias_generator":
+            return True
+        if isinstance(current, ast.Constant) and current.value == "alias_generator":
+            return True
+        if isinstance(current, _FUNCTIONS):
+            continue
+        pending.extend(ast.iter_child_nodes(current))
+    return False
+
+
+def _field_type(annotation: ast.expr | None) -> str | None:
+    """The one named type a parameter is annotated with: ``T``, ``"T"``, ``Optional[T]``,
+    ``T | None`` or ``Annotated[T, ...]``; anything else names none."""
+    if isinstance(annotation, ast.Name):
+        return annotation.id
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        return annotation.value if annotation.value.isidentifier() else None
+    if isinstance(annotation, ast.Subscript):
+        head = _last_name(annotation.value)
+        if head == "Optional":
+            return _field_type(annotation.slice)
+        if (
+            head == "Annotated"
+            and isinstance(annotation.slice, ast.Tuple)
+            and annotation.slice.elts
+        ):
+            return _field_type(annotation.slice.elts[0])
+        return None
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        sides = [annotation.left, annotation.right]
+        named = [s for s in sides if not (isinstance(s, ast.Constant) and s.value is None)]
+        return _field_type(named[0]) if len(named) == 1 else None
+    return None
+
+
+def _own_nodes(function: ast.AST) -> list[ast.AST]:
+    """A function's nodes, without the bodies of the functions and classes nested in it."""
+    found: list[ast.AST] = []
+    pending = list(ast.iter_child_nodes(function))
+    while pending:
+        node = pending.pop()
+        found.append(node)
+        if isinstance(node, (*_FUNCTIONS, ast.ClassDef)):
+            continue
+        pending.extend(ast.iter_child_nodes(node))
+    return found
+
+
+def _field_members(
+    function: ast.FunctionDef | ast.AsyncFunctionDef, owner: str
+) -> list[FieldMember]:
+    """What ``function`` reads through a typed parameter (``p.f``) and sets by constructing a
+    class by its bare name (``T(f=...)``), in its own body.
+
+    A typed parameter is annotated with one named type (:func:`_field_type`) and nothing in
+    the function binds its name again -- an assignment, a loop or ``with`` target, a lambda
+    parameter, ``except ... as``, a pattern capture, ``global``/``nonlocal``, an import or a
+    nested declaration. Only the first attribute is read: ``p.a.b`` reads ``a``. Whether the
+    name resolves, and to a model that owns the field, is the use's to decide.
+    """
+    arguments = [*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs]
+    every = {a.arg for a in arguments} | {
+        a.arg for a in (function.args.vararg, function.args.kwarg) if a is not None
+    }
+    typed = {a.arg: t for a in arguments if (t := _field_type(a.annotation))}
+    nodes = _own_nodes(function)
+    rebound: set[str] = set()
+    for node in nodes:
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store | ast.Del):
+            rebound.add(node.id)
+        elif isinstance(node, ast.Lambda):
+            rebound |= {a.arg for a in ast.walk(node.args) if isinstance(a, ast.arg)}
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            rebound.add(node.name)
+        elif isinstance(node, ast.alias):
+            rebound.add((node.asname or node.name).split(".")[0])
+        elif isinstance(node, ast.Global | ast.Nonlocal):
+            rebound |= set(node.names)
+        elif isinstance(node, ast.MatchAs | ast.MatchStar) and node.name:
+            rebound.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            rebound.add(node.rest)
+        elif isinstance(node, (*_FUNCTIONS, ast.ClassDef)):
+            rebound.add(node.name)
+    found: list[FieldMember] = []
+    for node in nodes:
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            name = node.value.id
+            if name in typed and name not in rebound:
+                found.append(
+                    FieldMember(owner, typed[name], "type", node.attr, node.lineno, "parameter")
+                )
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            name = node.func.id
+            if name in every or name in rebound:
+                continue
+            for keyword in node.keywords:
+                if keyword.arg is not None:
+                    line = getattr(keyword, "lineno", node.lineno)
+                    found.append(
+                        FieldMember(owner, name, "call", keyword.arg, line, "construction")
+                    )
+    return found
+
+
+def field_lists(
+    members: Sequence[FieldMember], ambiguous: set[str]
+) -> dict[tuple[str | None, str, str], list[list[object]]]:
+    """Each use's members, ``[field, line, access]`` once per field at its first line.
+
+    Keyed as uses are merged -- (owner, name, use), a declaration whose qualified name several
+    definitions carry being the file -- so each list rides on the one reference it belongs to.
+    """
+    first: dict[tuple[str | None, str, str], dict[str, tuple[int, str]]] = {}
+    for member in members:
+        owner = None if member.owner in ambiguous else member.owner
+        seen = first.setdefault((owner, member.name, member.use), {})
+        here = (member.line, member.access)
+        if member.field not in seen or here < seen[member.field]:
+            seen[member.field] = here
+    return {
+        key: [
+            [name, line, access]
+            for name, (line, access) in sorted(found.items(), key=lambda kv: (kv[1], kv[0]))
+        ][:MAX_FIELD_MEMBERS]
+        for key, found in first.items()
+    }
+
+
 def _binding_of(name: str, sites: list[_Site]) -> Binding:
     """The one binding ``sites`` make of ``name``, or why they make none."""
     if all(s.kind == "namespace" and s.module == name and s.imported is None for s in sites):
@@ -1082,8 +1395,9 @@ def python_use_references(
         first, count = merged.get(key, (site, 0))
         merged[key] = (first, count + 1)
 
+    fields = field_lists(analysis.members, ambiguous)
     references: list[ParsedReference] = []
-    for (owner, target, _), (site, count) in merged.items():
+    for (owner, target, use), (site, count) in merged.items():
         binding = site.binding
         meta = {
             "use": site.use,
@@ -1092,6 +1406,11 @@ def python_use_references(
             "local": site.name,
             "occurrences": str(count),
         }
+        members = fields.get((owner, target, use)) if site.member is None else None
+        if members:
+            # The model's fields this declaration reads or sets through this use (DF3b):
+            # resolved with the use, never copied into its own edge's record.
+            meta[FIELD_MEMBERS] = json.dumps(members, separators=(",", ":"))
         if binding.kind != "local":
             meta["module"] = binding.module or ""
             if binding.imported:
