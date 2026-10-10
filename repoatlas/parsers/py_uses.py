@@ -1128,17 +1128,9 @@ def _field_type(annotation: ast.expr | None) -> str | None:
     return None
 
 
-def _own_nodes(function: ast.AST) -> list[ast.AST]:
-    """A function's nodes, without the bodies of the functions and classes nested in it."""
-    found: list[ast.AST] = []
-    pending = list(ast.iter_child_nodes(function))
-    while pending:
-        node = pending.pop()
-        found.append(node)
-        if isinstance(node, (*_FUNCTIONS, ast.ClassDef)):
-            continue
-        pending.extend(ast.iter_child_nodes(node))
-    return found
+#: What a function's own walk stops at: a nested declaration's body is its own.
+_DECLARATIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+_MATCH_NAMED = (ast.MatchAs, ast.MatchStar)
 
 
 def _field_members(
@@ -1151,50 +1143,64 @@ def _field_members(
     the function binds its name again -- an assignment, a loop or ``with`` target, a lambda
     parameter, ``except ... as``, a pattern capture, ``global``/``nonlocal``, an import or a
     nested declaration. Only the first attribute is read: ``p.a.b`` reads ``a``. Whether the
-    name resolves, and to a model that owns the field, is the use's to decide.
+    name resolves, and to a model that owns the field, is the use's to decide. One walk of the
+    function's own nodes, without the bodies of the functions and classes nested in it.
     """
-    arguments = [*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs]
-    every = {a.arg for a in arguments} | {
-        a.arg for a in (function.args.vararg, function.args.kwarg) if a is not None
-    }
+    args = function.args
+    arguments = [*args.posonlyargs, *args.args, *args.kwonlyargs]
+    every = {a.arg for a in arguments} | {a.arg for a in (args.vararg, args.kwarg) if a is not None}
     typed = {a.arg: t for a in arguments if (t := _field_type(a.annotation))}
-    nodes = _own_nodes(function)
     rebound: set[str] = set()
-    for node in nodes:
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store | ast.Del):
-            rebound.add(node.id)
+    reads: list[tuple[str, str, int]] = []
+    calls: list[ast.Call] = []
+    pending = list(ast.iter_child_nodes(function))
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ast.Name):
+            if not isinstance(node.ctx, ast.Load):
+                rebound.add(node.id)
+            continue
+        if isinstance(node, ast.Attribute):
+            value = node.value
+            if isinstance(value, ast.Name) and value.id in typed:
+                reads.append((value.id, node.attr, node.lineno))
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and node.keywords and func.id not in every:
+                calls.append(node)
+        elif isinstance(node, _DECLARATIONS):
+            rebound.add(node.name)
+            continue
         elif isinstance(node, ast.Lambda):
             rebound |= {a.arg for a in ast.walk(node.args) if isinstance(a, ast.arg)}
-        elif isinstance(node, ast.ExceptHandler) and node.name:
-            rebound.add(node.name)
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name:
+                rebound.add(node.name)
         elif isinstance(node, ast.alias):
             rebound.add((node.asname or node.name).split(".")[0])
         elif isinstance(node, ast.Global | ast.Nonlocal):
             rebound |= set(node.names)
-        elif isinstance(node, ast.MatchAs | ast.MatchStar) and node.name:
-            rebound.add(node.name)
-        elif isinstance(node, ast.MatchMapping) and node.rest:
-            rebound.add(node.rest)
-        elif isinstance(node, (*_FUNCTIONS, ast.ClassDef)):
-            rebound.add(node.name)
-    found: list[FieldMember] = []
-    for node in nodes:
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            name = node.value.id
-            if name in typed and name not in rebound:
-                found.append(
-                    FieldMember(owner, typed[name], "type", node.attr, node.lineno, "parameter")
-                )
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            name = node.func.id
-            if name in every or name in rebound:
-                continue
-            for keyword in node.keywords:
-                if keyword.arg is not None:
-                    line = getattr(keyword, "lineno", node.lineno)
-                    found.append(
-                        FieldMember(owner, name, "call", keyword.arg, line, "construction")
-                    )
+        elif isinstance(node, _MATCH_NAMED):
+            if node.name:
+                rebound.add(node.name)
+        elif isinstance(node, ast.MatchMapping):
+            if node.rest:
+                rebound.add(node.rest)
+        pending.extend(ast.iter_child_nodes(node))
+    found = [
+        FieldMember(owner, typed[name], "type", attr, line, "parameter")
+        for name, attr, line in reads
+        if name not in rebound
+    ]
+    for call in calls:
+        assert isinstance(call.func, ast.Name)
+        name = call.func.id
+        if name in rebound:
+            continue
+        for keyword in call.keywords:
+            if keyword.arg is not None:
+                line = getattr(keyword, "lineno", call.lineno)
+                found.append(FieldMember(owner, name, "call", keyword.arg, line, "construction"))
     return found
 
 
