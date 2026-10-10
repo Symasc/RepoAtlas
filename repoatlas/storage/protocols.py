@@ -281,6 +281,26 @@ class SymbolRow(BaseModel):
         return json.loads(self.meta_json) if self.meta_json else {}
 
 
+class EnvReadRow(BaseModel):
+    """One read of an environment variable: the reader, where it reads, and which parser read it.
+
+    What a deployment configures reaches code only through the reads of the variable it sets in
+    the code its image holds, so the global pass reads these rows -- per-file ``READS`` edges,
+    never its own output -- to cross from a setter to its readers (DF3a).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    variable: str
+    #: The reader: a module value or binding, a function, or the file.
+    src_id: int
+    src_key: str
+    repo_id: int
+    file_id: int | None = None
+    path: str | None = None
+    line_start: int | None = None
+
+
 class RouteServerRow(BaseModel):
     """A route one file serves: the handler, where it is stated, and which parser read it.
 
@@ -404,11 +424,14 @@ class NeighborEdge(BaseModel):
 
 #: Where, in an edge's resolution, the evidence that lets an edge of an evidenced type join
 #: two repositories is recorded: a package link's crossing record
-#: (repoatlas.graph.packages), and an HTTP join's (repoatlas.graph.http_crossings). A type
-#: with no entry here never crosses on evidence.
+#: (repoatlas.graph.packages), an HTTP join's (repoatlas.graph.http_crossings), and a
+#: deployment configuration crossing's (repoatlas.graph.deployment_env). A type with no entry
+#: here never crosses on evidence.
 EVIDENCE_PATHS: dict[EdgeType, str] = {
     EdgeType.USES: "$.crossing.package",
     EdgeType.CALLS_HTTP_HANDLER: "$.http.provider",
+    # A deployment's effective setter to a reader in the image DF2 proved it runs (DF3a).
+    EdgeType.CONFIGURES: "$.deployment_env.built_by",
 }
 
 
@@ -604,6 +627,8 @@ class KnowledgeStore(Protocol):
     def list_route_servers(
         self, *, exclude_parser: str, repo_id: int | None = None
     ) -> list[RouteServerRow]: ...
+    def list_env_reads(self, *, exclude_parser: str) -> list[EnvReadRow]: ...
+    def reads_in(self, entity_id: int, repo_id: int) -> bool: ...
     def list_http_edges(self, repo_id: int) -> list[HttpEdgeRow]: ...
     def replace_http_call_decisions(self, rows: Sequence[HttpCallDecisionRow]) -> None: ...
     def list_http_call_decisions(self, repo_id: int | None = None) -> list[HttpCallDecisionRow]: ...
