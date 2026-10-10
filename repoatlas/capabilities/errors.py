@@ -266,6 +266,27 @@ class InvalidDependencyRequestError(RepoAtlasError):
         self.field = field
 
 
+class InvalidImpactRequestError(RepoAtlasError):
+    """The impact request names a source its seed cannot start from (DF3a, D3-1).
+
+    Refused rather than answered: a ``seed_repository`` for a seed that is no environment
+    variable, outside the call's scope, or reading nothing of the variable would otherwise
+    return an empty walk that reads as "nothing is affected".
+    """
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(
+        self,
+        message: str = "that impact request names a source its seed cannot start from",
+        *,
+        detail: str | None = None,
+        field: str = "",
+    ) -> None:
+        super().__init__(message, detail=detail)
+        self.field = field
+
+
 class InvalidGroundingRequestError(RepoAtlasError):
     """The verification request is malformed in a way that leaves nothing to check.
 
@@ -621,6 +642,13 @@ def capability_error(exc: Exception) -> CapabilityError:
                 **({"cause": exc.cause} if exc.cause is not None else {}),
                 **({"revalidation": exc.revalidation} if exc.revalidation is not None else {}),
             },
+        )
+    if isinstance(exc, InvalidImpactRequestError):
+        return _from_repoatlas(
+            exc,
+            code="INVALID_IMPACT_REQUEST",
+            category=ErrorCategory.INVALID_REQUEST,
+            context={"field": exc.field} if exc.field else None,
         )
     if isinstance(exc, InvalidGroundingRequestError):
         return _from_repoatlas(

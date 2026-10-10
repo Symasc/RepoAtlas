@@ -40,6 +40,11 @@ MAX_DECISIONS = 25
 #: The most candidates an ambiguous seed lists; ``total`` says how many there were.
 MAX_SEED_CANDIDATES = 8
 
+SEED_REPOSITORY_DESCRIPTION = (
+    "For an environment-variable seed only: the repository whose reads of it the change "
+    "starts from. The first step follows that repository's readers alone; every later step "
+    "is the ordinary walk. Under a repository scope it must be that repository."
+)
 SEED_DESCRIPTION = (
     "What changes: an entity key a tool returned, a declaration's name or qualified "
     "name, an `env:` or `module:` key, a configuration key's qualified name, or a "
@@ -60,6 +65,8 @@ class ImpactRequest(BaseModel):
 
     context: CapabilityContext
     seed: str = Field(description=SEED_DESCRIPTION)
+    #: DF3a (D3-1): the source a shared seed's change starts from.
+    seed_repository: str | None = Field(default=None, description=SEED_REPOSITORY_DESCRIPTION)
     max_candidates: int = Field(default=DEFAULT_CANDIDATES, ge=1, le=MAX_CANDIDATES)
     investigation_id: str | None = None
     depth: FreshnessDepth = FreshnessDepth.STORED
@@ -72,6 +79,13 @@ class ImpactRequest(BaseModel):
     def _seed_is_not_blank(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("seed must name what changes")
+        return value
+
+    @field_validator("seed_repository")
+    @classmethod
+    def _seed_repository_is_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("seed_repository must name a repository")
         return value
 
 
@@ -229,6 +243,46 @@ class HttpCrossing(BaseModel):
     published_in: str | None = None
     built_in: str | None = None
     declared_in: str | None = None
+
+
+class ConfigurationCrossing(BaseModel):
+    """How one step crossed from where a deployment sets an environment variable to code
+    reading it (DF3a, :mod:`repoatlas.graph.deployment_env`).
+
+    The setter is the one place the variable is effectively set, by the narrow precedence
+    RepoAtlas reads: a values-file key, the CI step carrying a ``--set``, a ConfigMap key
+    (``configMapKeyRef`` or ``envFrom``), or a compose ``environment`` entry. The reader holds
+    the read, in the image the deployment's artifact join proved it runs (or the compose
+    service builds). Each place is ``<repository>/<path>:<line>`` in the repository it lies in.
+    ``value`` is only the value's kind -- ``literal``, ``symbolic`` (a CI variable or a compose
+    interpolation, not established) or ``withheld`` -- never the value. The release, image,
+    version relation and bases are the artifact join's (:class:`HttpCrossing`). All of it
+    configuration, never a deployment seen.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    variable: str
+    setter_kind: str
+    setter_at: str
+    reader_at: str
+    deployment_repository: str
+    builder_repository: str
+    value: str
+    release: str | None = None
+    variant: str | None = None
+    container: str | None = None
+    service: str | None = None
+    image: str | None = None
+    version_relation: str | None = None
+    binding_basis: str | None = None
+    build_basis: str | None = None
+    workload_in: str | None = None
+    declared_in: str | None = None
+    #: Every release variant (or compose service) whose configuration this setter is, when
+    #: more than one.
+    deployments: tuple[str, ...] = ()
+    decision_ref: str
 
 
 class CodeGeneration(BaseModel):
@@ -389,6 +443,8 @@ class ImpactStep(BaseModel):
     crossing: PackageCrossing | None = None
     #: The HTTP evidence of a step from a handler to a request in another repository.
     http: HttpCrossing | None = None
+    #: The configuration evidence of a step between a deployment's setter and a reader.
+    configuration: ConfigurationCrossing | None = None
     #: The configured generation behind a step from a schema definition to what was
     #: generated from it.
     generation: CodeGeneration | None = None
