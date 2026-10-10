@@ -384,7 +384,7 @@ def test_a_configures_edge_without_its_record_never_crosses(
     build(workspace, tmp_path, repos())
     database = workspace.database
     setter = f"{VALUES}:env.VALUES_DEFAULT:5"
-    planted = "sym:namesake:config.py:OVERLAY:3"
+    planted = "sym:namesake:app/settings.py:OVERLAY:3"
     [(src, repo_id, file_id)] = database.execute(
         "SELECT id, repo_id, file_id FROM entities WHERE key = ?", (setter,)
     ).fetchall()
@@ -439,7 +439,7 @@ def test_an_unscoped_variable_seed_still_reaches_every_reader_through_the_shared
 ) -> None:
     reached = by_entity(impact(corpus, "env:VALUES_OVERLAY"))
     assert f"{SETTINGS}:VALUES_OVERLAY:4" in reached
-    assert "sym:namesake:config.py:OVERLAY:3" in reached
+    assert "sym:namesake:app/settings.py:OVERLAY:3" in reached
 
 
 def test_a_source_specific_seed_starts_from_that_repository_alone(corpus: Workspace) -> None:
@@ -451,7 +451,7 @@ def test_a_source_specific_seed_starts_from_that_repository_alone(corpus: Worksp
 
 def test_a_source_specific_seed_never_returns_through_the_shared_node(corpus: Workspace) -> None:
     reached = by_entity(impact(corpus, "env:VALUES_OVERLAY", seed_repository="namesake"))
-    assert set(reached) == {"sym:namesake:config.py:OVERLAY:3"}
+    assert set(reached) == {"sym:namesake:app/settings.py:OVERLAY:3"}
 
 
 def test_a_repository_scope_stays_a_boundary(corpus: Workspace) -> None:
