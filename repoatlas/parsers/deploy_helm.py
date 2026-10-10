@@ -1095,6 +1095,9 @@ def _workload(
                 entry.setdefault("source", "value")
                 if read is not None and ".Values" in read.group("root"):
                     entry["values"] = read.group("root").lstrip("$").removeprefix(".Values.")
+                    if read.group("default"):
+                        # The template's own value when the path renders empty (DF3a, §12.2).
+                        entry["default"] = "true"
                 elif "{{" in text:
                     entry["source"] = "unread"
             elif (
@@ -1110,12 +1113,17 @@ def _workload(
                 and field[2] == "valueFrom"
                 and field[3] in ("configMapKeyRef", "secretKeyRef")
             ):
-                # The flow form, `configMapKeyRef: {name: x, key: y}`, when literal.
-                reference = _flow_reference(text)
-                entry["source"] = field[3] if reference is not None else "unread"
-                entry.update(reference or {})
+                if not text:
+                    # The block form: its name and key follow, each on a line of its own.
+                    entry.setdefault("source", field[3])
+                else:
+                    # The flow form, `configMapKeyRef: {name: x, key: y}`, when literal.
+                    reference = _flow_reference(text)
+                    entry["source"] = field[3] if reference is not None else "unread"
+                    entry.update(reference or {})
         elif len(field) >= 3 and field[0] == "envFrom":
             source = _entry(container["env_from"], field[1])
+            source.setdefault("line", line)
             if unread:
                 source["source"] = "conditional"
             elif (
