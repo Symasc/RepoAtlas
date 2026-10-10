@@ -93,9 +93,14 @@ def test_a_withheld_value_is_unknown_never_text() -> None:
     assert json.loads(layer("auth:\n  password: hunter2\n")["values"]) == {
         "auth.password": "<withheld>"
     }
-    assert values.get("auth.password").kind == "unknown"  # type: ignore[union-attr]
+    # DF3a (§12.2): where it is set is kept, what it is never; it renders as unknown
+    found = values.get("auth.password")
+    assert found is not None and (found.kind, found.text) == ("withheld", "")
+    assert found.place is not None and found.place.path == "v.yaml"
+    assert values.literals("auth.password") is None
     values.setting("token", ((WITHHELD, ""),), PLACE)
-    assert values.get("token").kind == "unknown"  # type: ignore[union-attr]
+    token = values.get("token")
+    assert token is not None and (token.kind, token.text, token.place) == ("withheld", "", PLACE)
 
 
 def test_a_ci_symbol_is_a_symbol_never_literal_text() -> None:
