@@ -32,6 +32,7 @@ from repoatlas.config.settings import DECLARATIONS_SLUG
 from repoatlas.dependencies.normalize import PYPI
 from repoatlas.graph.declared import REFUSED_AS, TargetKind, classify_dependency_target
 from repoatlas.graph.deployment_env import DEPLOYMENT_ENV_EVIDENCE
+from repoatlas.graph.fields import FIELD_USE
 from repoatlas.graph.graphql_codegen import FAMILY as GENERATION
 from repoatlas.graph.graphql_ownership import EVIDENCE as COMPOSITION
 from repoatlas.graph.http_crossings import HTTP_CROSSING
@@ -73,7 +74,7 @@ from repoatlas.models.impact import (
     UnresolvedImpact,
     ValueMapping,
 )
-from repoatlas.models.parsing import EdgeDirection, EdgeType, EntityType
+from repoatlas.models.parsing import FIELD, EdgeDirection, EdgeType, EntityType
 from repoatlas.storage.protocols import (
     Confinement,
     DependencyStore,
@@ -89,7 +90,7 @@ from repoatlas.storage.protocols import (
 #: what a configured generator generated from it (``GENERATES`` on codegen evidence).
 #: 5: a deployment's effective setter crosses to the readers in the image its artifact join
 #: proved it runs (``CONFIGURES`` on deployment_env evidence, DF3a).
-POLICY = "impact/5"
+POLICY = "impact/6"
 
 #: Entity types a change is a *key* change for: they name a value, not code.
 _KEYS = frozenset(
@@ -310,13 +311,16 @@ class SeedResolver:
             return self._knowledge.count_keys_with_prefix(file_key(identity.qualified_name, ""))
         if slug is None or path is None:
             return None
+        # A model field is no member of its file or model (DF3b, ImpactWalk.members).
         if granularity is Granularity.FILE:
             prefix = f"sym:{slug}:{path}:"
-            return self._knowledge.count_keys_with_prefix(prefix, exclude_types=[EntityType.MODULE])
+            return self._knowledge.count_keys_with_prefix(
+                prefix, exclude_types=[EntityType.MODULE], exclude_kinds=[FIELD]
+            )
         if not identity.qualified_name:
             return None
         count = self._knowledge.count_keys_with_prefix(
-            f"sym:{slug}:{path}:{identity.qualified_name}."
+            f"sym:{slug}:{path}:{identity.qualified_name}.", exclude_kinds=[FIELD]
         )
         return count or None
 
@@ -358,6 +362,7 @@ def seed_nodes(
     identity = seed.identity
     if identity is not None:
         node = walk.node_of(identity, home)
+        node.climbs = walk.is_field(identity)
         slug, path = identity.repository_slug, identity.path
         prefixes: list[str] = []
         if identity.type is EntityType.REPOSITORY and identity.qualified_name:
@@ -396,6 +401,8 @@ def seed_nodes(
 
 
 _BASIS = {Tier.EXACT: "exact", Tier.CONTAINMENT: "containment", Tier.FILE: "file"}
+#: How a field use's step says the field is reached (DF3b): what the declaration itself does.
+_FIELD_ACCESS = {"parameter": "through a typed parameter", "construction": "by construction"}
 
 
 def display(node: Node) -> str:
@@ -551,6 +558,10 @@ def assemble(
         if isinstance(compared, dict):
             field_name, value = compared.get("field"), compared.get("value")
             return f"{node.step.reading}, comparing {field_name} with '{value}'"
+        used = node.step.resolution.get(FIELD_USE)
+        if isinstance(used, dict):
+            how = _FIELD_ACCESS.get(str(used.get("access")), str(used.get("access")))
+            return f"{node.step.reading}, field {used.get('model')}.{used.get('field')} {how}"
         return node.step.reading
 
     tests = [n for n in ranked if is_test_path(n.path) and n.role is not ImpactRole.MEMBER]
