@@ -12,7 +12,8 @@
 
 ``builder`` builds and publishes both images (``team/app``, ``team/worker``) from CircleCI;
 ``app/settings.py`` reads every variable at module scope, ``tools/report.py`` reads two outside
-the image. ``namesake`` reads a same-named variable nothing of it configures. ``composer`` has
+the image. ``namesake`` reads a same-named variable nothing of it configures, at the path the
+app image copies. ``composer`` has
 two compose services building their own images (mapping and list forms); ``overlaid`` a compose
 file beside the override compose merges over it.
 
@@ -298,7 +299,9 @@ BUILDER = {
     "worker/main.py": 'import os\n\nTHREADS = int(os.getenv("THREADS", "1"))\nMODE = os.getenv("WORKER_MODE", "slow")\n',
 }
 
-NAMESAKE = {"config.py": 'import os\n\nOVERLAY = os.getenv("VALUES_OVERLAY", "9")\n'}
+#: A same-named read at the very path the app image copies from ``builder``: only the
+#: repository it lies in keeps it out of the image.
+NAMESAKE = {"app/settings.py": 'import os\n\nOVERLAY = os.getenv("VALUES_OVERLAY", "9")\n'}
 
 COMPOSE = """\
 services:
