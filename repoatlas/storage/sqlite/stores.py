@@ -37,6 +37,7 @@ from repoatlas.storage.protocols import (
     EntityDescription,
     EntityIdentity,
     EntityRecord,
+    EnvReadRow,
     FileFacts,
     FileRow,
     HttpCallDecisionRow,
@@ -55,6 +56,9 @@ from repoatlas.storage.protocols import (
 )
 from repoatlas.storage.sqlite.database import Database
 from repoatlas.storage.sqlite.search import path_scope
+
+#: What every environment variable's key starts with (repoatlas.graph.keys.env_key).
+ENV_KEY_PREFIX = "env:"
 
 #: Everything an :class:`EntityIdentity` needs, shared by both key lookups.
 #: ``LEFT JOIN`` throughout: an interned entity has no file and no repository row,
@@ -1138,6 +1142,51 @@ class SqliteKnowledgeStore:
             ),
         ).fetchall()
         return [RouteServerRow(**dict(row)) for row in rows]
+
+    def reads_in(self, entity_id: int, repo_id: int) -> bool:
+        """Whether anything in one repository reads the environment variable ``entity_id``."""
+        row = self._db.execute(
+            """
+            SELECT 1 FROM edges e JOIN entities s ON s.id = e.src_id
+            WHERE e.dst_id = ? AND e.type = ? AND s.repo_id = ?
+            LIMIT 1
+            """,
+            (entity_id, str(EdgeType.READS), repo_id),
+        ).fetchone()
+        return row is not None
+
+    def list_env_reads(self, *, exclude_parser: str) -> list[EnvReadRow]:
+        """Every per-file read of an environment variable: its reader, file and line.
+
+        Reached through the variables' nodes (a key range on ``idx_entities_key``, then
+        ``idx_edges_dst``). The global pass's own edges are left out, so what it decides
+        never depends on what it decided last time.
+        """
+        rows = self._db.execute(
+            """
+            SELECT t.name AS variable, e.src_id AS src_id, s.key AS src_key,
+                   e.repo_id AS repo_id, e.file_id AS file_id, f.rel_path AS path,
+                   e.line_start AS line_start
+            FROM entities t
+            JOIN edges e ON e.dst_id = t.id
+            JOIN entities s ON s.id = e.src_id
+            LEFT JOIN files f ON f.id = e.file_id
+            WHERE t.key >= ? AND t.key < ?
+              AND t.type = ?
+              AND e.type = ?
+              AND e.repo_id IS NOT NULL
+              AND (e.parser IS NULL OR e.parser <> ?)
+            ORDER BY t.name, e.repo_id, f.rel_path, e.line_start, s.key
+            """,
+            (
+                ENV_KEY_PREFIX,
+                _after(ENV_KEY_PREFIX),
+                str(EntityType.ENV_VAR),
+                str(EdgeType.READS),
+                exclude_parser,
+            ),
+        ).fetchall()
+        return [EnvReadRow(**dict(row)) for row in rows]
 
     def replace_http_call_decisions(self, rows: Sequence[HttpCallDecisionRow]) -> None:
         """Replace every stored HTTP call decision, and record that they have been written.

@@ -47,6 +47,7 @@ from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
 from repoatlas.graph.ci_facts import plan_ci_facts
 from repoatlas.graph.deploy_artifacts import plan_deployment_artifacts
 from repoatlas.graph.deploy_identity import DOCKERFILE_UNREAD, NO_BUILD, NOT_IN_IMAGE
+from repoatlas.graph.deployment_env import plan_deployment_env
 from repoatlas.graph.graphql_artifacts import plan_artifacts
 from repoatlas.graph.graphql_codegen import plan_codegen
 from repoatlas.graph.graphql_documents import plan_documents
@@ -272,6 +273,10 @@ class ReferenceLinker:
         claims: list[UnresolvedRefRecord] = []
         for reference in parsed.references:
             source_id = sources.get(reference.source_symbol or "", file_entity_id)
+            if reference.edge_type is EdgeType.READS and reference.meta.get("owner") == "value":
+                # A module-scope read its value's statement holds (DF3a): that value, by its
+                # exact name, never a same-named declaration; failing that, the file.
+                source_id = values.get(reference.source_symbol or "", file_entity_id)
             if reference.meta.get("embedded") == "true":
                 # A document embedded in another language owns its own claims, and only
                 # them: its name may also be a declaration's of that language.
@@ -647,6 +652,18 @@ class ReferenceLinker:
             # join is made (repoatlas.graph.deploy_artifacts, DF2_PHASE_A.md §15 E7).
             ci = plan_ci_facts(claims, by_id)
             deployed = plan_deployment_artifacts(claims, by_id, decided.code_routes, ci)
+            # Where those deployments, and compose services building their own images, set the
+            # variables the code in each image reads: a crossing from the effective setter to
+            # each reader, never by a variable's name (repoatlas.graph.deployment_env, DF3a).
+            environment = plan_deployment_env(
+                claims,
+                by_id,
+                symbols,
+                deployed.containers,
+                self._knowledge.list_env_reads(exclude_parser=GLOBAL_PARSER),
+                producer=GLOBAL_PARSER,
+            )
+            edges.extend(environment.edges)
             # The one HTTP decision that joins two repositories: exposure and request
             # claims, both per file or derived from them, never this pass's previous output.
             crossings = plan_http_crossings(
@@ -704,7 +721,7 @@ class ReferenceLinker:
             watch.detail = (
                 f"{unresolved} still unresolved; {decided.detail}; {crossings.detail}; "
                 f"{codegen.detail}; {documents.detail}; {resolvers.detail}; {ownership.detail}; "
-                f"{artifacts.detail}; {ci.detail}; {deployed.detail}"
+                f"{artifacts.detail}; {ci.detail}; {deployed.detail}; {environment.detail}"
             )
         stages.append(_timing(watch))
 
@@ -791,6 +808,7 @@ class ReferenceLinker:
                 *mappings.decisions,
                 *ci.decisions,
                 *deployed.decisions,
+                *environment.decisions,
             ),
             resolved=resolved,
             unresolved=unresolved,
