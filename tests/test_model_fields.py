@@ -229,7 +229,7 @@ def test_python_members_ride_on_the_use_that_names_the_model() -> None:
 
 def ts(
     source: str, path: str = "x.ts"
-) -> tuple[dict[str, int], dict[tuple[str | None, str], list[list[object]]]]:
+) -> tuple[dict[str, int | None], dict[tuple[str | None, str], list[list[object]]]]:
     parsed = TypeScriptParser().parse(Path(path), source)
     fields = {
         s.qualified_name: s.line_start for s in parsed.symbols if s.meta.get("kind") == "field"
@@ -543,7 +543,7 @@ def test_a_field_reaches_its_exact_users_then_its_model_once_then_the_model_s_us
         by_name["build_rows"].chain
         == "Query.limit -> build_rows (uses, field Query.limit by construction)"
     )
-    assert by_name["read"].step.resolution["field_use"] == {
+    assert (by_name["read"].step.resolution or {})["field_use"] == {
         "field": "limit",
         "model": "Query",
         "access": "parameter",
