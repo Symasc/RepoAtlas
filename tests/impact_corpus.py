@@ -408,14 +408,18 @@ def verify_steps(workspace: Workspace, response: Any) -> int:
                         <= parent_lines[1]
                     )
         elif step.derived == "member-of":
-            assert before is not None and before.path == candidate.path
+            # a reached member's container, or a model field seed's model (DF3b)
+            entity = before.entity if before is not None else seed.entity
+            path = before.path if before is not None else seed.path
+            lines = before.lines if before is not None else seed.lines
+            assert entity is not None and path == candidate.path
             # sym:<repository>:<path>:<qualified name>:<line>, the name possibly holding ":"
-            member = before.entity.rsplit(":", 1)[0].split(":", 3)[3]
+            member = entity.rsplit(":", 1)[0].split(":", 3)[3]
             container = candidate.entity.rsplit(":", 1)[0].split(":", 3)[3]
             # an argument (`T.f(a:)`) belongs to what it is an argument of (`T.f`)
             assert member.startswith((container + ".", container + "("))
-            assert candidate.lines and before.lines
-            assert candidate.lines[0] <= before.lines[0] <= before.lines[1] <= candidate.lines[1]
+            assert candidate.lines and lines
+            assert candidate.lines[0] <= lines[0] <= lines[1] <= candidate.lines[1]
         else:
             raise AssertionError(f"a step that is neither an edge nor derived: {step}")
         checked += 1
