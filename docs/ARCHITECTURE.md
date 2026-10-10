@@ -1628,8 +1628,8 @@ neither a reference nor a generation says. The `maps-to` family follows it outwa
 across. Between two enums the types are mapped too, so a change to the key
 enum reaches the value enum itself: the walk never climbs from a member back to its container.
 
-**Impact.** `POLICY` is `impact/4`: the `generates` family (formerly `generates-graphql`) admits `prisma_migrate`
-evidence, and `maps-to` is new.
+**Impact.** `POLICY` was `impact/4` here: the `generates` family (formerly `generates-graphql`) admits
+`prisma_migrate` evidence, and `maps-to` is new. It is `impact/5` from DF3a's configuration crossings (§5).
 
 ### What an impact answer says about evidence and refusals
 
@@ -2348,6 +2348,53 @@ workload at all ties as before, to its repository's one application (`source_rul
 evidence, read or not, forbids that. A refusal at the artifact fails the source hop with its own reason
 (`publisher_unresolved`, `artifact_ambiguous`, `tag_unmatched`, `image_unread`, `registry_unresolved`,
 `workload_unmatched`).
+
+### Deployment configuration crossings
+
+> **Invariant.** A deployment's setting reaches code only through the artifact join's proven image, or inside one
+> compose repository: `repoatlas/graph/deployment_env.py`, called only by the global pass, writes `CONFIGURES` from
+> the one effective setter to each reader that image holds. Nothing is written to a variable's `env:` node, and no two
+> repositories are joined on a variable's name.
+
+> **Invariant.** A crossing says where a value is configured, never what it is: a value's kind (`literal`,
+> `symbolic`, `withheld`) is kept, never its text, and no output presents it as the value in effect.
+
+**Attribution.** A module-scope read belongs to the declaration that owns its uses: in Python (python-ast 17) the one
+module value its statement declares, nested in a module-level `if` or `try` or not; in TypeScript and JavaScript
+(typescript 19) the binding a program-level declarator names, an anonymous function in its initializer included.
+Anything else -- `a = b = f()`, an `if` test, a call at module level, a `const` in a top-level callback -- stays the
+file's.
+
+**Setter** (a narrow subset of the documented precedence, never a general evaluator; refusal is the default):
+
+| Configuration | Setter | Refused as `setter-unresolved` with |
+|---|---|---|
+| a direct `env` entry reading `.Values.<path>` | the winning layer by DF2's precedence: a values file's key, or the CI step key carrying the `--set` | `values-unresolved` (an unread or open layer; an empty or symbolic value under a template `default`), `not-indexed` (no layer sets it) |
+| a direct `configMapKeyRef` | the chart's one rendered ConfigMap of that literal name holding the key | `unread-source` |
+| a direct `secretKeyRef`, a literal value, a `fieldRef` | -- | `secret` (the reference kept), `not-indexed` |
+| `envFrom` (no direct entry) | the last source holding it | `unread-source` or `secret` when a source after it cannot be read |
+| a compose `environment` entry | its own key; a list entry, its service's `environment` key | `passthrough` (no value), `unread-source` (an override file beside it) |
+
+A conditional entry is `conditional`, a name stated twice `duplicate-entry`. Only variables a reader in the builder's
+repository reads are decided; when a source may set anything, also each variable a reader in the image reads.
+
+**Image.** A reader is in the image when a literal final-stage copy of the build context covers its file and nothing
+copied later may overwrite it. `reader-outside-image` is claimed only when every final-stage copy is read and the
+final stage builds on no earlier stage; otherwise `image-unread` (`copy-unresolved`, `base-unresolved`,
+`dockerfile-unread`). As for the source tie, `.dockerignore` and an external base's `ONBUILD` are not read.
+
+**Records.** `deployment_env` in `link_decisions`, one per container (or compose service), release variant and
+variable; a refusal is filed where the container names the variable, a crossing at its setter. Each `CONFIGURES` edge,
+one per (setter, reader), records `deployment_env`: the variable, the setter's kind and place, the reader's, the value's
+kind, the deploying and building repositories, and the artifact join's release, variant, image, version relation and
+bases (`deployments` when several release variants share the setter).
+
+**Impact** (`POLICY` `impact/5`). `configures` (a setter to its readers) and `configures-setter` (a reader to its
+setters, a leaf) cross on that record (`EVIDENCE_PATHS[CONFIGURES]`). A step carries it as `configuration`, and reads
+"is set by, `<deploying>` -> `<building>` via `<variable>` (where; release; relation; value)". `seed_repository` starts
+an environment-variable seed from one repository's readers: the seed's home is that repository, and a seed is never
+reached again, so nothing returns through the shared node; a seed that is no variable, a repository outside the scope
+or one reading nothing of it is refused (`INVALID_IMPACT_REQUEST`).
 
 ## 6. The indexing pipeline
 
@@ -4584,4 +4631,6 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | A CI-established deployment is joined to code in the global pass alone, and read from what it stored | Plan it with the other HTTP claims, so a repository's replan includes it | Its evidence spans repositories -- the release, the build, an operator declaration -- so no repository's replan can equal its share of the global one, which `http_operations` relies on. One join, persisted, keeps every read equal to it (§5) |
 | A values file a release names is read at the end of its repository's sync, its claims replaced whole every time | Read it in the global pass; or read every YAML file as values | The global pass reads stored state only, and reading every YAML file would make configuration that is not values look like it. A file named by a stored claim, read through the sync's own boundary, keeps incremental equal to fresh by construction (§5) |
 | The local API reads each connection on its own thread, and runs every capability call on one index thread | One thread for everything | A browser opens spare connections it may never send on; read one at a time, such a connection holds the server until its socket timeout. The index's connection is bound to the thread that opened it, so calls still run there, one at a time (§12, docs/local-api.md) |
+| A deployment's setting crosses to code only through the artifact join's proven image, or inside one compose repository | Link a setter to every reader of the variable's name | A name is not evidence: two repositories reading `LIMIT` share nothing, and a deployment configures only the image it runs. Crossing through the proven artifact keeps a same-named reader elsewhere out, and a refusal says why a variable did not cross (§5) |
+| An environment seed may name the repository it starts from (`seed_repository`) | Scope the call to that repository; or seed the reading declaration | A repository scope is a boundary, so it can never reach the deployment or the downstream caller; a declaration seed starts below the variable. Restricting only the first step keeps the walk global and the shared node closed behind it (§5) |
 | `install.sh` reruns safely and replaces nothing it did not create | An installer that overwrites existing links and registrations | Running it again is how an installation is updated, and the operator's own `repoatlas` on PATH, their skills and their MCP registration are theirs (docs/installation.md) |
