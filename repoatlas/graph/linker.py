@@ -48,6 +48,15 @@ from repoatlas.graph.ci_facts import plan_ci_facts
 from repoatlas.graph.deploy_artifacts import plan_deployment_artifacts
 from repoatlas.graph.deploy_identity import DOCKERFILE_UNREAD, NO_BUILD, NOT_IN_IMAGE
 from repoatlas.graph.deployment_env import plan_deployment_env
+from repoatlas.graph.fields import (
+    FIELD_USE,
+    Field,
+    Model,
+    field_meta,
+    field_record,
+    members_of,
+    resolve_members,
+)
 from repoatlas.graph.graphql_artifacts import plan_artifacts
 from repoatlas.graph.graphql_codegen import plan_codegen
 from repoatlas.graph.graphql_documents import plan_documents
@@ -80,6 +89,7 @@ from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.parsing import (
     EMBEDDED_DOCUMENT,
     ENUM_MEMBER,
+    FIELD,
     EdgeType,
     EntityType,
     ParsedFile,
@@ -250,9 +260,20 @@ class ReferenceLinker:
         qualified: dict[str, int] = {}
         values: dict[str, int] = {}
         documents: dict[str, int] = {}
+        fields: list[Field] = []
+        declared: dict[int, ParsedSymbol] = {}
         symbol_ids = self._symbol_ids(
-            file_id, repo_slug, rel_path, parsed.symbols, qualified, values, documents
+            file_id,
+            repo_slug,
+            rel_path,
+            parsed.symbols,
+            qualified,
+            values,
+            documents,
+            fields=fields,
+            declared=declared,
         )
+        python = parsed.language == "Python"
         # A module value owns the uses in its own statement, and is named by its name
         # before anything else is; it is no callee a CALLS or REFERENCES matches.
         sources = {**symbol_ids, **values}
@@ -267,10 +288,16 @@ class ReferenceLinker:
                 file_id=file_id,
                 parser=parsed.parser,
             )
-            for entity_id in (*symbol_ids.values(), *values.values(), *documents.values())
+            for entity_id in (
+                *symbol_ids.values(),
+                *values.values(),
+                *documents.values(),
+                *(field.entity_id for field in fields),
+            )
         ]
 
         claims: list[UnresolvedRefRecord] = []
+        field_uses: set[tuple[int, int]] = set()
         for reference in parsed.references:
             source_id = sources.get(reference.source_symbol or "", file_entity_id)
             if reference.edge_type is EdgeType.READS and reference.meta.get("owner") == "value":
@@ -305,6 +332,34 @@ class ReferenceLinker:
                                 resolution=use_resolution(reference.meta),
                             )
                         )
+                        model = declared.get(target)
+                        members = members_of(reference.meta)
+                        if model is not None and members:
+                            # The model's own fields the declaration reads or sets (DF3b).
+                            for use in resolve_members(
+                                _model(target, model), members, fields, python=python
+                            ):
+                                key = (source_id, use.field.entity_id)
+                                if key in field_uses:
+                                    continue
+                                field_uses.add(key)
+                                edges.append(
+                                    EdgeRecord(
+                                        src_id=source_id,
+                                        dst_id=use.field.entity_id,
+                                        type=EdgeType.USES,
+                                        confidence=reference.confidence,
+                                        repo_id=repo_id,
+                                        file_id=file_id,
+                                        line_start=use.line,
+                                        line_end=use.line,
+                                        parser=parsed.parser,
+                                        resolution=use_resolution(
+                                            field_meta(reference.meta, use),
+                                            **{FIELD_USE: field_record(use)},
+                                        ),
+                                    )
+                                )
                 else:
                     claims.append(self._claim(repo_id, file_id, source_id, reference, parsed))
                 continue
@@ -450,6 +505,9 @@ class ReferenceLinker:
         qualified: dict[str, int] | None = None,
         values: dict[str, int] | None = None,
         documents: dict[str, int] | None = None,
+        *,
+        fields: list[Field] | None = None,
+        declared: dict[int, ParsedSymbol] | None = None,
     ) -> dict[str, int]:
         """Map qualified symbol name to its persisted entity id.
 
@@ -457,12 +515,28 @@ class ReferenceLinker:
         bare-name fallback below. A module value (``ParsedSymbol.uses_only``) is never
         in the mapping: it goes to ``qualified`` and to ``values``, when given. A GraphQL
         document embedded in another language is in none of them, only in ``documents``.
+        A model field is in none of them either, only in ``fields``: no name resolves to
+        it, and it owns nothing (DF3b). ``declared`` receives every other symbol by id.
         """
         mapping: dict[str, int] = {}
         for symbol in symbols:
             key = symbol_key(repo_slug, rel_path, symbol.qualified_name, symbol.line_start)
             entity_id = self._knowledge.find_file_entity(file_id, key)
             if entity_id is not None:
+                if symbol.meta.get("kind") == FIELD:
+                    if fields is not None:
+                        fields.append(
+                            Field(
+                                entity_id=entity_id,
+                                name=symbol.name,
+                                qualified_name=symbol.qualified_name,
+                                line_start=symbol.line_start,
+                                init=symbol.meta.get("init"),
+                            )
+                        )
+                    continue
+                if declared is not None:
+                    declared[entity_id] = symbol
                 if symbol.meta.get("kind") == EMBEDDED_DOCUMENT:
                     # No name of the host language resolves to it, and it owns nothing
                     # but its own claims (link_file).
@@ -1347,3 +1421,15 @@ def _flavor(origin: FileRow, meta: dict[str, str]) -> str | None:
     if "typescript" in parser:
         return "node"
     return flavor_for(origin.rel_path)
+
+
+def _model(entity_id: int, symbol: ParsedSymbol) -> Model:
+    """A symbol this file declares, as the model a local use names (DF3b)."""
+    return Model(
+        entity_id=entity_id,
+        type=symbol.kind,
+        kind=symbol.meta.get("kind"),
+        qualified_name=symbol.qualified_name,
+        line_start=symbol.line_start,
+        line_end=symbol.line_end,
+    )
