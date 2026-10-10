@@ -360,6 +360,9 @@ class PythonUseAnalysis:
         self.decisions: list[tuple[int, int, str, str]] | None = [] if record else None
         #: The module values this file declares, in line order: the parser's symbols.
         self.declarations: list[Declaration] = []
+        #: Each module-level statement that owns the uses in it, with the one value it declares
+        #: (:meth:`_declares`): what else in the statement belongs to that value (DF3a).
+        self.owned: list[tuple[str, ast.stmt]] = []
         self._guards, rebinds = _survey(tree)
         self._module_bindings(tree, rebinds=rebinds)
         self.exports = self._export_table()
@@ -614,6 +617,8 @@ class PythonUseAnalysis:
     def _statement(self, node: ast.stmt, stack: list[_Scope], owner: str | None) -> None:
         if owner is None and len(stack) == 1:
             owner = self._declares(node)
+            if owner is not None:
+                self.owned.append((owner, node))
         if isinstance(node, _FUNCTIONS):
             self._function(node, stack, owner)
         elif isinstance(node, ast.ClassDef):
