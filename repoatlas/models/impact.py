@@ -25,6 +25,8 @@ Three kinds of answer are kept apart in the types rather than in prose:
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from repoatlas.compat import StrEnum
@@ -37,6 +39,9 @@ DEFAULT_CANDIDATES = 30
 MAX_CANDIDATES = 100
 #: The most link decisions one answer lists (``ImpactResponse.decisions``).
 MAX_DECISIONS = 25
+#: The most refused HTTP requests one answer lists beside them, under a cap of their own so
+#: they never displace a link decision (DF3c); the rest are counted under ``http``.
+MAX_HTTP_DECISIONS = 10
 #: The most candidates an ambiguous seed lists; ``total`` says how many there were.
 MAX_SEED_CANDIDATES = 8
 
@@ -414,6 +419,19 @@ class ImpactDecision(BaseModel):
     decision: str
     at: str
     evidence: dict[str, object] = Field(default_factory=dict)
+    #: A refused HTTP request (family ``http``, DF3c) only: ``at`` -- the request is made by a
+    #: declaration, or in a file, the walk reached; ``toward`` -- **hypothetical**: the request is
+    #: not linked, and if it were it would reach a handler the walk reached. Never a connection.
+    relation: Literal["at", "toward"] | None = Field(
+        default=None,
+        # Every other family's decision is written exactly as before: no relation key.
+        exclude_if=lambda value: value is None,
+        description=(
+            "Refused HTTP requests only. 'at': the request is made where the walk went. "
+            "'toward': hypothetical -- the request is NOT linked; if it were, it would reach a "
+            "handler the walk reached. Neither is a dependency or a step of the answer."
+        ),
+    )
 
 
 class ImpactStep(BaseModel):
