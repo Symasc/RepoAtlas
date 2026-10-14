@@ -1629,8 +1629,8 @@ across. Between two enums the types are mapped too, so a change to the key
 enum reaches the value enum itself: the walk never climbs from a member back to its container.
 
 **Impact.** `POLICY` was `impact/4` here: the `generates` family (formerly `generates-graphql`) admits
-`prisma_migrate` evidence, and `maps-to` is new. It is `impact/5` from DF3a's configuration crossings, and `impact/6`
-from DF3b's model fields (§5).
+`prisma_migrate` evidence, and `maps-to` is new. It is `impact/5` from DF3a's configuration crossings, `impact/6`
+from DF3b's model fields, and `impact/7` from DF3c's refused HTTP requests (§5).
 
 ### What an impact answer says about evidence and refusals
 
@@ -1653,7 +1653,8 @@ Chain labels say the same in words ("by a query on parcels.state_code = 'packed'
 than a link made (`linked`, `resolved`) whose decided entity is the seed or a returned candidate, or whose file holds
 one (`link_decisions_near`). This is a rule the index can decide, with no name in it: a refusal is listed when the walk
 touched the place it was made, and one made elsewhere is not. At most 25 are listed in family and subject order; the
-rest are counted by family.
+rest are counted by family. Refused HTTP requests are read beside them, under family `http` and a cap of their own
+(§5, *Refused HTTP requests*).
 
 > **Invariant.** A decision is a reason a link was not made or is qualified. The answer never presents one as a
 > breakage, and the change-impact skill and the server instructions say so.
@@ -2137,7 +2138,8 @@ it did. The identity claims name those places under source-agnostic keys (`ident
 `binding_in`, `source_in`), so the chain never asks which kind of deployment stated them; a claim with no
 `binding_in` (a compose service, a specification's host) states its deployment where it states its identity.
 `source_in` may be a whole path with no line (the one application root a chart's repository serves), which names a
-file but grounds no span. A CI-established deployment's places lie in several repositories -- the chart and release
+file but grounds no span. A refusal whose source the chain establishes may also say which handlers its link would
+reach (`would_reach`, §5 *Refused HTTP requests*); it decides nothing. A CI-established deployment's places lie in several repositories -- the chart and release
 in one, the build and the code in another, a declaration in `@declarations` -- and each claim names a place's
 repository (`<key>_repo`) and basis (`<key>_basis`) beside it; a claim without them files every place in its own
 repository, as before.
@@ -2440,6 +2442,47 @@ model (`member-of`) and the model's users. A step through a field use reads "use
 typed parameter" or "by construction"; the steps after it, an HTTP caller's included, say nothing about the field: a
 caller is reached because it calls a handler that uses it, not because it reads it. A field answers to its qualified
 name or its key, never to its bare name, and is no member of a class, file or directory seed.
+
+### Refused HTTP requests: listed where the walk went, never followed
+
+> **Invariant.** A refused request is never a candidate, a step or an edge, and never changes which requests link. An
+> answer is the same walk with or without its HTTP decisions.
+
+> **Invariant.** A refusal names a handler it would reach only when its own evidence establishes where the source is.
+> A deployment repository's identity is no proof of a source, and a route's method and shape alone name nothing.
+
+**Would reach** (`repoatlas/graph/http_crossings.py`, DF3c). The join records, in a refusal's evidence, the handlers
+its link would reach -- `would_reach`, `[{handler, route, repository}]`, the handler by its natural key, at most 5 in
+repository and handler order, the rest counted in `would_reach_omitted` -- in exactly two cases:
+
+| Refusal | When | The handlers |
+|---|---|---|
+| `http-deployment-binding-unresolved` | The request fits only a chart's pattern, and the chart is tied to its repository's one application (the chain proves `source_binding`) | The routes that code serves with the request's method and a path shape that matches the route behind the pattern's origin, as an exposure of a bound release would carry it. The global pass hands them to the join on the derived pattern (`served`, never stored). |
+| `http-provider-ambiguous` | One service whose source the chain proves (`source_binding` proven or declared) answers with several routes (`route` ambiguous) | Those routes' handlers |
+
+Every other refusal records none: several identities, a source no deployment ties to code
+(`http-deployment-source-unresolved`), an identity no deployment gives, no route of the request's shape, an unknown
+base, a claim not read. A route only a document serves (an OpenAPI file) names no handler. A linked request records
+none. Which requests link, every chain and every edge are decided exactly as before; `would_reach` is evidence on the
+stored row.
+
+**Impact** (`POLICY` `impact/7`; `http_decisions_near` in `repoatlas/capabilities/impact.py`, read in the same snapshot
+after the walk, `SqliteKnowledgeStore.http_decisions_near`). An answer lists, under family `http` and a typed
+`relation`:
+
+- `at`: a refused request whose caller is the seed or a returned candidate, or whose file's own entity is (evidence
+  `reached: caller` or `file`). A refusal made beside a reached declaration in the same file is not listed.
+- `toward`: a refused request whose `would_reach` names a reached handler declaration -- never the shared route
+  node. It is hypothetical: the request is not linked, and its evidence says `hypothetical: true`, the handlers and
+  the source's place and status, and reads "hypothetical: not linked; if it were, the request would reach this
+  handler".
+
+A refusal both made where the walk went and toward a reached handler is listed once, as `at`. Its subject is
+`<caller repository>:<METHOD> <url>`, its place the request's line, its evidence the `decision_ref`, the first hop
+not proven and its reason. At most 10 are listed, `at` before `toward`, each by place and `decision_ref`; the rest
+are counted in `decisions_omitted["http"]`, and never displace a link decision. Under repository scope only requests
+made inside the scope are listed, and no source place outside it is named. Every other family's decision carries no
+`relation`, and serializes as before.
 
 ## 6. The indexing pipeline
 
@@ -4680,4 +4723,5 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | An environment seed may name the repository it starts from (`seed_repository`) | Scope the call to that repository; or seed the reading declaration | A repository scope is a boundary, so it can never reach the deployment or the downstream caller; a declaration seed starts below the variable. Restricting only the first step keeps the walk global and the shared node closed behind it (§5) |
 | A model field is reached only through a use that already names its model, as one more `USES` edge resolved with it | Match `p.f` to every field named `f`; or record a field use as a claim of its own, or as `REFERENCES` | A name is not evidence: `measurement` is a field of many models. Riding on the model's use keeps the field the resolved declaration's own, keeps search expansion out (`USES` is not followed by it) and keeps incremental equal to fresh, since a model's file being written re-resolves every use landing in it (§5) |
 | A Python construction binds a field only through a proven dataclass or pydantic initializer | Take every keyword of `T(...)` as `T`'s field of that name | An initializer decides what a keyword means: attrs renames private attributes, aliases and alias generators rename keywords, an ORM or a hand-written `__init__` does anything. Only a proven mapping says the keyword is the field (§5) |
+| A refused HTTP request is listed in an impact answer where the walk went (`at`), or as a hypothetical toward a reached handler its source-established link would reach (`toward`), never followed | Follow a refusal to the handler its route shape matches; or list only link decisions | A route shape names every service with the same path, and a deployment repository's identity is no proof of its source: following one would invent the crossing the join refused. Listing it, labelled hypothetical and only where the refusal's own evidence ties the source, tells a reader what to check without changing the walk (§5) |
 | `install.sh` reruns safely and replaces nothing it did not create | An installer that overwrites existing links and registrations | Running it again is how an installation is updated, and the operator's own `repoatlas` on PATH, their skills and their MCP registration are theirs (docs/installation.md) |
