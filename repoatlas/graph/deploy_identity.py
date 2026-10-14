@@ -68,6 +68,7 @@ from repoatlas.parsers.http_facts import (
     HTTP_UNRESOLVED_PATTERN,
     HTTP_UNSOURCED_IDENTITY,
     PENDING_FACT,
+    SERVED_ROUTES,
 )
 from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
 
@@ -552,6 +553,19 @@ class Applications:
             if not route.roots:
                 self._untraced.add(route.repo_id)
 
+    def served(self, repo_id: int) -> str:
+        """The routes the repository's code serves, ``[method, path, handler id]`` sorted: what
+        an exposure of a bound release of a tied chart would carry. Handed to the join on an
+        unbound pattern for the handlers its refusal would reach (DF3c); never stored."""
+        found = sorted(
+            {
+                (method, path, route.src_id)
+                for route in self.routes[repo_id]
+                for method, _, path in [route.body.partition(" ")]
+            }
+        )
+        return json.dumps([list(row) for row in found], separators=(",", ":"))
+
     def source_in(self, repo_id: int) -> str:
         """The module constructing the repository's one application: what ties a chart to
         code. A whole file, since the tie is that every route comes from it."""
@@ -791,7 +805,14 @@ class _Charts:
                         "binding_outcome": "; ".join(dict.fromkeys(state for _, state in bindings))
                         or RELEASE_UNBOUND,
                         "source_outcome": untied or TIED,
-                        **({} if untied else {"source_in": self._source_in(origin.repo_id)}),
+                        **(
+                            {}
+                            if untied
+                            else {
+                                "source_in": self._source_in(origin.repo_id),
+                                SERVED_ROUTES: self._applications.served(origin.repo_id),
+                            }
+                        ),
                         "scope": scope,
                     },
                 )
