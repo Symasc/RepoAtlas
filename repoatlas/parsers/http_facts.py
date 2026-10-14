@@ -81,6 +81,10 @@ HTTP_UNSOURCED_IDENTITY = "http-unsourced-identity"
 #: Derived by the global pass, never stored, and never linked: a request it fits is
 #: refused as ``http-deployment-binding-unresolved``, and a link it could rival is refused.
 HTTP_UNRESOLVED_PATTERN = "http-unresolved-pattern"
+#: On an :data:`HTTP_UNRESOLVED_PATTERN` whose chart is tied to its repository's code: the
+#: routes that code serves, ``[[method, path, handler id], ...]``, which an exposure of a bound
+#: release would carry. Derived by the global pass for the join (DF3c), never stored.
+SERVED_ROUTES = "served"
 #: A request whose origin and path shape the source states: a literal URL, a module
 #: constant, or an f-string on a literal or constant origin. The other side of the join.
 #: A request whose path is read but whose host is not carries ``base`` =

@@ -333,6 +333,14 @@ def test_a_release_that_disables_the_ingress_renders_no_identity(
         "binding_outcome": NOT_RENDERED,
         "source_outcome": "tied",
         "provider": "devices",
+        # DF3c: the source is tied, so the one route of the request's method and shape
+        "would_reach": [
+            {
+                "handler": "sym:devices:app.py:get_item:7",
+                "route": "GET /items/{item_id}",
+                "repository": "devices",
+            }
+        ],
     }
 
 

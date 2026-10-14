@@ -29,6 +29,14 @@ package link's record lets a ``USES`` edge.
 This says that the source on both sides names the same operation. It does not say that
 the request is sent at run time, or that it reaches this deployment of the handler.
 
+A refusal may say what its link **would reach** (``would_reach``, DF3c), and only when its own
+evidence already establishes where the source is: a binding refusal whose chart is tied to its
+repository's code (the chain proves the source binding), from the routes that code serves with
+the request's method and path shape, as an exposure of a bound release would carry them; or a
+request one proven service answers with several routes. Each is a handler's natural key, the
+route and the repository, at most :data:`MAX_WOULD_REACH`, the rest counted. It is evidence on
+the refusal, never an edge: which requests link, and every chain, is decided exactly as before.
+
 Everything here is pure: claims in, edges and decisions out. The global pass applies
 the edges with its other output, replaces them on every run, and never reads them back
 (ARCHITECTURE.md §9).
@@ -39,7 +47,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 
 from repoatlas.graph import http_chain as hops
@@ -53,6 +61,7 @@ from repoatlas.parsers.http_facts import (
     HTTP_UNRESOLVED_PATTERN,
     HTTP_UNSOURCED_IDENTITY,
     PENDING_FACT,
+    SERVED_ROUTES,
 )
 from repoatlas.storage.protocols import (
     EdgeRecord,
@@ -63,6 +72,11 @@ from repoatlas.storage.protocols import (
 
 #: The key of the evidence record in a ``CALLS_HTTP_HANDLER`` edge's resolution.
 HTTP_CROSSING = "http"
+#: A refusal's hypothetical handlers (DF3c): ``[{handler, route, repository}]``, and how many
+#: more there were past :data:`MAX_WOULD_REACH`.
+WOULD_REACH = "would_reach"
+WOULD_REACH_OMITTED = "would_reach_omitted"
+MAX_WOULD_REACH = 5
 
 #: Decisions, one per request claim. Stable: tests and diagnostics read them.
 LINKED = "linked"
@@ -177,8 +191,9 @@ class HttpCallDecision:
     variant: str
     decision: str
     #: The hops the decision rests on, flat, as M4 recorded them: every hop a link proves,
-    #: or for a refusal the hops proven before (and beside) the one that failed.
-    evidence: dict[str, str]
+    #: or for a refusal the hops proven before (and beside) the one that failed; on a refusal
+    #: whose source is established, the handlers its link would reach (DF3c).
+    evidence: dict[str, object]
     #: The same, as the ordered chain (:mod:`repoatlas.graph.http_chain`).
     chain: tuple[Hop, ...]
     #: The ``CALLS_HTTP_HANDLER`` edge a link emits, carrying this ref; ``None`` otherwise.
@@ -304,9 +319,17 @@ def _line(value: str | None) -> int | None:
 
 
 def plan_http_crossings(
-    claims: Iterable[UnresolvedRefRecord], files: Iterable[FileRow], *, producer: str
+    claims: Iterable[UnresolvedRefRecord],
+    files: Iterable[FileRow],
+    *,
+    producer: str,
+    handler_key: Callable[[int], str | None] | None = None,
 ) -> HttpCrossingPlan:
-    """Decide every request claim: joined to at most one handler, or refused at a hop."""
+    """Decide every request claim: joined to at most one handler, or refused at a hop.
+
+    ``handler_key`` names a handler declaration by its natural key, for a refusal's
+    ``would_reach``; without it no refusal records one.
+    """
     by_file = {row.file_id: row for row in files}
     exposures: dict[tuple[str, str], list[_Exposure]] = defaultdict(list)
     served: list[_Exposure] = []
@@ -341,7 +364,7 @@ def plan_http_crossings(
     calls: list[HttpCallDecision] = []
     for (claim, meta, request), (ref, variant) in zip(asked, refs, strict=True):
         consumer = by_file.get(claim.file_id)
-        found = _called(claim, meta, by_file)
+        found: dict[str, object] = dict(_called(claim, meta, by_file))
         start = [hops.caller_hop(claim, consumer)]
         origin = hops.origin_places(claim, meta, consumer)
         edge: EdgeRecord | None = None
@@ -379,6 +402,9 @@ def plan_http_crossings(
             candidates = list(distinct.values())
             found.update(_identities([e.claim for e in candidates], by_file))
             chain = [*start, *_ambiguous(candidates, [], by_file)]
+            if handler_key is not None and _one_proven_service(chain):
+                # Several routes of one service whose source the chain proves (DF3c).
+                _reach(found, _exposed_handlers(candidates, by_file, handler_key))
         elif distinct:
             exposure = next(iter(distinct.values()))
             # A pattern of the chart whose rendering made this exposure is that same
@@ -459,6 +485,9 @@ def plan_http_crossings(
                 ),
                 *hops.unreached(hops.ROUTE, hops.HANDLER),
             ]
+            if handler_key is not None and tied and evidence.source:
+                # The chart is tied to its repository's code: the routes that code serves (DF3c).
+                _reach(found, _served_handlers(request, claims_fitting, by_file, handler_key))
         elif covering := [e for e in served if _covers(e, request)]:
             decision = ROUTE_UNMATCHED
             found.update(_identities([e.claim for e in covering], by_file))
@@ -672,6 +701,86 @@ def _edge(
         parser=producer,
         resolution=json.dumps({HTTP_CROSSING: record}, sort_keys=True),
     )
+
+
+def _reach(found: dict[str, object], handlers: list[dict[str, str]]) -> None:
+    """A refusal's would_reach: at most :data:`MAX_WOULD_REACH` by repository and handler, the
+    rest counted; nothing when there is none."""
+    if not handlers:
+        return
+    ordered = sorted(handlers, key=lambda h: (h["repository"], h["handler"]))
+    found[WOULD_REACH] = ordered[:MAX_WOULD_REACH]
+    if len(ordered) > MAX_WOULD_REACH:
+        found[WOULD_REACH_OMITTED] = len(ordered) - MAX_WOULD_REACH
+
+
+def _served_handlers(
+    request: _Request,
+    patterns: list[UnresolvedRefRecord],
+    by_file: dict[int, FileRow],
+    handler_key: Callable[[int], str | None],
+) -> list[dict[str, str]]:
+    """The handlers a tied pattern's code serves the request with: its method, and a path
+    shape that matches the route as an exposure of a bound release would carry it (the
+    Ingress origin, then the route). A route no declaration serves names no handler."""
+    found: dict[str, dict[str, str]] = {}
+    for claim in patterns:
+        provider = by_file.get(claim.file_id)
+        try:
+            served = json.loads(_meta(claim).get(SERVED_ROUTES, "[]"))
+        except json.JSONDecodeError:
+            continue
+        if provider is None or not isinstance(served, list):
+            continue
+        for row in served:
+            if not (isinstance(row, list) and len(row) == 3 and isinstance(row[2], int)):
+                continue
+            method, path, src_id = str(row[0]), str(row[1]), row[2]
+            if method != request.method:
+                continue
+            body = http.endpoint_body(method, f"{request.origin}{path}")
+            target = http.client_target(body.partition(" ")[2])
+            if (
+                http.canonical_endpoint(body) is None
+                or target is None
+                or not http.endpoint_matches(request.segments, target.path)
+            ):
+                continue
+            key = handler_key(src_id)
+            if key is not None:
+                route = f"{method} {path}"
+                found[key] = {"handler": key, "route": route, "repository": provider.repo_slug}
+    return list(found.values())
+
+
+def _one_proven_service(chain: list[Hop]) -> bool:
+    """Whether the request's ambiguity is between routes of one service whose identity and
+    source the chain proves (several routes), not between several identities."""
+    kinds = {hop.kind: hop for hop in chain}
+    source = kinds.get(hops.SOURCE_BINDING)
+    route = kinds.get(hops.ROUTE)
+    return (
+        source is not None
+        and source.status in {hops.PROVEN, hops.DECLARED}
+        and route is not None
+        and route.status == hops.AMBIGUOUS
+    )
+
+
+def _exposed_handlers(
+    candidates: list[_Exposure],
+    by_file: dict[int, FileRow],
+    handler_key: Callable[[int], str | None],
+) -> list[dict[str, str]]:
+    """The handlers of the exposures one proven service answers a request with."""
+    found: dict[str, dict[str, str]] = {}
+    for exposure in candidates:
+        provider = by_file.get(exposure.claim.file_id)
+        key = handler_key(exposure.claim.src_id)
+        if provider is not None and key is not None:
+            route = f"{exposure.method} {exposure.meta.get('route', exposure.path)}"
+            found[key] = {"handler": key, "route": route, "repository": provider.repo_slug}
+    return list(found.values())
 
 
 def _called(
