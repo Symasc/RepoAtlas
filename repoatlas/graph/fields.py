@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from repoatlas.models.parsing import FIELD, EntityType
-from repoatlas.parsers.ts_uses import FIELD_MEMBERS
+from repoatlas.parsers.ts_uses import FIELD_MEMBERS, FIELDS_OMITTED
 
 #: The evidence key of a field use's record: which field of which model, and how it is reached.
 FIELD_USE = "field_use"
@@ -134,8 +134,18 @@ def resolve_members(
     return found
 
 
-def field_record(use: FieldUse) -> dict[str, str]:
-    return {"field": use.field.name, "model": use.model.qualified_name, "access": use.access}
+def field_record(use: FieldUse, meta: Mapping[str, Any]) -> dict[str, object]:
+    """``field_use``: which field of which model, how it is reached, and -- when the use named
+    more members than a claim records -- how many it did not record (``members_omitted``)."""
+    record: dict[str, object] = {
+        "field": use.field.name,
+        "model": use.model.qualified_name,
+        "access": use.access,
+    }
+    omitted = str(meta.get(FIELDS_OMITTED) or "")
+    if omitted.isdigit():
+        record["members_omitted"] = int(omitted)
+    return record
 
 
 def field_meta(meta: Mapping[str, str], use: FieldUse) -> dict[str, str]:

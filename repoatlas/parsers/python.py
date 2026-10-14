@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 from repoatlas.models.parsing import (
@@ -34,6 +35,7 @@ from repoatlas.parsers.py_graphql import AriadneFacts, schema_download_reference
 from repoatlas.parsers.py_persistence import PyPersistence
 from repoatlas.parsers.py_uses import PythonUseAnalysis, python_use_references
 from repoatlas.parsers.setuptools_project import setup_py_facts, setuptools_reference
+from repoatlas.parsers.ts_uses import FIELDS_OMITTED, FIELDS_TRUNCATED
 
 _SUFFIXES = frozenset({".py", ".pyi"})
 
@@ -532,7 +534,15 @@ class PythonParser:
                 *uses,
                 *(() if setuptools is None else (setuptools_reference(setuptools, content),)),
             ),
+            diagnostics=_truncated_members(uses),
         )
+
+
+def _truncated_members(uses: Sequence[ParsedReference]) -> tuple[ParseDiagnostic, ...]:
+    """A warning when a use named more model-field members than its claim records (DF3b)."""
+    if any(FIELDS_OMITTED in use.meta for use in uses):
+        return (ParseDiagnostic(severity=Severity.WARNING, message=FIELDS_TRUNCATED),)
+    return ()
 
 
 def _owned_reads(visitor: _Visitor, owners: list[tuple[str, ast.stmt]]) -> list[ParsedReference]:

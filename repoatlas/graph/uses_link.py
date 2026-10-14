@@ -641,7 +641,7 @@ def plan_uses(
                     line_end=use.line,
                     parser=producer,
                     resolution=use_resolution(
-                        field_meta(meta, use), **fields, **{FIELD_USE: field_record(use)}
+                        field_meta(meta, use), **fields, **{FIELD_USE: field_record(use, meta)}
                     ),
                 )
             )

@@ -356,7 +356,7 @@ class ReferenceLinker:
                                         parser=parsed.parser,
                                         resolution=use_resolution(
                                             field_meta(reference.meta, use),
-                                            **{FIELD_USE: field_record(use)},
+                                            **{FIELD_USE: field_record(use, reference.meta)},
                                         ),
                                     )
                                 )
