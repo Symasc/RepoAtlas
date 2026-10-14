@@ -100,6 +100,7 @@ from repoatlas.capabilities.impact import (
     assemble,
     decisions_near,
     http_crossing,
+    http_decisions_near,
     package_crossing,
     package_dependents,
     seed_nodes,
@@ -1079,13 +1080,25 @@ class CapabilityService:
                         reasons = dict(answer.omitted.by_reason)
                         reasons["budget"] = reasons.get("budget", 0) + more
                         answer.omitted = answer.omitted.model_copy(update={"by_reason": reasons})
+                    reached = [
+                        seed.model.entity or "",
+                        *(c.entity for c in (*answer.candidates, *answer.tests)),
+                    ]
                     decisions, decisions_omitted = decisions_near(
-                        self._workspace.knowledge,
-                        [
-                            seed.model.entity or "",
-                            *(c.entity for c in (*answer.candidates, *answer.tests)),
-                        ],
+                        self._workspace.knowledge, reached
                     )
+                    # The refused HTTP requests where it went, under a cap of their own (DF3c).
+                    refused, refused_omitted = http_decisions_near(
+                        self._workspace.knowledge,
+                        reached,
+                        slug_of=walk.slug_of,
+                        scope=frozenset(scope)
+                        if resolution.scope is CapabilityScope.REPOSITORY
+                        else None,
+                    )
+                    decisions = (*decisions, *refused)
+                    if refused_omitted:
+                        decisions_omitted = {**decisions_omitted, "http": refused_omitted}
             candidates = answer.candidates if answer is not None else ()
             tests = answer.tests if answer is not None else ()
             facts = current_facts_version(self._workspace)

@@ -42,6 +42,7 @@ from repoatlas.storage.protocols import (
     FileRow,
     HttpCallDecisionRow,
     HttpEdgeRow,
+    HttpRefusalNear,
     LinkDecisionRow,
     NeighborCount,
     NeighborCursor,
@@ -1334,6 +1335,61 @@ class SqliteKnowledgeStore:
                     )
         return sorted(found.values(), key=lambda d: (d[0], d[1], d[2]))
 
+    def http_decisions_near(self, entity_keys: Sequence[str]) -> list[HttpRefusalNear]:
+        """The refused HTTP requests where an impact walk went (DF3c), never a linked one.
+
+        ``at``: a refusal whose caller entity is one of these, or whose file's own entity is --
+        reached, never merely a file some reached declaration is in. ``toward``: a refusal whose
+        stored ``would_reach`` names one of these as a handler. A refusal may be both; the
+        caller decides which is listed. In decision-ref order.
+        """
+        keys = sorted({key for key in entity_keys if key})
+        if not keys:
+            return []
+        reached: dict[int, str] = {}
+        files: set[int] = set()
+        for start in range(0, len(keys), 500):
+            chunk = keys[start : start + 500]
+            marks = ",".join("?" * len(chunk))
+            for row in self._db.execute(
+                f"SELECT id, type, file_id FROM entities WHERE key IN ({marks})",  # noqa: S608
+                chunk,
+            ).fetchall():
+                reached[int(row[0])] = str(row[1])
+                if row[1] == EntityType.FILE.value and row[2] is not None:
+                    files.add(int(row[2]))
+        select = (
+            "SELECT d.decision_ref, d.decision, d.method, d.url, d.src_id, d.file_id, "
+            "d.line_start, d.evidence_json, d.chain_json, r.slug, f.rel_path "
+            "FROM http_call_decisions d JOIN files f ON f.id = d.file_id "
+            "JOIN repositories r ON r.id = f.repo_id WHERE d.decision <> 'linked' AND "
+        )
+        found: list[HttpRefusalNear] = []
+        seen: set[str] = set()
+        for column, ids in (("src_id", sorted(reached)), ("file_id", sorted(files))):
+            for chunk in _chunks(ids):
+                marks = ",".join("?" * len(chunk))
+                for row in self._db.execute(f"{select}d.{column} IN ({marks})", chunk).fetchall():
+                    if row["decision_ref"] in seen:
+                        continue
+                    seen.add(row["decision_ref"])
+                    caller = (
+                        row["src_id"] in reached and reached[row["src_id"]] != EntityType.FILE.value
+                    )
+                    found.append(_near(row, "at", reached="caller" if caller else "file"))
+        wanted = set(keys)
+        for row in self._db.execute(
+            f"{select}json_extract(d.evidence_json, '$.would_reach') IS NOT NULL"
+        ).fetchall():
+            handlers = tuple(
+                h
+                for h in json.loads(row["evidence_json"] or "{}").get("would_reach") or []
+                if isinstance(h, dict) and h.get("handler") in wanted
+            )
+            if handlers:
+                found.append(_near(row, "toward", handlers=handlers))
+        return sorted(found, key=lambda n: (n.decision_ref, n.relation))
+
     def list_link_decisions(
         self, family: str | None = None, repo_id: int | None = None
     ) -> list[LinkDecisionRow]:
@@ -2460,3 +2516,25 @@ class SqliteDependencyStore:
 
     def count(self, repo_ids: Sequence[int] | None = None) -> int:
         return len(self.list_for_repos(repo_ids))
+
+
+def _near(
+    row: sqlite3.Row,
+    relation: str,
+    *,
+    reached: str = "",
+    handlers: tuple[dict[str, object], ...] = (),
+) -> HttpRefusalNear:
+    return HttpRefusalNear(
+        decision_ref=row["decision_ref"],
+        decision=row["decision"],
+        method=row["method"],
+        url=row["url"],
+        repository=row["slug"],
+        path=row["rel_path"],
+        line=row["line_start"],
+        relation=relation,
+        reached=reached,
+        handlers=handlers,
+        chain_json=row["chain_json"] or "[]",
+    )
