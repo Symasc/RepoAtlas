@@ -2462,8 +2462,8 @@ repository and handler order, the rest counted in `would_reach_omitted` -- in ex
 
 Every other refusal records none: several identities, a source no deployment ties to code
 (`http-deployment-source-unresolved`), an identity no deployment gives, no route of the request's shape, an unknown
-base, a claim not read. A route only a document serves (an OpenAPI file) names no handler. A linked request records
-none. Which requests link, every chain and every edge are decided exactly as before; `would_reach` is evidence on the
+base, a claim not read. A route no declaration serves names no handler: an OpenAPI document's, or one registered
+at module scope, which its file serves. A linked request records none. Which requests link, every chain and every edge are decided exactly as before; `would_reach` is evidence on the
 stored row.
 
 **Impact** (`POLICY` `impact/7`; `http_decisions_near` in `repoatlas/capabilities/impact.py`, read in the same snapshot
