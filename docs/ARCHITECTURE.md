@@ -2417,7 +2417,9 @@ its first line (`repoatlas/parsers/py_uses.py`, `ts_uses.py`): `parameter` for `
 `({f}: T)` and `const {f} = p`) through a parameter annotated with exactly one named type (`T`, `"T"`, `Optional[T]`,
 `T | None`, `Annotated[T, ...]`; `T | null`, `T | undefined`) that nothing in the function binds again; `construction`
 for `T(f=...)` and for an object literal whose contextual type is `T` (a variable annotated `T`, a value returned from
-a function declared to return `T` or `Promise<T>`). Only the first attribute counts: `p.a.b` reads `a`. Aliases,
+a function declared to return `T` or `Promise<T>`). Only the first attribute counts: `p.a.b` reads `a`. One use
+records at most 256 members (`MAX_FIELD_MEMBERS`), the first by line; past that it counts the rest
+(`fields_omitted`), the parser warns, and each field use it resolves records `members_omitted`. Aliases,
 unions of two types, generics, attribute-qualified annotations and locals typed by assignment carry nothing.
 
 **Resolution** (`repoatlas/graph/fields.py`; `USES_RESOLUTION_VERSION` 12). When the use resolves -- in `link_file`

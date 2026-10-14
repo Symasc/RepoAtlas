@@ -62,8 +62,22 @@ USES_EXPORTS = "uses_exports"
 #: what the declaration reads through a parameter typed by the used name, or sets in an
 #: object literal (Python: a construction) of that type. Resolved with the use.
 FIELD_MEMBERS = "fields"
-#: The most distinct fields one use carries: a guard, since each is a written member.
+#: The most distinct fields one use carries: a guard, since each is a written member. Past it the
+#: first ones by line are kept and the rest counted (:data:`FIELDS_OMITTED`); the parser warns.
 MAX_FIELD_MEMBERS = 256
+#: The ``meta`` key counting a use's members past :data:`MAX_FIELD_MEMBERS`, when there are any.
+FIELDS_OMITTED = "fields_omitted"
+#: The warning a parser records when a use's members were read only in part.
+FIELDS_TRUNCATED = f"model-field members read only in part (at most {MAX_FIELD_MEMBERS} per use)"
+
+
+def member_meta(listed: list[list[object]]) -> dict[str, str]:
+    """A use's members, ``[field, line, access]`` in line order, as its claim records them:
+    at most :data:`MAX_FIELD_MEMBERS`, and how many more there were, never silently fewer."""
+    meta = {FIELD_MEMBERS: json.dumps(listed[:MAX_FIELD_MEMBERS], separators=(",", ":"))}
+    if len(listed) > MAX_FIELD_MEMBERS:
+        meta[FIELDS_OMITTED] = str(len(listed) - MAX_FIELD_MEMBERS)
+    return meta
 
 #: Node kinds a use can be read from.
 USE_NODES = frozenset({"identifier", "type_identifier", "shorthand_property_identifier"})
@@ -829,10 +843,7 @@ def use_references(
             # The model's fields this declaration reads or sets through this use (DF3b):
             # resolved with the use, never copied into its own edge's record.
             listed = sorted(members[key].items(), key=lambda kv: (kv[1], kv[0]))
-            meta[FIELD_MEMBERS] = json.dumps(
-                [[name, line, access] for name, (line, access) in listed][:MAX_FIELD_MEMBERS],
-                separators=(",", ":"),
-            )
+            meta.update(member_meta([[name, line, access] for name, (line, access) in listed]))
         if binding.kind != "local":
             meta["module"] = binding.module or ""
             imported = site.member if binding.kind == "namespace" else binding.imported
