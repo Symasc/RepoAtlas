@@ -460,9 +460,20 @@ describe("decisions", () => {
       relation: "toward" as const,
       evidence: { would_reach: [{ handler: "sym:intake:intake_api/app.py:submit_observation:15", route: "POST /v1/x", repository: "intake" }] },
     };
-    expect(decisionReading(link)).toEqual({ note: "sql-dynamic", hypothetical: false, wouldReach: [] });
-    expect(decisionReading(at)).toEqual({ note: "Request made here, not linked", hypothetical: false, wouldReach: [] });
-    expect(decisionReading(toward)).toEqual({ note: "Hypothetical, not linked", hypothetical: true, wouldReach: ["submit_observation"] });
+    // a link decision's note is its code; a request's note is its relation, and its code stays beside it
+    expect(decisionReading(link)).toEqual({ note: "sql-dynamic", hypothetical: false, wouldReach: [], refused: "" });
+    expect(decisionReading(at)).toEqual({
+      note: "Request made here, not linked",
+      hypothetical: false,
+      wouldReach: [],
+      refused: "http-base-unknown",
+    });
+    expect(decisionReading(toward)).toEqual({
+      note: "Hypothetical, not linked",
+      hypothetical: true,
+      wouldReach: ["submit_observation"],
+      refused: "http-deployment-binding-unresolved",
+    });
     // two requests to one URL from one repository stay two rows
     expect(decisionKey(toward)).not.toEqual(decisionKey({ ...toward, at: "report/clients.py:41" }));
     expect(decisionKey(link)).toBe("persistence-api:src/q.ts::inState-api/src/q.ts:21-");
