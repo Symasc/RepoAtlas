@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from repoatlas.config.settings import SaltSettings
@@ -121,6 +121,7 @@ from repoatlas.storage.protocols import (
     EntityRecord,
     FileRow,
     LinkDecisionRow,
+    SymbolRow,
     UnresolvedRefRecord,
 )
 from repoatlas.storage.sqlite.stores import SqliteDependencyStore, SqliteKnowledgeStore
@@ -751,6 +752,7 @@ class ReferenceLinker:
                 ],
                 file_rows,
                 producer=GLOBAL_PARSER,
+                handler_key=_handler_keys(symbols, by_id),
             )
             edges.extend(crossings.edges)
             # Generated declarations, from the schema files their configuration loads
@@ -1433,3 +1435,20 @@ def _model(entity_id: int, symbol: ParsedSymbol) -> Model:
         line_start=symbol.line_start,
         line_end=symbol.line_end,
     )
+
+
+def _handler_keys(
+    symbols: Sequence[SymbolRow], by_id: Mapping[int, FileRow]
+) -> Callable[[int], str | None]:
+    """A declaration's natural key by its entity id: how a refusal names the handlers its link
+    would reach (DF3c). A file serving a route is no declaration, and names none."""
+    rows = {symbol.entity_id: symbol for symbol in symbols}
+
+    def key(entity_id: int) -> str | None:
+        symbol = rows.get(entity_id)
+        row = by_id.get(symbol.file_id) if symbol is not None else None
+        if symbol is None or row is None or not symbol.qualified_name:
+            return None
+        return symbol_key(row.repo_slug, row.rel_path, symbol.qualified_name, symbol.line_start)
+
+    return key
