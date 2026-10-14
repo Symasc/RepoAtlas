@@ -10,6 +10,8 @@ import {
   boundaryLabel,
   buildTrace,
   chainOf,
+  decisionKey,
+  decisionReading,
   decisionsOf,
   nameFromKey,
   reachOf,
@@ -445,6 +447,25 @@ describe("decisions", () => {
     } as unknown as ImpactResponse;
     expect(decisionsOf(impact)).toEqual({ shown: impact.decisions, more: 3 });
     expect(decisionsOf({} as ImpactResponse)).toEqual({ shown: [], more: 0 });
+  });
+
+  it("reads a refused request's relation, and never a toward as a connection", () => {
+    const link = { family: "persistence", subject: "api:src/q.ts::inState", decision: "sql-dynamic", at: "api/src/q.ts:21" };
+    const at = { family: "http", subject: "report:GET {BASE}/v1/x", decision: "http-base-unknown", at: "report/clients.py:33", relation: "at" as const };
+    const toward = {
+      family: "http",
+      subject: "report:POST https://intake.qa.example/v1/x",
+      decision: "http-deployment-binding-unresolved",
+      at: "report/clients.py:29",
+      relation: "toward" as const,
+      evidence: { would_reach: [{ handler: "sym:intake:intake_api/app.py:submit_observation:15", route: "POST /v1/x", repository: "intake" }] },
+    };
+    expect(decisionReading(link)).toEqual({ note: "sql-dynamic", hypothetical: false, wouldReach: [] });
+    expect(decisionReading(at)).toEqual({ note: "Request made here, not linked", hypothetical: false, wouldReach: [] });
+    expect(decisionReading(toward)).toEqual({ note: "Hypothetical, not linked", hypothetical: true, wouldReach: ["submit_observation"] });
+    // two requests to one URL from one repository stay two rows
+    expect(decisionKey(toward)).not.toEqual(decisionKey({ ...toward, at: "report/clients.py:41" }));
+    expect(decisionKey(link)).toBe("persistence-api:src/q.ts::inState-api/src/q.ts:21-");
   });
 });
 
