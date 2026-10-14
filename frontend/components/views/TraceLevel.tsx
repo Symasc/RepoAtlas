@@ -23,6 +23,8 @@ import {
   boundaryLabel,
   buildTrace,
   chainOf,
+  decisionKey,
+  decisionReading,
   decisionsOf,
   nameFromKey,
   reachOf,
@@ -709,15 +711,21 @@ function TraceInspector({
                     Links not made where it went <span className={inspectorClasses.sectionCount}>{decisions.shown.length + decisions.more}</span>
                   </h3>
                   <ul className={inspectorClasses.rows}>
-                    {decisions.shown.map((d) => (
-                      <li key={`${d.family}-${d.subject}`} className={classes.summaryRow}>
-                        <span className={inspectorClasses.rowText}>
-                          <span className={inspectorClasses.rowLabel}>{d.subject.slice(d.subject.indexOf(":") + 1)}</span>
-                          <span className={inspectorClasses.rowDetail}>{d.at}</span>
-                        </span>
-                        <span className={classes.summaryNote}>{d.decision}</span>
-                      </li>
-                    ))}
+                    {decisions.shown.map((d) => {
+                      const reading = decisionReading(d);
+                      return (
+                        <li key={decisionKey(d)} className={classes.summaryRow} data-relation={d.relation ?? undefined}>
+                          <span className={inspectorClasses.rowText}>
+                            <span className={inspectorClasses.rowLabel}>{d.subject.slice(d.subject.indexOf(":") + 1)}</span>
+                            <span className={inspectorClasses.rowDetail}>
+                              {d.at}
+                              {reading.wouldReach.length > 0 && ` · would reach ${reading.wouldReach.join(", ")} if it were linked`}
+                            </span>
+                          </span>
+                          <span className={classes.summaryNote}>{reading.note}</span>
+                        </li>
+                      );
+                    })}
                   </ul>
                   {decisions.more > 0 && <Quiet>{plural(decisions.more, "more decision")} not listed.</Quiet>}
                   <Quiet>A decision says why a link was not made or is qualified. It is not a breakage.</Quiet>
