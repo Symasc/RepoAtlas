@@ -24,6 +24,7 @@ from repoatlas.models.impact import ImpactRequest, ImpactResponse, Presentation
 from repoatlas.models.search import SearchRequest
 from repoatlas.models.topology import TopologyNamesRequest
 from repoatlas.parsers.python import PythonParser
+from repoatlas.parsers.ts_uses import FIELDS_OMITTED, FIELDS_TRUNCATED, MAX_FIELD_MEMBERS
 from repoatlas.parsers.typescript import TypeScriptParser
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace
@@ -742,3 +743,59 @@ def test_a_field_named_like_a_type_leaves_the_type_s_comparison_alone(
            WHERE e.type = 'REFERENCES' AND e.resolution LIKE '%typed_comparison%'"""
     ).fetchall()
     assert [tuple(r) for r in rows] == [("lost", "Stage.LOST")]
+
+
+# -- the member cap: at it, one past it, far past it -----------------------------------------
+
+AT_CAP = MAX_FIELD_MEMBERS
+
+
+def python_reader(count: int) -> str:
+    reads = "\n".join(f"    p.f{i:03d}" for i in range(count))
+    return f"from m import M\n\n\ndef read(p: M):\n{reads}\n"
+
+
+def ts_reader(count: int) -> str:
+    keys = "\n".join(f"  f{i:03d}," for i in range(count))
+    return (
+        f'import {{ M }} from "./m";\nexport function read({{\n{keys}\n}}: M) {{\n  return 1;\n}}\n'
+    )
+
+
+@pytest.mark.parametrize("count", [AT_CAP - 1, AT_CAP, AT_CAP + 1, 2 * AT_CAP])
+@pytest.mark.parametrize("language", ["python", "typescript"])
+def test_a_use_records_at_most_the_cap_in_line_order_and_counts_the_rest(
+    language: str, count: int
+) -> None:
+    """Never silently fewer: past the cap the first members by line are kept, the rest counted on
+    the claim (``fields_omitted``) and the parser warns, as other parsers' caps do."""
+    if language == "python":
+        parsed = PythonParser().parse(Path("use.py"), python_reader(count))
+    else:
+        parsed = TypeScriptParser().parse(Path("use.ts"), ts_reader(count))
+    [use] = [r for r in parsed.references if r.meta.get("fields")]
+    kept = min(count, AT_CAP)
+    assert [m[0] for m in json.loads(use.meta["fields"])] == [f"f{i:03d}" for i in range(kept)]
+    omitted = count - kept
+    assert use.meta.get(FIELDS_OMITTED) == (str(omitted) if omitted else None)
+    assert [d.message for d in parsed.diagnostics if d.message == FIELDS_TRUNCATED] == (
+        [FIELDS_TRUNCATED] if omitted else []
+    )
+
+
+def test_a_capped_use_resolves_at_most_the_cap_and_says_how_many_it_left_out(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    model = "class M:\n" + "".join(f"    f{i:03d}: int\n" for i in range(AT_CAP + 1))
+    reads = "\n".join(f"    p.f{i:03d}" for i in range(AT_CAP + 1))
+    at = "\n".join(f"    p.f{i:03d}" for i in range(AT_CAP))
+    user = f"from pkg.models import M\n\n\ndef over(p: M):\n{reads}\n\n\ndef at(p: M):\n{at}\n"
+    files = {"pyproject.toml": '[project]\nname = "pkg"\nversion = "1.0"\n', "pkg/__init__.py": ""}
+    build(workspace, tmp_path, {"pkg": {**files, "pkg/models.py": model, "pkg/user.py": user}})
+    edges = [e for e in use_edges(workspace) if "field_use" in e]
+    over = [e for e in edges if e["source"] == "pkg/user.py#over"]
+    exact = [e for e in edges if e["source"] == "pkg/user.py#at"]
+    assert len(over) == len(exact) == AT_CAP
+    assert {e["target"] for e in over} == {f"pkg/models.py#M.f{i:03d}" for i in range(AT_CAP)}
+    assert {e["field_use"].get("members_omitted") for e in over} == {1}
+    assert {e["field_use"].get("members_omitted") for e in exact} == {None}

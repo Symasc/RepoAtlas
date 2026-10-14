@@ -45,7 +45,14 @@ from repoatlas.parsers.treesitter import (
 )
 from repoatlas.parsers.ts_graphql import TsGraphQL
 from repoatlas.parsers.ts_persistence import TsPersistence
-from repoatlas.parsers.ts_uses import USE_NODES, UseAnalysis, UseSite, use_references
+from repoatlas.parsers.ts_uses import (
+    FIELDS_OMITTED,
+    FIELDS_TRUNCATED,
+    USE_NODES,
+    UseAnalysis,
+    UseSite,
+    use_references,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from tree_sitter import Node
@@ -943,6 +950,13 @@ class TypeScriptParser:
             if has_error(tree)
             else ()
         )
+        used = use_references(walker.uses, walker.symbols, uses.exports) if uses is not None else []
+        if any(FIELDS_OMITTED in use.meta for use in used):
+            # A use named more model-field members than its claim records (DF3b).
+            diagnostics = (
+                *diagnostics,
+                ParseDiagnostic(severity=Severity.WARNING, message=FIELDS_TRUNCATED),
+            )
 
         return ParsedFile(
             language=language,
@@ -959,11 +973,7 @@ class TypeScriptParser:
                 *graphql.references(),
                 *persistence.references(),
                 *wrappers.declarations(),
-                *(
-                    use_references(walker.uses, walker.symbols, uses.exports)
-                    if uses is not None
-                    else ()
-                ),
+                *used,
             ),
             diagnostics=diagnostics,
         )
