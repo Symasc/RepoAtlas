@@ -74,7 +74,7 @@ from repoatlas.models.parsing import (
     ParsedReference,
     ParsedSymbol,
 )
-from repoatlas.parsers.ts_uses import FIELD_MEMBERS, USES_EXPORTS
+from repoatlas.parsers.ts_uses import USES_EXPORTS, member_meta
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 _COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
@@ -1022,8 +1022,6 @@ _DATACLASSES = frozenset({"dataclasses", "pydantic.dataclasses"})
 #: A field's keyword is another name when its value or annotation calls with one of these.
 _ALIASES = frozenset({"alias", "validation_alias"})
 _VALIDATORS = frozenset({"model_validator", "root_validator"})
-#: The most distinct fields one use carries: a guard, since each is a written member.
-MAX_FIELD_MEMBERS = 256
 
 
 def _class_var(annotation: ast.expr) -> bool:
@@ -1207,7 +1205,8 @@ def _field_members(
 def field_lists(
     members: Sequence[FieldMember], ambiguous: set[str]
 ) -> dict[tuple[str | None, str, str], list[list[object]]]:
-    """Each use's members, ``[field, line, access]`` once per field at its first line.
+    """Each use's members, ``[field, line, access]`` once per field at its first line, in line
+    order (whole: :func:`~repoatlas.parsers.ts_uses.member_meta` caps what a claim records).
 
     Keyed as uses are merged -- (owner, name, use), a declaration whose qualified name several
     definitions carry being the file -- so each list rides on the one reference it belongs to.
@@ -1223,7 +1222,7 @@ def field_lists(
         key: [
             [name, line, access]
             for name, (line, access) in sorted(found.items(), key=lambda kv: (kv[1], kv[0]))
-        ][:MAX_FIELD_MEMBERS]
+        ]
         for key, found in first.items()
     }
 
@@ -1416,7 +1415,7 @@ def python_use_references(
         if members:
             # The model's fields this declaration reads or sets through this use (DF3b):
             # resolved with the use, never copied into its own edge's record.
-            meta[FIELD_MEMBERS] = json.dumps(members, separators=(",", ":"))
+            meta.update(member_meta(members))
         if binding.kind != "local":
             meta["module"] = binding.module or ""
             if binding.imported:
