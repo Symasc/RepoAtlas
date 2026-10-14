@@ -1556,6 +1556,10 @@ export interface ImpactDecision {
     [k: string]: unknown | undefined;
   };
   family: string;
+  /**
+   * Refused HTTP requests only. 'at': the request is made where the walk went. 'toward': hypothetical -- the request is NOT linked; if it were, it would reach a handler the walk reached. Neither is a dependency or a step of the answer.
+   */
+  relation?: ("at" | "toward") | null;
   subject: string;
 }
 /**

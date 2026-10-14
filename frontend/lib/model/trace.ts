@@ -336,3 +336,30 @@ export function decisionsOf(impact: ImpactResponse): DecisionsView {
   return { shown, more };
 }
 
+/** How a decision reads in the list: its own code, or for a refused HTTP request (DF3c) what it
+ *  is to the answer. ``toward`` is hypothetical: the request is not linked, and is never drawn. */
+export interface DecisionReading {
+  note: string;
+  hypothetical: boolean;
+  /** ``toward``: the handlers the answer reached that the request would reach if it were linked. */
+  wouldReach: string[];
+}
+
+export function decisionReading(decision: ImpactDecision): DecisionReading {
+  if (decision.relation === "toward") {
+    const reach = (decision.evidence?.would_reach ?? []) as { handler?: string }[];
+    return {
+      note: "Hypothetical, not linked",
+      hypothetical: true,
+      wouldReach: reach.map((h) => nameFromKey(String(h.handler ?? ""))).filter((name) => name.length > 0),
+    };
+  }
+  if (decision.relation === "at") return { note: "Request made here, not linked", hypothetical: false, wouldReach: [] };
+  return { note: decision.decision, hypothetical: false, wouldReach: [] };
+}
+
+/** One row per decision: a refused request is told apart by where it is made. */
+export function decisionKey(decision: ImpactDecision): string {
+  return `${decision.family}-${decision.subject}-${decision.at}-${decision.relation ?? ""}`;
+}
+
