@@ -151,6 +151,42 @@ def test_a_tied_binding_refusal_would_reach_its_method_and_shape_only(
     assert "would_reach" not in refusals["plain_item"]
 
 
+#: An Express application whose one route is registered at module scope: its file serves it.
+EXPRESS = d("""
+    import express from "express";
+
+    const app = express();
+
+    app.get("/items/:itemId", (req, res) => {
+      res.json({});
+    });
+
+    app.listen(8080);
+""")
+
+
+def test_a_route_its_file_serves_names_no_handler(workspace: Workspace, tmp_path: Path) -> None:
+    """A file is no declaration: a tied refusal of the route's shape names no handler, never a
+    key that is no entity's."""
+    devices = {
+        "package.json": '{"name": "devices", "dependencies": {"express": "4.0.0"}}',
+        "src/server.ts": EXPRESS,
+        **chart(enabled=None),
+    }
+    built = build(workspace, tmp_path, {"devices": devices, "caller": CALLER})
+    [(server,)] = built.database.execute(
+        """SELECT s.type FROM edges e JOIN entities s ON s.id = e.src_id
+           WHERE e.type = 'SERVES_HTTP_ROUTE'"""
+    ).fetchall()
+    assert server == "file"
+    prd = stored(built)["prd_item"]
+    assert (prd["decision"], prd["source_outcome"]) == (
+        "http-deployment-binding-unresolved",
+        "tied",
+    )
+    assert "would_reach" not in prd
+
+
 def test_a_refusal_whose_source_is_not_tied_reaches_nothing(
     workspace: Workspace, tmp_path: Path
 ) -> None:
