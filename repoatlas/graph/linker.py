@@ -1441,8 +1441,9 @@ def _handler_keys(
     symbols: Sequence[SymbolRow], by_id: Mapping[int, FileRow]
 ) -> Callable[[int], str | None]:
     """A declaration's natural key by its entity id: how a refusal names the handlers its link
-    would reach (DF3c). A file serving a route is no declaration, and names none."""
-    rows = {symbol.entity_id: symbol for symbol in symbols}
+    would reach (DF3c). A file serving a route is no declaration, and names none: a route
+    registered at module scope is served by its file, whose key is no symbol's."""
+    rows = {symbol.entity_id: symbol for symbol in symbols if symbol.type is not EntityType.FILE}
 
     def key(entity_id: int) -> str | None:
         symbol = rows.get(entity_id)
