@@ -719,6 +719,7 @@ function TraceInspector({
                             <span className={inspectorClasses.rowLabel}>{d.subject.slice(d.subject.indexOf(":") + 1)}</span>
                             <span className={inspectorClasses.rowDetail}>
                               {d.at}
+                              {reading.refused && ` · ${reading.refused}`}
                               {reading.wouldReach.length > 0 && ` · would reach ${reading.wouldReach.join(", ")} if it were linked`}
                             </span>
                           </span>

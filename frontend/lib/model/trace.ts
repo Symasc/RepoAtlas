@@ -343,6 +343,8 @@ export interface DecisionReading {
   hypothetical: boolean;
   /** ``toward``: the handlers the answer reached that the request would reach if it were linked. */
   wouldReach: string[];
+  /** Why the link was refused, when the note is the relation instead: the decision code. */
+  refused: string;
 }
 
 export function decisionReading(decision: ImpactDecision): DecisionReading {
@@ -352,10 +354,13 @@ export function decisionReading(decision: ImpactDecision): DecisionReading {
       note: "Hypothetical, not linked",
       hypothetical: true,
       wouldReach: reach.map((h) => nameFromKey(String(h.handler ?? ""))).filter((name) => name.length > 0),
+      refused: decision.decision,
     };
   }
-  if (decision.relation === "at") return { note: "Request made here, not linked", hypothetical: false, wouldReach: [] };
-  return { note: decision.decision, hypothetical: false, wouldReach: [] };
+  if (decision.relation === "at") {
+    return { note: "Request made here, not linked", hypothetical: false, wouldReach: [], refused: decision.decision };
+  }
+  return { note: decision.decision, hypothetical: false, wouldReach: [], refused: "" };
 }
 
 /** One row per decision: a refused request is told apart by where it is made. */
