@@ -22,7 +22,7 @@ from repoatlas.models.impact import ImpactRequest, ImpactResponse
 from repoatlas.services.workspace import Workspace
 from tests.http_crossing_corpus import decided, links
 from tests.impact_corpus import build
-from tests.incremental_corpus import assert_equals_fresh, edit, sync_all
+from tests.incremental_corpus import assert_equals_fresh, edit, fresh_index, sync_all
 from tests.test_deploy_ingress import CALLER, chart
 
 GLOBAL = CapabilityContext(scope=CapabilityScope.GLOBAL)
@@ -80,6 +80,24 @@ def key(workspace: Workspace, repository: str, name: str) -> str:
         (repository, name),
     ).fetchall()
     return str(found)
+
+
+def decisions(workspace: Workspace) -> list[tuple[object, ...]]:
+    """Every stored HTTP call decision, id-free: its ref, caller, decision and evidence (where
+    would_reach is), and its chain without row ids."""
+
+    def bare(value: object) -> object:
+        if isinstance(value, dict):
+            return {k: bare(v) for k, v in value.items() if k not in ("entity_id", "repo_id")}
+        if isinstance(value, list):
+            return [bare(v) for v in value]
+        return value
+
+    rows = workspace.database.execute(
+        """SELECT d.decision_ref, s.key, d.decision, d.evidence_json, d.chain_json
+           FROM http_call_decisions d JOIN entities s ON s.id = d.src_id ORDER BY d.decision_ref"""
+    ).fetchall()
+    return [(*row[:4], json.dumps(bare(json.loads(row[4])), sort_keys=True)) for row in rows]
 
 
 def stored(workspace: Workspace) -> dict[str, dict[str, Any]]:
@@ -373,6 +391,9 @@ def test_every_change_to_a_route_a_binding_a_source_or_a_caller_equals_a_fresh_i
     def step(tag: str) -> None:
         sync_all(built, root)
         assert_equals_fresh(built, settings, root, tmp_path, tag)
+        # the facts snapshot holds no HTTP call decision: compare them, would_reach included
+        with fresh_index(settings, root, tmp_path, f"{tag}-http") as fresh:
+            assert decisions(built) == decisions(fresh)
 
     assert reach() == [key(built, "devices", "get_item")]
     # a route of the same shape added
