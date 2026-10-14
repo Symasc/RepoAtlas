@@ -23,7 +23,7 @@ Stop when every candidate you report has been read or is labelled unread. After 
 - `basis`: `exact` joins declarations, keys or files by facts about exactly them; `containment` passes through a member of what changes; `file` rests on a file-level import.
 - `step` is one indexed fact (`edge`, `at`, `lines`) or one `derived` from keys and spans; `from` is its predecessor (`0` is the seed) and `chain` the whole path. `role` is `dependent`, `sets` or `member`.
 - `step.crossing` is package evidence for a step into another repository; `step.http` joins a request in one repository to a handler in another (`called_at`, `served_at`, `identity_at`). Report both sides.
-- Schema and persistence steps name their evidence (`generation`, `composition`, `migration`, `client`, `query`, `mapping`, `comparison`). `decisions` lists links refused or qualified on the way: checks, not breakages.
+- Schema and persistence steps name their evidence (`generation`, `composition`, `migration`, `client`, `query`, `mapping`, `comparison`). `decisions` lists links refused or qualified on the way: checks, not breakages. An `http` decision with `relation: toward` is hypothetical: that request is not linked, and would reach the handler only if it were; never report its caller as affected.
 - `packages` are coarse, and `exact_consumers: "unresolved"` means RepoAtlas does not know which declarations use the change. `hubs` collapse dependents, which are no less affected. `unresolved` lists importers not narrowed to a declaration.
 - `summary.complete: false` or a non-zero `omitted` means the walk stopped early. Say so: a short list is not proof nothing else is affected.
 
