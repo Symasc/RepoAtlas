@@ -47,6 +47,7 @@ from repoatlas.graph.value_mappings import COMPARISON_EVIDENCE, MAPPING_EVIDENCE
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.impact import (
     MAX_DECISIONS,
+    MAX_HTTP_DECISIONS,
     MAX_SEED_CANDIDATES,
     ClientBinding,
     CodeGeneration,
@@ -79,6 +80,7 @@ from repoatlas.storage.protocols import (
     Confinement,
     DependencyStore,
     EntityIdentity,
+    HttpRefusalNear,
     KnowledgeStore,
     NeighborRow,
     NeighborRule,
@@ -89,8 +91,10 @@ from repoatlas.storage.protocols import (
 #: into another repository on a package link's evidence. 3: a schema definition reaches
 #: what a configured generator generated from it (``GENERATES`` on codegen evidence).
 #: 5: a deployment's effective setter crosses to the readers in the image its artifact join
-#: proved it runs (``CONFIGURES`` on deployment_env evidence, DF3a).
-POLICY = "impact/6"
+#: proved it runs (``CONFIGURES`` on deployment_env evidence, DF3a). 6: a model field reaches
+#: its exact users, then its model once (DF3b). 7: an answer lists the refused HTTP requests
+#: where the walk went, each ``at`` or (hypothetically) ``toward``; none is ever followed (DF3c).
+POLICY = "impact/7"
 
 #: Entity types a change is a *key* change for: they name a value, not code.
 _KEYS = frozenset(
@@ -1229,6 +1233,98 @@ def decisions_near(
     for family, *_ in rows[MAX_DECISIONS:]:
         omitted[family] = omitted.get(family, 0) + 1
     return listed, omitted
+
+
+#: How each relation of a refused HTTP request reads (DF3c). ``toward`` is a hypothetical.
+_HTTP_READINGS = {
+    "at": "a request made where the walk went; it is not linked",
+    "toward": "hypothetical: not linked; if it were, the request would reach this handler",
+}
+#: The hop statuses a chain establishes; the first other one is why a request is refused.
+_ESTABLISHED = frozenset({"proven", "declared"})
+
+
+def http_decisions_near(
+    knowledge: KnowledgeStore,
+    entity_keys: Sequence[str],
+    *,
+    slug_of: Callable[[int | None], str | None],
+    scope: frozenset[str] | None = None,
+) -> tuple[tuple[ImpactDecision, ...], int]:
+    """The refused HTTP requests where the walk went (DF3c), at most :data:`MAX_HTTP_DECISIONS`,
+    and how many more there were.
+
+    ``at``: the request is made by a declaration the answer reached, or in a file whose own
+    entity it reached. ``toward``: the request is not linked, and its stored ``would_reach``
+    names a handler the answer reached -- a hypothetical, never a step, a candidate or a
+    connection. A refusal both is listed once, as ``at``. ``at`` first, then ``toward``, each
+    by place and decision ref. Under a repository scope (``scope``) only requests made inside it
+    are listed, and a ``toward``'s source places outside it are left out: no hypothetical
+    target crosses the boundary.
+    """
+    rows = [
+        row
+        for row in knowledge.http_decisions_near([key for key in entity_keys if key])
+        if scope is None or row.repository in scope
+    ]
+    at = {row.decision_ref for row in rows if row.relation == "at"}
+    chosen = [row for row in rows if row.relation == "at" or row.decision_ref not in at]
+
+    def order(row: HttpRefusalNear) -> tuple[bool, str, int, str]:
+        return (
+            row.relation != "at",
+            f"{row.repository}/{row.path}",
+            row.line or 0,
+            row.decision_ref,
+        )
+
+    chosen.sort(key=order)
+    listed = tuple(_http_decision(row, slug_of, scope) for row in chosen[:MAX_HTTP_DECISIONS])
+    return listed, max(0, len(chosen) - MAX_HTTP_DECISIONS)
+
+
+def _http_decision(
+    row: HttpRefusalNear, slug_of: Callable[[int | None], str | None], scope: frozenset[str] | None
+) -> ImpactDecision:
+    chain = json.loads(row.chain_json or "[]")
+    refused = next(
+        (hop for hop in chain if isinstance(hop, dict) and hop.get("status") not in _ESTABLISHED),
+        {},
+    )
+    evidence: dict[str, object] = {
+        "decision_ref": row.decision_ref,
+        "relation": row.relation,
+        "reading": _HTTP_READINGS[row.relation],
+        "request": f"{row.method} {row.url}",
+        "hop": refused.get("kind"),
+        "reason": refused.get("reason") or refused.get("status"),
+    }
+    if row.relation == "at":
+        evidence["reached"] = row.reached
+    else:
+        evidence["hypothetical"] = True
+        evidence["would_reach"] = [dict(handler) for handler in row.handlers]
+        source = next(
+            (hop for hop in chain if isinstance(hop, dict) and hop.get("kind") == "source_binding"),
+            {},
+        )
+        places = []
+        for place in source.get("provenance") or []:
+            slug = slug_of(place.get("repo_id"))
+            if slug is None or (scope is not None and slug not in scope):
+                continue
+            line = place.get("line_start")
+            places.append(f"{slug}/{place.get('path')}" + (f":{line}" if line is not None else ""))
+        evidence["source"] = places
+        evidence["source_status"] = source.get("status")
+    return ImpactDecision(
+        family="http",
+        subject=f"{row.repository}:{row.method} {row.url}",
+        decision=row.decision,
+        at=f"{row.repository}/{row.path}" + (f":{row.line}" if row.line is not None else ""),
+        evidence=evidence,
+        relation="at" if row.relation == "at" else "toward",
+    )
 
 
 @dataclass(frozen=True, slots=True)

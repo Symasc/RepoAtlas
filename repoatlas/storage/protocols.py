@@ -365,6 +365,29 @@ class HttpCallDecisionRow(BaseModel):
     src_key: str | None = None
 
 
+class HttpRefusalNear(BaseModel):
+    """A refused HTTP request where an impact walk went (DF3c, ``http_decisions_near``)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    decision_ref: str
+    decision: str
+    method: str
+    url: str
+    #: The caller's repository slug, and the request's file and line.
+    repository: str
+    path: str
+    line: int | None
+    #: ``at`` or ``toward``.
+    relation: str
+    #: ``at``: whether the caller itself (``caller``) or only its file (``file``) was reached.
+    reached: str = ""
+    #: ``toward``: the would_reach entries naming a reached handler, as stored.
+    handlers: tuple[dict[str, object], ...] = ()
+    #: The decision's stored chain, as written.
+    chain_json: str = "[]"
+
+
 class LinkDecisionRow(BaseModel):
     """One stored decision of a link family (``link_decisions``): what the global pass
     decided about one subject, anchored where the claim it decided was made."""
@@ -705,6 +728,7 @@ class KnowledgeStore(Protocol):
     def link_decisions_near(
         self, entity_keys: Sequence[str]
     ) -> list[tuple[str, str, str, str, str, int | None]]: ...
+    def http_decisions_near(self, entity_keys: Sequence[str]) -> list[HttpRefusalNear]: ...
     def chunks_for_file(self, file_id: int, line_start: int, line_end: int) -> list[ChunkHit]: ...
     def gc_orphan_entities(self) -> int: ...
 
