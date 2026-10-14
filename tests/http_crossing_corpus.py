@@ -276,7 +276,7 @@ def links(workspace: Workspace) -> set[tuple[str, str, str, str]]:
     }
 
 
-def decided(workspace: Workspace, repository: str) -> dict[str, list[tuple[str, dict[str, str]]]]:
+def decided(workspace: Workspace, repository: str) -> dict[str, list[tuple[str, dict[str, Any]]]]:
     """Every request claim one repository makes, by caller: its decision and the evidence
     the join kept for it, one entry per claim (literal alternatives are separate claims)."""
     from repoatlas.graph.linker import ReferenceLinker
@@ -292,7 +292,7 @@ def decided(workspace: Workspace, repository: str) -> dict[str, list[tuple[str, 
         (repository, f'%"{HTTP_CLIENT_CALL}"%', f'%"{TS_INJECTED_REQUEST}"%'),
     ).fetchall()
     names = {row["id"]: row["qualified_name"] for row in rows}
-    found: dict[str, list[tuple[str, dict[str, str]]]] = {}
+    found: dict[str, list[tuple[str, dict[str, Any]]]] = {}
     # One entry per decision: per claim, and per injected root a claim's request is made from.
     for call in plan.calls:
         if call.claim.id in names:
