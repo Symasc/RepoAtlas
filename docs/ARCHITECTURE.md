@@ -1630,7 +1630,8 @@ enum reaches the value enum itself: the walk never climbs from a member back to 
 
 **Impact.** `POLICY` was `impact/4` here: the `generates` family (formerly `generates-graphql`) admits
 `prisma_migrate` evidence, and `maps-to` is new. It is `impact/5` from DF3a's configuration crossings, `impact/6`
-from DF3b's model fields, and `impact/7` from DF3c's refused HTTP requests (§5).
+from DF3b's model fields, `impact/7` from DF3c's refused HTTP requests, and `impact/8` from DF3d's deployment
+context (§5).
 
 ### What an impact answer says about evidence and refusals
 
@@ -2483,6 +2484,50 @@ not proven and its reason. At most 10 are listed, `at` before `toward`, each by 
 are counted in `decisions_omitted["http"]`, and never displace a link decision. Under repository scope only requests
 made inside the scope are listed, and no source place outside it is named. Every other family's decision carries no
 `relation`, and serializes as before.
+
+### Deployment context: a setting reaches its own deployments' callers
+
+> `repoatlas/graph/impact.py` (`ImpactWalk._context`, `_applies`, `_represent`); `POLICY` `impact/8`. Nothing is
+> indexed differently: the walk reads the records the configuration crossing and the HTTP join already store.
+
+A configuration crossing (`configures`) applies to the deployments its evidence names, and the path after it carries
+them as its **context**. A walk state is `(entity, context)`: two paths reaching the same code under different
+deployments are two states, each expanded. The context passes unchanged through every step -- package `uses`,
+generation, composition, a repository boundary -- but one: an `http` step is followed only through a link of a
+deployment in the context, keeps that link's evidence on the step, and clears the context, since the caller's code runs
+in its own service. A later `configures` step sets a context again. With no context (a seed of code, an `env:` node,
+anything no crossing constrained) every link is followed, as before.
+
+A deployment is what both records already state:
+
+| Identity | Crossing (`deployment_env`) | Link (`http`) |
+|---|---|---|
+| A CI-established release | `deployed_by`, `release`, `variant`, `workload_in` | the same four, from the artifact join |
+| A compose service | `deployed_by`, `compose_in` | `identity_source` `docker-compose-service`, `identity_in` and its repository |
+| Unestablished | a release without `workload_in`, or anything else | a release without `workload_in` (a Tilt-bound chart), or anything else |
+
+An unestablished deployment matches nothing. A setter of several deployments (`deployments`) applies to each through
+that deployment's own stored `deployment_env` `linked` decision (same setter place, variable and deploying repository,
+and a reader place including this edge's reader), read once per deploying repository and never charged to the walk.
+One deployment's workload is never lent to another because they share a chart: a deployment without its own decision
+is unestablished. A request matched to a route by its path alone (`requests`) names no deployment, so under a context it
+is not followed either.
+
+**Not followed is not cut.** A link a context kept the walk from is counted once, by edge, under
+`omitted.by_reason` `deployment_inapplicable` (a link of another deployment) or `deployment_unestablished` (its
+deployment, or the context's, not established) -- unless the same edge was followed on another path. Neither is a
+candidate, a refusal decision or an edge; neither is charged to `Work`, counted in `by_unit`, or makes `complete` false.
+
+**One state per entity in the answer.** When every entity was reached under one context (every walk no crossing
+splits), the answer is exactly as before. Otherwise one bounded pass, top-down in rank order, chooses for each entity
+a state whose predecessor is the state chosen for its own entity: the one whose context includes every other's, else
+the one following the most HTTP links beneath it, else the best ranked. A state none of whose own paths qualifies may
+be re-rooted through a path offered to it and not kept (at most `MAX_ALTERNATIVES` per state), with its subtree's
+distances and paths derived again. When no choice is found for some entity, the walk returns the setters whose crossings
+started the contexts of every entity reached under several (`WalkResult.conflict`), and the answer's seed is
+`ambiguous`, reason `several_deployments`, with those setters as candidates: no path is listed, so none borrows
+another's evidence. The pass says only that it found no consistent choice, never that none exists. Every listed
+candidate's `from` trail is its own `chain`.
 
 ## 6. The indexing pipeline
 
