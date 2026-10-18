@@ -2519,15 +2519,19 @@ deployment, or the context's, not established) -- unless the same edge was follo
 candidate, a refusal decision or an edge; neither is charged to `Work`, counted in `by_unit`, or makes `complete` false.
 
 **One state per entity in the answer.** When every entity was reached under one context (every walk no crossing
-splits), the answer is exactly as before. Otherwise one bounded pass, top-down in rank order, chooses for each entity
-a state whose predecessor is the state chosen for its own entity: the one whose context includes every other's, else
-the one following the most HTTP links beneath it, else the best ranked. A state none of whose own paths qualifies may
-be re-rooted through a path offered to it and not kept (at most `MAX_ALTERNATIVES` per state), with its subtree's
-distances and paths derived again. When no choice is found for some entity, the walk returns the setters whose crossings
-started the contexts of every entity reached under several (`WalkResult.conflict`), and the answer's seed is
-`ambiguous`, reason `several_deployments`, with those setters as candidates: no path is listed, so none borrows
-another's evidence. The pass says only that it found no consistent choice, never that none exists. Every listed
-candidate's `from` trail is its own `chain`.
+splits), the answer is exactly as before. Otherwise each entity starts at its best-ranked state, as the walk would list
+it with no contexts, and the choices are repaired in rank order until none changes (at most `MAX_SWEEPS`): a chosen
+state whose predecessor is not the state chosen for its own entity is re-rooted through a path offered to it and not
+kept (at most `MAX_ALTERNATIVES` per state, never through its own subtree or past `MAX_DISTANCE`), its subtree's
+distances and paths derived again; else replaced by the best-ranked of its entity's states whose predecessor is chosen;
+else its own path is adopted, each ancestor becoming the chosen state of its entity -- at most once per entity. So a
+path is lengthened only where a successor needs it: an entity reached directly under one deployment and again,
+unconstrained, after an HTTP round trip is listed by the round trip only when something beyond it was reached through
+that path alone. A second adoption for one entity, or choices that never settle, is a conflict: the walk returns the
+setters whose crossings started the contexts of every entity reached under several (`WalkResult.conflict`), and the
+answer's seed is `ambiguous`, reason `several_deployments`, with those setters as candidates. No path is listed, so
+none borrows another's evidence. The pass says only that it found no consistent choice, never that none exists. Every
+listed candidate's `from` trail is its own `chain`.
 
 ## 6. The indexing pipeline
 
