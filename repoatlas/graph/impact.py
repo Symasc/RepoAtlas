@@ -37,6 +37,21 @@ node with no home adopts the repository of each dependent it reaches, unless the
 names the one it starts from (``seed_repository``). Nothing crosses into a repository
 outside the caller's scope.
 
+**Deployment context** (DF3d). A configuration crossing (``configures``) applies to the deployments
+its evidence names, and a path carries them: a walk state is ``(entity, context)``, never the
+entity alone, so two paths through the same code under different deployments are two states. The
+context passes unchanged through every step but one: an HTTP crossing (``http``) is followed only
+through a link of a deployment in the context, and clears it -- the caller's code runs in its own
+service. Without a context (a seed of code, an environment variable, anything a configuration
+crossing has not constrained) every link is followed, as before. A deployment is what both edges
+already record: a CI-established release (its deploying repository, release, variant and the
+workload template its container is selected at) or a compose service (its repository and the line
+naming it); anything else is unestablished and matches nothing. A link not followed is counted by
+reason (:data:`DEPLOYMENT_INAPPLICABLE`, :data:`DEPLOYMENT_UNESTABLISHED`), never a candidate. An
+answer lists one state per entity, chosen so that every predecessor is the listed one; when no such
+choice is found, the walk reports the setters whose crossings started each context instead
+(:attr:`WalkResult.conflict`).
+
 **Bounds.** At most :data:`MAX_DISTANCE` steps. Every read goes through
 :class:`~repoatlas.graph.neighbourhood.Neighbourhood` and is charged to :class:`Work`;
 a spent budget stops the walk and is reported, never hidden. Setters and test files are
@@ -45,13 +60,18 @@ leaves: they are affected, and nothing is affected through them.
 
 from __future__ import annotations
 
+import copy
 import heapq
 import json
 import re
-from collections.abc import Callable, Sequence
+from collections import defaultdict
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import IntEnum
 
+from repoatlas.graph.deploy_identity import COMPOSE
+from repoatlas.graph.deployment_env import DEPLOYMENT_ENV_EVIDENCE
+from repoatlas.graph.http_crossings import HTTP_CROSSING
 from repoatlas.graph.neighbourhood import Neighbourhood, Work, WorkLimits
 from repoatlas.graph.traversal import CROSS_REPOSITORY_EDGES
 from repoatlas.models.impact import ImpactRole
@@ -79,6 +99,20 @@ MAX_GROUPS = 64
 MAX_ALTERNATIVES = 5
 #: The most members a seed is read with.
 MAX_MEMBERS = 2_000
+
+#: Why a link was not followed under a deployment context (DF3d): it is a link of another
+#: deployment, or the deployment it, or the context's deployment it might be, is not established.
+DEPLOYMENT_INAPPLICABLE = "deployment_inapplicable"
+DEPLOYMENT_UNESTABLISHED = "deployment_unestablished"
+#: A deployment, as the evidence states it: ``("release", repository, release, variant,
+#: workload)``, ``("compose", repository, service line)``; or, unestablished,
+#: ``("release?", repository, release, variant)`` (the workload not established) and
+#: ``("unknown",)``. Only the first two ever match.
+Deployment = tuple[str, ...]
+#: The deployments a path's configuration applies to; ``None`` when unconstrained.
+Context = frozenset[Deployment] | None
+_ESTABLISHED = frozenset({"release", "compose"})
+_UNKNOWN: Deployment = ("unknown",)
 
 
 class Tier(IntEnum):
@@ -327,6 +361,9 @@ class Node:
     whole: bool = False
     expanded: bool = False
     alternatives: list[Node] = field(default_factory=list)
+    #: The deployments this path's configuration crossing applies to (DF3d); ``None`` when
+    #: no crossing constrains it. Part of the state, never of the rank.
+    context: Context = None
 
     @property
     def rank(self) -> tuple[int, int, int, int, str, tuple[str, ...]]:
@@ -379,6 +416,11 @@ class WalkResult:
     members_cut: bool = False
     #: Hubs by entity id.
     hubs: dict[int, Hub] = field(default_factory=dict)
+    #: Links not followed under a deployment context, by reason (DF3d): never candidates.
+    skipped: dict[str, int] = field(default_factory=dict)
+    #: The setters whose configuration crossings started contexts no single path per entity
+    #: could represent together (DF3d): the answer is ambiguous, ``reached`` is empty.
+    conflict: list[Node] = field(default_factory=list)
 
     @property
     def complete(self) -> bool:
@@ -445,7 +487,18 @@ class ImpactWalk:
         self._max_distance = max_distance
         self._heap: list[tuple[tuple[int, int, int, int, str, tuple[str, ...]], int, Node]] = []
         self._pushed = 0
-        self._reached: dict[int, Node] = {}
+        #: Every state reached, by entity and deployment context (DF3d), and by entity.
+        self._states: dict[tuple[int, Context], Node] = {}
+        self._by_entity: dict[int, list[Node]] = defaultdict(list)
+        self._seed_ids: set[int] = set()
+        #: Links a deployment context kept from being followed, and every one followed.
+        self._skipped: dict[int, str] = {}
+        self._followed: set[int] = set()
+        #: Paths offered to a state and not kept (or replaced), by the state's ``id``: what the
+        #: representative pass may re-root a state through (DF3d, R2).
+        self._offers: dict[int, list[Node]] = defaultdict(list)
+        #: Stored deployment_env decisions by deploying repository, read once (DF3d, R4).
+        self._configured: dict[str, dict[tuple[str, str], list[dict[str, object]]]] = {}
         self._depth_cut = 0
         self._members_cut = False
         self._hubs: dict[int, Hub] = {}
@@ -485,7 +538,9 @@ class ImpactWalk:
             seed.seed, seed.signature = True, (seed.key,)
             seed.whole = seed.type in {EntityType.FILE, None}
             if seed.entity_id is not None:
-                self._reached[seed.entity_id] = seed
+                self._seed_ids.add(seed.entity_id)
+                self._states[(seed.entity_id, None)] = seed
+                self._by_entity[seed.entity_id].append(seed)
             self._push(seed)
         for parent, member in members:
             self._member(parent, member)
@@ -510,16 +565,23 @@ class ImpactWalk:
             self._expand(node)
             if self.work.exhausted is not None:
                 break
+        reached, conflict = self._represent()
+        skipped: dict[str, int] = {}
+        for edge, reason in sorted(self._skipped.items()):
+            if edge not in self._followed:
+                skipped[reason] = skipped.get(reason, 0) + 1
         return WalkResult(
             seeds=list(seeds),
-            reached={i: n for i, n in self._reached.items() if not n.seed},
+            reached={} if conflict else reached,
             work=self.work,
             depth_cut=self._depth_cut,
             unexpanded=sum(
-                1 for n in self._reached.values() if not n.expanded and not n.leaf and not n.seed
+                1 for n in self._states.values() if not n.expanded and not n.leaf and not n.seed
             ),
             members_cut=self._members_cut,
             hubs=dict(self._hubs),
+            skipped=skipped,
+            conflict=conflict,
         )
 
     def members(
@@ -637,7 +699,10 @@ class ImpactWalk:
         return True
 
     def _reach(self, near: Node, row: NeighborRow, family: Family) -> None:
-        if row.far_id in self._reached and self._reached[row.far_id].seed:
+        if row.far_id in self._seed_ids:
+            return
+        taken, context = self._context(near, row, family)
+        if not taken:
             return
         penalty = 0
         if row.type is EdgeType.USES and '"use":"type"' in (row.resolution or ""):
@@ -668,8 +733,188 @@ class ImpactWalk:
             signature=(*near.signature, row.far_key),
             went_up=near.went_up,
             leaf=family.leaf or is_test_path(row.far_path),
+            context=context,
         )
         self._offer(candidate)
+
+    # -- deployment context (DF3d) ------------------------------------------------------------
+
+    def _context(self, near: Node, row: NeighborRow, family: Family) -> tuple[bool, Context]:
+        """Whether the step ``row`` is taken from ``near`` under its context, and the context
+        of the state it reaches. A step not taken is counted, by its edge."""
+        if family.name == "configures":
+            applied = self._applies(row)
+            if near.context is None:
+                return True, applied
+            narrowed = near.context & applied
+            if not narrowed:
+                return self._skip(row, DEPLOYMENT_INAPPLICABLE)
+            return True, narrowed
+        if family.name == "http":
+            if near.context is None:
+                return True, None
+            link = _link_deployment(_record(row, HTTP_CROSSING))
+            if link is not None and link in near.context:
+                self._followed.add(row.edge_id)
+                return True, None  # the caller's code runs in its own service
+            if link is None or _might_be(near.context, link):
+                return self._skip(row, DEPLOYMENT_UNESTABLISHED)
+            return self._skip(row, DEPLOYMENT_INAPPLICABLE)
+        if family.name == "requests" and near.context is not None:
+            # A request matched to a route by its path, in the route's repository: it states no
+            # deployment, so it never matches a constrained path.
+            return self._skip(row, DEPLOYMENT_UNESTABLISHED)
+        return True, near.context
+
+    def _skip(self, row: NeighborRow, reason: str) -> tuple[bool, Context]:
+        self._skipped.setdefault(row.edge_id, reason)
+        return False, None
+
+    def _applies(self, row: NeighborRow) -> frozenset[Deployment]:
+        """The deployments a configuration crossing applies to, each from its own evidence.
+
+        One deployment: the edge's own record. Several (``deployments``): each one's own stored
+        ``linked`` decision of the same setter, variable and reader -- its release, variant and
+        workload as the release selected them -- never another's (R4). A deployment without
+        one is unestablished."""
+        record = _record(row, DEPLOYMENT_ENV_EVIDENCE)
+        listed = record.get("deployments")
+        if not isinstance(listed, list) or len(listed) < 2:
+            return frozenset({_configured_deployment(record)})
+        found = {
+            _configured_deployment(decision)
+            for decision in self._decisions(record)
+            if str(record.get("reader_at", "")) in _places(decision.get("reader_at"))
+        }
+        established = {d for d in found if d[0] in _ESTABLISHED}
+        if len(established) < len(listed):
+            # fewer established than listed: the rest are not established
+            found |= {_listed_deployment(record, str(entry)) for entry in listed}
+            found -= {d for d in found if d[0] == "release?" and _covered(d, established)}
+        return frozenset(found)
+
+    def _decisions(self, record: Mapping[str, object]) -> list[dict[str, object]]:
+        """The stored ``linked`` deployment_env decisions of this record's setter and variable,
+        read once per deploying repository and never charged to the walk's budget."""
+        deployed = str(record.get("deployed_by", ""))
+        if deployed not in self._configured:
+            index: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+            repo_id = self._slug_ids.get(deployed)
+            if repo_id is not None:
+                for row in self._knowledge.list_link_decisions(DEPLOYMENT_ENV_EVIDENCE, repo_id):
+                    if row.decision != "linked":
+                        continue
+                    loaded = json.loads(row.evidence_json or "{}")
+                    if isinstance(loaded, dict) and loaded.get("deployed_by") == deployed:
+                        key = (str(loaded.get("setter_at", "")), str(loaded.get("variable", "")))
+                        index[key].append(loaded)
+            self._configured[deployed] = dict(index)
+        key = (str(record.get("setter_at", "")), str(record.get("variable", "")))
+        return self._configured[deployed].get(key, [])
+
+    def _represent(self) -> tuple[dict[int, Node], list[Node]]:
+        """One state per reached entity, every one's predecessor the state chosen for its own
+        entity, so each listed path's ``from`` trail is its ``chain`` (DF3d, R2).
+
+        One state per entity -- every walk no configuration crossing splits -- is that choice
+        as it is. Otherwise, top-down in rank order (a state ranks after its predecessor): of
+        the states whose predecessor was chosen, the one whose context includes every other's,
+        else the one following the most HTTP links beneath it, else the best ranked. A reached
+        entity with no such state is a conflict: the setters whose crossings started the
+        contexts in play are returned instead. One bounded pass over the walk's own states;
+        a conflict says none was found by it, not that none exists."""
+        if all(len(states) == 1 for states in self._by_entity.values()):
+            return {e: s[0] for e, s in self._by_entity.items() if not s[0].seed}, []
+        beneath = self._links_beneath()
+        chosen: dict[int, Node] = {}
+        conflicted = False
+        for entity in sorted(
+            self._by_entity, key=lambda e: min(s.rank for s in self._by_entity[e])
+        ):
+            states = self._by_entity[entity]
+            seed = next((s for s in states if s.seed), None)
+            if seed is not None:
+                chosen[entity] = seed
+                continue
+            consistent = [s for s in states if _from_chosen(s, chosen)]
+            if not consistent:
+                rerooted = self._reroot(states, chosen)
+                if rerooted is None:
+                    conflicted = True
+                    continue
+                consistent = [rerooted]
+            chosen[entity] = _pick(consistent, beneath)
+        if conflicted:
+            return {}, self._origins()
+        for node in chosen.values():
+            node.alternatives = [
+                p for p in node.alternatives if p.seed or chosen.get(p.entity_id or -1) is p
+            ]
+        return {e: n for e, n in chosen.items() if not n.seed}, []
+
+    def _reroot(self, states: list[Node], chosen: Mapping[int, Node]) -> Node | None:
+        """A state of this entity re-rooted through a path offered to it whose predecessor was
+        chosen, with its subtree's distances and paths derived again; ``None`` when no
+        offered path has a chosen predecessor."""
+        for state in sorted(states, key=lambda s: s.rank):
+            for offer in sorted(self._offers.get(id(state), []), key=lambda o: o.rank):
+                if offer.parent is None or not _from_chosen(offer, chosen):
+                    continue
+                if _descends(offer.parent, state):
+                    continue  # never through a path beneath the state itself
+                state.parent, state.step, state.role, state.leaf, state.whole = (
+                    offer.parent,
+                    offer.step,
+                    offer.role,
+                    offer.leaf,
+                    offer.whole,
+                )
+                self._derive(state)
+                return state
+        return None
+
+    def _derive(self, root: Node) -> None:
+        """Derive ``root``'s path from its predecessor again, then every state beneath it:
+        distance, tier, penalty, path, home -- exactly as the step that reached it did."""
+        children: dict[int, list[Node]] = defaultdict(list)
+        for state in self._states.values():
+            if state.parent is not None:
+                children[id(state.parent)].append(state)
+        pending = [root]
+        while pending:
+            node = pending.pop()
+            _derive_step(node)
+            pending.extend(children.get(id(node), []))
+
+    def _links_beneath(self) -> dict[int, int]:
+        """For each state (by ``id``), how many HTTP links were followed in its subtree."""
+        children: dict[int, list[Node]] = defaultdict(list)
+        for state in self._states.values():
+            if state.parent is not None:
+                children[id(state.parent)].append(state)
+        counts: dict[int, int] = {}
+        for state in sorted(self._states.values(), key=lambda s: s.rank, reverse=True):
+            own = 1 if state.step is not None and state.step.family == "http" else 0
+            counts[id(state)] = own + sum(counts.get(id(c), 0) for c in children[id(state)])
+        return counts
+
+    def _origins(self) -> list[Node]:
+        """The setters whose configuration crossings started the contexts of every entity
+        reached under more than one: real, indexed setters, by key."""
+        found: dict[str, Node] = {}
+        for states in self._by_entity.values():
+            if len(states) < 2:
+                continue
+            for state in states:
+                origin = None
+                node: Node | None = state
+                while node is not None and node.parent is not None:
+                    if node.step is not None and node.step.family == "configures":
+                        origin = node.parent
+                    node = node.parent
+                if origin is not None:
+                    found.setdefault(origin.key, origin)
+        return [found[k] for k in sorted(found)]
 
     def page(
         self, entity_id: int, rule: NeighborRule, confinement: Confinement, *, limit: int
@@ -693,7 +938,7 @@ class ImpactWalk:
         return max(found)[1] if found else None
 
     def _member(self, parent: Node, member: EntityIdentity) -> None:
-        if member.entity_id in self._reached:
+        if member.entity_id in self._seed_ids or (member.entity_id, parent.context) in self._states:
             return
         node = self.node_of(member, parent.home)
         node.distance = parent.distance + 1
@@ -706,6 +951,7 @@ class ImpactWalk:
         node.went_up = True  # a member's container is what it is a member of
         node.leaf = is_test_path(node.path)
         node.whole = node.type is EntityType.FILE and parent.whole
+        node.context = parent.context
         self._offer(node)
 
     def _container(self, node: Node) -> None:
@@ -729,7 +975,10 @@ class ImpactWalk:
             )
             if m.qualified_name == parent_name
         ]
-        if len(found) != 1 or found[0].entity_id in self._reached:
+        if len(found) != 1 or (
+            found[0].entity_id in self._seed_ids
+            or (found[0].entity_id, node.context) in self._states
+        ):
             return
         container = self.node_of(found[0], node.home)
         container.distance = node.distance + 1
@@ -741,15 +990,18 @@ class ImpactWalk:
         container.signature = (*node.signature, container.key)
         container.went_up = True
         container.leaf = is_test_path(container.path)
+        container.context = node.context
         self._offer(container)
 
     # -- the frontier -------------------------------------------------------------
 
     def _offer(self, candidate: Node) -> None:
         assert candidate.entity_id is not None
-        existing = self._reached.get(candidate.entity_id)
+        key = (candidate.entity_id, candidate.context)
+        existing = self._states.get(key)
         if existing is None:
-            self._reached[candidate.entity_id] = candidate
+            self._states[key] = candidate
+            self._by_entity[candidate.entity_id].append(candidate)
             self._push(candidate)
             return
         if existing.seed:
@@ -758,6 +1010,7 @@ class ImpactWalk:
             # A better path to a node not yet expanded: it takes over, the old one stays
             # as an alternative, and the node is queued again under its new rank.
             previous = existing.parent
+            self._remember(existing, copy.copy(existing))
             for name in (
                 "distance",
                 "tier",
@@ -778,6 +1031,14 @@ class ImpactWalk:
             return
         if candidate.parent is not None:
             self._alternative(existing, candidate.parent)
+            self._remember(existing, candidate)
+
+    def _remember(self, state: Node, offer: Node) -> None:
+        """Keep a path offered to ``state`` -- only where configuration splits a walk into
+        several deployment contexts is it ever read (DF3d)."""
+        offers = self._offers[id(state)]
+        if len(offers) < MAX_ALTERNATIVES:
+            offers.append(offer)
 
     @staticmethod
     def _alternative(node: Node, predecessor: Node) -> None:
@@ -789,6 +1050,134 @@ class ImpactWalk:
     def _push(self, node: Node) -> None:
         self._pushed += 1
         heapq.heappush(self._heap, (node.rank, self._pushed, node))
+
+
+_FAMILY = {family.name: family for family in FAMILIES}
+
+
+def _derive_step(node: Node) -> None:
+    """A node's path fields from its predecessor and its own step, as :meth:`ImpactWalk._reach`,
+    ``_member`` and ``_container`` set them."""
+    parent, step = node.parent, node.step
+    if parent is None or step is None:
+        return
+    node.distance = parent.distance + 1
+    node.signature = (*parent.signature, node.key)
+    row = step.row
+    if row is None:  # a member, or a member's container
+        node.tier = max(parent.tier, Tier.CONTAINMENT)
+        node.penalty = parent.penalty
+        node.went_up = True
+        node.home = parent.home
+        return
+    family = _FAMILY[step.family]
+    node.tier = max(parent.tier, family.tier)
+    typed = row.type is EdgeType.USES and '"use":"type"' in (row.resolution or "")
+    node.penalty = parent.penalty + (1 if typed else 0)
+    node.went_up = parent.went_up
+    home = parent.home
+    if row.far_repo_id is not None and (parent.home is None or row.far_repo_id != parent.home):
+        home = row.far_repo_id
+    node.home = home
+
+
+def _record(row: NeighborRow, key: str) -> dict[str, object]:
+    """One evidence record of an edge's resolution, or an empty one."""
+    if not row.resolution:
+        return {}
+    loaded = json.loads(row.resolution)
+    record = loaded.get(key) if isinstance(loaded, dict) else None
+    return record if isinstance(record, dict) else {}
+
+
+def _configured_deployment(record: Mapping[str, object]) -> Deployment:
+    """The deployment a configuration record (a crossing's, or a stored decision's) states."""
+    deployed, release = record.get("deployed_by"), record.get("release")
+    if deployed and release:
+        variant = str(record.get("variant") or "")
+        workload = record.get("workload_in")
+        if workload:
+            return ("release", str(deployed), str(release), variant, str(workload))
+        return ("release?", str(deployed), str(release), variant)
+    if deployed and record.get("compose_in"):
+        return ("compose", str(deployed), str(record["compose_in"]))
+    return _UNKNOWN
+
+
+def _listed_deployment(record: Mapping[str, object], entry: str) -> Deployment:
+    """A deployment a crossing lists without its own evidence: never established."""
+    if entry.startswith("compose:"):
+        return _UNKNOWN
+    release, _, variant = entry.partition("#")
+    return ("release?", str(record.get("deployed_by", "")), release, variant)
+
+
+def _covered(partial: Deployment, established: set[Deployment]) -> bool:
+    return any(d[0] == "release" and d[1:4] == partial[1:4] for d in established)
+
+
+def _link_deployment(record: Mapping[str, object]) -> Deployment | None:
+    """The deployment an HTTP link goes through, as its join recorded it; ``None`` when the
+    record states none (a Tilt-bound release, a specification's host)."""
+    deployed, release, workload = (
+        record.get("deployed_by"),
+        record.get("release"),
+        record.get("workload_in"),
+    )
+    if deployed and release:
+        if not workload:
+            return None
+        variant = str(record.get("variant") or "")
+        return ("release", str(deployed), str(release), variant, str(workload))
+    if record.get("identity_source") == COMPOSE and record.get("identity_in"):
+        repository = record.get("identity_in_repo") or record.get("provider")
+        return ("compose", str(repository), str(record["identity_in"])) if repository else None
+    return None
+
+
+def _might_be(context: frozenset[Deployment], link: Deployment) -> bool:
+    """Whether a deployment in the context, not itself established, could be the link's."""
+    for deployment in context:
+        if deployment == _UNKNOWN:
+            return True
+        if deployment[0] == "release?" and link[0] == "release" and link[1:4] == deployment[1:4]:
+            return True
+    return False
+
+
+def _places(value: object) -> set[str]:
+    return {p.strip() for p in str(value or "").split(";") if p.strip()}
+
+
+def _descends(node: Node, ancestor: Node) -> bool:
+    """Whether ``ancestor`` is on ``node``'s path."""
+    current: Node | None = node
+    while current is not None:
+        if current is ancestor:
+            return True
+        current = current.parent
+    return False
+
+
+def _from_chosen(state: Node, chosen: Mapping[int, Node]) -> bool:
+    """Whether the state's predecessor is the one chosen for its own entity (or a seed)."""
+    parent = state.parent
+    if parent is None or parent.seed or parent.entity_id is None:
+        return True
+    return chosen.get(parent.entity_id) is parent
+
+
+def _pick(states: list[Node], beneath: Mapping[int, int]) -> Node:
+    """The state including every other's context, else the one following the most HTTP
+    links beneath it, else the best ranked."""
+
+    def includes(a: Context, b: Context) -> bool:
+        return a is None or (b is not None and a >= b)
+
+    for state in sorted(states, key=lambda s: s.rank):
+        if all(includes(state.context, other.context) for other in states):
+            return state
+    return min(states, key=lambda s: (-beneath.get(id(s), 0), s.rank))
 
 
 def _representatives(

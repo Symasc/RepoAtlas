@@ -94,7 +94,9 @@ from repoatlas.storage.protocols import (
 #: proved it runs (``CONFIGURES`` on deployment_env evidence, DF3a). 6: a model field reaches
 #: its exact users, then its model once (DF3b). 7: an answer lists the refused HTTP requests
 #: where the walk went, each ``at`` or (hypothetically) ``toward``; none is ever followed (DF3c).
-POLICY = "impact/7"
+#: 8: a configuration crossing's deployments go with the path, and an HTTP link is followed under
+#: them only through one of them; links not followed are counted, never listed (DF3d).
+POLICY = "impact/8"
 
 #: Entity types a change is a *key* change for: they name a value, not code.
 _KEYS = frozenset(
@@ -114,6 +116,9 @@ _LOOKUP_LIMIT = 10_000
 
 NOT_INDEXED = "nothing indexed is keyed, located or named by it"
 OUT_OF_SCOPE = "it names something only outside the repositories this call is scoped to"
+#: A resolved seed whose walk reached one entity under deployment contexts no single path per
+#: entity represents together (DF3d): the answer names the setters that started them instead.
+SEVERAL_DEPLOYMENTS = "several_deployments"
 
 
 @dataclass(frozen=True, slots=True)
@@ -734,6 +739,9 @@ def assemble(
         by_reason["depth"] = result.depth_cut
     if result.unexpanded or result.members_cut:
         by_reason["work"] = result.unexpanded + (1 if result.members_cut else 0)
+    # Links a deployment context kept from being followed (DF3d): counted under their own
+    # reasons, never as a cut, and never in ``by_unit`` or ``complete``.
+    by_reason.update(result.skipped)
     returned = [*candidates, *listed_tests]
     summary = ImpactSummary(
         reached=len(result.reached),
@@ -1453,6 +1461,15 @@ def configuration_reading(record: Mapping[str, object]) -> str:
     deployed, built = record.get("deployed_by"), record.get("built_by")
     route = f"{deployed} -> {built}" if deployed != built else f"in {deployed}"
     parts = [_SETTERS.get(str(record.get("setter_kind")), str(record.get("setter_kind")))]
+    listed = record.get("deployments")
+    if isinstance(listed, list) and len(listed) > 1:
+        # One setter of several deployments: every one is named, and nothing the record
+        # states for its first deployment alone -- version, bases -- is given to all (DF3d R1).
+        parts.append("releases " + ", ".join(_deployment_named(str(d)) for d in listed))
+        value = _VALUES.get(str(record.get("value", "")))
+        if value is not None:
+            parts.append(value)
+        return f"{route} via {record.get('variable')} ({'; '.join(parts)})"
     if record.get("release"):
         variant = f" ({record['variant']})" if record.get("variant") else ""
         parts.append(f"release {record['release']}{variant}")
@@ -1469,6 +1486,15 @@ def configuration_reading(record: Mapping[str, object]) -> str:
     if value is not None:
         parts.append(value)
     return f"{route} via {record.get('variable')} ({'; '.join(parts)})"
+
+
+def _deployment_named(entry: str) -> str:
+    """A ``deployments`` entry as a reading names it: ``release (variant)``, or the compose
+    service's target."""
+    if entry.startswith("compose:"):
+        return entry.removeprefix("compose:")
+    release, _, variant = entry.partition("#")
+    return f"{release} ({variant})" if variant else release
 
 
 def configuration_crossing(resolution: Mapping[str, object]) -> ConfigurationCrossing | None:
