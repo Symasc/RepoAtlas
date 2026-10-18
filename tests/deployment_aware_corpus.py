@@ -272,18 +272,20 @@ def get_limits() -> dict:
     return {"limit": LIMIT}
 """
 
+#: ``ask_svc`` reads REGION, so app-a's ``--set`` reaches it directly ({app-a}) and again,
+#: unconstrained, after the round trip through ``svc``.
 SVC_CLIENT = """\
 import requests
+
+from app.settings import REGION
 
 SVC_URL = "https://svc.example"
 
 
 def ask_svc() -> dict:
-    return requests.get(f"{SVC_URL}/v1/answers/1", timeout=5).json()
+    return requests.get(f"{SVC_URL}/v1/answers/1", params={"region": REGION}, timeout=5).json()
 """
 
-#: A dev release of ``app``'s own chart, bound by Tilt: no workload, so the M3 tie and no
-#: release recorded on the link.
 #: app's own smoke check of app-b's ``/v1/limits``: linked to get_limits through app-b, and -- a
 #: literal URL, in the route's own repository -- matched to the route by its path, which states
 #: no deployment.
@@ -295,6 +297,8 @@ def smoke_b() -> dict:
     return requests.get("https://b.example/v1/limits", timeout=5).json()
 """
 
+#: A dev release of ``app``'s own chart, bound by Tilt: no workload, so the M3 tie and no
+#: release recorded on the link.
 DEV_CHART = {
     path.replace("charts/web/", "charts/dev/"): text.replace("web.", "dev.").replace(
         "name: web\n", "name: dev\n"
