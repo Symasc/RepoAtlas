@@ -283,18 +283,42 @@ def test_paths_no_single_entity_path_represents_make_the_answer_ambiguous(
         assert impact(corpus, entity).seed.status is SeedStatus.RESOLVED
 
 
-def test_a_shared_context_that_includes_every_other_is_no_ambiguity(corpus: Workspace) -> None:
-    """``charts/web/`` holds the shared SORT (app-a and app-b) and REGION's default (app-b):
-    the shared context includes the other, so one path per entity represents both callers."""
+def test_paths_that_meet_and_never_part_are_no_ambiguity(corpus: Workspace) -> None:
+    """``charts/web/`` holds the shared SORT (app-a and app-b) and REGION's default (app-b).
+    They meet at get_item, and ask_svc (reading REGION) is reached under app-b's context and
+    again, unconstrained, after the round trip through svc. Each entity is listed by its
+    best-ranked path that every successor agrees with: ask_svc by its direct one."""
     response = impact(corpus, "deployer:charts/web/")
     assert response.seed.status is SeedStatus.RESOLVED
-    assert {"call_a", "call_b"} <= callers(response)
+    assert {"call_a", "call_b", "call_summary_b"} <= callers(response)
+    [ask] = [c for c in listed(response) if c.name == "ask_svc"]
+    assert chain_names(ask.chain)[-2:] == ["REGION", "ask_svc"], ask.chain
+
+
+def test_a_state_under_no_context_and_one_under_a_deployment_are_both_expanded(
+    corpus: Workspace,
+) -> None:
+    """§7, context per state: app-a's ``--set`` reaches ask_svc under {app-a} directly, and
+    unconstrained after the round trip through svc. The constrained state finds call_summary_b's
+    link (app-b) inapplicable; the unconstrained one follows it. The caller is listed, and so is
+    the path it needs -- ask_svc and get_summary by the round trip -- and the link followed on
+    one path is not counted as skipped on the other: the four skipped are call_b's, call_pair_a's,
+    call_pair_b's and call_either's app-b link; call_dev's is unestablished."""
+    response = impact(
+        corpus, key(corpus, "deployer", ".github/workflows/deploy.yml", "jobs.deploy.steps[1].run")
+    )
+    assert response.seed.status is SeedStatus.RESOLVED
+    [summary] = [c for c in listed(response) if c.name == "call_summary_b"]
+    names = chain_names(summary.chain)
+    assert names.index("fetch_item") < names.index("ask_svc") < names.index("get_summary")
+    assert skipped(response) == {"deployment_inapplicable": 4, "deployment_unestablished": 1}
 
 
 def test_the_representative_does_not_depend_on_which_path_ranks_first(corpus: Workspace) -> None:
     """``charts/pair/``: ``apiOnly`` (pair-a) ranks before ``shared`` (pair-a and pair-b), so
-    pair-a's caller is first reached under the narrower context. The shared context includes
-    it: that path is listed, and the caller re-rooted through it, its own chain."""
+    get_item and pair-a's caller are first reached under the narrower context. pair-b's caller
+    hangs only off the shared one: its path is adopted for get_item, and pair-a's caller
+    re-rooted through it, its own chain."""
     response = impact(corpus, "deployer:charts/pair/")
     assert response.seed.status is SeedStatus.RESOLVED
     assert {"call_pair_a", "call_pair_b"} <= callers(response)
