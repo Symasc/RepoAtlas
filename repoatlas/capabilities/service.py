@@ -94,6 +94,7 @@ from repoatlas.capabilities.errors import (
 from repoatlas.capabilities.evidence_shaping import LINE_SEPARATOR
 from repoatlas.capabilities.impact import POLICY as IMPACT_POLICY
 from repoatlas.capabilities.impact import (
+    SEVERAL_DEPLOYMENTS,
     Assembled,
     Seed,
     SeedResolver,
@@ -237,12 +238,15 @@ from repoatlas.models.http_inventory import (
     OperationBasis,
 )
 from repoatlas.models.impact import (
+    MAX_SEED_CANDIDATES,
     ImpactDecision,
     ImpactOmitted,
     ImpactRequest,
     ImpactResponse,
+    ImpactSeed,
     ImpactSummary,
     PackageImpact,
+    SeedCandidate,
     SeedStatus,
 )
 from repoatlas.models.inspection import (
@@ -1058,47 +1062,72 @@ class CapabilityService:
                     )
                     starts, members = seed_nodes(seed, walk, home)
                     walked = walk.run(starts, members)
-                    answer = assemble(
-                        walked,
-                        walk,
-                        max_candidates=request.max_candidates,
-                        full=request.presentation is Presentation.FULL,
-                        directories=directories,
-                    )
-                    packages, more = package_dependents(
-                        seed,
-                        self._workspace.knowledge,
-                        self._workspace.dependencies,
-                        walk,
-                        walked,
-                        [*answer.candidates, *answer.tests],
-                        directories,
-                        scoped=resolution.scope is CapabilityScope.REPOSITORY,
-                        roots={r.id: root_path(r.path) for r in registered if r.id is not None},
-                    )
-                    if more:
-                        reasons = dict(answer.omitted.by_reason)
-                        reasons["budget"] = reasons.get("budget", 0) + more
-                        answer.omitted = answer.omitted.model_copy(update={"by_reason": reasons})
-                    reached = [
-                        seed.model.entity or "",
-                        *(c.entity for c in (*answer.candidates, *answer.tests)),
-                    ]
-                    decisions, decisions_omitted = decisions_near(
-                        self._workspace.knowledge, reached
-                    )
-                    # The refused HTTP requests where it went, under a cap of their own (DF3c).
-                    refused, refused_omitted = http_decisions_near(
-                        self._workspace.knowledge,
-                        reached,
-                        slug_of=walk.slug_of,
-                        scope=frozenset(scope)
-                        if resolution.scope is CapabilityScope.REPOSITORY
-                        else None,
-                    )
-                    decisions = (*decisions, *refused)
-                    if refused_omitted:
-                        decisions_omitted = {**decisions_omitted, "http": refused_omitted}
+                    if walked.conflict:
+                        # DF3d: deployment contexts that no single path per entity represents
+                        # together. The answer names the setters that started them, never a
+                        # path that would mix their evidence or pick one (DF3D_PHASE_A.md §5).
+                        seed = Seed(
+                            ImpactSeed(
+                                status=SeedStatus.AMBIGUOUS,
+                                term=request.seed,
+                                candidates=tuple(
+                                    SeedCandidate(
+                                        entity=node.key,
+                                        type=node.type,
+                                        repository=walk.slug_of(node.repo_id),
+                                        path=node.path,
+                                        lines=node.lines,
+                                    )
+                                    for node in walked.conflict[:MAX_SEED_CANDIDATES]
+                                ),
+                                total=len(walked.conflict),
+                                reason=SEVERAL_DEPLOYMENTS,
+                            )
+                        )
+                    else:
+                        answer = assemble(
+                            walked,
+                            walk,
+                            max_candidates=request.max_candidates,
+                            full=request.presentation is Presentation.FULL,
+                            directories=directories,
+                        )
+                        packages, more = package_dependents(
+                            seed,
+                            self._workspace.knowledge,
+                            self._workspace.dependencies,
+                            walk,
+                            walked,
+                            [*answer.candidates, *answer.tests],
+                            directories,
+                            scoped=resolution.scope is CapabilityScope.REPOSITORY,
+                            roots={r.id: root_path(r.path) for r in registered if r.id is not None},
+                        )
+                        if more:
+                            reasons = dict(answer.omitted.by_reason)
+                            reasons["budget"] = reasons.get("budget", 0) + more
+                            answer.omitted = answer.omitted.model_copy(
+                                update={"by_reason": reasons}
+                            )
+                        reached = [
+                            seed.model.entity or "",
+                            *(c.entity for c in (*answer.candidates, *answer.tests)),
+                        ]
+                        decisions, decisions_omitted = decisions_near(
+                            self._workspace.knowledge, reached
+                        )
+                        # The refused HTTP requests where it went, under a cap of their own (DF3c).
+                        refused, refused_omitted = http_decisions_near(
+                            self._workspace.knowledge,
+                            reached,
+                            slug_of=walk.slug_of,
+                            scope=frozenset(scope)
+                            if resolution.scope is CapabilityScope.REPOSITORY
+                            else None,
+                        )
+                        decisions = (*decisions, *refused)
+                        if refused_omitted:
+                            decisions_omitted = {**decisions_omitted, "http": refused_omitted}
             candidates = answer.candidates if answer is not None else ()
             tests = answer.tests if answer is not None else ()
             facts = current_facts_version(self._workspace)
