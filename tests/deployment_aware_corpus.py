@@ -17,8 +17,8 @@ The shared ConfigMap key ``SORT`` (``charts/web/templates/web-config.yaml``) is 
 ``app`` builds ``team/app``; its ``app/settings.py`` reads every variable, its one FastAPI
 application serves ``get_item`` (``/v1/items/{item_id}``, using them), ``get_summary``
 (``/v1/summary``, through ``svc``), ``get_cycle`` (``/v1/cycle``, through ``ypkg``) and
-``get_limits`` (``/v1/limits``), which its own ``smoke_b`` requests at ``b.example``. Its compose
-service sets ``CACHE``; its Tilt-bound ``dev`` chart (``dev.example``) states no workload, so its
+``get_limits`` (``/v1/limits``), which its own ``smoke_b`` requests at ``b.example``. A Salt state
+sets REGION with no deployment evidence. Its compose service (``http://app:8080``) sets ``CACHE``; its Tilt-bound ``dev`` chart (``dev.example``) states no workload, so its
 link records no release. ``ypkg`` depends on ``app`` and ``app`` on it: a package cycle. ``svc``
 serves ``get_answer``, which requests ``a.example``. ``consumer`` calls every host, and
 ``call_either`` one of two literal bases.
@@ -311,12 +311,14 @@ APP = {
     "pyproject.toml": '[project]\nname = "app"\nversion = "1.0.0"\ndependencies = ["fastapi", "requests", "ypkg"]\n',
     ".circleci/config.yml": _circle("app", "deploy/app.Dockerfile"),
     "deploy/app.Dockerfile": 'FROM python:3.12-slim\nWORKDIR /app\nCOPY app /app/app\nCMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]\n',
-    "docker-compose.yml": 'services:\n  app:\n    build:\n      context: .\n      dockerfile: deploy/app.Dockerfile\n    environment:\n      CACHE: "5"\n',
+    "docker-compose.yml": 'services:\n  app:\n    build:\n      context: .\n      dockerfile: deploy/app.Dockerfile\n    ports:\n      - "8080:8080"\n    environment:\n      CACHE: "5"\n',
     "app/__init__.py": "",
     "app/settings.py": SETTINGS,
     "app/main.py": MAIN,
     "app/svc_client.py": SVC_CLIENT,
     "app/smoke.py": SMOKE,
+    # a Salt state's context sets REGION: configuration with no deployment evidence
+    "salt/app.sls": "app_config:\n  file.managed:\n    - name: /etc/app.conf\n    - context:\n        REGION: 'eu'\n",
     **DEV_CHART,
     "Tiltfile": "k8s_yaml(helm('charts/dev', name='dev', set=['ingress.host=dev.example']))\n",
 }
@@ -358,6 +360,7 @@ B_URL = "https://b.example"
 DEV_URL = "https://dev.example"
 PAIR_A_URL = "https://pair-a.example"
 PAIR_B_URL = "https://pair-b.example"
+COMPOSE_URL = "http://app:8080"
 if os.getenv("STAGE") == "a":
     EITHER_URL = "https://a.example"
 else:
@@ -398,6 +401,10 @@ def call_pair_b(item_id: str) -> dict:
 
 def call_either(item_id: str) -> dict:
     return requests.get(f"{EITHER_URL}/v1/items/{item_id}", timeout=5).json()
+
+
+def call_compose(item_id: str) -> dict:
+    return requests.get(f"{COMPOSE_URL}/v1/items/{item_id}", timeout=5).json()
 """
 
 CONSUMER = {"client.py": CLIENT}
