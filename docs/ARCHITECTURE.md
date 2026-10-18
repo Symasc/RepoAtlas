@@ -2495,8 +2495,10 @@ them as its **context**. A walk state is `(entity, context)`: two paths reaching
 deployments are two states, each expanded. The context passes unchanged through every step -- package `uses`,
 generation, composition, a repository boundary -- but one: an `http` step is followed only through a link of a
 deployment in the context, keeps that link's evidence on the step, and clears the context, since the caller's code runs
-in its own service. A later `configures` step sets a context again. With no context (a seed of code, an `env:` node,
-anything no crossing constrained) every link is followed, as before.
+in its own service. A later `configures` step sets a context again. A `CONFIGURES` edge without a `deployment_env`
+record (a Salt state's context, a project's own configuration) is no deployment's crossing: it passes the context on
+like any other step. With no context (a seed of code, an `env:` node, anything no crossing constrained) every link is
+followed, as before.
 
 A deployment is what both records already state:
 
