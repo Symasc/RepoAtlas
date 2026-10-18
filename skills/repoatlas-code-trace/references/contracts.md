@@ -184,12 +184,13 @@ Name what changes. A key a tool returned is best, but a declaration's name or qu
 
 What the result means:
 
-- `seed.status` other than `resolved` means nothing was followed. `ambiguous` lists the candidates the seed could mean; call again with one of their `entity` keys.
+- `seed.status` other than `resolved` means nothing was followed. `ambiguous` lists the candidates the seed could mean; call again with one of their `entity` keys. With `reason: several_deployments` the seed itself was found, but it holds settings of different deployments whose paths meet in the same code and part again, and no single path per candidate was found to represent them all: the candidates are those settings; call again with one.
 - Candidates are ranked, not rated. Each `step` is one indexed fact (`edge`, `at`, `lines`) or one derived from keys and spans (`derived`), and `from` is the candidate it leads from (`0` is the seed). Read the lines a step names before claiming the candidate is affected.
 - `basis` says how precise the path is: `exact` joins declarations, keys or files by facts about exactly them; `containment` passes through a member of what changes; `file` rests on a file-level import.
 - `hubs` are candidates with more dependents than one answer shows. `collapsed` counts the rest; collapsed dependents are not less affected.
 - `packages` are coarse: a unit or repository declares the package the change lives in. `exact_consumers: "unresolved"` means RepoAtlas does not know which of its declarations uses the change.
 - `omitted` counts what was left out, by reason and by unit, and `summary.complete` is false when a budget or the distance bound stopped the walk. A short answer is not proof that nothing else is affected.
+- A path through a deployment's setting (a values key, a `--set`, a ConfigMap or compose entry) applies to that deployment only, until it leaves through an HTTP link of the same deployment. `omitted.by_reason` counts the HTTP links it did not follow: `deployment_inapplicable` (a link of another deployment) and `deployment_unestablished` (a link, or a setting, whose deployment the index does not establish). These are not cuts: they are neither candidates nor refused links, and they never make `summary.complete` false.
 
 Nothing is recorded in the investigation, so a step has no evidence id; read the source it names with any tool and cite what you read.
 
