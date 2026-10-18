@@ -99,6 +99,8 @@ MAX_GROUPS = 64
 MAX_ALTERNATIVES = 5
 #: The most members a seed is read with.
 MAX_MEMBERS = 2_000
+#: The most times the representative pass revisits its choices (DF3d, R2).
+MAX_SWEEPS = 16
 
 #: Why a link was not followed under a deployment context (DF3d): it is a link of another
 #: deployment, or the deployment it, or the context's deployment it might be, is not established.
@@ -112,6 +114,8 @@ Deployment = tuple[str, ...]
 #: The deployments a path's configuration applies to; ``None`` when unconstrained.
 Context = frozenset[Deployment] | None
 _ESTABLISHED = frozenset({"release", "compose"})
+#: The families a deployment context may keep a step of from being taken.
+_GATED = frozenset({"configures", "http", "requests"})
 _UNKNOWN: Deployment = ("unknown",)
 
 
@@ -741,7 +745,14 @@ class ImpactWalk:
 
     def _context(self, near: Node, row: NeighborRow, family: Family) -> tuple[bool, Context]:
         """Whether the step ``row`` is taken from ``near`` under its context, and the context
-        of the state it reaches. A step not taken is counted, by its edge."""
+        of the state it reaches. A step not taken is counted, by its edge, unless the same edge
+        is taken on another path -- under another context or none."""
+        taken, context = self._gate(near, row, family)
+        if taken and family.name in _GATED:
+            self._followed.add(row.edge_id)
+        return taken, context
+
+    def _gate(self, near: Node, row: NeighborRow, family: Family) -> tuple[bool, Context]:
         if family.name == "configures":
             applied = self._applies(row)
             if near.context is None:
@@ -755,7 +766,6 @@ class ImpactWalk:
                 return True, None
             link = _link_deployment(_record(row, HTTP_CROSSING))
             if link is not None and link in near.context:
-                self._followed.add(row.edge_id)
                 return True, None  # the caller's code runs in its own service
             if link is None or _might_be(near.context, link):
                 return self._skip(row, DEPLOYMENT_UNESTABLISHED)
@@ -817,34 +827,32 @@ class ImpactWalk:
         entity, so each listed path's ``from`` trail is its ``chain`` (DF3d, R2).
 
         One state per entity -- every walk no configuration crossing splits -- is that choice
-        as it is. Otherwise, top-down in rank order (a state ranks after its predecessor): of
-        the states whose predecessor was chosen, the one whose context includes every other's,
-        else the one following the most HTTP links beneath it, else the best ranked. A reached
-        entity with no such state is a conflict: the setters whose crossings started the
-        contexts in play are returned instead. One bounded pass over the walk's own states;
-        a conflict says none was found by it, not that none exists."""
+        as it is. Otherwise each entity starts at its best-ranked state, as the walk would list
+        it with no contexts. Then, in rank order, a chosen state whose predecessor is not the
+        one chosen for its own entity is re-rooted through a path offered to it whose
+        predecessor is; else replaced by the best-ranked of its entity's states whose
+        predecessor is; else its own path is adopted: each ancestor not chosen for its entity
+        becomes the chosen one, each entity at most once. Repeated until nothing changes, at
+        most :data:`MAX_SWEEPS` times. A second adoption for one entity, or no settled choice,
+        is a conflict: the setters whose crossings started the contexts in play are returned
+        instead. Bounded by the walk's own states and offers; a conflict says no choice was
+        found, not that none exists."""
         if all(len(states) == 1 for states in self._by_entity.values()):
             return {e: s[0] for e, s in self._by_entity.items() if not s[0].seed}, []
-        beneath = self._links_beneath()
-        chosen: dict[int, Node] = {}
-        conflicted = False
-        for entity in sorted(
-            self._by_entity, key=lambda e: min(s.rank for s in self._by_entity[e])
-        ):
-            states = self._by_entity[entity]
-            seed = next((s for s in states if s.seed), None)
-            if seed is not None:
-                chosen[entity] = seed
-                continue
-            consistent = [s for s in states if _from_chosen(s, chosen)]
-            if not consistent:
-                rerooted = self._reroot(states, chosen)
-                if rerooted is None:
-                    conflicted = True
+        chosen = {e: min(states, key=lambda s: s.rank) for e, states in self._by_entity.items()}
+        adopted: set[int] = set()
+        for _ in range(MAX_SWEEPS):
+            changed = False
+            for entity in sorted(chosen, key=lambda e: chosen[e].rank):
+                current = chosen[entity]
+                if _from_chosen(current, chosen):
                     continue
-                consistent = [rerooted]
-            chosen[entity] = _pick(consistent, beneath)
-        if conflicted:
+                if not self._resolve(entity, current, chosen, adopted):
+                    return {}, self._origins()
+                changed = True
+            if not changed:
+                break
+        else:
             return {}, self._origins()
         for node in chosen.values():
             node.alternatives = [
@@ -852,51 +860,70 @@ class ImpactWalk:
             ]
         return {e: n for e, n in chosen.items() if not n.seed}, []
 
-    def _reroot(self, states: list[Node], chosen: Mapping[int, Node]) -> Node | None:
-        """A state of this entity re-rooted through a path offered to it whose predecessor was
-        chosen, with its subtree's distances and paths derived again; ``None`` when no
-        offered path has a chosen predecessor."""
-        for state in sorted(states, key=lambda s: s.rank):
-            for offer in sorted(self._offers.get(id(state), []), key=lambda o: o.rank):
-                if offer.parent is None or not _from_chosen(offer, chosen):
-                    continue
-                if _descends(offer.parent, state):
-                    continue  # never through a path beneath the state itself
-                state.parent, state.step, state.role, state.leaf, state.whole = (
-                    offer.parent,
-                    offer.step,
-                    offer.role,
-                    offer.leaf,
-                    offer.whole,
-                )
-                self._derive(state)
-                return state
-        return None
+    def _resolve(
+        self, entity: int, current: Node, chosen: dict[int, Node], adopted: set[int]
+    ) -> bool:
+        """Make the entity's chosen state one whose predecessor is chosen: ``current``
+        re-rooted, else the best-ranked such state, else ``current``'s own path adopted.
+        ``False`` when that would adopt a second path for some entity."""
+        if self._reroot(current, chosen):
+            return True
+        consistent = [s for s in self._by_entity[entity] if _from_chosen(s, chosen)]
+        if consistent:
+            chosen[entity] = min(consistent, key=lambda s: s.rank)
+            return True
+        node = current.parent
+        while node is not None and not node.seed and node.entity_id is not None:
+            if chosen.get(node.entity_id) is node:
+                break
+            if node.entity_id in adopted:
+                return False
+            adopted.add(node.entity_id)
+            chosen[node.entity_id] = node
+            node = node.parent
+        return True
 
-    def _derive(self, root: Node) -> None:
-        """Derive ``root``'s path from its predecessor again, then every state beneath it:
-        distance, tier, penalty, path, home -- exactly as the step that reached it did."""
+    def _reroot(self, state: Node, chosen: Mapping[int, Node]) -> bool:
+        """Re-root ``state`` through a path offered to it whose predecessor was chosen, and
+        derive its subtree's distances and paths again; never through a path beneath the
+        state itself, nor one that takes its subtree past the distance bound."""
+        children = self._children()
+        for offer in sorted(self._offers.get(id(state), []), key=lambda o: o.rank):
+            if offer.parent is None or not _from_chosen(offer, chosen):
+                continue
+            if _descends(offer.parent, state):
+                continue
+            longer = offer.parent.distance + 1 - state.distance
+            if _deepest(state, children) + longer > self._max_distance:
+                continue
+            state.parent, state.step, state.role, state.leaf, state.whole = (
+                offer.parent,
+                offer.step,
+                offer.role,
+                offer.leaf,
+                offer.whole,
+            )
+            self._derive(state)
+            return True
+        return False
+
+    def _children(self) -> dict[int, list[Node]]:
+        """Each state's successors, by the state's ``id``."""
         children: dict[int, list[Node]] = defaultdict(list)
         for state in self._states.values():
             if state.parent is not None:
                 children[id(state.parent)].append(state)
+        return children
+
+    def _derive(self, root: Node) -> None:
+        """Derive ``root``'s path from its predecessor again, then every state beneath it:
+        distance, tier, penalty, path, home -- exactly as the step that reached it did."""
+        children = self._children()
         pending = [root]
         while pending:
             node = pending.pop()
             _derive_step(node)
             pending.extend(children.get(id(node), []))
-
-    def _links_beneath(self) -> dict[int, int]:
-        """For each state (by ``id``), how many HTTP links were followed in its subtree."""
-        children: dict[int, list[Node]] = defaultdict(list)
-        for state in self._states.values():
-            if state.parent is not None:
-                children[id(state.parent)].append(state)
-        counts: dict[int, int] = {}
-        for state in sorted(self._states.values(), key=lambda s: s.rank, reverse=True):
-            own = 1 if state.step is not None and state.step.family == "http" else 0
-            counts[id(state)] = own + sum(counts.get(id(c), 0) for c in children[id(state)])
-        return counts
 
     def _origins(self) -> list[Node]:
         """The setters whose configuration crossings started the contexts of every entity
@@ -1149,6 +1176,16 @@ def _places(value: object) -> set[str]:
     return {p.strip() for p in str(value or "").split(";") if p.strip()}
 
 
+def _deepest(root: Node, children: Mapping[int, list[Node]]) -> int:
+    """The greatest distance in ``root``'s subtree."""
+    deepest, pending = root.distance, [root]
+    while pending:
+        node = pending.pop()
+        deepest = max(deepest, node.distance)
+        pending.extend(children.get(id(node), []))
+    return deepest
+
+
 def _descends(node: Node, ancestor: Node) -> bool:
     """Whether ``ancestor`` is on ``node``'s path."""
     current: Node | None = node
@@ -1165,19 +1202,6 @@ def _from_chosen(state: Node, chosen: Mapping[int, Node]) -> bool:
     if parent is None or parent.seed or parent.entity_id is None:
         return True
     return chosen.get(parent.entity_id) is parent
-
-
-def _pick(states: list[Node], beneath: Mapping[int, int]) -> Node:
-    """The state including every other's context, else the one following the most HTTP
-    links beneath it, else the best ranked."""
-
-    def includes(a: Context, b: Context) -> bool:
-        return a is None or (b is not None and a >= b)
-
-    for state in sorted(states, key=lambda s: s.rank):
-        if all(includes(state.context, other.context) for other in states):
-            return state
-    return min(states, key=lambda s: (-beneath.get(id(s), 0), s.rank))
 
 
 def _representatives(
