@@ -571,9 +571,10 @@ class ImpactWalk:
                 break
         reached, conflict = self._represent()
         skipped: dict[str, int] = {}
-        for edge, reason in sorted(self._skipped.items()):
+        for edge, reason in self._skipped.items():
             if edge not in self._followed:
                 skipped[reason] = skipped.get(reason, 0) + 1
+        skipped = dict(sorted(skipped.items()))  # by reason: the same on every index
         return WalkResult(
             seeds=list(seeds),
             reached={} if conflict else reached,
@@ -754,12 +755,13 @@ class ImpactWalk:
 
     def _gate(self, near: Node, row: NeighborRow, family: Family) -> tuple[bool, Context]:
         if family.name == "configures":
-            record = _record(row, DEPLOYMENT_ENV_EVIDENCE)
-            if not record:
+            if not _carries(row, DEPLOYMENT_ENV_EVIDENCE):
                 # no deployment's crossing (a Salt state, a project's own configuration):
                 # nothing to constrain the path to
                 return True, near.context
-            applied = self._applies(record)
+            # a deployment's crossing: whatever of it is not established constrains the path
+            # to an unestablished deployment, never to none
+            applied = self._applies(_record(row, DEPLOYMENT_ENV_EVIDENCE))
             if near.context is None:
                 return True, applied
             narrowed = near.context & applied
@@ -1111,6 +1113,14 @@ def _derive_step(node: Node) -> None:
     if row.far_repo_id is not None and (parent.home is None or row.far_repo_id != parent.home):
         home = row.far_repo_id
     node.home = home
+
+
+def _carries(row: NeighborRow, key: str) -> bool:
+    """Whether an edge's resolution records ``key`` at all, usable or not."""
+    if not row.resolution:
+        return False
+    loaded = json.loads(row.resolution)
+    return isinstance(loaded, dict) and key in loaded
 
 
 def _record(row: NeighborRow, key: str) -> dict[str, object]:
