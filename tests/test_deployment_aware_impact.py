@@ -114,7 +114,14 @@ def test_a_release_s_own_setting_reaches_its_own_callers_only(corpus: Workspace)
     """P1/F1, P2/F2: each values file's LIMIT, through its release's links alone."""
     a = impact(corpus, key(corpus, "deployer", "env/a.yaml", "env.LIMIT"))
     assert {"call_a", "call_cycle_a", "call_either"} <= callers(a)
-    assert not {"call_b", "call_cycle_b", "call_pair_a", "call_pair_b", "call_dev"} & callers(a)
+    assert not {
+        "call_b",
+        "call_cycle_b",
+        "call_pair_a",
+        "call_pair_b",
+        "call_dev",
+        "call_compose",
+    } & callers(a)
     assert releases(a, "call_a") == {"app-a"}
     assert skipped(a)["deployment_inapplicable"] >= 1
     b = impact(corpus, key(corpus, "deployer", "env/b.yaml", "env.LIMIT"))
@@ -158,22 +165,41 @@ def test_shared_source_and_the_variable_itself_stay_unconstrained(corpus: Worksp
     """P6, P7: code and the variable reach every linked deployment's callers."""
     for seed in (key(corpus, "app", "app/settings.py", "MAX"), "env:LIMIT"):
         response = impact(corpus, seed)
-        assert {"call_a", "call_b", "call_dev", "call_pair_a", "call_pair_b"} <= callers(response)
+        assert {
+            "call_a",
+            "call_b",
+            "call_dev",
+            "call_pair_a",
+            "call_pair_b",
+            "call_compose",
+        } <= callers(response)
         assert skipped(response) == {}
     variable = impact(corpus, "env:LIMIT")
     assert {"call_cycle_a", "call_cycle_b"} <= callers(variable)
 
 
-def test_a_compose_setting_never_crosses_a_release_of_the_same_application(
+def test_configuration_with_no_deployment_evidence_constrains_nothing(corpus: Workspace) -> None:
+    """A Salt state's context sets REGION: a CONFIGURES edge with no deployment_env record is
+    no deployment's crossing, so the path stays unconstrained and reaches every caller, as
+    before DF3d."""
+    response = impact(corpus, key(corpus, "app", "salt/app.sls", "app_config"))
+    assert {"call_a", "call_b", "call_dev", "call_compose", "call_summary_b"} <= callers(response)
+    assert skipped(response) == {}
+
+
+def test_a_compose_setting_reaches_its_service_s_callers_never_a_release_s(
     corpus: Workspace,
 ) -> None:
-    """F5: the compose service's CACHE reaches the reader and the handler, never a caller of
-    any Kubernetes release."""
+    """F5: the compose service's CACHE reaches the caller of ``http://app:8080`` -- a link
+    through that service, matched by its file and line -- and never a caller of any
+    Kubernetes release of the same code."""
     response = impact(
         corpus, key(corpus, "app", "docker-compose.yml", "services.app.environment.CACHE")
     )
-    assert "get_item" in {c.name for c in listed(response)}
-    assert callers(response) == set()
+    assert callers(response) == {"call_compose"}
+    [caller] = [c for c in listed(response) if c.name == "call_compose"]
+    assert caller.step.http is not None
+    assert caller.step.http.identity_source == "docker-compose-service"
     assert skipped(response)["deployment_inapplicable"] >= 1
 
 
@@ -302,8 +328,8 @@ def test_a_state_under_no_context_and_one_under_a_deployment_are_both_expanded(
     unconstrained after the round trip through svc. The constrained state finds call_summary_b's
     link (app-b) inapplicable; the unconstrained one follows it. The caller is listed, and so is
     the path it needs -- ask_svc and get_summary by the round trip -- and the link followed on
-    one path is not counted as skipped on the other: the four skipped are call_b's, call_pair_a's,
-    call_pair_b's and call_either's app-b link; call_dev's is unestablished."""
+    one path is not counted as skipped on the other: the five skipped are call_b's, call_pair_a's,
+    call_pair_b's, call_compose's and call_either's app-b link; call_dev's is unestablished."""
     response = impact(
         corpus, key(corpus, "deployer", ".github/workflows/deploy.yml", "jobs.deploy.steps[1].run")
     )
@@ -311,7 +337,7 @@ def test_a_state_under_no_context_and_one_under_a_deployment_are_both_expanded(
     [summary] = [c for c in listed(response) if c.name == "call_summary_b"]
     names = chain_names(summary.chain)
     assert names.index("fetch_item") < names.index("ask_svc") < names.index("get_summary")
-    assert skipped(response) == {"deployment_inapplicable": 4, "deployment_unestablished": 1}
+    assert skipped(response) == {"deployment_inapplicable": 5, "deployment_unestablished": 1}
 
 
 def test_the_representative_does_not_depend_on_which_path_ranks_first(corpus: Workspace) -> None:
