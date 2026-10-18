@@ -754,7 +754,12 @@ class ImpactWalk:
 
     def _gate(self, near: Node, row: NeighborRow, family: Family) -> tuple[bool, Context]:
         if family.name == "configures":
-            applied = self._applies(row)
+            record = _record(row, DEPLOYMENT_ENV_EVIDENCE)
+            if not record:
+                # no deployment's crossing (a Salt state, a project's own configuration):
+                # nothing to constrain the path to
+                return True, near.context
+            applied = self._applies(record)
             if near.context is None:
                 return True, applied
             narrowed = near.context & applied
@@ -780,14 +785,14 @@ class ImpactWalk:
         self._skipped.setdefault(row.edge_id, reason)
         return False, None
 
-    def _applies(self, row: NeighborRow) -> frozenset[Deployment]:
-        """The deployments a configuration crossing applies to, each from its own evidence.
+    def _applies(self, record: Mapping[str, object]) -> frozenset[Deployment]:
+        """The deployments a configuration crossing's record applies to, each from its own
+        evidence.
 
         One deployment: the edge's own record. Several (``deployments``): each one's own stored
         ``linked`` decision of the same setter, variable and reader -- its release, variant and
         workload as the release selected them -- never another's (R4). A deployment without
         one is unestablished."""
-        record = _record(row, DEPLOYMENT_ENV_EVIDENCE)
         listed = record.get("deployments")
         if not isinstance(listed, list) or len(listed) < 2:
             return frozenset({_configured_deployment(record)})
@@ -1157,7 +1162,8 @@ def _link_deployment(record: Mapping[str, object]) -> Deployment | None:
         variant = str(record.get("variant") or "")
         return ("release", str(deployed), str(release), variant, str(workload))
     if record.get("identity_source") == COMPOSE and record.get("identity_in"):
-        repository = record.get("identity_in_repo") or record.get("provider")
+        # a compose service runs what its own repository builds: the provider's
+        repository = record.get("provider")
         return ("compose", str(repository), str(record["identity_in"])) if repository else None
     return None
 
