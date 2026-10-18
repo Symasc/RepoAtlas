@@ -523,7 +523,7 @@ def test_a_field_reaches_its_exact_users_then_its_model_once_then_the_model_s_us
     corpus: Workspace,
 ) -> None:
     response = impact(corpus, "sym:api:api/models.py:Query.limit:8")
-    assert response.summary.policy == "impact/7"
+    assert response.summary.policy == "impact/8"
     found = basis(response)
     assert found == {
         "read": ("exact", "USES"),
