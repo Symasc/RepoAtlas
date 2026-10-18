@@ -9,6 +9,7 @@ calling every host.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -187,6 +188,41 @@ def test_configuration_with_no_deployment_evidence_constrains_nothing(corpus: Wo
     assert skipped(response) == {}
 
 
+def test_deployment_evidence_without_its_deployment_is_never_read_as_unrestricted(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """The other half of the rule above: an edge that records a deployment's crossing but not
+    which deployment -- no workload, or no release at all -- constrains the path to an
+    unestablished deployment. Its links are skipped, never followed as if nothing constrained
+    it. No writer leaves a record so today: it is edited in the store, as the evidence check of
+    test_http_crossings.py edits a link's."""
+    built = build(workspace, tmp_path, repos())
+    setter = key(built, "deployer", "env/a.yaml", "env.LIMIT")
+    [(edge, resolution)] = built.database.execute(
+        """SELECT e.id, e.resolution FROM edges e JOIN entities s ON s.id = e.src_id
+           WHERE e.type = 'CONFIGURES' AND s.key = ?""",
+        (setter,),
+    ).fetchall()
+    stored = json.loads(resolution)
+
+    def without(*fields: str) -> ImpactResponse:
+        record = {k: v for k, v in stored["deployment_env"].items() if k not in fields}
+        built.database.execute(
+            "UPDATE edges SET resolution = ? WHERE id = ?",
+            (json.dumps({**stored, "deployment_env": record}), edge),
+        )
+        return impact(built, setter)
+
+    no_workload = without("workload_in")
+    assert "get_item" in {c.name for c in listed(no_workload)}
+    assert callers(no_workload) == set()
+    assert skipped(no_workload)["deployment_unestablished"] >= 1  # app-a's own links
+    no_release = without("workload_in", "release", "variant")
+    assert "get_item" in {c.name for c in listed(no_release)}
+    assert callers(no_release) == set()
+    assert set(skipped(no_release)) == {"deployment_unestablished"}
+
+
 def test_a_compose_setting_reaches_its_service_s_callers_never_a_release_s(
     corpus: Workspace,
 ) -> None:
@@ -307,6 +343,24 @@ def test_paths_no_single_entity_path_represents_make_the_answer_ambiguous(
     assert response.candidates == () and response.tests == ()
     for entity in suggested:
         assert impact(corpus, entity).seed.status is SeedStatus.RESOLVED
+
+
+def test_no_single_setter_is_ever_ambiguous(corpus: Workspace) -> None:
+    """R2, I3: ambiguity needs contexts that part again; one setter's paths share theirs. Every
+    deployment setter of the corpus, asked alone, resolves -- and every answer's ``from`` trails
+    are its chains (``impact`` asserts it)."""
+    setters = sorted(
+        {
+            str(found)
+            for (found,) in corpus.database.execute(
+                """SELECT s.key FROM edges e JOIN entities s ON s.id = e.src_id
+                   WHERE e.type = 'CONFIGURES' AND e.resolution LIKE '%"deployment_env"%'"""
+            ).fetchall()
+        }
+    )
+    assert len(setters) >= 8
+    for setter in setters:
+        assert impact(corpus, setter).seed.status is SeedStatus.RESOLVED, setter
 
 
 def test_paths_that_meet_and_never_part_are_no_ambiguity(corpus: Workspace) -> None:
