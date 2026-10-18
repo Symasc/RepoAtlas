@@ -279,7 +279,7 @@ def test_xr1_the_answer_says_how_the_change_crossed_and_where_to_read_it(
     assert all(
         c.step.crossing is None for c in (*response.candidates, *response.tests) if c.distance > 1
     )
-    assert response.summary.policy == "impact/7"
+    assert response.summary.policy == "impact/8"
 
 
 def test_xr2_every_name_on_the_way_is_in_the_answer(indexed: Workspace) -> None:
