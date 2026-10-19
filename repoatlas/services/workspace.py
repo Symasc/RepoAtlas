@@ -19,6 +19,7 @@ from repoatlas.gitstate.client import GitClient
 from repoatlas.parsers.registry import ParserRegistry
 from repoatlas.retrieval.retriever import RetrievalLimits, Retriever
 from repoatlas.storage.sqlite.database import Database, open_database
+from repoatlas.storage.sqlite.deployment_links import SqliteDeploymentLinkStore
 from repoatlas.storage.sqlite.search import SqliteSearchIndex
 from repoatlas.storage.sqlite.stores import (
     SqliteDependencyStore,
@@ -41,6 +42,8 @@ class Workspace:
     files: SqliteFileStore
     knowledge: SqliteKnowledgeStore
     dependencies: SqliteDependencyStore
+    #: The one store a user writes: where repositories are deployed. No sync touches it.
+    deployment_links: SqliteDeploymentLinkStore
     search: SqliteSearchIndex
     registry: ParserRegistry
     dependency_registry: DependencyRegistry
@@ -107,6 +110,7 @@ def open_workspace(*, settings: Settings | None = None, require_root: bool = Tru
         files=SqliteFileStore(database),
         knowledge=SqliteKnowledgeStore(database),
         dependencies=SqliteDependencyStore(database),
+        deployment_links=SqliteDeploymentLinkStore(database),
         search=SqliteSearchIndex(database),
         registry=ParserRegistry(),
         dependency_registry=DependencyRegistry(),

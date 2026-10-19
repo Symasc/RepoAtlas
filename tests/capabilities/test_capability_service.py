@@ -301,6 +301,10 @@ def test_the_public_callable_surface_is_only_the_intended_operations() -> None:
         "impact",
         "dependencies",
         "http_operations",
+        "deployment_targets",
+        "deployment_link_create",
+        "deployment_link_update",
+        "deployment_link_delete",
         # topology: shipped for the local API, deliberately not an agent tool
         "topology_overview",
         "topology_children",

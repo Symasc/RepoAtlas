@@ -188,7 +188,7 @@ def test_the_index_names_the_contract_and_exactly_what_the_schema_describes(api:
     assert {"topology/overview", "topology/children", "topology/edge"} <= set(described)
     # the write and the answer check stay agent tools; topology is not one
     assert not {"sync", "verify_grounding"} & set(described)
-    assert len(TOOLS) == 10
+    assert len(TOOLS) == 11
     assert not any("topology" in spec.name for spec in TOOLS)
 
 
@@ -323,6 +323,42 @@ def test_capability_refusals_are_answered_by_their_category(api: Serving) -> Non
         assert reply.status == STATUS_BY_CATEGORY[ErrorCategory(reply.error["category"])]
         if code is not None:
             assert reply.error["code"] == code
+
+
+def test_a_deployment_link_is_written_read_and_removed_over_the_wire(api: Serving) -> None:
+    context = repository("app")
+    fields = {"label": "staging", "environment": "staging", "url": "https://app.example.test/"}
+    created = post(api, "deployment_links/create", {"context": context, "link": fields})
+    assert created.status == 200, created.body
+    link = created.result["link"]
+    assert link["verification"] == "unverified"
+
+    listed = post(api, "deployment_targets", {"context": context}).result
+    assert [entry["id"] for entry in listed["links"]] == [link["id"]]
+
+    confirmed = post(
+        api,
+        "deployment_links/update",
+        {
+            "context": context,
+            "id": link["id"],
+            "link": {**fields, "verification": "user_confirmed"},
+        },
+    ).result["link"]
+    assert confirmed["verification"] == "user_confirmed" and confirmed["verified_at"]
+
+    refused = post(
+        api,
+        "deployment_links/create",
+        {"context": context, "link": {"label": "x", "url": "https://u:p@app.example.test/"}},
+    )
+    assert refused.status == 400
+    assert "u:p" not in json.dumps(refused.body)
+
+    assert post(api, "deployment_links/delete", {"context": context, "id": link["id"]}).result
+    gone = post(api, "deployment_links/delete", {"context": context, "id": link["id"]})
+    assert gone.status == 404 and gone.error["code"] == "DEPLOYMENT_LINK_NOT_FOUND"
+    assert post(api, "deployment_targets", {"context": GLOBAL}).status == 400
 
 
 # ---------------------------------------------------------------------------

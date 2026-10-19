@@ -1057,6 +1057,220 @@ export interface ProviderView {
   version?: string | null;
 }
 /**
+ * One condition: the context's ``kind`` (a ``variable`` by ``name``) ``op`` ``value``.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeploymentCondition".
+ */
+export interface DeploymentCondition {
+  kind: "branch" | "environment" | "pull_request" | "variable";
+  name?: string | null;
+  op?: "equals" | "glob";
+  value: string;
+}
+/**
+ * A template ``if`` around a target, and whether the values at hand meet it.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeploymentGuard".
+ */
+export interface DeploymentGuard {
+  expression: string;
+  line: number;
+  state: "met" | "unmet" | "unknown";
+}
+/**
+ * A stored link (``deployment_links``), kept by repository slug so it outlives the
+ * repository's index.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeploymentLink".
+ */
+export interface DeploymentLink {
+  /**
+   * At most 16; all must hold.
+   */
+  conditions?: DeploymentCondition[];
+  created_at: string;
+  environment?: string | null;
+  id: number;
+  label: string;
+  repository: string;
+  target_id?: string | null;
+  updated_at: string;
+  url?: string | null;
+  variables?: {
+    [k: string]: string | undefined;
+  };
+  verification?: "unverified" | "user_confirmed";
+  verified_at?: string | null;
+}
+/**
+ * State where one repository is deployed.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeploymentLinkCreateRequest".
+ */
+export interface DeploymentLinkCreateRequest {
+  context: CapabilityContext;
+  link: DeploymentLinkFields;
+}
+/**
+ * What a user states about a deployment: where it is, under which conditions, and
+ * the values of the variables a stated target leaves open.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeploymentLinkFields".
+ */
+export interface DeploymentLinkFields {
+  /**
+   * At most 16; all must hold.
+   */
+  conditions?: DeploymentCondition[];
+  environment?: string | null;
+  label: string;
+  target_id?: string | null;
+  url?: string | null;
+  variables?: {
+    [k: string]: string | undefined;
+  };
+  verification?: "unverified" | "user_confirmed";
+}
+/**
+ * Remove a stored link.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeploymentLinkDeleteRequest".
+ */
+export interface DeploymentLinkDeleteRequest {
+  context: CapabilityContext;
+  id: number;
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeploymentLinkDeleteResponse".
+ */
+export interface DeploymentLinkDeleteResponse {
+  context: CapabilityContext;
+  deleted: boolean;
+  id: number;
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeploymentLinkResponse".
+ */
+export interface DeploymentLinkResponse {
+  context: CapabilityContext;
+  link: DeploymentLink;
+}
+/**
+ * Replace what a stored link states.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeploymentLinkUpdateRequest".
+ */
+export interface DeploymentLinkUpdateRequest {
+  context: CapabilityContext;
+  id: number;
+  link: DeploymentLinkFields;
+}
+/**
+ * A target under one context: the chart's defaults, a release, or a user's link.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeploymentResolution".
+ */
+export interface DeploymentResolution {
+  basis: "declared" | "chart-defaults" | "release" | "link";
+  conditions?: "match" | "no_match" | "unknown" | "conflict" | "none";
+  duplicate_of?: string | null;
+  enabled?: "met" | "unmet" | "unknown";
+  environment?: string | null;
+  label: string;
+  link_id?: number | null;
+  origin?: string | null;
+  rendered: string;
+  state: "resolved" | "partial" | "unresolved";
+  url?: string | null;
+  variables?: DeploymentVariable[];
+  verification?: "unverified" | "user_confirmed";
+}
+/**
+ * One part of a target's URL that is not literal in the file that states it.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeploymentVariable".
+ */
+export interface DeploymentVariable {
+  basis?: ("chart-defaults" | "release" | "configured" | "context" | "chart" | "declared") | null;
+  name: string;
+  source: "value" | "chart" | "release" | "namespace" | "scheme" | "opaque";
+  value?: string | null;
+  withheld?: boolean;
+}
+/**
+ * One place a repository is reached, as stated, with every context it resolves under.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeploymentTarget".
+ */
+export interface DeploymentTarget {
+  detached?: boolean;
+  diagnostics?: string[];
+  guards?: DeploymentGuard[];
+  kind: "ingress" | "openapi-server" | "link";
+  line?: number | null;
+  path?: string | null;
+  pattern: string;
+  repository: string;
+  resolutions?: DeploymentResolution[];
+  scheme_basis?: string | null;
+  schemes?: string[];
+  target_id: string;
+}
+/**
+ * List where one repository says it is deployed, and what users say about it.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeploymentTargetsRequest".
+ */
+export interface DeploymentTargetsRequest {
+  /**
+   * The branch to evaluate conditions for. Defaults to the branch the repository's checkout is on.
+   */
+  branch?: string | null;
+  context: CapabilityContext;
+  /**
+   * The environment to evaluate conditions for.
+   */
+  environment?: string | null;
+  /**
+   * Whether conditions are evaluated for a pull request.
+   */
+  pull_request?: boolean | null;
+  /**
+   * Values for `variable` conditions.
+   */
+  variables?: {
+    [k: string]: string | undefined;
+  };
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeploymentTargetsResponse".
+ */
+export interface DeploymentTargetsResponse {
+  basis?: string;
+  branch?: string | null;
+  branch_basis?: ("request" | "checkout") | null;
+  context: CapabilityContext;
+  diagnostics?: string[];
+  environment?: string | null;
+  links?: DeploymentLink[];
+  repository: string;
+  targets?: DeploymentTarget[];
+}
+/**
  * Workspace candidates; every row's status still describes its source repository.
  *
  * This interface was referenced by `ApiIndex`'s JSON-Schema
@@ -2318,7 +2532,7 @@ export interface TopologyReferencesResponse {
 export const CONTRACT = "repoatlas-local-api/1" as const;
 
 /** Every endpoint the local API serves, in the server's registry order. */
-export const ENDPOINT_NAMES = ["repositories","status","search","inspect","relationships","impact","dependencies","http_operations","topology/overview","topology/children","topology/edge","topology/files","topology/names","topology/references"] as const;
+export const ENDPOINT_NAMES = ["repositories","status","search","inspect","relationships","impact","dependencies","http_operations","deployment_targets","deployment_links/create","deployment_links/update","deployment_links/delete","topology/overview","topology/children","topology/edge","topology/files","topology/names","topology/references"] as const;
 
 export type EndpointName = (typeof ENDPOINT_NAMES)[number];
 
@@ -2332,6 +2546,10 @@ export interface Endpoints {
   "impact": { request: ImpactRequest; response: ImpactResponse };
   "dependencies": { request: DependenciesRequest; response: DependenciesResponse };
   "http_operations": { request: HttpOperationsRequest; response: HttpOperationsResponse };
+  "deployment_targets": { request: DeploymentTargetsRequest; response: DeploymentTargetsResponse };
+  "deployment_links/create": { request: DeploymentLinkCreateRequest; response: DeploymentLinkResponse };
+  "deployment_links/update": { request: DeploymentLinkUpdateRequest; response: DeploymentLinkResponse };
+  "deployment_links/delete": { request: DeploymentLinkDeleteRequest; response: DeploymentLinkDeleteResponse };
   "topology/overview": { request: TopologyOverviewRequest; response: TopologyOverviewResponse };
   "topology/children": { request: TopologyChildrenRequest; response: TopologyChildrenResponse };
   "topology/edge": { request: TopologyEdgeRequest; response: TopologyEdgeResponse };

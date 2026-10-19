@@ -1441,16 +1441,30 @@ class SqliteKnowledgeStore:
         """Whether a global commit has written ``http_call_decisions`` since the table existed."""
         return self._db.get_meta(HTTP_CALL_DECISIONS_KEY) is not None
 
-    def list_http_edges(self, repo_id: int) -> list[HttpEdgeRow]:
+    def list_http_edges(
+        self, repo_id: int, types: Sequence[EdgeType] | None = None
+    ) -> list[HttpEdgeRow]:
         """Every edge one repository asserts to a shared HTTP route or endpoint.
 
         Reached through the HTTP nodes (a key range on ``idx_entities_key``, then
         ``idx_edges_dst``) and narrowed to the asserting repository, which is the
         edge's own ``repo_id``: the other repositories meeting on the same node are
-        not this repository's facts.
+        not this repository's facts. ``types`` defaults to the call and serve edges.
         """
+        chosen = (
+            types
+            if types is not None
+            else (
+                EdgeType.CALLS_HTTP_ROUTE,
+                EdgeType.SERVES_HTTP_ROUTE,
+                EdgeType.CALLS_HTTP_ENDPOINT,
+            )
+        )
+        if not chosen:
+            return []
+        marks = ", ".join("?" for _ in chosen)
         rows = self._db.execute(
-            """
+            f"""
             SELECT e.type, e.parser, e.src_id, s.key AS src_key, s.name AS src_name,
                    s.qualified_name AS src_qualified_name, t.key AS target_key,
                    t.name AS target_name, f.rel_path AS path, e.line_start, e.line_end
@@ -1460,16 +1474,14 @@ class SqliteKnowledgeStore:
             LEFT JOIN files f ON f.id = e.file_id
             WHERE t.key >= ? AND t.key < ?
               AND e.repo_id = ?
-              AND e.type IN (?, ?, ?)
+              AND e.type IN ({marks})
             ORDER BY f.rel_path, e.line_start, t.key, s.key
-            """,
+            """,  # noqa: S608 - placeholders are a generated count, values are bound
             (
                 _HTTP_KEY_PREFIX,
                 _after(_HTTP_KEY_PREFIX),
                 repo_id,
-                str(EdgeType.CALLS_HTTP_ROUTE),
-                str(EdgeType.SERVES_HTTP_ROUTE),
-                str(EdgeType.CALLS_HTTP_ENDPOINT),
+                *(str(edge_type) for edge_type in chosen),
             ),
         ).fetchall()
         return [
