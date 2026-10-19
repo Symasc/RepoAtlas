@@ -1,0 +1,138 @@
+/* -- the Deployments view ---------------------------------------------------------------- */
+
+.deployments {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.context {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.context > :first-child {
+  flex: 1;
+}
+
+.target,
+.link,
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--ra-border);
+  border-radius: var(--ra-radius);
+  background: var(--ra-surface);
+}
+
+.targetHead,
+.resolutionHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.kind,
+.label {
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 600;
+  color: var(--ra-text);
+}
+
+.at,
+.state,
+.basisTag {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-muted);
+}
+
+.flag {
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-warning);
+}
+
+.pattern,
+.url {
+  margin: 0;
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text);
+  overflow-wrap: anywhere;
+}
+
+.detail,
+.basis {
+  margin: 0;
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-muted);
+}
+
+.guards,
+.notes,
+.resolutions,
+.links {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-muted);
+}
+
+.guards li[data-state="unmet"] {
+  color: var(--ra-warning);
+}
+
+.resolution {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--ra-border);
+}
+
+/* Confirmation is the user's word, never a check; it is marked, not celebrated. */
+.verification {
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-subtle);
+}
+
+.verification[data-verification="user_confirmed"] {
+  color: var(--ra-success);
+}
+
+.variables {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 10px;
+  margin: 0;
+  font-size: var(--mantine-font-size-xs);
+}
+
+.variable {
+  display: contents;
+}
+
+.variable dt {
+  font-family: var(--mantine-font-family-monospace);
+  color: var(--ra-text-muted);
+}
+
+.variable dd {
+  margin: 0;
+  font-family: var(--mantine-font-family-monospace);
+  color: var(--ra-text);
+  overflow-wrap: anywhere;
+}
+
+.linkActions {
+  display: flex;
+  gap: 6px;
+}

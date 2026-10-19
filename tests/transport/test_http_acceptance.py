@@ -110,7 +110,7 @@ def test_an_agent_walks_from_search_to_a_grounded_claim(corpus_state: Path) -> N
 
     outcome = over_stdio(corpus_state, body)
 
-    assert len(outcome["tools"]) == 10
+    assert len(outcome["tools"]) == 11
     assert outcome["handle"] == ENDPOINT
     sides = {
         (edge["source"]["repository_slug"], edge["type"]) for edge in outcome["related"]["edges"]

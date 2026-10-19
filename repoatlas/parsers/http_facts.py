@@ -166,6 +166,14 @@ HELM_VALUES_FILE = "helm-values-file"
 K8S_WORKLOAD = "k8s-workload"
 #: A chart template's ConfigMap: its name and data keys (never their values).
 K8S_CONFIGMAP = "k8s-configmap"
+#: An Ingress document of any YAML file, read leniently for where it is reached: hosts and
+#: TLS hosts as parts (text, chart name, values path, release, or an opaque hole), paths,
+#: backends, scheme, guards and holes (repoatlas.parsers.deploy_targets). Never read by the
+#: HTTP join, which keeps :data:`HELM_INGRESS`'s strict subset.
+DEPLOYMENT_TARGET_INGRESS = "deployment-target-ingress"
+#: A chart's ``values.yaml``: the literal ALB ``listen-ports`` annotation of each
+#: ``annotations`` mapping in it, by the mapping's dotted path.
+DEPLOYMENT_TARGET_VALUES = "deployment-target-values"
 
 #: ``transport`` values of :data:`HTTP_LOCAL_CALL`.
 TRANSPORT_WRAPPER = "wrapper"

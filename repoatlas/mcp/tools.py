@@ -1,4 +1,4 @@
-"""The ten capabilities, as tool declarations. No repository intelligence.
+"""The eleven capabilities, as tool declarations. No repository intelligence.
 
 Every entry here is four facts: a protocol name, a description an agent reads
 before choosing, the V2 request model that validates its arguments, and the
@@ -29,6 +29,7 @@ from pydantic import BaseModel
 
 from repoatlas.models.capability_io import RepositoriesRequest, StatusRequest
 from repoatlas.models.dependency_inventory import DependenciesRequest
+from repoatlas.models.deployment_targets import DeploymentTargetsRequest
 from repoatlas.models.http_inventory import HttpOperationsRequest
 from repoatlas.models.impact import ImpactRequest
 from repoatlas.models.inspection import InspectRequest
@@ -57,7 +58,7 @@ class ToolSpec:
     #: to a function, so this module never holds a callable that could acquire a
     #: wrapper with behaviour of its own.
     capability: str
-    #: Whether the capability may change the index. True for nine of ten;
+    #: Whether the capability may change the index. True for ten of eleven;
     #: ``sync`` is the exception and is the whole of Slice I.
     read_only: bool
 
@@ -207,6 +208,27 @@ HTTP_OPERATIONS = ToolSpec(
     read_only=True,
 )
 
+DEPLOYMENT_TARGETS = ToolSpec(
+    name=f"{NAMESPACE}_deployment_targets",
+    title="List deployment targets",
+    description=(
+        "List where one repository's source says it is reached: each Kubernetes Ingress "
+        "host and path (from a manifest or a Helm chart template) and each OpenAPI "
+        "server URL, plus the deployment links the user recorded. Every target keeps "
+        "four things apart: the pattern as configured, the conditions under which a "
+        "release applies (branch, environment, pull request, variables), each "
+        "resolution with the basis of every variable it filled (chart defaults, a "
+        "release's values, the request's context, a link), and verification, which is "
+        "unverified unless the user confirmed it. A value nothing supplies stays a named "
+        "hole, never a guess. Reads the local index and the stored links; it reaches no "
+        "network and never checks that a URL answers. An OAuth callback or redirect URL "
+        "is not a deployment target and is not listed."
+    ),
+    request=DeploymentTargetsRequest,
+    capability="deployment_targets",
+    read_only=True,
+)
+
 VERIFY_GROUNDING = ToolSpec(
     name=f"{NAMESPACE}_verify_grounding",
     title="Verify citations against supplied evidence",
@@ -249,6 +271,7 @@ TOOLS: tuple[ToolSpec, ...] = (
     RELATIONSHIPS,
     DEPENDENCIES,
     HTTP_OPERATIONS,
+    DEPLOYMENT_TARGETS,
     VERIFY_GROUNDING,
     SYNC,
 )

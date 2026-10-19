@@ -30,12 +30,13 @@ Ten, and no others:
 | `repoatlas_relationships` | walk indexed graph facts from one exact entity |
 | `repoatlas_dependencies` | read declared, resolved and provided package facts |
 | `repoatlas_http_operations` | list a repository's HTTP operations, or explicitly discover route candidates across repositories |
+| `repoatlas_deployment_targets` | list where one repository's source says it is reached (Ingress hosts, OpenAPI servers) and the user's deployment links |
 | `repoatlas_verify_grounding` | check that your citations resolve to supplied evidence |
 | `repoatlas_sync` | update the index from local working trees |
 
 There is no tool that initializes an index, answers a question for you, reads an arbitrary file, or runs anything. Indexing a workspace for the first time is an operator action outside this tool surface; if nothing is indexed, say so.
 
-Do not call all ten on every question. Most questions need two or three.
+Do not call all eleven on every question. Most questions need two or three.
 
 ## Investigations
 
@@ -265,6 +266,16 @@ An endpoint a specification composes from a server URL and a path has no single 
 `repoatlas_relationships` walks the link by default inside one repository, and across repositories with `cross_repository: true`; from the request, `repoatlas_http_operations` lists the same decision as a `linked` crossing with its whole chain.
 
 Read those lines before stating the relationship, and state it as source evidence: "portal's `load_user` requests GET https://accounts.example/api/users/{user_id}, which accounts' `get_user` serves under the host its Swagger template publishes." It is not proof the request is sent at run time or reaches that deployment.
+
+## Deployment targets
+
+`repoatlas_deployment_targets` lists, for one repository, each Kubernetes Ingress host and path (a manifest or a Helm chart template) and each OpenAPI server URL, with the deployment links the user recorded.
+
+```json
+{"tool": "repoatlas_deployment_targets", "arguments": {"context": {"scope": "repository", "repository": "web"}, "branch": "main"}}
+```
+
+Keep its four states apart when you report one: the `pattern` is what is configured; `conditions` say when a release applies; each resolution's `variables` give the basis of every value it filled (`chart-defaults`, `release`, `context`, `link`), and a value nothing supplies stays a named hole; `verification` is `unverified` unless the user confirmed it. Nothing here is checked over the network. An OAuth callback or redirect URL is not a deployment target and is never listed as one.
 
 ## HTTP inventory and coverage
 

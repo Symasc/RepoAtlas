@@ -170,6 +170,8 @@ Content-Length: <n>
 | `search`, `inspect` | find evidence; read indexed source and recorded evidence |
 | `relationships`, `impact` | what one entity is connected to; what a change may reach |
 | `dependencies`, `http_operations` | declared packages; HTTP operations made and served |
+| `deployment_targets` | where one repository says it is deployed, resolved per release, link and branch context |
+| `deployment_links/create`, `deployment_links/update`, `deployment_links/delete` | record, change or remove a user's deployment link |
 | `topology/overview` | which repositories are linked to which, by kind: `observed`, `http`, `dependency` |
 | `topology/children` | one page of a directory's or file's children, and how every child links |
 | `topology/edge` | one exact stored edge: its evidence, crossing, and multiplicity |
@@ -177,7 +179,10 @@ Content-Length: <n>
 | `topology/names` | declared names (variables, functions, classes, methods, environment variables) that hold every term of a query, best-named first |
 | `topology/references` | what each line of one file declares and refers to, in source order |
 
-**Not served:** `sync`, the only write, and `verify_grounding`, which checks an agent's answer. Both remain
+The `deployment_links/*` names are the only writes served here. They change only the user's own links, never
+an indexed fact, and pass the same Host, token and Origin checks as every other request.
+
+**Not served:** `sync`, the index's write, and `verify_grounding`, which checks an agent's answer. Both remain
 agent tools over MCP. The topology capabilities are served here only; they are not MCP tools.
 
 ## Responses

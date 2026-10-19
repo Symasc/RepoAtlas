@@ -74,6 +74,7 @@ from repoatlas.capabilities.dependencies import (
     validate_dependency_request,
 )
 from repoatlas.capabilities.errors import (
+    DeploymentLinkNotFoundError,
     EdgeNotFoundError,
     EntityAmbiguousError,
     EntityNotFoundError,
@@ -82,6 +83,7 @@ from repoatlas.capabilities.errors import (
     FileNotIndexedError,
     IndexChangedError,
     IndexInconsistencyError,
+    InvalidDeploymentLinkError,
     InvalidImpactRequestError,
     InvalidTopologyRequestError,
     InvestigationRequiredError,
@@ -194,6 +196,7 @@ from repoatlas.errors import (
 )
 from repoatlas.freshness import index_freshness
 from repoatlas.graph.declared import root_path
+from repoatlas.graph.deployment_targets import build_targets
 from repoatlas.graph.impact import ImpactWalk
 from repoatlas.graph.keys import is_positional
 from repoatlas.graph.linker import plan_repository_http
@@ -203,6 +206,7 @@ from repoatlas.grounding import NAMED_REFERENCE, GroundingReport, ground_answer
 from repoatlas.indexing.chunking import chunk_hash
 from repoatlas.models.capability import (
     AppliedBudget,
+    CapabilityContext,
     CapabilityScope,
     ContextResolution,
     Presentation,
@@ -227,6 +231,17 @@ from repoatlas.models.dependency_inventory import (
     DependencyPackageView,
     DependencyProvenance,
     ProviderView,
+)
+from repoatlas.models.deployment_conditions import ConditionContext
+from repoatlas.models.deployment_targets import (
+    DeploymentLinkCreateRequest,
+    DeploymentLinkDeleteRequest,
+    DeploymentLinkDeleteResponse,
+    DeploymentLinkResponse,
+    DeploymentLinkUpdateRequest,
+    DeploymentTargetsRequest,
+    DeploymentTargetsResponse,
+    LinkLimitError,
 )
 from repoatlas.models.evidence import EvidenceCandidate, EvidenceSource, EvidenceTier, MatchClass
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
@@ -267,7 +282,7 @@ from repoatlas.models.investigation import (
     LedgerEntry,
     ProposedEvidence,
 )
-from repoatlas.models.parsing import EntityType, NeighborOrder
+from repoatlas.models.parsing import EdgeType, EntityType, NeighborOrder
 from repoatlas.models.relationships import (
     MAX_NEIGHBORS_CEILING,
     AppliedGraphLimits,
@@ -1248,6 +1263,109 @@ class CapabilityService:
                 entries=entries,
                 limits=limits,
             )
+
+    def deployment_targets(self, request: DeploymentTargetsRequest) -> DeploymentTargetsResponse:
+        """Where one repository says it is deployed, and what users stated about it.
+
+        Built from the repository's standing claims on every call, never stored: each
+        Ingress host and OpenAPI server its files state, resolved under the chart's
+        defaults, each release that installs the chart and each link a user made for
+        it, with every value's source named and every hole left a hole. Nothing is
+        contacted; a URL here is what the files and links render to.
+        """
+        with self._operation():
+            repository = self._deployment_repository(request.context)
+            branch_basis = "request" if request.branch is not None else None
+            branch = request.branch
+            if branch is None and repository.branch:
+                branch, branch_basis = repository.branch, "checkout"
+            context = ConditionContext(
+                branch=branch,
+                environment=request.environment,
+                pull_request=request.pull_request,
+                variables=dict(request.variables),
+            )
+            knowledge = self._workspace.knowledge
+            assert repository.id is not None
+            with self._workspace.database.read_snapshot():
+                claims = knowledge.list_unresolved_refs(repository.id)
+                paths = {
+                    row.file_id: row.rel_path for row in knowledge.list_file_rows(repository.id)
+                }
+                edges = knowledge.list_http_edges(
+                    repository.id, (EdgeType.DECLARES_HTTP_DEPLOYMENT,)
+                )
+                links = self._workspace.deployment_links.list(repository.slug)
+            targets, diagnostics = build_targets(
+                repository.slug, claims, paths, edges, links, context
+            )
+            return DeploymentTargetsResponse(
+                context=request.context,
+                repository=repository.slug,
+                branch=branch,
+                branch_basis=branch_basis,  # type: ignore[arg-type]
+                environment=request.environment,
+                targets=tuple(targets),
+                links=tuple(links),
+                diagnostics=tuple(diagnostics),
+            )
+
+    def deployment_link_create(
+        self, request: DeploymentLinkCreateRequest
+    ) -> DeploymentLinkResponse:
+        """Store a link a user states for the one repository in scope."""
+        with self._operation():
+            repository = self._deployment_repository(request.context)
+            try:
+                link = self._workspace.deployment_links.create(repository.slug, request.link)
+            except LinkLimitError as exc:
+                raise InvalidDeploymentLinkError(str(exc)) from exc
+            return DeploymentLinkResponse(context=request.context, link=link)
+
+    def deployment_link_update(
+        self, request: DeploymentLinkUpdateRequest
+    ) -> DeploymentLinkResponse:
+        """Replace what a stored link of the repository in scope states."""
+        with self._operation():
+            repository = self._deployment_repository(request.context)
+            store = self._workspace.deployment_links
+            current = store.get(request.id)
+            if current is None or current.repository != repository.slug:
+                raise DeploymentLinkNotFoundError()
+            link = store.update(request.id, request.link)
+            if link is None:
+                raise DeploymentLinkNotFoundError()
+            return DeploymentLinkResponse(context=request.context, link=link)
+
+    def deployment_link_delete(
+        self, request: DeploymentLinkDeleteRequest
+    ) -> DeploymentLinkDeleteResponse:
+        """Remove a stored link of the repository in scope."""
+        with self._operation():
+            repository = self._deployment_repository(request.context)
+            store = self._workspace.deployment_links
+            current = store.get(request.id)
+            if current is None or current.repository != repository.slug:
+                raise DeploymentLinkNotFoundError()
+            return DeploymentLinkDeleteResponse(
+                context=request.context, id=request.id, deleted=store.delete(request.id)
+            )
+
+    def _deployment_repository(self, context: CapabilityContext) -> Repository:
+        """The one repository a deployment call is about."""
+        resolution = resolve_context(context, self._workspace.repositories.list_all())
+        if (
+            resolution.scope is not CapabilityScope.REPOSITORY
+            or len(resolution.repositories) != 1
+            or resolution.repositories[0].slug == DECLARATIONS_SLUG
+        ):
+            raise ContextResolutionError(
+                "deployment targets need a repository scope",
+                detail="Name the one repository whose deployments to read or change.",
+                reason=ContextFailure.AMBIGUOUS,
+                candidates=tuple(sorted(repo.slug for repo in resolution.repositories)),
+            )
+        return resolution.repositories[0]
 
     def http_operations(self, request: HttpOperationsRequest) -> HttpOperationsResponse:
         """The HTTP operations one repository's indexed source makes or serves.

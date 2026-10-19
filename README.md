@@ -34,7 +34,7 @@ the agent reads the right code, including code it would not have thought to sear
   lockfiles, and which repository depends on which.
 - **Evidence you can check**: every result names indexed files and lines, and carries an evidence id that an
   agent's final answer can be verified against.
-- **MCP server and agent skills**: ten tools over the Model Context Protocol, and five skills that teach an agent
+- **MCP server and agent skills**: eleven tools over the Model Context Protocol, and five skills that teach an agent
   which tool fits which task.
 - **Graph explorer**: a local web app for browsing repositories, files, names and the links between them, down to
   the evidence behind each link.
@@ -98,7 +98,7 @@ installing by hand, and troubleshooting.
 
 ### With a coding agent
 
-The MCP server exposes ten tools. Five skills teach an agent which tools to use for which task:
+The MCP server exposes eleven tools. Five skills teach an agent which tools to use for which task:
 
 | Skill | For |
 |---|---|
@@ -120,7 +120,8 @@ repoatlas ui
 This opens a local web app at <http://127.0.0.1:7318> that draws the index: the repositories and the links
 between them, then directories, files and the names declared in them. A file opens on its code. Select a name to
 trace everything connected to it, a directory to see what a change there may reach, or a link to see the evidence
-behind it.
+behind it. A repository's **Deployments** tab shows where its source says it is deployed (Ingress hosts,
+declared servers) and what each needs to resolve, and keeps the links you record for each environment.
 
 ![The explorer's evidence for an HTTP link: a request in requests-cache to https://httpbin.org/get, matched to the httpbin handler that serves it, with each hop of the decision proven](https://raw.githubusercontent.com/Symasc/RepoAtlas/master/docs/assets/explorer-http-evidence.png)
 
