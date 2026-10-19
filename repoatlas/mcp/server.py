@@ -94,7 +94,7 @@ INSTRUCTIONS = (
 
 
 def tool_definitions() -> list[protocol.Tool]:
-    """The ten tools, with schemas derived from the request models themselves.
+    """The eleven tools, with schemas derived from the request models themselves.
 
     ``model_json_schema()`` rather than a hand-written declaration, so enum
     members, numeric bounds, defaults and which fields are optional are stated
@@ -269,7 +269,7 @@ def dispatch(
 
 
 def build_server(service: CapabilityService) -> Server[object, object]:
-    """Bind the ten tools to one already-open service.
+    """Bind the eleven tools to one already-open service.
 
     Exactly two handlers are registered, which is also how the handshake comes to
     advertise tools and nothing else: the SDK derives server capabilities from the

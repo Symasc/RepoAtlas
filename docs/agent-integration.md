@@ -88,10 +88,10 @@ Every tool call states its own repository scope.
 
 ### What `tools/list` costs
 
-The ten tool input schemas are advertised in full and are derived directly from
+The eleven tool input schemas are advertised in full and are derived directly from
 the V2 Pydantic request models, so the schema a client validates against is the
-one the capability actually accepts. A compact JSON serialization of all ten
-tool definitions currently measures 56,638 bytes, including descriptions and
+one the capability actually accepts. A compact JSON serialization of all eleven
+tool definitions currently measures 62,096 bytes, including descriptions and
 schemas. This is a byte measurement, not model tokens; clients may expose only
 selected definitions. See the dated comparison in the evaluation notes above.
 
@@ -139,7 +139,7 @@ flowchart LR
     impact --> t1["repoatlas_impact,<br/>then repoatlas_inspect"]
     trace --> t2["repoatlas_search,<br/>repoatlas_relationships,<br/>repoatlas_inspect"]
     deps --> t3["repoatlas_dependencies"]
-    http --> t4["repoatlas_http_operations"]
+    http --> t4["repoatlas_http_operations,<br/>repoatlas_deployment_targets"]
     idx --> t5["repoatlas_repositories,<br/>repoatlas_status,<br/>repoatlas_sync"]
 ```
 
@@ -171,15 +171,15 @@ there is one source of behavioural truth.
 
 ## 4. What the agent gets
 
-Ten tools, and no resources or prompts:
+Eleven tools, and no resources or prompts:
 
 ```
 repoatlas_repositories   repoatlas_status         repoatlas_search             repoatlas_inspect
 repoatlas_impact         repoatlas_relationships  repoatlas_dependencies       repoatlas_http_operations
-repoatlas_verify_grounding                        repoatlas_sync
+repoatlas_deployment_targets  repoatlas_verify_grounding                       repoatlas_sync
 ```
 
-Nine read. `repoatlas_sync` is the only one that changes anything, and what it
+Ten read. `repoatlas_sync` is the only one that changes anything, and what it
 changes is the index, never repository source.
 
 The graph explorer (`repoatlas ui`) is not among them. It is for the operator,

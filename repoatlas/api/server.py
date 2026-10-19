@@ -39,9 +39,11 @@ host, never this server's loopback address.
 
 Why sync and verify_grounding are not served
 --------------------------------------------
-Sync is the one write, and a page has no business starting one. Verification
-checks an agent's answer against its investigation, and no answer is written
-here. Both stay agent tools; this transport serves reads.
+A page has no business starting a sync. Verification checks an agent's answer
+against its investigation, and no answer is written here. Both stay agent tools.
+The one write served is ``deployment_links/*``: the user's own notes of where a
+repository is deployed, kept apart from the index, which no sync replaces and
+no read of the index depends on.
 """
 
 from __future__ import annotations
@@ -81,6 +83,15 @@ from repoatlas.models.capability_io import (
     StatusResponse,
 )
 from repoatlas.models.dependency_inventory import DependenciesRequest, DependenciesResponse
+from repoatlas.models.deployment_targets import (
+    DeploymentLinkCreateRequest,
+    DeploymentLinkDeleteRequest,
+    DeploymentLinkDeleteResponse,
+    DeploymentLinkResponse,
+    DeploymentLinkUpdateRequest,
+    DeploymentTargetsRequest,
+    DeploymentTargetsResponse,
+)
 from repoatlas.models.http_inventory import HttpOperationsRequest, HttpOperationsResponse
 from repoatlas.models.impact import ImpactRequest, ImpactResponse
 from repoatlas.models.inspection import InspectRequest, InspectResponse
@@ -160,6 +171,30 @@ ENDPOINTS: tuple[Endpoint, ...] = (
     Endpoint("impact", ImpactRequest, ImpactResponse, "impact"),
     Endpoint("dependencies", DependenciesRequest, DependenciesResponse, "dependencies"),
     Endpoint("http_operations", HttpOperationsRequest, HttpOperationsResponse, "http_operations"),
+    Endpoint(
+        "deployment_targets",
+        DeploymentTargetsRequest,
+        DeploymentTargetsResponse,
+        "deployment_targets",
+    ),
+    Endpoint(
+        "deployment_links/create",
+        DeploymentLinkCreateRequest,
+        DeploymentLinkResponse,
+        "deployment_link_create",
+    ),
+    Endpoint(
+        "deployment_links/update",
+        DeploymentLinkUpdateRequest,
+        DeploymentLinkResponse,
+        "deployment_link_update",
+    ),
+    Endpoint(
+        "deployment_links/delete",
+        DeploymentLinkDeleteRequest,
+        DeploymentLinkDeleteResponse,
+        "deployment_link_delete",
+    ),
     Endpoint(
         "topology/overview",
         TopologyOverviewRequest,

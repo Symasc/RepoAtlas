@@ -125,6 +125,17 @@ capabilities:
       supplied as evidence, and it always carries basis and coverage, which say
       what its statuses rest on and what could not be read.
 
+  - id: deployment_targets
+    tool: repoatlas_deployment_targets
+    arguments: {context: {scope: repository, repository: ts-service}}
+    expect:
+      fields: [context, repository, branch, branch_basis, targets, links, diagnostics, basis]
+      non_empty: [basis]
+      investigation: none
+    notes: >-
+      Where one repository's source says it is reached, and the user's links. It
+      supplies no source text, so it has no investigation to mint.
+
   - id: verify_grounding
     tool: repoatlas_verify_grounding
     arguments: {}          # filled in from the search that precedes it

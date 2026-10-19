@@ -9,6 +9,7 @@ import { languagesOf, type GraphNode, type NodeActions } from "@/components/grap
 import { useTween } from "@/components/graph/useTween";
 import { Connections } from "@/components/inspector/Connections";
 import { Contents } from "@/components/inspector/Entries";
+import { Deployments } from "@/components/inspector/Deployments";
 import { Evidence } from "@/components/inspector/Evidence";
 import { Inspector, OpenButton } from "@/components/inspector/Inspector";
 import { Requests } from "@/components/inspector/Requests";
@@ -223,6 +224,11 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
                     onOpenPlace={(at) => openAt(nav, at)}
                   />
                 ),
+              },
+              {
+                value: "deployments",
+                label: "Deployments",
+                panel: <Deployments repository={repository.slug} />,
               },
               { value: "details", label: "Details", panel: <RepositoryDetails repository={repository} /> },
               {
