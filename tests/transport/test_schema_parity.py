@@ -151,8 +151,13 @@ def test_investigation_semantics_survive_the_transport(service: Any) -> None:
     assert "investigation_id" in verify["required"]
     assert verify["properties"]["investigation_id"]["minLength"] == 1
 
-    # And the three that never touch an investigation do not offer one.
-    for name in ("repoatlas_repositories", "repoatlas_status", "repoatlas_sync"):
+    # And the four that never touch an investigation do not offer one.
+    for name in (
+        "repoatlas_repositories",
+        "repoatlas_status",
+        "repoatlas_deployment_targets",
+        "repoatlas_sync",
+    ):
         assert "investigation_id" not in schemas[name]["properties"]
 
 

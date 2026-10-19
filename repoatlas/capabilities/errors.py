@@ -473,6 +473,29 @@ class PathNotFoundError(RepoAtlasError):
         super().__init__(message, detail=detail)
 
 
+class DeploymentLinkNotFoundError(RepoAtlasError):
+    """No deployment link of the repository in scope has that id."""
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(
+        self,
+        message: str = "no deployment link of that repository has that id",
+        *,
+        detail: str | None = "List the repository's deployment targets for current link ids.",
+    ) -> None:
+        super().__init__(message, detail=detail)
+
+
+class InvalidDeploymentLinkError(RepoAtlasError):
+    """A deployment link the store refuses: one too many for its repository."""
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(self, message: str, *, detail: str | None = None) -> None:
+        super().__init__(message, detail=detail)
+
+
 class InvalidTopologyRequestError(RepoAtlasError):
     """The topology request asks for something that capability does not answer."""
 
@@ -607,6 +630,14 @@ def capability_error(exc: Exception) -> CapabilityError:
         return _from_repoatlas(exc, code="EDGE_NOT_FOUND", category=ErrorCategory.NOT_FOUND)
     if isinstance(exc, PathNotFoundError):
         return _from_repoatlas(exc, code="PATH_NOT_FOUND", category=ErrorCategory.NOT_FOUND)
+    if isinstance(exc, DeploymentLinkNotFoundError):
+        return _from_repoatlas(
+            exc, code="DEPLOYMENT_LINK_NOT_FOUND", category=ErrorCategory.NOT_FOUND
+        )
+    if isinstance(exc, InvalidDeploymentLinkError):
+        return _from_repoatlas(
+            exc, code="INVALID_DEPLOYMENT_LINK", category=ErrorCategory.INVALID_REQUEST
+        )
     if isinstance(exc, InvalidTopologyRequestError):
         return _from_repoatlas(
             exc, code="INVALID_TOPOLOGY_REQUEST", category=ErrorCategory.INVALID_REQUEST

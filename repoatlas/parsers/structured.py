@@ -38,6 +38,7 @@ from repoatlas.parsers.deploy_helm import (
     values_references,
     workload_references,
 )
+from repoatlas.parsers.deploy_targets import ingress_target_references, values_target_references
 from repoatlas.parsers.graphql_artifacts import package_script_references
 from repoatlas.parsers.graphql_codegen import codegen_references
 from repoatlas.parsers.http_openapi import MAX_OPERATIONS, specification_references
@@ -166,7 +167,10 @@ class StructuredParser:
     #     reads, a block-form ConfigMap or Secret key reference as such, and an ``envFrom``
     #     source its line (DF3a: deployment configuration crossings,
     #     repoatlas.graph.deployment_env).
-    version = "13"
+    # 14: an Ingress document of any YAML file is also read leniently for where it is
+    #     reached, and a chart's values.yaml records its literal listen-ports annotations
+    #     (deployment targets, repoatlas.parsers.deploy_targets).
+    version = "14"
     language = "YAML"
 
     def supports(self, path: Path) -> bool:
@@ -186,6 +190,7 @@ class StructuredParser:
             *resolution,
             *service_references(posix, content),
             *ingress_references(posix, content),
+            *ingress_target_references(posix, content),
             *workload_references(posix, content),
             *configmap_references(posix, content),
         ]
@@ -224,6 +229,7 @@ class StructuredParser:
             *compose,
             *chart_references(posix, documents),
             *values_references(posix, documents),
+            *values_target_references(posix, documents),
         ]
         ci, ci_truncated = ci_references(posix, documents)
         compose = [*compose, *ci, *declaration_references(documents)]

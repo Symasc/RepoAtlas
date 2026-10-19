@@ -2237,6 +2237,38 @@ the chart's name nor a whole literal label would fit any host and is not used. P
 which hop a refused request failed, and a pattern of a chart other than the one a link's exposure came from makes
 that link ambiguous.
 
+#### Deployment targets
+
+Where a repository says it is deployed is asked separately from what it links to, so the strict subset above is
+never widened. `repoatlas/parsers/deploy_targets.py` reads every `kind: Ingress` document of any YAML file
+leniently, as text: each rule host and `spec.tls[].hosts` entry is recorded as parts (literal text, the chart's
+name, a `.Values` path, a `range` item, the release name or namespace, or an opaque hole naming the expression it
+could not read), with its paths, backends, a literal `listen-ports` annotation and the `if` guards around it. A
+chart's `values.yaml` adds the `listen-ports` annotations it holds. Nothing is rendered there.
+
+`repoatlas/graph/deployment_targets.py` builds the targets when asked; none is stored. Each Ingress target, each
+server an OpenAPI document or framework declares (`DECLARES_HTTP_DEPLOYMENT`), and each user link becomes a
+target resolved under every context that can supply its variables: the chart's defaults, each Tilt or CI release
+of the chart, each link naming the target. Four states stay distinct on every resolution:
+
+- **configured:** what the source or the user states, cited by path and line;
+- **conditions:** whether the branch, environment, pull-request and variable conditions match the context the
+  caller gives (`match`, `no_match`, `unknown`, `conflict`, `none`), and whether the Ingress `if` guards are
+  `met`, `unmet` or `unknown`;
+- **resolved:** `resolved`, `partial` or `unresolved`, with every variable's value and where it came from; a
+  missing value, a credential and an unread expression stay named holes;
+- **verified:** `unverified`, or `user_confirmed` when the person who recorded a link says so. Nothing is
+  contacted, so nothing here claims a deployment is live.
+
+A value that only *mentions* a URL is not a target. An OAuth redirect allow-list such as a Cognito `CallbackUrl`
+names where an identity provider may send a browser back to, not where the system is served; it is not read as
+one. A deployment that no source states (a CI orb step RepoAtlas does not interpret, a hand-run `helm upgrade`)
+is recorded by the user as a link.
+
+Links live in the `deployment_links` table (migration `003_deployment_links.sql`), keyed by repository slug so a
+removing a repository from the index never removes them: a label, an optional environment, a URL or a target id, variables, conditions and a
+verification state, at most 200 per repository. They are the only user-written state in the index.
+
 **Security.** HTTP extraction reads only files the sync already admitted, so an excluded `.env` holding `API_URL`
 declares nothing and is not cross-resolved. Nothing resolves DNS, fetches a specification or `$ref`, probes an
 endpoint, starts a server, or imports repository code.

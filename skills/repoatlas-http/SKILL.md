@@ -24,6 +24,7 @@ None of these proves runtime reachability. Do not invent a deployment, a public 
 3. **Every side of one route**: walk `repoatlas_relationships` from the row's exact `http-route:` or `http-endpoint:` key, under global scope or with `cross_repository: true`. Rows can lack a key; do not build one. From a caller or handler entity, `cross_repository: true` also follows its `CALLS_HTTP_HANDLER` link.
 4. **Which service a client really reaches** is configuration: search and inspect the client's base URL and the service's host, port and environment variables. Label each finding as route, configuration or ownership.
 5. **What a route or handler change may affect** is a `repoatlas_impact` question (the repoatlas-change-impact skill); it follows a handler link from the handler to its requests.
+6. **Where a repository is deployed**: call `repoatlas_deployment_targets` under a repository scope. It lists Ingress hosts and OpenAPI servers as configured, with each value's basis and the user's links; report holes and `unverified` as they are, and never treat an OAuth callback URL as a deployment.
 
 ## Reading statuses
 
