@@ -365,6 +365,103 @@ def ui(
         raise typer.Exit(130) from None
 
 
+links_app = typer.Typer(
+    help="Export or import the deployment links you recorded. They are the one thing you "
+    "write into the index, so keep a copy before rebuilding or moving it.",
+    no_args_is_help=True,
+)
+app.add_typer(links_app, name="links")
+
+
+@links_app.command("export")
+def links_export(
+    file: Annotated[
+        Path | None, typer.Argument(help="Where to write them; standard output if omitted.")
+    ] = None,
+) -> None:
+    """Write every deployment link, of every repository, as JSON."""
+    from repoatlas.models.deployment_targets import ExportedLink, LinksExport
+
+    workspace = _open()
+    try:
+        exported = LinksExport(
+            links=[
+                ExportedLink(
+                    repository=link.repository,
+                    **link.model_dump(
+                        include={
+                            "label",
+                            "environment",
+                            "url",
+                            "target_id",
+                            "variables",
+                            "conditions",
+                            "verification",
+                        }
+                    ),
+                )
+                for link in workspace.deployment_links.list_all()
+            ]
+        )
+    finally:
+        workspace.close()
+    text = exported.model_dump_json(indent=2, exclude_none=True)
+    if file is None:
+        typer.echo(text)
+    else:
+        file.write_text(text + "\n", encoding="utf-8")
+        typer.echo(f"Wrote {len(exported.links)} link(s) to {file}", err=True)
+
+
+@links_app.command("import")
+def links_import(
+    file: Annotated[Path, typer.Argument(help="A file `repoatlas links export` wrote.")],
+) -> None:
+    """Add the links in FILE. A link already recorded, the same in every field, is skipped.
+    They take part in HTTP links from the next sync."""
+    from pydantic import ValidationError
+
+    from repoatlas.models.deployment_targets import (
+        DeploymentLinkFields,
+        LinkLimitError,
+        LinksExport,
+    )
+
+    try:
+        exported = LinksExport.model_validate_json(file.read_text(encoding="utf-8"))
+    except (OSError, ValidationError) as exc:
+        typer.echo(f"Not an export of deployment links: {exc}", err=True)
+        raise typer.Exit(ExitCode.RUNTIME) from exc
+    workspace = _open()
+    added = skipped = 0
+    try:
+        store = workspace.deployment_links
+        present: dict[str, set[str]] = {}
+        for item in exported.links:
+            fields = DeploymentLinkFields.model_validate(item.model_dump(exclude={"repository"}))
+            stated = fields.model_dump_json()
+            if item.repository not in present:
+                present[item.repository] = {
+                    DeploymentLinkFields.model_validate(
+                        link.model_dump(include=set(DeploymentLinkFields.model_fields))
+                    ).model_dump_json()
+                    for link in store.list(item.repository)
+                }
+            if stated in present[item.repository]:
+                skipped += 1
+                continue
+            try:
+                store.create(item.repository, fields)
+            except LinkLimitError as exc:
+                typer.echo(f"{item.repository}: {exc}", err=True)
+                raise typer.Exit(ExitCode.RUNTIME) from exc
+            present[item.repository].add(stated)
+            added += 1
+    finally:
+        workspace.close()
+    typer.echo(f"Added {added} link(s); {skipped} already recorded.")
+
+
 @contextmanager
 def _progress() -> Iterator[TerminalProgress | None]:
     """A progress line on stderr while a run lasts, when stderr is a terminal.

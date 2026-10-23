@@ -1,6 +1,7 @@
 """``deployment_links``: what users state about where a repository is deployed.
 
-The one store a user writes. Nothing a sync does reads or replaces it, and it is keyed by
+The one store a user writes. No sync replaces it -- the global pass only reads it, for the HTTP join
+to fall back on (repoatlas.graph.link_exposures) -- and it is keyed by
 repository slug, so a repository removed from the index and added again finds its links
 where it left them (``003_deployment_links.sql``).
 """
@@ -18,13 +19,13 @@ from repoatlas.storage.sqlite.database import Database
 #: Links one repository may carry: a person's list, not a crawl.
 MAX_LINKS_PER_REPOSITORY = 200
 
-_SELECT = (
+DEPLOYMENT_LINKS_SELECT = (
     "SELECT id, repository, label, environment, url, target_id, variables_json, "
     "conditions_json, verification, verified_at, created_at, updated_at FROM deployment_links "
 )
 
 
-def _link(row: sqlite3.Row) -> DeploymentLink:
+def deployment_link(row: sqlite3.Row) -> DeploymentLink:
     return DeploymentLink(
         id=row["id"],
         repository=row["repository"],
@@ -58,14 +59,19 @@ class SqliteDeploymentLinkStore:
 
     def list(self, repository: str) -> list[DeploymentLink]:
         rows = self._db.execute(
-            _SELECT + "WHERE repository = ? ORDER BY id",
+            DEPLOYMENT_LINKS_SELECT + "WHERE repository = ? ORDER BY id",
             (repository,),
         ).fetchall()
-        return [_link(row) for row in rows]
+        return [deployment_link(row) for row in rows]
+
+    def list_all(self) -> list[DeploymentLink]:
+        """Every repository's links, by id: what ``repoatlas links export`` writes."""
+        rows = self._db.execute(DEPLOYMENT_LINKS_SELECT + "ORDER BY id").fetchall()
+        return [deployment_link(row) for row in rows]
 
     def get(self, link_id: int) -> DeploymentLink | None:
-        row = self._db.execute(_SELECT + "WHERE id = ?", (link_id,)).fetchone()
-        return _link(row) if row is not None else None
+        row = self._db.execute(DEPLOYMENT_LINKS_SELECT + "WHERE id = ?", (link_id,)).fetchone()
+        return deployment_link(row) if row is not None else None
 
     def create(self, repository: str, fields: DeploymentLinkFields) -> DeploymentLink:
         now = datetime.now(timezone.utc).isoformat()
