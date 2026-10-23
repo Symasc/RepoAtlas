@@ -459,6 +459,44 @@ def test_a_declaration_from_the_worklist_must_serve_a_route_one_of_its_requests_
     assert audit_rows(built) == []
 
 
+def test_an_update_that_names_a_worklist_group_is_checked_like_a_declaration(
+    built: Workspace,
+) -> None:
+    """The check holds for an update as for a creation: a stored link cannot be moved off the
+    group's origin by naming the group."""
+    group = group_of(worklist(built), SHOP_URL)
+    link_id = declare(built, "shop", SHOP_URL, group=group.key)
+    with pytest.raises(InvalidDeploymentLinkError, match="does not name the origin"):
+        service(built).deployment_link_update(
+            DeploymentLinkUpdateRequest(
+                context=repository_context(built, "shop"),
+                id=link_id,
+                link=DeploymentLinkFields(label="moved", url="https://elsewhere.example"),
+                provenance=DeclarationProvenance(via="ui", request_group=group.key),
+            )
+        )
+    assert built.deployment_links.get(link_id).url == SHOP_URL
+    assert [row[0] for row in audit_rows(built)] == ["create"]
+
+
+def test_a_confirm_after_the_service_stopped_serving_routes_is_refused(
+    built: Workspace, tmp_path: Path
+) -> None:
+    """The creation re-checks at confirm time: a preview that could create no longer can."""
+    group = group_of(worklist(built), SHOP_URL)
+    preview = service(built).http_connection_preview(
+        HttpConnectionPreviewRequest(
+            context=GLOBAL, group=group.key, repository=slug(built, "shop")
+        )
+    )
+    assert preview.can_create
+    (tmp_path / "repos" / "shop" / "shop" / "main.py").write_text("# no routes\n")
+    sync(built, tmp_path)
+    with pytest.raises(InvalidDeploymentLinkError):
+        declare(built, "shop", SHOP_URL, group=group.key)
+    assert audit_rows(built) == []
+
+
 def test_stating_what_is_already_stated_is_one_declaration_and_one_history_row(
     built: Workspace,
 ) -> None:
