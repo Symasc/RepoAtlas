@@ -44,7 +44,7 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 import yaml
@@ -85,12 +85,17 @@ from repoatlas.graph.deploy_identity import (
     helm_name,
     source_tie,
 )
+from repoatlas.graph.release_values import BRANCH as _BRANCH
+from repoatlas.graph.release_values import CONTAINER_ARTIFACT, release_values
+from repoatlas.graph.release_values import UNKNOWN_VALUE as _UNKNOWN
+from repoatlas.graph.release_values import EffectiveValues as _Effective
+from repoatlas.graph.release_values import ReleaseValue as _Value
+from repoatlas.graph.release_values import substituted as _substituted
 from repoatlas.models.container_image import (
     EXPR,
     RESOLVED,
     TEXT,
     VAR,
-    WITHHELD,
     parse_reference,
     text_of,
     version_parts,
@@ -108,7 +113,6 @@ from repoatlas.parsers.http_facts import (
 )
 from repoatlas.storage.protocols import FileRow, LinkDecisionRow, UnresolvedRefRecord
 
-CONTAINER_ARTIFACT = "container_artifact"
 LINKED = "linked"
 PUBLISHER_UNRESOLVED_DECISION = "publisher-unresolved"
 ARTIFACT_AMBIGUOUS_DECISION = "artifact-ambiguous"
@@ -124,11 +128,6 @@ UNKNOWN = "unknown"
 MAX_VARIANTS = 16
 ALTERNATIVES_CAPPED = "alternatives-capped"
 
-#: The branch symbols whose literal domain gives a release's variants, per CI system.
-_BRANCH = {
-    "circleci": frozenset({(VAR, "CIRCLE_BRANCH")}),
-    "github": frozenset({(EXPR, "github.ref_name"), (VAR, "GITHUB_REF_NAME")}),
-}
 #: Execution-stable CI built-ins: a value every job of one run shares, a rerun included,
 #: by the identity it stands for (E3). Nothing else is ever ``symbolic``.
 STABLE: dict[str, dict[str, str]] = {
@@ -167,132 +166,6 @@ _OUTCOMES = {
 }
 
 _DOLLAR_ROOT = re.compile(r"(?<![\w$])\$\.")
-
-
-# -- values, with Helm's precedence ------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class _Value:
-    #: ``lit``, ``sym`` (CI parts, a symbol among them), ``withheld`` (a credential leaf or
-    #: ``--set``: where it is set is known, never what) or ``unknown``. Only a literal
-    #: renders; anything else is read as unknown here.
-    kind: str
-    text: str = ""
-    parts: tuple[tuple[str, str], ...] = ()
-    place: Place | None = None
-
-
-_UNKNOWN = _Value("unknown")
-
-
-def _ancestors(key: str) -> list[str]:
-    """``a``, ``a.b`` and ``a.b[0]`` for ``a.b[0].c``: every path above ``key``."""
-    found: list[str] = []
-    for index, char in enumerate(key):
-        if char in ".[" and index:
-            found.append(key[:index])
-    return found
-
-
-class _Effective:
-    """The values a release renders with, layer by layer, lowest first."""
-
-    def __init__(self) -> None:
-        self.entries: dict[str, _Value] = {}
-        #: Whether a layer that may set anything was applied: an absent key is then unknown.
-        self.open = False
-        #: Keys a later layer removed (a null): absent whatever was open before.
-        self.absent: set[str] = set()
-        self.reasons: list[str] = []
-
-    def _drop(self, key: str) -> None:
-        for above in _ancestors(key):
-            self.entries.pop(above, None)
-        for under in [k for k in self.entries if k.startswith((f"{key}.", f"{key}["))]:
-            del self.entries[under]
-
-    def put(self, key: str, value: _Value) -> None:
-        self._drop(key)
-        self.entries[key] = value
-        self.absent.discard(key)
-
-    def unknown(self, reason: str) -> None:
-        """A layer that may set any key to anything: everything known so far is unknown."""
-        self.entries = dict.fromkeys(self.entries, _UNKNOWN)
-        self.open = True
-        self.absent.clear()
-        if reason not in self.reasons:
-            self.reasons.append(reason)
-
-    def file(self, meta: Mapping[str, str], repo_id: int, path: str) -> None:
-        leaves: dict[str, str] = json.loads(meta.get("values", "{}"))
-        lines: dict[str, int] = json.loads(meta.get("lines", "{}"))
-        cleared: list[list[str]] = json.loads(meta.get("cleared", "[]"))
-        if meta.get("truncated") == "true":
-            # What the cut part sets is not known, and may be anything.
-            self.unknown("truncated")
-        # Helm replaces a list whole; it merges maps.
-        lists = {key.split("[", 1)[0] for key in leaves if "[" in key}
-        lists |= {key for key, kind in cleared if kind == "list"}
-        for root in lists:
-            for key in [k for k in self.entries if k.startswith(f"{root}[")]:
-                del self.entries[key]
-        for key, kind in cleared:
-            if kind == "null":
-                self._drop(key)
-                self.entries.pop(key, None)
-                self.absent.add(key)
-        for key, text in leaves.items():
-            place = Place(repo_id, path, int(lines[key])) if key in lines else None
-            self.put(
-                key,
-                _Value("withheld", place=place)
-                if text == "<withheld>"
-                else _Value("lit", text, place=place),
-            )
-
-    def setting(self, key: str | None, parts: Sequence[tuple[str, str]], place: Place) -> None:
-        if key is None:
-            self.unknown("set-unread")
-            return
-        if any(kind == WITHHELD for kind, _ in parts):
-            self.put(key, _Value("withheld", place=place))
-        elif all(kind == TEXT for kind, _ in parts):
-            text = "".join(value for _, value in parts)
-            if text in ("null", "Null", "NULL", "~"):
-                self._drop(key)
-                self.entries.pop(key, None)
-                self.absent.add(key)
-            else:
-                self.put(key, _Value("lit", text, place=place))
-        else:
-            self.put(key, _Value("sym", parts=tuple(parts), place=place))
-
-    def get(self, key: str) -> _Value | None:
-        """The value at ``key``; ``None`` when absent (Helm's nil); unknown when a layer
-        that may set anything left it open."""
-        found = self.entries.get(key)
-        if found is not None:
-            return found
-        if self.open and key not in self.absent:
-            return _UNKNOWN
-        return None
-
-    def nested(self, key: str) -> bool:
-        return any(k.startswith((f"{key}.", f"{key}[")) for k in self.entries)
-
-    def literals(self, *keys: str) -> dict[str, str] | None:
-        """Literal values at ``keys`` (absent ones left out), or ``None`` if one is not."""
-        found: dict[str, str] = {}
-        for key in keys:
-            value = self.get(key)
-            if value is None:
-                continue
-            if value.kind != "lit":
-                return None
-            found[key] = value.text
-        return found
 
 
 def _holds(values: _Effective, path: str) -> bool | None:
@@ -501,28 +374,12 @@ class _Planner:
     def effective(
         self, chart: _Chart, release: CiRelease, substitute: Mapping[tuple[str, str], str]
     ) -> _Effective:
-        values = _Effective()
-        if chart.values is not None:
-            values.file(chart.values[0], chart.repo_id, chart.values[1])
-        for path, _how in release.values:
-            if path is None:
-                values.unknown("values-unresolved")
-                continue
-            meta = self.values_files.get((release.origin.repo_id, path))
-            if path == (chart.values[1] if chart.values else None):
-                meta = chart.values[0] if chart.values else None
-            if meta is None:
-                values.unknown("values-unread")
-                continue
-            values.file(meta, release.origin.repo_id, path)
-        if release.set_unread:
-            values.unknown("set-unread")
-        place = Place(
-            release.origin.repo_id, release.origin.rel_path, release.claim.line_start or 1
-        )
-        for key, parts in release.sets:
-            values.setting(key, _substituted(parts, substitute), place)
-        return values
+        files = {
+            path: meta
+            for (repo, path), meta in self.values_files.items()
+            if repo == release.origin.repo_id
+        }
+        return release_values(chart.repo_id, chart.values, files, release, substitute)
 
     # -- rendering ------------------------------------------------------------------------
 
@@ -1321,16 +1178,6 @@ class _Planner:
 
 
 DOCKERFILE_UNREAD_TIE = "the build's Dockerfile or context is not stated literally"
-
-
-def _substituted(
-    parts: Iterable[tuple[str, str]], substitute: Mapping[tuple[str, str], str]
-) -> list[tuple[str, str]]:
-    found: list[tuple[str, str]] = []
-    for kind, text in parts:
-        literal = substitute.get((kind, text))
-        found.append((TEXT, literal) if literal is not None else (kind, text))
-    return found
 
 
 def _place(place: Place, slugs: Mapping[int, str], *, short: bool = False) -> str:
