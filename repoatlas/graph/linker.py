@@ -37,6 +37,7 @@ that gap published a knowledge base with no cross-repository graph at all while
 
 from __future__ import annotations
 
+import functools
 import json
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
@@ -565,9 +566,10 @@ class ReferenceLinker:
         it, and it owns nothing (DF3b). ``declared`` receives every other symbol by id.
         """
         mapping: dict[str, int] = {}
+        known = self._knowledge.file_entity_ids(file_id) if symbols else {}
         for symbol in symbols:
             key = symbol_key(repo_slug, rel_path, symbol.qualified_name, symbol.line_start)
-            entity_id = self._knowledge.find_file_entity(file_id, key)
+            entity_id = known.get(key)
             if entity_id is not None:
                 if symbol.meta.get("kind") == FIELD:
                     if fields is not None:
@@ -1340,9 +1342,15 @@ def plan_repository_http(knowledge: SqliteKnowledgeStore, repo_id: int) -> Repos
 
 def claim_role(claim: UnresolvedRefRecord) -> str | None:
     """The pending-fact role a claim carries, or ``None`` for an ordinary claim."""
-    if not claim.meta_json:
-        return None
-    role = json.loads(claim.meta_json).get(PENDING_FACT)
+    return _role_of(claim.meta_json) if claim.meta_json else None
+
+
+@functools.lru_cache(maxsize=4096)
+def _role_of(meta_json: str) -> str | None:
+    """``claim_role`` of a claim's metadata. The global pass asks it of every claim
+    several times in a row, and decoding the JSON each time was a third of the pass;
+    a role is a string, so nothing a caller does can change what the cache holds."""
+    role = json.loads(meta_json).get(PENDING_FACT)
     return role if isinstance(role, str) and role else None
 
 
