@@ -20,6 +20,7 @@ from repoatlas.models.dependencies import (
     DependencyRole,
     DependencyScope,
 )
+from repoatlas.models.deployment_targets import DeploymentLink
 from repoatlas.models.http import ROUTE_KEY_PREFIX
 from repoatlas.models.parsing import (
     USES_EXPORT_TABLE,
@@ -56,6 +57,7 @@ from repoatlas.storage.protocols import (
     UnresolvedRefRecord,
 )
 from repoatlas.storage.sqlite.database import Database
+from repoatlas.storage.sqlite.deployment_links import DEPLOYMENT_LINKS_SELECT, deployment_link
 from repoatlas.storage.sqlite.search import path_scope
 
 #: What every environment variable's key starts with (repoatlas.graph.keys.env_key).
@@ -1389,6 +1391,12 @@ class SqliteKnowledgeStore:
             if handlers:
                 found.append(_near(row, "toward", handlers=handlers))
         return sorted(found, key=lambda n: (n.decision_ref, n.relation))
+
+    def list_deployment_links(self) -> list[DeploymentLink]:
+        """Every user's deployment link, of every repository, by id: what the global pass
+        offers the HTTP join to fall back on (repoatlas.graph.link_exposures)."""
+        rows = self._db.execute(DEPLOYMENT_LINKS_SELECT + "ORDER BY id").fetchall()
+        return [deployment_link(row) for row in rows]
 
     def list_link_decisions(
         self, family: str | None = None, repo_id: int | None = None
