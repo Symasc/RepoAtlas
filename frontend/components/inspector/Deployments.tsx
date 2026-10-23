@@ -146,6 +146,12 @@ function TargetCard({ target, onLink }: { target: DeploymentTarget; onLink?: () 
         {at && <span className={classes.at}>{at}</span>}
         {target.detached && <span className={classes.flag}>target no longer stated</span>}
       </header>
+      {target.runs && (
+        <p className={classes.detail}>
+          Stated in <strong>{target.repository}</strong>, whose release is configured to run the image{" "}
+          {target.runs}&apos;s CI is configured to publish.
+        </p>
+      )}
       <p className={classes.pattern} title="As configured">
         {target.pattern}
       </p>
@@ -217,10 +223,18 @@ function Resolution({ resolution }: { resolution: DeploymentResolution }) {
               <dd>
                 {variable.withheld ? "withheld" : (variable.value ?? "not set")}
                 {variable.basis && <span className={classes.basisTag}> · {variable.basis}</span>}
+                {variable.at && <span className={classes.basisTag}> · {variable.at}</span>}
               </dd>
             </div>
           ))}
         </dl>
+      )}
+      {(resolution.notes ?? []).length > 0 && (
+        <ul className={classes.notes}>
+          {(resolution.notes ?? []).map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
       )}
       {holes.length > 0 && (
         <p className={classes.detail}>
