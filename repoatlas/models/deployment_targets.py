@@ -222,6 +222,28 @@ class DeploymentLink(DeploymentLinkFields):
     verified_at: datetime | None = None
 
 
+#: The format ``repoatlas links export`` writes and ``repoatlas links import`` reads.
+LINKS_EXPORT_FORMAT = "repoatlas/deployment-links/v1"
+
+
+class ExportedLink(DeploymentLinkFields):
+    """One link as exported: what it states, and the repository it is about."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    repository: str = Field(min_length=1, max_length=MAX_LINK_TEXT)
+
+
+class LinksExport(BaseModel):
+    """Every deployment link of an index, outside it: the only state a user writes there,
+    so rebuilding or moving the index need not lose it."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    format: Literal["repoatlas/deployment-links/v1"] = LINKS_EXPORT_FORMAT
+    links: list[ExportedLink] = Field(default_factory=list)
+
+
 #: Every deployment-targets answer says what it rests on, since a reader may take a URL for
 #: a claim that something is live.
 TARGETS_BASIS = (
