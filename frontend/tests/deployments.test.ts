@@ -52,6 +52,7 @@ describe("the link form", () => {
         target_id: null,
         variables: { stage: "staging" },
         conditions: [{ kind: "branch", op: "equals", value: "develop" }],
+        callers: [],
         verification: "unverified",
       },
     });
@@ -81,6 +82,30 @@ describe("the link form", () => {
     const fields = fieldsOf(form);
     expect("fields" in fields && fields.fields.conditions).toEqual(link.conditions);
     expect("fields" in fields && fields.fields.verification).toBe("user_confirmed");
+  });
+});
+
+describe("callers", () => {
+  it("survive an edit: a form built from a link sends the callers it was made with", () => {
+    const link: DeploymentLink = {
+      id: 3,
+      repository: "api",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+      label: "dev",
+      environment: "dev",
+      url: "http://localhost:8000",
+      callers: ["web", "tools"],
+    };
+    const form = formOf(link);
+    expect(form.callers).toBe("web\ntools");
+    const result = fieldsOf(form);
+    expect("fields" in result && result.fields.callers).toEqual(["web", "tools"]);
+  });
+
+  it("are empty, not missing, for a link that names none", () => {
+    const result = fieldsOf({ ...EMPTY_FORM, label: "prod", url: "https://app.example.test/" });
+    expect("fields" in result && result.fields.callers).toEqual([]);
   });
 });
 
