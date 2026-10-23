@@ -19,8 +19,9 @@ from datetime import datetime
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from repoatlas.models import http
 from repoatlas.models.capability import CapabilityContext
 from repoatlas.models.deployment_conditions import (
     MAX_CONDITIONS,
@@ -67,6 +68,35 @@ def link_url_problem(url: str) -> str | None:
     if any(char.isspace() for char in url) or "{" in url or "}" in url:
         return "it holds whitespace or a template hole"
     return None
+
+
+#: Hosts that name this machine. An origin alone never says which service answers there: the same
+#: loopback address is a different program in every repository's dev setup.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"})  # noqa: S104 - names, never bound
+#: Repositories one link may be scoped to.
+MAX_LINK_CALLERS = 20
+
+
+def is_loopback_url(url: str) -> bool:
+    """Whether ``url`` names this machine (``localhost``, ``127.x``, ``::1``, ``0.0.0.0``)."""
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in _LOOPBACK_HOSTS or host.startswith("127.") or host.endswith(".localhost")
+
+
+def declared_base(url: str) -> str | None:
+    """The base a link's URL serves routes under, in one canonical spelling: the lower-cased
+    origin (default port dropped) plus its path with no trailing ``/``. ``None`` when it is
+    not an absolute http(s) URL. Two links with the same base state the same place."""
+    parts = urlsplit(url)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return None
+    target = http.client_target(f"{parts.scheme}://{parts.netloc}/")
+    if target is None or target.origin is None:
+        return None
+    return target.origin + parts.path.rstrip("/")
 
 
 class DeploymentVariable(BaseModel):
@@ -172,6 +202,39 @@ class DeploymentLinkFields(BaseModel):
         default_factory=list, description=f"At most {MAX_CONDITIONS}; all must hold."
     )
     verification: Verification = "unverified"
+    #: Repositories whose requests this link may join. Empty: any. A link at a loopback origin
+    #: must name them, because that origin means a different service in each repository.
+    callers: list[str] = Field(
+        default_factory=list, description=f"At most {MAX_LINK_CALLERS} repository slugs."
+    )
+
+    @field_validator("callers")
+    @classmethod
+    def _callers(cls, callers: list[str]) -> list[str]:
+        if len(callers) > MAX_LINK_CALLERS:
+            raise ValueError(f"at most {MAX_LINK_CALLERS} caller repositories")
+        for slug in callers:
+            if (
+                not slug
+                or len(slug) > MAX_LINK_TEXT
+                or any(c.isspace() or ord(c) < 32 for c in slug)
+            ):
+                raise ValueError("a caller repository is a slug, without whitespace")
+        if len(set(callers)) != len(callers):
+            raise ValueError("a caller repository is named once")
+        return sorted(callers)
+
+    @model_validator(mode="after")
+    def _loopback_is_scoped(self) -> DeploymentLinkFields:
+        if self.url is not None and is_loopback_url(self.url):
+            if not self.callers:
+                raise ValueError(
+                    "a loopback origin names a different service in each repository: "
+                    "name the caller repositories it applies to"
+                )
+            if not self.environment:
+                raise ValueError("a loopback origin belongs to an environment: name it")
+        return self
 
     @field_validator("conditions")
     @classmethod
@@ -207,6 +270,44 @@ class DeploymentLinkFields(BaseModel):
 
 class LinkLimitError(ValueError):
     """A repository already carries as many links as a store keeps for one."""
+
+
+class LinkConflictError(ValueError):
+    """Another repository already states this place, for callers this link would also serve."""
+
+    def __init__(self, link_id: int, repository: str) -> None:
+        super().__init__(
+            f"link {link_id} already states that {repository} is at this URL for the same callers: "
+            "two services at one place join nothing; revoke it first"
+        )
+        self.link_id = link_id
+        self.repository = repository
+
+
+MAX_NOTE = 500
+
+
+class DeclarationProvenance(BaseModel):
+    """Where a declaration came from, for the history only; never what the link states."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    #: The explorer or a direct API call; the CLI and an import set their own.
+    via: Literal["ui", "api"] = "api"
+    #: Why, in the person's words. Never read by the join; refused if it carries a credential.
+    note: str | None = Field(default=None, max_length=MAX_NOTE)
+    #: The worklist group the declaration was made from (``hcg1-<hex>``): with it, the target must
+    #: serve a route one of the group's requests matches, or nothing is stored.
+    request_group: str | None = Field(default=None, pattern=r"^hcg1-[0-9a-f]{20}$")
+
+    @field_validator("note")
+    @classmethod
+    def _note(cls, note: str | None) -> str | None:
+        if note is None:
+            return None
+        if any(ord(c) < 32 and c not in "\n\t" for c in note) or secret_bearing(note):
+            raise ValueError("a note holds a control character or a credential")
+        return note.strip() or None
 
 
 class DeploymentLink(DeploymentLinkFields):
@@ -301,6 +402,7 @@ class DeploymentLinkCreateRequest(BaseModel):
 
     context: CapabilityContext
     link: DeploymentLinkFields
+    provenance: DeclarationProvenance | None = None
 
 
 class DeploymentLinkUpdateRequest(BaseModel):
@@ -311,15 +413,17 @@ class DeploymentLinkUpdateRequest(BaseModel):
     context: CapabilityContext
     id: int = Field(ge=1)
     link: DeploymentLinkFields
+    provenance: DeclarationProvenance | None = None
 
 
 class DeploymentLinkDeleteRequest(BaseModel):
-    """Remove a stored link."""
+    """Remove a stored link. The history keeps what it stated and who revoked it."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     context: CapabilityContext
     id: int = Field(ge=1)
+    provenance: DeclarationProvenance | None = None
 
 
 class DeploymentLinkResponse(BaseModel):
@@ -340,6 +444,7 @@ class DeploymentLinkDeleteResponse(BaseModel):
 __all__ = [
     "TARGETS_BASIS",
     "ConditionContext",
+    "DeclarationProvenance",
     "DeploymentCondition",
     "DeploymentGuard",
     "DeploymentLink",
@@ -354,5 +459,8 @@ __all__ = [
     "DeploymentTargetsRequest",
     "DeploymentTargetsResponse",
     "DeploymentVariable",
+    "LinkConflictError",
+    "declared_base",
+    "is_loopback_url",
     "link_url_problem",
 ]

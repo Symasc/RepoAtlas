@@ -26,6 +26,21 @@
   margin: 0;
 }
 
+.figureAction {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ra-accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.figureAction:focus-visible {
+  outline: 2px solid var(--ra-focus);
+  outline-offset: 2px;
+}
+
 .figure {
   display: flex;
   flex-direction: row-reverse;

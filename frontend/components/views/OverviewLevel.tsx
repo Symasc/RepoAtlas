@@ -7,6 +7,7 @@ import { Graph } from "@/components/graph/Graph";
 import { flowEdges, place } from "@/components/graph/flow";
 import { languagesOf, type GraphNode, type NodeActions } from "@/components/graph/nodes";
 import { useTween } from "@/components/graph/useTween";
+import { ConnectionsPanel } from "@/components/connections/ConnectionsPanel";
 import { Connections } from "@/components/inspector/Connections";
 import { Contents } from "@/components/inspector/Entries";
 import { Deployments } from "@/components/inspector/Deployments";
@@ -15,9 +16,11 @@ import { Inspector, OpenButton } from "@/components/inspector/Inspector";
 import { Requests } from "@/components/inspector/Requests";
 import inspectorClasses from "@/components/inspector/Inspector.module.css";
 import type { RepositoryLink } from "@/lib/api/generated";
+import { useConnections } from "@/lib/api/connections";
 import { useTopologyOverview } from "@/lib/api/topology";
 import { bounds, constellation, GROUP_ID, HUB_ID, type Layout } from "@/lib/graph/layout";
 import { absoluteTime, formatCount, plural, relativeTime, shortSha } from "@/lib/model/format";
+import { NO_FILTERS } from "@/lib/model/connections";
 import { buildOverview, FAMILIES, repositoryId, type Connection, type Family } from "@/lib/model/graph";
 import type { RepositoryModel } from "@/lib/model/repositories";
 import { useAnimationsOff } from "@/lib/useMotion";
@@ -36,6 +39,9 @@ const NO_LINKS: readonly RepositoryLink[] = [];
  */
 export function OverviewLevel({ repositories, nav }: { repositories: RepositoryModel[]; nav: Navigation }) {
   const overview = useTopologyOverview();
+  // the HTTP requests the join left unlinked, counted for the totals and listed in the worklist
+  const [connectionsOpen, setConnectionsOpen] = useState(false);
+  const unresolved = useConnections(NO_FILTERS, true);
   const links = overview.data?.links ?? NO_LINKS;
   const graph = useMemo(() => buildOverview(repositories, links), [repositories, links]);
   const reduced = useAnimationsOff();
@@ -174,7 +180,14 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
             refit={anchorKey}
             families={families}
             start={<h1 className={classes.levelTitle}>All repositories</h1>}
-            end={<Totals repositories={repositories} crossing={overview.isSuccess ? crossing : null} />}
+            end={
+              <Totals
+                repositories={repositories}
+                crossing={overview.isSuccess ? crossing : null}
+                unresolved={unresolved.data ? unresolved.data.summary.unresolved : null}
+                onOpenConnections={() => setConnectionsOpen(true)}
+              />
+            }
             notice={note && <p>{note}</p>}
           />
         </div>
@@ -242,6 +255,12 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
           />
         )}
       </div>
+      <ConnectionsPanel
+        opened={connectionsOpen}
+        onClose={() => setConnectionsOpen(false)}
+        repositories={repositories}
+        onOpenPlace={(at) => openAt(nav, at)}
+      />
     </div>
   );
 }

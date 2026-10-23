@@ -1,0 +1,270 @@
+/* -- HTTP connections: the workspace worklist -------------------------------------------- */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  color: var(--ra-text);
+}
+
+.basis {
+  margin: 0;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-muted);
+}
+
+.summary {
+  margin: 0;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.banner {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--ra-border);
+  border-radius: var(--ra-radius-s);
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-muted);
+}
+
+.banner[data-tone="warning"] {
+  border-color: var(--ra-warning);
+}
+
+.banner[data-tone="success"] {
+  border-color: var(--ra-success);
+}
+
+.banner[data-tone="danger"] {
+  border-color: var(--ra-danger);
+  color: var(--ra-danger);
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.groups,
+.requests,
+.declarations,
+.history {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.group,
+.declaration,
+.entry {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--ra-border);
+  border-radius: var(--ra-radius);
+  background-color: var(--ra-card);
+}
+
+.groupHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+}
+
+.origin {
+  margin: 0;
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-md);
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.tag {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-subtle);
+}
+
+.tag[data-tone="warning"] {
+  color: var(--ra-warning);
+}
+
+.tag[data-tone="success"] {
+  color: var(--ra-success);
+}
+
+.tag[data-tone="danger"] {
+  color: var(--ra-danger);
+}
+
+.reasons {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-muted);
+}
+
+.request {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-left: 8px;
+  border-left: 1px solid var(--ra-border);
+}
+
+.requestLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+}
+
+.method {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 600;
+}
+
+.route {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-sm);
+  word-break: break-all;
+}
+
+.place {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 0;
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-subtle);
+}
+
+.placeLink {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ra-accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.placeLink:focus-visible {
+  outline: 2px solid var(--ra-focus);
+  outline-offset: 2px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mapper {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  border: 1px dashed var(--ra-border-strong);
+  border-radius: var(--ra-radius-s);
+}
+
+.fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.previewCounts {
+  margin: 0;
+  font-size: var(--mantine-font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.problems,
+.warnings {
+  margin: 0;
+  padding-left: 18px;
+  font-size: var(--mantine-font-size-sm);
+}
+
+.problems {
+  color: var(--ra-danger);
+}
+
+.warnings {
+  color: var(--ra-warning);
+}
+
+.preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.previewRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: var(--mantine-font-size-sm);
+}
+
+.outcome {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-subtle);
+}
+
+.outcome[data-good="true"] {
+  color: var(--ra-success);
+}
+
+.state {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-muted);
+}
+
+.state[data-state="applied"] {
+  color: var(--ra-success);
+}
+
+.state[data-state="pending"] {
+  color: var(--ra-accent);
+}
+
+.state[data-state="ineffective"],
+.state[data-state="invalidated"] {
+  color: var(--ra-warning);
+}
+
+.detail {
+  margin: 0;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-muted);
+}
+
+.mono {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-sm);
+  word-break: break-all;
+}

@@ -1417,9 +1417,33 @@ _RELATIONS = {
 }
 
 
+#: ``identity_source`` of a crossing an operator's deployment link supplied.
+_OPERATOR_SOURCE = "deployment-link"
+
+
+def declaration_label(record: Mapping[str, object]) -> str | None:
+    """``link <id>: <label>`` (environment, confirmation) when an operator's link supplied the
+    crossing's identity, binding and source, else ``None``. Only what the operator stated."""
+    if record.get("identity_source") != _OPERATOR_SOURCE:
+        return None
+    label = str(record.get("link_label") or "")
+    found = f"link {record.get('link_id', '?')}: {label}".rstrip(": ")
+    environment = record.get("link_environment")
+    if isinstance(environment, str) and environment:
+        found += f" ({environment})"
+    confirmed = record.get("link_verification") == "user_confirmed"
+    return found + (", confirmed by the operator" if confirmed else ", unconfirmed")
+
+
 def deployment_qualifiers(record: Mapping[str, object]) -> list[str]:
-    """What a CI-established link's step adds to its reading: who deploys and builds it,
-    any basis but source, and the version relation. Nothing for any other link."""
+    """What a step adds to its reading. For an operator's declaration: that it is one, and which.
+    For a CI-established link: who deploys and builds it, any basis but source, and the version
+    relation. Nothing for any other link."""
+    operator = declaration_label(record)
+    if operator is not None:
+        return [
+            f"operator-declared service identity ({operator}); route and handler are the source's"
+        ]
     deployed = record.get("deployed_by")
     if not isinstance(deployed, str) or not deployed:
         return []
@@ -1566,6 +1590,7 @@ def http_crossing(resolution: Mapping[str, object], consumer: str | None) -> Htt
     deployed = text("deployed_by")
     built = text("built_by") or (provider if deployed is not None else None)
     declared = text("declared_in")
+    operator = declaration_label(record)
     return HttpCrossing(
         method=str(record.get("method")),
         url=str(record.get("url")),
@@ -1595,6 +1620,8 @@ def http_crossing(resolution: Mapping[str, object], consumer: str | None) -> Htt
         published_in=each(built, "published_in") if text("built_by") else None,
         built_in=each(built, "built_in") if text("built_by") else None,
         declared_in=f"{DECLARATIONS_SLUG}/{declared}" if declared else None,
+        operator_declared=operator is not None,
+        declaration=operator,
     )
 
 

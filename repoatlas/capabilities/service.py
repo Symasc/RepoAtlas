@@ -52,7 +52,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
 
-from repoatlas.capabilities import http_inventory
+from repoatlas.capabilities import http_connections, http_inventory
 from repoatlas.capabilities.budget import (
     apply_budget_policy,
     ceiling_for,
@@ -207,6 +207,7 @@ from repoatlas.graph.traversal import RELATIONSHIP_CROSSING_EDGES, WalkResult, W
 from repoatlas.graph.units import package_directories, unit_of
 from repoatlas.grounding import NAMED_REFERENCE, GroundingReport, ground_answer
 from repoatlas.indexing.chunking import chunk_hash
+from repoatlas.models import http
 from repoatlas.models.capability import (
     AppliedBudget,
     CapabilityContext,
@@ -237,17 +238,29 @@ from repoatlas.models.dependency_inventory import (
 )
 from repoatlas.models.deployment_conditions import ConditionContext
 from repoatlas.models.deployment_targets import (
+    DeclarationProvenance,
     DeploymentLinkCreateRequest,
     DeploymentLinkDeleteRequest,
     DeploymentLinkDeleteResponse,
+    DeploymentLinkFields,
     DeploymentLinkResponse,
     DeploymentLinkUpdateRequest,
     DeploymentTargetsRequest,
     DeploymentTargetsResponse,
+    LinkConflictError,
     LinkLimitError,
+    declared_base,
 )
 from repoatlas.models.evidence import EvidenceCandidate, EvidenceSource, EvidenceTier, MatchClass
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
+from repoatlas.models.http_connections import (
+    HttpConnectionPreviewRequest,
+    HttpConnectionPreviewResponse,
+    HttpConnectionsRequest,
+    HttpConnectionsResponse,
+    HttpDeclarationHistoryRequest,
+    HttpDeclarationHistoryResponse,
+)
 from repoatlas.models.http_inventory import (
     CrossingBasis,
     DiscoveryBasis,
@@ -1334,9 +1347,14 @@ class CapabilityService:
         """Store a link a user states for the one repository in scope."""
         with self._operation():
             repository = self._deployment_repository(request.context)
+            provenance = request.provenance
+            if provenance is not None and provenance.request_group is not None:
+                self._require_declarable(request.context, repository, request.link, provenance)
             try:
-                link = self._workspace.deployment_links.create(repository.slug, request.link)
-            except LinkLimitError as exc:
+                link = self._workspace.deployment_links.create(
+                    repository.slug, request.link, provenance=provenance
+                )
+            except (LinkLimitError, LinkConflictError) as exc:
                 raise InvalidDeploymentLinkError(str(exc)) from exc
             return DeploymentLinkResponse(context=request.context, link=link)
 
@@ -1350,7 +1368,14 @@ class CapabilityService:
             current = store.get(request.id)
             if current is None or current.repository != repository.slug:
                 raise DeploymentLinkNotFoundError()
-            link = store.update(request.id, request.link)
+            if request.provenance is not None and request.provenance.request_group is not None:
+                self._require_declarable(
+                    request.context, repository, request.link, request.provenance
+                )
+            try:
+                link = store.update(request.id, request.link, provenance=request.provenance)
+            except LinkConflictError as exc:
+                raise InvalidDeploymentLinkError(str(exc)) from exc
             if link is None:
                 raise DeploymentLinkNotFoundError()
             return DeploymentLinkResponse(context=request.context, link=link)
@@ -1366,8 +1391,90 @@ class CapabilityService:
             if current is None or current.repository != repository.slug:
                 raise DeploymentLinkNotFoundError()
             return DeploymentLinkDeleteResponse(
-                context=request.context, id=request.id, deleted=store.delete(request.id)
+                context=request.context,
+                id=request.id,
+                deleted=store.delete(request.id, provenance=request.provenance),
             )
+
+    def http_connections(self, request: HttpConnectionsRequest) -> HttpConnectionsResponse:
+        """The workspace's unresolved HTTP requests, grouped by what they target, with the
+        operators' declarations and what became of them (repoatlas.capabilities.http_connections).
+        Reads the join's stored decisions; nothing is replanned, contacted or written."""
+        with self._operation():
+            self._require_global(request.context)
+            with self._workspace.database.read_snapshot():
+                return http_connections.connections(self._workspace, request)
+
+    def http_connection_preview(
+        self, request: HttpConnectionPreviewRequest
+    ) -> HttpConnectionPreviewResponse:
+        """What declaring that an origin is served by one repository would do, request by request,
+        before anything is stored: the same matching the next sync applies."""
+        with self._operation():
+            self._require_global(request.context)
+            with self._workspace.database.read_snapshot():
+                return http_connections.preview(self._workspace, request)
+
+    def http_declaration_history(
+        self, request: HttpDeclarationHistoryRequest
+    ) -> HttpDeclarationHistoryResponse:
+        """What operators did to their declarations: append-only, local to this index."""
+        with self._operation():
+            self._require_global(request.context)
+            with self._workspace.database.read_snapshot():
+                return http_connections.history(self._workspace, request)
+
+    def _require_global(self, context: CapabilityContext) -> None:
+        if context.scope is not CapabilityScope.GLOBAL:
+            raise ContextResolutionError(
+                "HTTP connections are a workspace view",
+                detail="Ask with scope `global`: a declaration joins requests across repositories.",
+                reason=ContextFailure.AMBIGUOUS,
+            )
+
+    def _require_declarable(
+        self,
+        context: CapabilityContext,
+        repository: Repository,
+        fields: DeploymentLinkFields,
+        provenance: DeclarationProvenance,
+    ) -> None:
+        """A declaration made from a worklist group must name that group's origin and a service
+        that serves a route one of its requests matches: otherwise nothing is stored.
+
+        A link stored with a `request_group` was, at write time, checked against the latest
+        committed index: the URL names the group's origin, the repository is indexed and serves
+        at least one route, at least one of the group's requests would join, and no other service
+        claims that place for the same callers. Within one service process nothing interleaves
+        (the call lock). Across processes, a commit can land between the check and the write.
+        That is acceptable because the join decides every link again at each sync and the
+        worklist shows a drifted declaration as invalidated or ineffective."""
+        assert provenance.request_group is not None
+        if fields.url is None:
+            raise InvalidDeploymentLinkError("a declaration made from the worklist states a URL")
+        base = declared_base(fields.url)
+        target = http.client_target(base + "/") if base else None
+        if base is None or target is None or target.origin is None:
+            raise InvalidDeploymentLinkError("the URL is not an absolute http(s) URL")
+        path = base[len(target.origin) :]
+        with self._workspace.database.read_snapshot():
+            checked = http_connections.preview(
+                self._workspace,
+                HttpConnectionPreviewRequest(
+                    context=CapabilityContext(scope=CapabilityScope.GLOBAL),
+                    group=provenance.request_group,
+                    repository=repository.slug,
+                    base_path=path,
+                    callers=tuple(fields.callers),
+                    environment=fields.environment,
+                ),
+            )
+        if checked.origin != target.origin:
+            raise InvalidDeploymentLinkError(
+                "the URL does not name the origin of the group it was made from"
+            )
+        if checked.requirements:
+            raise InvalidDeploymentLinkError(checked.requirements[0])
 
     def _deployed_elsewhere(
         self, repository: Repository, registered: Sequence[Repository]

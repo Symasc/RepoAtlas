@@ -59,6 +59,8 @@ export interface LinkForm {
   variables: string;
   /** One condition per line: `branch=main`, `branch~release-*`, `pull_request=false`, `var:NAME=value`. */
   conditions: string;
+  /** One caller repository slug per line; empty serves every caller. A loopback URL needs them. */
+  callers: string;
   confirmed: boolean;
 }
 
@@ -69,6 +71,7 @@ export const EMPTY_FORM: LinkForm = {
   targetId: "",
   variables: "",
   conditions: "",
+  callers: "",
   confirmed: false,
 };
 
@@ -82,6 +85,7 @@ export function formOf(link: DeploymentLink): LinkForm {
       .map(([name, value]) => `${name}=${value}`)
       .join("\n"),
     conditions: (link.conditions ?? []).map(conditionText).join("\n"),
+    callers: (link.callers ?? []).join("\n"),
     confirmed: link.verification === "user_confirmed",
   };
 }
@@ -139,6 +143,7 @@ export function fieldsOf(form: LinkForm): { fields: DeploymentLinkFields } | { p
       target_id: form.targetId || null,
       variables,
       conditions,
+      callers: lines(form.callers),
       verification: form.confirmed ? "user_confirmed" : "unverified",
     },
   };

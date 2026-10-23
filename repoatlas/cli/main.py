@@ -438,6 +438,7 @@ def links_export(
                         include={
                             "label",
                             "environment",
+                            "callers",
                             "url",
                             "target_id",
                             "variables",
@@ -499,7 +500,7 @@ def links_import(
                 skipped += 1
                 continue
             try:
-                store.create(item.repository, fields)
+                store.create(item.repository, fields, via="import")
             except LinkLimitError as exc:
                 typer.echo(f"{item.repository}: {exc}", err=True)
                 raise typer.Exit(ExitCode.RUNTIME) from exc
