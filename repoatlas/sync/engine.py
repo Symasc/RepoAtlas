@@ -32,12 +32,17 @@ same transaction (ARCHITECTURE.md §9).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
-from collections.abc import Sequence
+import time
+from collections import deque
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 
 from repoatlas.config.settings import Settings
@@ -49,18 +54,17 @@ from repoatlas.graph.keys import file_key, repository_key, symbol_key
 from repoatlas.graph.linker import GLOBAL_PARSER, GlobalLinkResult, ReferenceLinker
 from repoatlas.graph.py_requirements import REQUIREMENTS_FACTS, ROOT, reach, requirements_meta
 from repoatlas.graph.uses_link import PENDING, UsesChangeLog, stored_scope
-from repoatlas.indexing.chunking import chunk_content
 from repoatlas.models.dependencies import DependencyRecord, DependencyReport
 from repoatlas.models.parsing import (
     ENUMERATION_INCOMPLETE,
     EdgeType,
     EntityType,
-    ParsedFile,
     ParseDiagnostic,
     Severity,
 )
 from repoatlas.models.reports import RepositorySyncReport, SyncReport
 from repoatlas.models.repository import IndexedFile, Repository, repository_slug
+from repoatlas.parsers.base import LanguageParser
 from repoatlas.parsers.ci_config import CI_HELM_RELEASE
 from repoatlas.parsers.deploy_helm import (
     REFERENCED_VALUES_KEY,
@@ -83,6 +87,7 @@ from repoatlas.storage.sqlite.stores import (
     SqliteKnowledgeStore,
     SqliteRepositoryStore,
 )
+from repoatlas.sync.derive import POOL_THRESHOLD, Deriver, Pending
 from repoatlas.sync.planner import decide_rehash, facts_version, plan_sync
 from repoatlas.sync.progress import LINK_STAGES, SILENT, SyncProgress
 from repoatlas.sync.scanner import (
@@ -94,6 +99,11 @@ from repoatlas.sync.scanner import (
 )
 
 _logger = logging.getLogger(__name__)
+
+#: Bounds on one commit group of a large pass (:class:`_CommitGroups`): at most this many
+#: files, and closed once it has been open this long, so another writer waits no longer.
+GROUP_MAX_FILES = 128
+GROUP_MAX_SECONDS = 0.25
 
 #: Bytes above which a file is recorded but never read (V1_SPEC §17 zip-bomb guard).
 #: How much of a file's head decides whether it is binary. Public because a
@@ -162,6 +172,8 @@ class SyncEngine:
         self._uses: UsesChangeLog | None = None
         #: Who is watching the run in progress (:mod:`repoatlas.sync.progress`).
         self._progress: SyncProgress = SILENT
+        #: Where the run in progress parses files (:mod:`repoatlas.sync.derive`).
+        self._deriver = self._new_deriver()
 
     @property
     def facts_version(self) -> str:
@@ -303,8 +315,20 @@ class SyncEngine:
 
         pending = [*plan.new, *plan.changed]
         progress.indexing(position, total, repo.name, 0, len(pending))
-        for scanned_file in pending:
-            outcome = self._index_file(repo, scanned_file.rel_path, scanned_file, boundary)
+        self._deriver.prepare(len(pending))
+        # Files are read and handed to the deriver up to `ahead` files before the one
+        # being written, and written strictly in plan order. With no pool `ahead` is
+        # zero, so each file is read, parsed and written before the next is read.
+        ahead = self._deriver.ahead
+        upcoming = iter(pending)
+        admitted: deque[tuple[ScannedFile, _Admitted]] = deque()
+        groups = _CommitGroups(self._knowledge, grouped=len(pending) >= POOL_THRESHOLD)
+        for _ in pending:
+            while len(admitted) <= ahead and (following := next(upcoming, None)) is not None:
+                admitted.append((following, self._admit(repo, following, boundary)))
+            scanned_file, admission = admitted.popleft()
+            with groups.file():
+                outcome = self._write_file(repo, scanned_file, boundary, admission)
             # Stamped here, from the path this sync admitted, because this is the
             # only place that knows it: a parser is handed content and a name it
             # cannot vouch for, and a library that mentions a filename in its
@@ -322,6 +346,7 @@ class SyncEngine:
             progress.indexing(position, total, repo.name, indexed, len(pending))
             if outcome.language:
                 languages.add(outcome.language)
+        groups.close()
 
         reached = self._materialize_requirements(repo, boundary)
         if reached != requirements and self._uses is not None:
@@ -530,14 +555,11 @@ class SyncEngine:
         if is_lockfile(rel_path):
             lockfiles.add(rel_path)
 
-    def _index_file(
-        self,
-        repo: Repository,
-        rel_path: str,
-        scanned_file: ScannedFile,
-        boundary: RepositoryBoundary,
-    ) -> _FileOutcome:
-        """Parse and persist one file. Never raises: failures become diagnostics.
+    def _admit(
+        self, repo: Repository, scanned_file: ScannedFile, boundary: RepositoryBoundary
+    ) -> _Admitted:
+        """Read one file and decide what indexing it takes, handing its content to the
+        deriver when there is something to parse. Writes nothing.
 
         The read goes through the boundary rather than through ``repo.path /
         rel_path``. Enumeration already proved this candidate contained, and
@@ -545,25 +567,25 @@ class SyncEngine:
         badly, because a raw path can be redirected by an ancestor that changed
         since (ARCHITECTURE.md §12).
         """
-        assert repo.id is not None
+        rel_path = scanned_file.rel_path
         language = detect_language(rel_path)
-        cap = self._settings.indexing.max_file_bytes
 
         # The cap is applied by the reader, on the descriptor it reads from, so
         # a file larger than it is never allocated (ARCHITECTURE.md §12). What
         # comes back is at most `cap` bytes or a reason there are none.
-        found = boundary.read_content(rel_path, max_bytes=cap)
+        found = boundary.read_content(rel_path, max_bytes=self._settings.indexing.max_file_bytes)
 
         if found.status is ContentStatus.OVERSIZED:
-            return self._index_oversized(repo, rel_path, scanned_file, boundary, found, language)
+            return _Admitted(language=language, oversized=found)
 
         raw = found.data
         if raw is None:
             # Unreadable, vanished, no longer inside the repository, or rewritten
             # mid-read. All of them mean the same thing to the indexer: there is
             # nothing to record, and the file's previous facts are replaced by none.
-            return _FileOutcome(
-                diagnostics=[
+            return _Admitted(
+                language=language,
+                diagnostics=(
                     ParseDiagnostic(
                         severity=Severity.WARNING,
                         message=(
@@ -571,51 +593,75 @@ class SyncEngine:
                             if found.status is ContentStatus.CHANGED
                             else "unreadable or not contained"
                         ),
-                    )
-                ]
+                    ),
+                ),
             )
 
-        content_hash = hash_bytes(raw)
-        size = len(raw)
-        mtime_ns = scanned_file.mtime_ns
         is_binary = b"\0" in raw[:BINARY_SNIFF_BYTES]
-
         parser = None if is_binary else self._registry.for_path(Path(rel_path))
-
         record = IndexedFile(
             rel_path=rel_path,
-            size=size,
-            mtime_ns=mtime_ns,
-            content_hash=content_hash,
+            size=len(raw),
+            mtime_ns=scanned_file.mtime_ns,
+            content_hash=hash_bytes(raw),
             language=language,
             parser=parser.name if parser else None,
             parser_version=self.facts_version,
             is_binary=is_binary,
             indexed_at=datetime.now(timezone.utc),
         )
-
         if is_binary:
             # Recorded so deletion tracking stays correct, but never parsed.
-            self._record_without_facts(repo, rel_path, record)
-            return _FileOutcome(language=language)
-
+            return _Admitted(language=language, record=record)
         try:
             content = raw.decode("utf-8")
         except UnicodeDecodeError:
-            self._record_without_facts(repo, rel_path, record)
-            return _FileOutcome(
+            return _Admitted(
                 language=language,
-                diagnostics=[ParseDiagnostic(severity=Severity.WARNING, message="not valid UTF-8")],
+                record=record,
+                diagnostics=(
+                    ParseDiagnostic(severity=Severity.WARNING, message="not valid UTF-8"),
+                ),
             )
+        # Parsing, dependency extraction and chunking are a pure function of
+        # `content`, and the expensive half. None of them touches the database, so
+        # they run apart from the write, and the transaction stays as short as the
+        # writes it makes (repoatlas.sync.derive).
+        return _Admitted(
+            language=language,
+            record=record,
+            parser=parser,
+            derived=self._deriver.submit(rel_path, content, language),
+        )
 
-        # Everything below this line up to the transaction is a pure function of
-        # `content`. Parsing, dependency extraction and chunking are the expensive
-        # half and none of them touch the database, so they run *before* the write
-        # lock is taken and the transaction stays as short as the writes it makes.
-        if parser:
-            try:
-                parsed = parser.parse(Path(rel_path), content)
-            except Exception as exc:
+    def _write_file(
+        self,
+        repo: Repository,
+        scanned_file: ScannedFile,
+        boundary: RepositoryBoundary,
+        admission: _Admitted,
+    ) -> _FileOutcome:
+        """Persist one admitted file. Never raises but for a parser's own failure:
+        everything else becomes a diagnostic."""
+        assert repo.id is not None
+        rel_path = scanned_file.rel_path
+        language = admission.language
+        if admission.oversized is not None:
+            return self._index_oversized(
+                repo, rel_path, scanned_file, boundary, admission.oversized, language
+            )
+        record = admission.record
+        if record is None:
+            return _FileOutcome(diagnostics=list(admission.diagnostics))
+        if admission.derived is None:
+            self._record_without_facts(repo, rel_path, record)
+            return _FileOutcome(language=language, diagnostics=list(admission.diagnostics))
+
+        parser = admission.parser
+        try:
+            derived = admission.derived.result()
+        except Exception as exc:
+            if parser is not None:
                 _logger.error(
                     "Parser %s failed for repository %s, file %s (%s: %s)",
                     parser.name,
@@ -624,11 +670,8 @@ class SyncEngine:
                     type(exc).__name__,
                     exc,
                 )
-                raise
-        else:
-            parsed = ParsedFile(language=language or "unknown", parser="none", parser_version="0")
-        dependencies, dependency_diagnostics = self._dependency_reports(rel_path, content)
-        chunks = chunk_content(content, parsed.symbols, self._settings.indexing)
+            raise
+        parsed = derived.parsed
 
         # One transaction for every durable consequence of this file's content: the
         # row that claims the content is indexed, and every fact derived from it.
@@ -670,7 +713,7 @@ class SyncEngine:
                     split_index=chunk.split_index,
                     split_total=chunk.split_total,
                 )
-                for chunk in chunks
+                for chunk in derived.chunks
             )
 
             self._knowledge.replace_file_facts(
@@ -685,7 +728,7 @@ class SyncEngine:
                 parsed=parsed,
             )
 
-            dependency_count = self._write_dependencies(repo.id, file_id, dependencies)
+            dependency_count = self._write_dependencies(repo.id, file_id, derived.dependencies)
             if self._uses is not None:
                 self._uses.after(repo.id, file_id, uses)
 
@@ -694,7 +737,7 @@ class SyncEngine:
             symbols=len(parsed.symbols),
             edges=link.edges,
             dependencies=dependency_count,
-            diagnostics=[*parsed.diagnostics, *dependency_diagnostics],
+            diagnostics=[*parsed.diagnostics, *derived.dependency_diagnostics],
         )
 
     def _record_without_facts(self, repo: Repository, rel_path: str, record: IndexedFile) -> None:
@@ -797,31 +840,8 @@ class SyncEngine:
             ],
         )
 
-    def _dependency_reports(
-        self, rel_path: str, content: str
-    ) -> tuple[list[tuple[str, DependencyReport]], list[ParseDiagnostic]]:
-        """Parse one file for declared, resolved and provided packages.
-
-        Runs for every indexed file, not only those the language registry claimed:
-        a manifest such as ``package.json`` is parsed twice on purpose, once as
-        configuration keys and once as dependencies, and the two answer different
-        questions.
-
-        Pure, and separate from the write for that reason: it is the expensive
-        half, and the per-file transaction must not be held open across it
-        (ARCHITECTURE.md §9).
-        """
-        path = Path(rel_path)
-        reports: list[tuple[str, DependencyReport]] = []
-        diagnostics: list[ParseDiagnostic] = []
-        for parser in self._dependency_registry.for_path(path):
-            report = parser.parse(path, content)
-            diagnostics.extend(report.diagnostics)
-            reports.append((parser.name, report))
-        return reports, diagnostics
-
     def _write_dependencies(
-        self, repo_id: int, file_id: int, reports: list[tuple[str, DependencyReport]]
+        self, repo_id: int, file_id: int, reports: Sequence[tuple[str, DependencyReport]]
     ) -> int:
         """Persist parsed dependency reports for one file. Caller owns the transaction."""
         if not reports:
@@ -964,6 +984,10 @@ class SyncEngine:
         finally:
             self._uses = None
             self._progress = SILENT
+            # Worker processes live for one run: whatever they were parsing when the
+            # run ended, by success or failure, is abandoned with them.
+            self._deriver.close()
+            self._deriver = self._new_deriver()
 
     def _run(
         self,
@@ -1032,6 +1056,11 @@ class SyncEngine:
         """
         return self._linker.link_global()
 
+    def _new_deriver(self) -> Deriver:
+        return Deriver(
+            self._registry, self._dependency_registry, self._settings.indexing, self.facts_version
+        )
+
     @staticmethod
     def _file_entity(repo: Repository, file_id: int, rel_path: str) -> EntityRecord:
         return EntityRecord(
@@ -1061,6 +1090,82 @@ class SyncEngine:
                 repo_id=identified.id,
             )
         )
+
+
+class _CommitGroups:
+    """Commits a large pass's files a group at a time, every file whole in one group.
+
+    The unit of durability is one file, entirely: its row and every fact derived from
+    its content commit together, or none of them does (ARCHITECTURE.md §9). Nothing
+    requires that unit to commit *alone*, and committing several together is a third
+    of the writes: each commit appends every page it touched to the write-ahead log,
+    and the full-text index writes a new segment per commit and merges them again, so
+    thousands of one-file commits rewrite the same pages thousands of times.
+
+    A group closes after :data:`GROUP_MAX_FILES` files or :data:`GROUP_MAX_SECONDS`,
+    so a writer waiting on SQLite's lock waits about as long as before, and a pass
+    interrupted mid-group loses that group, which the next sync redoes like any file
+    without a row. A small pass --- a one-file sync, an edit or two --- is not grouped
+    at all, and commits each file as it is written.
+
+    A failure while a file is written leaves the group's transaction to roll back
+    whole: the run is ending, and the files before it in the group are redone.
+    """
+
+    def __init__(self, knowledge: SqliteKnowledgeStore, *, grouped: bool) -> None:
+        self._knowledge = knowledge
+        self._grouped = grouped
+        self._open: contextlib.ExitStack | None = None
+        self._files = 0
+        self._opened = 0.0
+
+    @contextlib.contextmanager
+    def file(self) -> Iterator[None]:
+        """Write one file inside the open group, opening one if none is."""
+        if self._grouped and self._open is None:
+            stack = contextlib.ExitStack()
+            stack.enter_context(self._knowledge.transaction())
+            self._open, self._files, self._opened = stack, 0, time.monotonic()
+        try:
+            yield
+        except BaseException as exc:
+            self._end(type(exc), exc, exc.__traceback__)
+            raise
+        self._files += 1
+        if self._files >= GROUP_MAX_FILES or time.monotonic() - self._opened >= GROUP_MAX_SECONDS:
+            self.close()
+
+    def close(self) -> None:
+        """Commit the open group, if there is one."""
+        self._end(None, None, None)
+
+    def _end(
+        self,
+        kind: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        stack, self._open = self._open, None
+        if stack is not None:
+            stack.__exit__(kind, exc, traceback)
+
+
+@dataclass(frozen=True, slots=True)
+class _Admitted:
+    """What reading one file decided its indexing takes.
+
+    Exactly one shape holds: ``oversized`` for a file past the content cap; no
+    ``record`` for one with nothing to record; a ``record`` and no ``derived`` for a
+    binary or undecodable file, recorded without facts; and both for a file whose
+    content is being derived.
+    """
+
+    language: str | None
+    record: IndexedFile | None = None
+    parser: LanguageParser | None = None
+    derived: Pending | None = None
+    oversized: FileContent | None = None
+    diagnostics: tuple[ParseDiagnostic, ...] = ()
 
 
 class _FileOutcome:

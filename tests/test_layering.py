@@ -197,7 +197,11 @@ def test_language_parsers_never_import_the_dependency_layer() -> None:
 #: not pattern-matched, so a second one is a decision somebody makes in this file.
 _PROCESS_STARTERS = {
     Path("ui/launcher.py"): "runs Node for the explorer and opens a browser; never git",
+    Path("sync/derive.py"): "starts Python workers that parse file content; never git",
 }
+
+#: What starting a process looks like in source: a command, or a Python worker.
+_PROCESS_MARKERS = ("subprocess", "multiprocessing")
 
 
 def test_only_gitstate_invokes_git() -> None:
@@ -207,9 +211,10 @@ def test_only_gitstate_invokes_git() -> None:
         relative = path.relative_to(PACKAGE_ROOT)
         if relative.parts[0] == "gitstate" or relative in _PROCESS_STARTERS:
             continue
-        if "subprocess" in path.read_text(encoding="utf-8"):
+        source = path.read_text(encoding="utf-8")
+        if any(marker in source for marker in _PROCESS_MARKERS):
             offenders.append(str(relative))
-    assert not offenders, f"subprocess used outside gitstate: {offenders}"
+    assert not offenders, f"processes started outside gitstate: {offenders}"
 
 
 def test_a_module_that_starts_processes_never_starts_git() -> None:
