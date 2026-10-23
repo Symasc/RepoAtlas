@@ -28,6 +28,7 @@ from repoatlas.models.deployment_conditions import (
     ConditionState,
     DeploymentCondition,
 )
+from repoatlas.models.secrets import credential_named, secret_bearing
 
 #: Where a target's statement comes from.
 TargetKind = Literal["ingress", "openapi-server", "link"]
@@ -82,6 +83,9 @@ class DeploymentVariable(BaseModel):
     basis: ResolutionBasis | None = None
     #: A credential's value is never shown nor used; the variable stays unresolved.
     withheld: bool = False
+    #: Where the value is stated, ``<path>:<line>`` in the repository that states it: the
+    #: chart's ``values.yaml``, a release's ``-f`` values file, its CI step.
+    at: str | None = None
 
 
 class DeploymentGuard(BaseModel):
@@ -118,6 +122,9 @@ class DeploymentResolution(BaseModel):
     link_id: int | None = None
     #: The target and resolution this one repeats, when two reach the same URL.
     duplicate_of: str | None = None
+    #: What keeps this context from resolving, or qualifies what it resolves: a values
+    #: file not read, a value set from a CI expression, a value left empty.
+    notes: list[str] = Field(default_factory=list)
 
 
 class DeploymentTarget(BaseModel):
@@ -140,6 +147,9 @@ class DeploymentTarget(BaseModel):
     diagnostics: list[str] = Field(default_factory=list)
     #: A link whose target is no longer stated by any indexed file.
     detached: bool = False
+    #: For a target another repository states, the repository asked about, whose built
+    #: code that repository's release is configured to run (``container_artifact``).
+    runs: str | None = None
 
 
 class DeploymentLinkFields(BaseModel):
@@ -185,6 +195,9 @@ class DeploymentLinkFields(BaseModel):
         for name, value in variables.items():
             if not _VARIABLE_NAME.fullmatch(name):
                 raise ValueError(f"`{name[:40]}` is not a variable name")
+            if credential_named(name) or secret_bearing(value):
+                # A link names a place; a credential has no business in one.
+                raise ValueError(f"`{name[:40]}` names or holds a credential")
             if not value or len(value) > MAX_LINK_TEXT or any(c.isspace() for c in value):
                 raise ValueError(f"the value of `{name}` is empty, too long or has whitespace")
             if any(char in value for char in "/?#@") and name != "scheme":

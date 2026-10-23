@@ -42,7 +42,9 @@ the wrong place.
 
 from __future__ import annotations
 
+import json
 import threading
+from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -196,10 +198,11 @@ from repoatlas.errors import (
 )
 from repoatlas.freshness import index_freshness
 from repoatlas.graph.declared import root_path
-from repoatlas.graph.deployment_targets import build_targets
+from repoatlas.graph.deployment_targets import Elsewhere, build_targets
 from repoatlas.graph.impact import ImpactWalk
 from repoatlas.graph.keys import is_positional
 from repoatlas.graph.linker import plan_repository_http
+from repoatlas.graph.release_values import CONTAINER_ARTIFACT
 from repoatlas.graph.traversal import RELATIONSHIP_CROSSING_EDGES, WalkResult, WalkStep, walk
 from repoatlas.graph.units import package_directories, unit_of
 from repoatlas.grounding import NAMED_REFERENCE, GroundingReport, ground_answer
@@ -333,7 +336,7 @@ from repoatlas.services.freshness_service import (
     repository_set_drift,
 )
 from repoatlas.services.workspace import Workspace, open_workspace
-from repoatlas.storage.protocols import EntityIdentity, StoredEdge
+from repoatlas.storage.protocols import EntityIdentity, StoredEdge, UnresolvedRefRecord
 from repoatlas.sync.engine import BINARY_SNIFF_BYTES
 from repoatlas.sync.scanner import hash_bytes
 
@@ -1287,17 +1290,32 @@ class CapabilityService:
             )
             knowledge = self._workspace.knowledge
             assert repository.id is not None
+            registered = self._workspace.repositories.list_all()
             with self._workspace.database.read_snapshot():
                 claims = knowledge.list_unresolved_refs(repository.id)
-                paths = {
-                    row.file_id: row.rel_path for row in knowledge.list_file_rows(repository.id)
-                }
+                files = {row.file_id: row for row in knowledge.list_file_rows(repository.id)}
                 edges = knowledge.list_http_edges(
                     repository.id, (EdgeType.DECLARES_HTTP_DEPLOYMENT,)
                 )
                 links = self._workspace.deployment_links.list(repository.slug)
+                # The operator's declarations, so a release they make interpretable is read.
+                declarations: list[UnresolvedRefRecord] = []
+                for repo in registered:
+                    if repo.slug == DECLARATIONS_SLUG and repo.id is not None:
+                        declarations = knowledge.list_unresolved_refs(repo.id)
+                        files.update(
+                            (row.file_id, row) for row in knowledge.list_file_rows(repo.id)
+                        )
+                elsewhere = self._deployed_elsewhere(repository, registered)
             targets, diagnostics = build_targets(
-                repository.slug, claims, paths, edges, links, context
+                repository.slug,
+                claims,
+                files,
+                edges,
+                links,
+                context,
+                declarations=declarations,
+                elsewhere=elsewhere,
             )
             return DeploymentTargetsResponse(
                 context=request.context,
@@ -1350,6 +1368,41 @@ class CapabilityService:
             return DeploymentLinkDeleteResponse(
                 context=request.context, id=request.id, deleted=store.delete(request.id)
             )
+
+    def _deployed_elsewhere(
+        self, repository: Repository, registered: Sequence[Repository]
+    ) -> list[Elsewhere]:
+        """The other repositories whose releases the artifact join found configured to run
+        this repository's built code (``container_artifact`` ``linked``), each with the
+        charts and release names to resolve. Read inside the caller's snapshot."""
+        knowledge = self._workspace.knowledge
+        wanted: dict[int, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+        for row in knowledge.list_link_decisions(CONTAINER_ARTIFACT):
+            if row.decision != "linked" or row.repo_id == repository.id:
+                continue
+            evidence = json.loads(row.evidence_json or "{}")
+            publishers = str(evidence.get("publisher", "")).split(";")
+            if not any(p.strip().startswith(f"{repository.slug}:") for p in publishers):
+                continue
+            workload = str(evidence.get("workload_in", ""))
+            chart, marker, _ = workload.partition("/templates/")
+            release = evidence.get("release")
+            if marker and release:
+                wanted[row.repo_id][chart].add(str(release))
+        slugs = {repo.id: repo.slug for repo in registered}
+        found: list[Elsewhere] = []
+        for repo_id in sorted(wanted):
+            if repo_id not in slugs:
+                continue
+            found.append(
+                Elsewhere(
+                    repository=slugs[repo_id],
+                    claims=knowledge.list_unresolved_refs(repo_id),
+                    files={row.file_id: row for row in knowledge.list_file_rows(repo_id)},
+                    releases={chart: set(names) for chart, names in wanted[repo_id].items()},
+                )
+            )
+        return found
 
     def _deployment_repository(self, context: CapabilityContext) -> Repository:
         """The one repository a deployment call is about."""

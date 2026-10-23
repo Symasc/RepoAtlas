@@ -337,6 +337,14 @@ def _ingress(
                     item["port"] = (text, line)
         elif path[:2] == ("spec", "tls") and len(path) == 5 and path[3] == "hosts":
             tls.append({"parts": _host(text, scope_at.get(line, empty)), "line": line})
+        elif path[:2] == ("spec", "tls") and len(path) == 4 and path[3] == "hosts":
+            # A flow sequence, ``hosts: [a.example, b.example]``: each entry is a host.
+            flow = text.strip()
+            if flow.startswith("[") and flow.endswith("]"):
+                for listed_host in flow[1:-1].split(","):
+                    named = listed_host.strip().strip("\"'")
+                    if named and len(tls) < _LIMIT:
+                        tls.append({"parts": _host(named, scope_at.get(line, empty)), "line": line})
     for path, text, line in other:
         if path[:2] == ("spec", "tls") and len(path) >= 4 and path[3] == "hosts":
             listed = text.removeprefix("-").strip()

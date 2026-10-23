@@ -23,7 +23,13 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
-from repoatlas.models.container_image import EXPR, TEXT, VAR, WITHHELD
+from repoatlas.graph.ci_facts import CiRelease, plan_ci_facts
+from repoatlas.graph.release_values import (
+    EffectiveValues,
+    branch_symbols,
+    release_values,
+)
+from repoatlas.models.container_image import EXPR, TEXT, VAR
 from repoatlas.models.deployment_conditions import ConditionContext, ConditionState, evaluate
 from repoatlas.models.deployment_targets import (
     DeploymentGuard,
@@ -36,31 +42,19 @@ from repoatlas.models.deployment_targets import (
 )
 from repoatlas.models.http import DEPLOYMENT_KEY_PREFIX
 from repoatlas.models.parsing import EdgeType
-from repoatlas.parsers.ci_config import CI_HELM_RELEASE, CI_STEP_UNSUPPORTED
+from repoatlas.parsers.ci_config import CI_STEP_UNSUPPORTED
 from repoatlas.parsers.http_facts import (
     DEPLOYMENT_TARGET_INGRESS,
     DEPLOYMENT_TARGET_VALUES,
     HELM_CHART,
     HELM_RELEASE,
     HELM_VALUES,
+    HELM_VALUES_FILE,
     PENDING_FACT,
 )
 from repoatlas.parsers.withhold import WITHHELD as WITHHELD_VALUE
-from repoatlas.storage.protocols import HttpEdgeRow, UnresolvedRefRecord
+from repoatlas.storage.protocols import FileRow, HttpEdgeRow, UnresolvedRefRecord
 
-#: CI variables that hold the branch a pipeline runs for, by CI system convention.
-BRANCH_VARIABLES = frozenset(
-    {
-        "CIRCLE_BRANCH",
-        "GITHUB_REF_NAME",
-        "GITHUB_HEAD_REF",
-        "CI_COMMIT_BRANCH",
-        "CI_COMMIT_REF_NAME",
-        "BRANCH_NAME",
-        "BITBUCKET_BRANCH",
-        "BUILD_SOURCEBRANCHNAME",
-    }
-)
 #: Targets one repository may report, and contexts one target may be resolved under.
 MAX_TARGETS = 200
 MAX_RESOLUTIONS = 32
@@ -103,6 +97,15 @@ class _Context:
     conditions: ConditionState = "none"
     link: DeploymentLink | None = None
     notes: list[str] = field(default_factory=list)
+    #: A CI release's values, layered as the HTTP join layers them (``release_values``):
+    #: when set, every values path is read from it rather than from ``defaults``.
+    effective: EffectiveValues | None = None
+    #: Where the chart's ``values.yaml`` states each key: ``(path, {key: line})``.
+    default_lines: tuple[str, Mapping[str, int]] | None = None
+    #: The CI parts that hold the branch the release's pipeline runs for, and that branch
+    #: as asked about: such a part takes the asked branch, with the basis ``context``.
+    branch_symbols: frozenset[tuple[str, str]] = frozenset()
+    branch: str | None = None
 
 
 @dataclass(slots=True)
@@ -110,17 +113,64 @@ class _Value:
     value: str | None
     basis: ResolutionBasis | None
     withheld: bool = False
+    at: str | None = None
+    #: Why a value that is set has no literal value here.
+    note: str | None = None
+
+
+#: Why a layer of a release's values left everything after it unknown.
+_OPEN_REASONS = {
+    "values-unresolved": "a values file the release names is not a literal path",
+    "values-unread": "a values file the release names is not indexed",
+    "set-unread": "a --set the release passes is not read",
+    "truncated": "a values file is too large to read whole",
+}
+
+
+def _effective_lookup(path: str, context: _Context) -> _Value:
+    assert context.effective is not None
+    found = context.effective.get(path)
+    if found is None:
+        return _Value(None, None)
+    at = f"{found.place.path}:{found.place.line}" if found.place is not None else None
+    defaults = context.default_lines[0] if context.default_lines is not None else None
+    basis: ResolutionBasis = (
+        "chart-defaults" if found.place is not None and found.place.path == defaults else "release"
+    )
+    if found.kind == "lit":
+        return _Value(found.text, basis, at=at)
+    if found.kind == "withheld":
+        return _Value(None, basis, withheld=True, at=at)
+    if found.kind == "sym":
+        symbolic = [part for part in found.parts if part[0] != TEXT]
+        if context.branch is not None and all(p in context.branch_symbols for p in symbolic):
+            text = "".join(
+                context.branch if (kind, value) in context.branch_symbols else value
+                for kind, value in found.parts
+            )
+            return _Value(text, "context", at=at)
+        names = [text for kind, text in found.parts if kind in (VAR, EXPR) and text]
+        return _Value(
+            None, basis, at=at, note=f"`{path}` is set from {', '.join(names) or 'an expression'}"
+        )
+    reasons = [_OPEN_REASONS.get(r, r) for r in context.effective.reasons]
+    return _Value(None, None, note=f"`{path}` may be set by what is not read: {'; '.join(reasons)}")
 
 
 def _lookup(path: str, context: _Context) -> _Value:
     if path in context.overrides:
         value, basis, withheld = context.overrides[path]
         return _Value(None if withheld else value, basis, withheld)
+    if context.effective is not None:
+        return _effective_lookup(path, context)
     if path in context.defaults:
         value = context.defaults[path]
+        at = None
+        if context.default_lines is not None and path in context.default_lines[1]:
+            at = f"{context.default_lines[0]}:{context.default_lines[1][path]}"
         if value == WITHHELD_VALUE:
-            return _Value(None, "chart-defaults", True)
-        return _Value(value, "chart-defaults")
+            return _Value(None, "chart-defaults", True, at=at)
+        return _Value(value, "chart-defaults", at=at)
     return _Value(None, None)
 
 
@@ -136,8 +186,12 @@ def _truth(path: str, context: _Context) -> GuardState:
             return "unknown"
         return "unmet" if found.value in _FALSY else "met"
     prefix = (f"{path}.", f"{path}[")
+    if context.effective is not None and context.effective.nested(path):
+        return "met"
     if any(key.startswith(prefix) for key in (*context.overrides, *context.defaults)):
         return "met"
+    if context.effective is not None and context.effective.open:
+        return "unknown"
     # Absent from every values source this context reads: Helm renders it as nil, unless
     # a source this did not read sets it.
     return "unmet" if context.basis != "declared" else "unknown"
@@ -204,6 +258,7 @@ class _Rendered:
     text: str
     resolved: bool
     variables: list[DeploymentVariable]
+    notes: list[str] = field(default_factory=list)
 
 
 def _render(
@@ -211,6 +266,7 @@ def _render(
 ) -> _Rendered:
     pieces: list[str] = []
     variables: list[DeploymentVariable] = []
+    notes: list[str] = []
     resolved = True
     for part in parts:
         kind, text = part
@@ -233,6 +289,13 @@ def _render(
                 value = _Value(context.release, "release")
         elif kind == "namespace":
             value = _lookup("namespace", context)
+        if value.note is not None:
+            notes.append(value.note)
+        if value.value is not None and not value.value.strip():
+            # Helm renders it, but an empty part names no host or path: a hole, not a value.
+            where = f" at {value.at}" if value.at else ""
+            notes.append(f"`{name}` is empty{where}")
+            value = _Value(None, None, at=value.at)
         source = kind if kind in {"value", "chart", "release", "namespace"} else "opaque"
         variables.append(
             DeploymentVariable(
@@ -241,6 +304,7 @@ def _render(
                 value=value.value,
                 basis=value.basis if value.value is not None or value.withheld else None,
                 withheld=value.withheld,
+                at=value.at if value.value is not None or value.withheld else None,
             )
         )
         if value.value is None:
@@ -248,7 +312,7 @@ def _render(
             pieces.append("{" + name + "}")
         else:
             pieces.append(value.value)
-    return _Rendered("".join(pieces), resolved, variables)
+    return _Rendered("".join(pieces), resolved, variables, notes)
 
 
 def _path_prefix(text: str) -> str | None:
@@ -343,49 +407,34 @@ def _link_overrides(
 
 
 def _set_overrides(
-    meta: Mapping[str, str], role: str, context: ConditionContext
+    meta: Mapping[str, str],
 ) -> tuple[dict[str, tuple[str | None, ResolutionBasis, bool]], list[str]] | None:
-    """What a release sets, or ``None`` when its settings were not read."""
+    """What a Tilt release sets, or ``None`` when its settings were not read."""
     found: dict[str, tuple[str | None, ResolutionBasis, bool]] = {}
     notes: list[str] = []
     sets = _loads(meta.get("set"), None)
-    if role == HELM_RELEASE:
-        if sets is None and "set" in meta:
-            return None
-        for item in sets or []:
-            path, _, value = str(item).partition("=")
-            found[path] = (value, "release", value == WITHHELD_VALUE)
-        if meta.get("values_files") == "true":
-            notes.append("the release names values files, which may override any value")
-        return found, notes
-    if meta.get("set_unread") == "true":
-        notes.append("the release sets values from files or JSON, which are not read")
-    if _loads(meta.get("values"), []):
-        notes.append("the release names values files, which may override any value")
-    for path, parts in sets or []:
-        if path is None:
-            notes.append("a --set argument is not read")
-            continue
-        texts = [text for kind, text in parts if kind == TEXT]
-        withheld = any(kind == WITHHELD for kind, _ in parts)
-        branch = [text for kind, text in parts if kind == VAR and text in BRANCH_VARIABLES]
-        if withheld:
-            found[path] = (None, "release", True)
-        elif len(parts) == len(texts):
-            found[path] = ("".join(texts), "release", False)
-        elif branch and len(parts) == 1:
-            found[path] = (context.branch, "context", False)
-            if context.branch is None:
-                notes.append(f"`{path}` is the branch the pipeline runs for, not known here")
-        else:
-            found[path] = (None, "release", False)
-            names = [text for kind, text in parts if kind in (VAR, EXPR) and text]
-            notes.append(f"`{path}` is set from {', '.join(names) or 'an expression'}")
+    if sets is None and "set" in meta:
+        return None
+    for item in sets or []:
+        path, _, value = str(item).partition("=")
+        found[path] = (value, "release", value == WITHHELD_VALUE)
+    if meta.get("values_files") == "true":
+        notes.append("the release names values files, which are not read for a Tilt release")
     return found, notes
 
 
+def _literal(parts: Sequence[Sequence[str]]) -> str | None:
+    """CI parts as one literal string, or ``None`` when any part is not text."""
+    if parts and all(kind == TEXT for kind, _ in parts):
+        return "".join(text for _, text in parts)
+    return None
+
+
 def _branches_state(meta: Mapping[str, str], context: ConditionContext) -> ConditionState:
-    domains = _loads(meta.get("domains"), {})
+    return _domain_state(_loads(meta.get("domains"), {}), context)
+
+
+def _domain_state(domains: object, context: ConditionContext) -> ConditionState:
     branches = domains.get("branches") if isinstance(domains, dict) else None
     if not branches:
         return "none"
@@ -399,59 +448,133 @@ class _Builder:
         self,
         repository: str,
         claims: Sequence[UnresolvedRefRecord],
-        paths: Mapping[int, str],
+        files: Mapping[int, FileRow],
         links: Sequence[DeploymentLink],
         context: ConditionContext,
+        *,
+        declarations: Sequence[UnresolvedRefRecord] = (),
+        only: Mapping[str, set[str]] | None = None,
     ) -> None:
         self.repository = repository
-        self.paths = paths
+        self.files = files
+        self.paths = {file_id: row.rel_path for file_id, row in files.items()}
         self.links = links
         self.context = context
+        #: Chart directory -> the release names to resolve it under, and nothing else: a
+        #: target another repository states, asked about from the code it runs.
+        self.only = only
         grouped: dict[str, list[UnresolvedRefRecord]] = defaultdict(list)
         for claim in claims:
             grouped[_meta(claim).get(PENDING_FACT, "")].append(claim)
         self.grouped = grouped
         self.charts = {_meta(c).get("chart", ""): c.target_key for c in grouped[HELM_CHART]}
         self.values: dict[str, dict[str, str]] = {}
+        #: Chart directory -> (its values.yaml path, the values meta, {key: line}).
+        self.chart_values: dict[str, tuple[str, dict[str, str], dict[str, int]]] = {}
         for claim in grouped[HELM_VALUES]:
             meta = _meta(claim)
             leaves = _loads(meta.get("values"), {})
-            self.values[meta.get("chart", "")] = leaves if isinstance(leaves, dict) else {}
+            chart_dir = meta.get("chart", "")
+            self.values[chart_dir] = leaves if isinstance(leaves, dict) else {}
+            lines = _loads(meta.get("lines"), {})
+            self.chart_values[chart_dir] = (
+                self.paths.get(claim.file_id, ""),
+                meta,
+                lines if isinstance(lines, dict) else {},
+            )
+        self.values_files: dict[str, dict[str, str]] = {
+            self.paths.get(claim.file_id, ""): _meta(claim) for claim in grouped[HELM_VALUES_FILE]
+        }
         self.listens: dict[str, dict[str, object]] = {}
         for claim in grouped[DEPLOYMENT_TARGET_VALUES]:
             meta = _meta(claim)
             found = _loads(meta.get("listen"), {})
             self.listens[meta.get("chart", "")] = found if isinstance(found, dict) else {}
+        # The releases CI establishes, decided exactly as the HTTP join decides them, with
+        # an operator's declarations when one supplies an action's semantics.
+        ci_files = dict(files)
+        ci = plan_ci_facts([*claims, *declarations], ci_files)
+        self.ci_releases: list[CiRelease] = [
+            r for r in ci.releases if r.decision in ("bound", "values-unresolved")
+        ]
         self.diagnostics: list[str] = []
+        #: Set by :func:`build_targets` for a target another repository states.
+        self.runs: str | None = None
+
+    def _default_lines(self, chart: str) -> tuple[str, Mapping[str, int]] | None:
+        found = self.chart_values.get(chart)
+        return (found[0], found[2]) if found is not None else None
 
     def _releases(self, chart: str) -> list[_Context]:
+        wanted = self.only.get(chart) if self.only is not None else None
         found: list[_Context] = []
-        for role in (HELM_RELEASE, CI_HELM_RELEASE):
-            for claim in self.grouped[role]:
-                meta = _meta(claim)
-                if meta.get("chart", "") != chart:
-                    continue
-                path = self.paths.get(claim.file_id, "")
-                where = f"{path}:{claim.line_start}" if claim.line_start else path
-                read = _set_overrides(meta, role, self.context)
-                release = claim.target_key if role == HELM_RELEASE else None
-                if role == CI_HELM_RELEASE:
-                    words = _loads(meta.get("release"), [])
-                    if isinstance(words, list) and words and all(k == TEXT for k, _ in words):
-                        release = "".join(text for _, text in words)
-                context = _Context(
-                    basis="release",
-                    label=f"release `{release or claim.target_key}` ({where})",
-                    defaults=self.values.get(chart, {}),
-                    release=release,
-                    conditions=_branches_state(meta, self.context),
+        for claim in self.grouped[HELM_RELEASE]:
+            meta = _meta(claim)
+            if meta.get("chart", "") != chart:
+                continue
+            if wanted is not None and claim.target_key not in wanted:
+                continue
+            path = self.paths.get(claim.file_id, "")
+            where = f"{path}:{claim.line_start}" if claim.line_start else path
+            read = _set_overrides(meta)
+            context = _Context(
+                basis="release",
+                label=f"release `{claim.target_key}` ({where})",
+                defaults=self.values.get(chart, {}),
+                release=claim.target_key,
+                conditions=_branches_state(meta, self.context),
+                default_lines=self._default_lines(chart),
+            )
+            if read is None:
+                context.notes.append("the release's settings are not literal")
+            else:
+                context.overrides, notes = read
+                context.notes.extend(notes)
+            found.append(context)
+        for release in self.ci_releases:
+            if release.chart != chart:
+                continue
+            name = _literal(release.release)
+            if wanted is not None and name not in wanted:
+                continue
+            where = f"{release.origin.rel_path}:{release.claim.line_start}"
+            symbols = branch_symbols(release.system)
+            branch = self.context.branch
+            chart_values = self.chart_values.get(chart)
+            values = release_values(
+                release.origin.repo_id,
+                (chart_values[1], chart_values[0]) if chart_values is not None else None,
+                self.values_files,
+                release,
+                {},
+            )
+            if name is None and branch is not None:
+                name = _literal(
+                    [
+                        (TEXT, branch) if (kind, text) in symbols else (kind, text)
+                        for kind, text in release.release
+                    ]
                 )
-                if read is None:
-                    context.notes.append("the release's settings are not literal")
-                else:
-                    context.overrides, notes = read
-                    context.notes.extend(notes)
-                found.append(context)
+            context = _Context(
+                basis="release",
+                label=f"release `{name or release.claim.target_key}` ({where})",
+                release=name,
+                conditions=_domain_state(release.domains, self.context),
+                effective=values,
+                default_lines=self._default_lines(chart),
+                branch_symbols=symbols,
+                branch=branch,
+            )
+            uses_branch = any(
+                (kind, text) in symbols
+                for parts in (release.release, *(p for _, p in release.sets))
+                for kind, text in parts
+            )
+            if uses_branch and branch is None:
+                context.notes.append("the release uses the branch it runs for, not known here")
+            if release.basis == "declared":
+                context.notes.append("an operator declaration supplies how this release is made")
+            found.append(context)
         return found
 
     def ingress_targets(self) -> list[DeploymentTarget]:
@@ -461,6 +584,8 @@ class _Builder:
             path = self.paths.get(claim.file_id, "")
             templated = meta.get("source") == "chart-template"
             chart_dir = meta.get("chart", "")
+            if self.only is not None and (not templated or chart_dir not in self.only):
+                continue
             chart = self.charts.get(chart_dir) if templated else None
             hosts = _loads(meta.get("hosts"), [])
             tls = [entry["parts"] for entry in _loads(meta.get("tls"), [])]
@@ -480,41 +605,60 @@ class _Builder:
             if not hosts:
                 diagnostics.append("it states no host")
             defaults = self.values.get(chart_dir, {}) if templated else {}
+            defaults_context = _Context(
+                "chart-defaults",
+                "chart defaults",
+                defaults=defaults,
+                default_lines=self._default_lines(chart_dir),
+            )
             contexts = (
                 [
-                    _Context("chart-defaults", "chart defaults", defaults=defaults),
+                    # Asked from the code another repository runs, only its own releases.
+                    *([defaults_context] if self.only is None else []),
                     *self._releases(chart_dir),
                 ]
                 if templated
                 else [_Context("declared", "as written")]
             )
+            if not contexts:
+                continue
             for host in hosts:
                 parts: list[Part] = host["parts"]
-                first = (host.get("paths") or [{}])[0]
-                path_parts: list[Part] = first.get("parts") or []
-                starred = [p[1] for p in [*parts, *path_parts] if p[0] == "value"]
-                known = set(defaults)
-                for context in contexts:
-                    known.update(context.overrides)
-                for binding in _bindings(starred, known):
-                    key = ",".join(f"{k}={v}" for k, v in sorted(binding.items()))
-                    tid = target_id(self.repository, path, int(host["line"]), key)
-                    targets.append(
-                        self._ingress_target(
-                            tid,
-                            path,
-                            host,
-                            parts,
-                            path_parts,
-                            binding,
-                            tls,
-                            meta,
-                            chart,
-                            chart_dir,
-                            contexts,
-                            list(diagnostics),
+                # Each path of the rule is its own target: a host serves each one.
+                served: list[list[Part]] = []
+                for entry in host.get("paths") or []:
+                    if (entry.get("parts") or []) not in served:
+                        served.append(entry.get("parts") or [])
+                served = served or [[]]
+                for index, path_parts in enumerate(served):
+                    starred = [p[1] for p in [*parts, *path_parts] if p[0] == "value"]
+                    known = set(defaults)
+                    for context in contexts:
+                        known.update(context.overrides)
+                        if context.effective is not None:
+                            known.update(context.effective.entries)
+                    for binding in _bindings(starred, known):
+                        key = ",".join(f"{k}={v}" for k, v in sorted(binding.items()))
+                        if index:
+                            # The first path keeps the id a target had before paths split.
+                            key = f"{key};path={index}"
+                        tid = target_id(self.repository, path, int(host["line"]), key)
+                        targets.append(
+                            self._ingress_target(
+                                tid,
+                                path,
+                                host,
+                                parts,
+                                path_parts,
+                                binding,
+                                tls,
+                                meta,
+                                chart,
+                                chart_dir,
+                                contexts,
+                                list(diagnostics),
+                            )
                         )
-                    )
         return targets
 
     def _ingress_target(
@@ -562,8 +706,6 @@ class _Builder:
             resolutions.append(
                 self._resolve(context, parts, path_parts, binding, scheme, guards_meta, chart)
             )
-            if context.basis != "link":
-                diagnostics.extend(f"{context.label}: {note}" for note in context.notes)
         guard_views = [
             DeploymentGuard(
                 expression=_guard_view(g, contexts[0])[0],
@@ -584,6 +726,7 @@ class _Builder:
             guards=guard_views,
             resolutions=resolutions,
             diagnostics=list(dict.fromkeys(diagnostics)),
+            runs=self.runs,
         )
 
     def _resolve(
@@ -629,6 +772,7 @@ class _Builder:
                 split = urlsplit(url)
                 origin = f"{split.scheme}://{split.netloc}"
         enabled = _combined(_guard_view(g, context)[1] for g in guards)
+        notes = [*context.notes, *host.notes, *(served.notes if served is not None else [])]
         if url is not None:
             state = "resolved"
         elif any(v.value is not None for v in variables) or any(p[0] == "text" for p in parts):
@@ -648,6 +792,7 @@ class _Builder:
             conditions=context.conditions,
             verification=verification,  # type: ignore[arg-type]
             link_id=link_id,
+            notes=list(dict.fromkeys(notes)),
         )
 
     def openapi_targets(self, edges: Sequence[HttpEdgeRow]) -> list[DeploymentTarget]:
@@ -657,8 +802,6 @@ class _Builder:
                 continue
             if not edge.target_key.startswith(DEPLOYMENT_KEY_PREFIX):
                 continue
-            if edge.parser == DEPLOYMENT_TARGET_PARSER:
-                continue  # stated by an Ingress, and listed as one
             base = edge.target_key[len(DEPLOYMENT_KEY_PREFIX) :]
             path = edge.path or ""
             tid = target_id(self.repository, path, edge.line_start or 0, base)
@@ -737,8 +880,14 @@ class _Builder:
         """CI steps this does not interpret that look like they deploy with Helm: a
         release made there is not read, so whatever it sets is not known."""
         found: list[str] = []
+        # A step an operator's declaration makes interpretable is read as a release.
+        declared = {
+            (r.claim.file_id, r.claim.line_start, r.claim.target_key) for r in self.ci_releases
+        }
         for claim in self.grouped[CI_STEP_UNSUPPORTED]:
             if "helm" not in claim.target_key.lower():
+                continue
+            if (claim.file_id, claim.line_start, claim.target_key) in declared:
                 continue
             path = self.paths.get(claim.file_id, "")
             found.append(
@@ -746,11 +895,6 @@ class _Builder:
                 "interpreted, so the values a release there sets are not known"
             )
         return found
-
-
-#: The parser name the global pass gives the HTTP deployment edges it derives from an
-#: Ingress (:func:`repoatlas.graph.deployment_target_edges.deployment_edges`).
-DEPLOYMENT_TARGET_PARSER = "deployment-targets"
 
 
 def _mark_duplicates(targets: list[DeploymentTarget]) -> list[DeploymentTarget]:
@@ -768,19 +912,50 @@ def _mark_duplicates(targets: list[DeploymentTarget]) -> list[DeploymentTarget]:
     return marked
 
 
+@dataclass(frozen=True, slots=True)
+class Elsewhere:
+    """Another repository whose releases are configured to run the asked repository's
+    built code (its ``container_artifact`` links): its claims and files, and the release
+    names to resolve each of its charts under."""
+
+    repository: str
+    claims: Sequence[UnresolvedRefRecord]
+    files: Mapping[int, FileRow]
+    releases: Mapping[str, set[str]]
+
+
 def build_targets(
     repository: str,
     claims: Sequence[UnresolvedRefRecord],
-    paths: Mapping[int, str],
+    files: Mapping[int, FileRow],
     edges: Sequence[HttpEdgeRow],
     links: Sequence[DeploymentLink],
     context: ConditionContext,
+    *,
+    declarations: Sequence[UnresolvedRefRecord] = (),
+    elsewhere: Sequence[Elsewhere] = (),
 ) -> tuple[list[DeploymentTarget], list[str]]:
     """One repository's deployment targets, and what keeps any of them from resolving
-    that belongs to no single target."""
-    builder = _Builder(repository, claims, paths, links, context)
+    that belongs to no single target.
+
+    Besides what the repository's own files state, each repository in ``elsewhere`` adds
+    the Ingress targets of the charts whose releases run this repository's code, resolved
+    under those releases alone and marked with ``runs``."""
+    builder = _Builder(repository, claims, files, links, context, declarations=declarations)
     stated = [*builder.ingress_targets(), *builder.openapi_targets(edges)]
-    stated.sort(key=lambda t: (t.path or "", t.line or 0, t.target_id))
+    for other in elsewhere:
+        deploying = _Builder(
+            other.repository,
+            other.claims,
+            other.files,
+            (),
+            context,
+            declarations=declarations,
+            only=other.releases,
+        )
+        deploying.runs = repository
+        stated.extend(deploying.ingress_targets())
+    stated.sort(key=lambda t: (t.runs or "", t.path or "", t.line or 0, t.target_id))
     stated = stated[:MAX_TARGETS]
     targets = _mark_duplicates([*stated, *builder.link_targets({t.target_id for t in stated})])
     return targets, builder.ci_diagnostics()
