@@ -1042,6 +1042,7 @@ class SyncEngine:
             scope=scope,
             linked_references=link.resolved,
             unresolved_references=link.unresolved,
+            ordinary=link.ordinary,
             cross_repository_edges=link.cross_repository,
             link_trace=link.trace,
         )

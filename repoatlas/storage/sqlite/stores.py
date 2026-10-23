@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -22,6 +22,7 @@ from repoatlas.models.dependencies import (
 )
 from repoatlas.models.deployment_targets import DeploymentLink
 from repoatlas.models.http import ROUTE_KEY_PREFIX
+from repoatlas.models.ordinary_outcomes import ORDINARY_FAMILY, OutcomeRow
 from repoatlas.models.parsing import (
     USES_EXPORT_TABLE,
     EdgeDirection,
@@ -1306,13 +1307,76 @@ class SqliteKnowledgeStore:
                 ],
             )
 
+    def replace_ordinary_outcomes(
+        self, rows: Sequence[OutcomeRow], accounting: Mapping[str, int]
+    ) -> None:
+        """Replace the ordinary-claim account (``ordinary_outcomes``, ``ordinary_accounting``).
+
+        Called by the global commit inside its transaction, so the account and the graph it
+        accounts for change together.
+        """
+        with self._db.transaction() as conn:
+            conn.execute("DELETE FROM ordinary_outcomes")
+            conn.execute("DELETE FROM ordinary_accounting")
+            conn.executemany(
+                """
+                INSERT INTO ordinary_outcomes (
+                    repo_id, language, edge_type, target_kind, outcome, subreason, claims
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        row.repo_id,
+                        row.language,
+                        row.edge_type,
+                        row.target_kind,
+                        row.outcome,
+                        row.subreason,
+                        row.claims,
+                    )
+                    for row in rows
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO ordinary_accounting (key, value) VALUES (?, ?)",
+                sorted(accounting.items()),
+            )
+
+    def list_ordinary_outcomes(self) -> list[OutcomeRow]:
+        """The stored account, in a fixed order."""
+        rows = self._db.execute(
+            """
+            SELECT repo_id, language, edge_type, target_kind, outcome, subreason, claims
+            FROM ordinary_outcomes
+            ORDER BY repo_id, language, edge_type, target_kind, outcome, subreason
+            """
+        ).fetchall()
+        return [OutcomeRow(**{key: row[key] for key in row.keys()}) for row in rows]  # noqa: SIM118
+
+    def ordinary_accounting(self) -> dict[str, int]:
+        """The stored accounting figures by key."""
+        rows = self._db.execute(
+            "SELECT key, value FROM ordinary_accounting ORDER BY key"
+        ).fetchall()
+        return {str(row["key"]): int(row["value"]) for row in rows}
+
+    def count_standing_claims(self) -> tuple[int, int]:
+        """Every standing claim, and how many of them are ``USES`` claims."""
+        row = self._db.execute(
+            "SELECT COUNT(*) AS total, "
+            "COALESCE(SUM(edge_type = ?), 0) AS uses FROM unresolved_refs",
+            (str(EdgeType.USES),),
+        ).fetchone()
+        return int(row["total"]), int(row["uses"])
+
     def link_decisions_near(
         self, entity_keys: Sequence[str]
     ) -> list[tuple[str, str, str, str, str, int | None]]:
         """Every decision other than a link made (``linked``, ``resolved``) decided at one of
         these entities or in a file one of them is in: (family, subject, decision,
         ``<repository>/<path>``, evidence, line), in family and subject order. What the
-        change-impact answer lists."""
+        change-impact answer lists. The ``ordinary`` family is a report of what is still open
+        and is never listed here: impact answers keep exactly the decisions they had."""
         if not entity_keys:
             return []
         entity_ids: set[int] = set()
@@ -1337,9 +1401,10 @@ class SqliteKnowledgeStore:
                     "d.line_start, r.slug || '/' || f.rel_path AS place "
                     "FROM link_decisions d JOIN files f ON f.id = d.file_id "
                     "JOIN repositories r ON r.id = f.repo_id "
-                    f"WHERE d.decision NOT IN ('linked', 'resolved') AND d.{column} IN ({marks})"
+                    f"WHERE d.decision NOT IN ('linked', 'resolved') AND d.family != ? "
+                    f"AND d.{column} IN ({marks})"
                 )
-                for row in self._db.execute(sql, chunk).fetchall():
+                for row in self._db.execute(sql, [ORDINARY_FAMILY, *chunk]).fetchall():
                     found[row["decision_ref"]] = (
                         row["family"],
                         row["subject"],

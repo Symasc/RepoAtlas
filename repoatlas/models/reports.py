@@ -10,6 +10,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from repoatlas.models.ordinary_outcomes import OrdinarySummary
 from repoatlas.models.parsing import ParseDiagnostic
 from repoatlas.models.telemetry import LinkTrace
 
@@ -60,6 +61,10 @@ class SyncReport(BaseModel):
     unresolved_references: int = 0
     cross_repository_edges: int = 0
     link_trace: LinkTrace | None = None
+    #: What became of every ordinary reference claim this run's link pass considered. A
+    #: separate account from ``unresolved_references``, which it neither sums to nor replaces:
+    #: that scalar also holds planner claims and the USES stage's remainder.
+    ordinary: OrdinarySummary | None = None
     #: Canonical identities of repositories this run discovered and registered for
     #: the first time. Empty on an ordinary run; non-empty is the machine-readable
     #: form of "the managed root gained repositories since the last sync"

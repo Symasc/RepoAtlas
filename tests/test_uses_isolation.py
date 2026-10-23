@@ -100,11 +100,27 @@ def pair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Work
         workspace.close()
 
 
+#: The accounting figures that count the USES stage: its rows and what it left open. Every
+#: other figure of the ordinary-claim account is about claims the stage never sees.
+_USES_FIGURES = frozenset(
+    {
+        "standing_claims",
+        "uses_rows",
+        "excluded:uses-stage",
+        "legacy_unresolved",
+        "legacy_uses_remainder",
+    }
+)
+
+
 def _without_uses(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         **snapshot,
         "edges": [row for row in snapshot["edges"] if row[0] != "USES"],
         "unresolved_refs": [row for row in snapshot["unresolved_refs"] if row[2] != "USES"],
+        "ordinary_accounting": [
+            row for row in snapshot["ordinary_accounting"] if row[0] not in _USES_FIGURES
+        ],
     }
 
 
