@@ -1368,6 +1368,10 @@ class CapabilityService:
             current = store.get(request.id)
             if current is None or current.repository != repository.slug:
                 raise DeploymentLinkNotFoundError()
+            if request.provenance is not None and request.provenance.request_group is not None:
+                self._require_declarable(
+                    request.context, repository, request.link, request.provenance
+                )
             try:
                 link = store.update(request.id, request.link, provenance=request.provenance)
             except LinkConflictError as exc:
@@ -1436,7 +1440,15 @@ class CapabilityService:
         provenance: DeclarationProvenance,
     ) -> None:
         """A declaration made from a worklist group must name that group's origin and a service
-        that serves a route one of its requests matches: otherwise nothing is stored."""
+        that serves a route one of its requests matches: otherwise nothing is stored.
+
+        A link stored with a `request_group` was, at write time, checked against the latest
+        committed index: the URL names the group's origin, the repository is indexed and serves
+        at least one route, at least one of the group's requests would join, and no other service
+        claims that place for the same callers. Within one service process nothing interleaves
+        (the call lock). Across processes, a commit can land between the check and the write.
+        That is acceptable because the join decides every link again at each sync and the
+        worklist shows a drifted declaration as invalidated or ineffective."""
         assert provenance.request_group is not None
         if fields.url is None:
             raise InvalidDeploymentLinkError("a declaration made from the worklist states a URL")
