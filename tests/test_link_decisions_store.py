@@ -75,5 +75,9 @@ def test_a_decision_goes_with_the_file_it_was_anchored_in(
 
     sync(initialized, initialized.resolver().resolve(workspace_root / "python-service"))
 
-    assert initialized.knowledge.list_link_decisions() == []
-    assert fact_snapshot(initialized)["link_decisions"] == []
+    # The ordinary family reports what is still open and is decided afresh by every pass; the
+    # decision this test anchored is the one that must be gone.
+    stored = initialized.knowledge.list_link_decisions()
+    assert [r for r in stored if r.family != "ordinary"] == []
+    snapshot: list[tuple[object, ...]] = fact_snapshot(initialized)["link_decisions"]  # type: ignore[assignment]
+    assert [row for row in snapshot if row[0] != "ordinary"] == []

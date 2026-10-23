@@ -182,6 +182,24 @@ def _named(identities: Sequence[str], limit: int = 5) -> list[str]:
     return shown
 
 
+def _ordinary_notice(report: SyncReport) -> list[str]:
+    """The ordinary-claim account: what became of each ordinary reference this run considered.
+
+    Its own count, not a breakdown of the unresolved line above, which also holds claims the
+    HTTP and GraphQL planners decide and the declaration uses left open. ``external`` is a
+    claim whose target is outside the managed index by evidence; the rest of what is not
+    linked is named by the reason the ordinary rules could not establish a target.
+    """
+    summary = report.ordinary
+    if summary is None or not summary.considered:
+        return []
+    parts = [f"{count} {outcome}" for outcome, count in summary.outcomes.items() if count]
+    return [
+        f"  {summary.considered} ordinary references considered: " + ", ".join(parts),
+        "    (counted apart from the unresolved total above)",
+    ]
+
+
 def _discovered_notice(report: SyncReport) -> list[str]:
     """Say which repositories this sync found for the first time.
 
@@ -257,6 +275,7 @@ def render_sync(report: SyncReport) -> str:
         # Not a failure: a reference to something outside the managed set stays a
         # recorded claim, and is resolved if that repository is added later.
         lines.append(f"  {report.unresolved_references} references still unresolved")
+    lines.extend(_ordinary_notice(report))
     lines.extend(_discovered_notice(report))
     lines.extend(_unreadable_notice(report.unreadable_paths))
     lines.extend(_unavailable_notice(report))

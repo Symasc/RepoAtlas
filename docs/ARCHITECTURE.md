@@ -555,6 +555,18 @@ link_decisions(                    -- derived: every link family's decisions, re
   line_start, line_end,            -- where the decided claim was made
   subject, decision, evidence_json -- the family's spelling of what was decided, and what it read
 )
+
+ordinary_outcomes(                 -- derived: how many ordinary claims share an outcome, rebuilt by every global commit (§5)
+  repo_id → repositories ON DELETE CASCADE,
+  language, edge_type, target_kind,   -- closed codes
+  outcome, subreason,                 -- closed codes (repoatlas/models/ordinary_outcomes.py)
+  claims,                             -- the count; the table holds no path, name or text of any source
+  PRIMARY KEY (repo_id, language, edge_type, target_kind, outcome, subreason)
+) WITHOUT ROWID
+
+ordinary_accounting(               -- derived: the figures that reconcile the account (closed keys), same transaction
+  key PRIMARY KEY, value
+) WITHOUT ROWID
 ```
 
 ### Repository identity, path and display name are three things
@@ -1817,6 +1829,51 @@ to a *wrong* same-named definition. The missing half is recall, not correctness 
 needs a real resolver per ecosystem (§14).
 
 ---
+
+### Ordinary claims: what became of each
+
+`ReferenceLinker._resolve` answers an ordinary claim — a call, reference, import, export, configuration read, script
+path, Salt requisite or template include that names its target by text — with an edge or with nothing. The legacy
+`unresolved` figure that `sync` prints is one scalar over those nothings, and it also holds claims the HTTP and GraphQL
+planners decide and what the `USES` stage left open. It cannot say *why*, and most of what it counts could never become
+an edge (a call into `react`, `os` or a declared package).
+
+`repoatlas/graph/ordinary_outcomes.py` keeps a second account beside it, with its own definition:
+
+```text
+standing claims  = ordinary + excluded(reason) + USES-stage rows            (a partition of unresolved_refs)
+ordinary         = linked + one classified outcome per claim that did not link
+```
+
+- **It cannot change the graph.** A claim is classified only after `_resolve` has returned nothing for it; the
+  classifier reads indexed facts and writes nothing, and the edges are planned before it is asked. A test replaces the
+  classifier and shows no edge, claim or other family's decision moves.
+- **Outcomes** (`linked`, `external`, `not-indexed`, `target-not-found`, `dynamic`, `ambiguous`, `unsupported`,
+  `evidence-unreadable`, `trace-bound`) each carry a closed *subreason*. `external` needs evidence: the standard
+  library (the interpreter's module list, or Node's fixed core list), or a package the claim's repository **declares**
+  and no managed repository **provides**. A name nobody declares is `unsupported`, never external, because the ordinary
+  lookup does not read tsconfig `paths`, workspaces or Python project layouts, so "nothing found" is not "nothing
+  there". A package another managed repository provides is `unsupported:cross-repository-provider`: the ordinary rules
+  never cross repositories.
+- **`linked` means a source relationship.** Every `IMPORTS` claim also has an edge to an interned module node, a fact
+  about the *name*. It counts as `linked` only when the global pass resolved it to a file; `interned_node_only` counts
+  the module and configuration claims that have only the node.
+- **Not a breakdown of the legacy scalar.** The two do not describe the same set. The bridge is stored, not assumed:
+  `legacy_unresolved` is the scalar, `legacy_ordinary + legacy_graphql_unknown_role + legacy_planners +
+  legacy_uses_remainder` its parts, and `legacy_residual` what the parts do not explain. `partition_residual` is what
+  the ledger and the `USES` rows fail to cover of `standing_claims`. Both are reported as measured and are expected to
+  be zero; a non-zero value is a defect to find, not a number to absorb.
+- **Storage.** Counts go to `ordinary_outcomes` and `ordinary_accounting` in the global commit's transaction, keyed
+  only by closed codes, so their size is bounded by the codes and they hold no source text. What is still open
+  (`not-indexed`, `target-not-found`, `dynamic`, `ambiguous`, `unsupported`, `evidence-unreadable`, `trace-bound`) also
+  gets per-site `link_decisions` rows of family `ordinary`, at most 200 per repository, outcome and subreason (the rest
+  are counted in `open_rows_truncated`), chosen by place and not by id, and a callee that carries arguments or text is
+  stored as `<expression>`. `repoatlas decisions` lists them. **Impact never does**: `link_decisions_near` excludes the
+  family, so an impact answer, its decision list and its omissions are what they were without it.
+- **Not modelled here, by design.** Renamed imports, default imports, re-exports and the member of an imported value
+  are not traced by the ordinary rules, and the account says `unsupported` with the form it met rather than `external`
+  or `target-not-found`. A call whose root name the file never imported is not a claim at all, so it has no outcome;
+  that parser coverage is a separate figure from resolution.
 
 ### HTTP routes, deployments and endpoints
 

@@ -42,6 +42,7 @@ import json
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from repoatlas.config.settings import DECLARATIONS_SLUG, SaltSettings
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
@@ -73,6 +74,14 @@ from repoatlas.graph.http_crossings import (
 )
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
 from repoatlas.graph.link_exposures import plan_link_exposures
+from repoatlas.graph.ordinary_outcomes import (
+    Classifier,
+    Decision,
+    OutcomeLedger,
+    OutcomePlan,
+    finish_accounting,
+    summarize,
+)
 from repoatlas.graph.persistence import plan_persistence
 from repoatlas.graph.prisma_schema import plan_prisma, prisma_projects
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
@@ -91,6 +100,18 @@ from repoatlas.models import http
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.deployment_conditions import ConditionContext
 from repoatlas.models.deployment_targets import DeploymentLink
+from repoatlas.models.ordinary_outcomes import (
+    DEPLOYMENT_FACT,
+    EVIDENCE_UNREADABLE,
+    GRAPHQL_PLANNER,
+    HTTP_PLANNER,
+    MODULE_FACT,
+    ORIGIN_FILE_MISSING,
+    PERSISTENCE_PLANNER,
+    PILLAR_READ,
+    SALT_MAPPING,
+    OrdinarySummary,
+)
 from repoatlas.models.parsing import (
     EMBEDDED_DOCUMENT,
     ENUM_MEMBER,
@@ -188,6 +209,8 @@ class GlobalLinkResult:
     unresolved: int
     cross_repository: int
     trace: LinkTrace | None = None
+    #: The ordinary-claim account of this pass, independent of ``unresolved``.
+    ordinary: OrdinarySummary | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +289,13 @@ class GlobalPlan:
     uses: UsesPlan | None = None
     #: Every link family's decisions, replaced with the edges they account for.
     decisions: tuple[LinkDecisionRow, ...] = ()
+    #: The ordinary-claim account, and the figures it is reconciled with (ordinary_outcomes).
+    outcomes: OutcomePlan | None = None
+    standing_claims: int = 0
+    uses_rows: int = 0
+    legacy_ordinary: int = 0
+    legacy_graphql_unknown_role: int = 0
+    legacy_planners: int = 0
     resolved: int = 0
     unresolved: int = 0
     cross_repository: int = 0
@@ -660,7 +690,10 @@ class ReferenceLinker:
             # Declaration uses resolve in a stage of their own, below; module-resolution
             # configuration is read by that stage, never resolved itself.
             recorded = self._knowledge.list_unresolved_refs(exclude_uses=True)
-            claims = [claim for claim in recorded if not _is_module_fact(claim)]
+            claims: list[UnresolvedRefRecord] = []
+            module_facts: list[UnresolvedRefRecord] = []
+            for claim in recorded:
+                (module_facts if _is_module_fact(claim) else claims).append(claim)
             watch.candidates_in = len(claims)
             by_file: dict[int, list[UnresolvedRefRecord]] = {}
             for claim in claims:
@@ -685,15 +718,27 @@ class ReferenceLinker:
                 for result in resolve_pillar_reads(self._salt, index, claims, by_id)
             }
             salt_crossings: set[tuple[int, int]] = set()
+            # The ordinary-claim account (repoatlas.graph.ordinary_outcomes): counted beside the
+            # resolution below and never consulted by it. A claim is classified only after
+            # `_resolve` has returned nothing for it.
+            ledger = OutcomeLedger()
+            classifier = Classifier(index, records, module_facts)
+            languages: dict[int, str] = {}
+            graphql_unknown_role = 0
+            ordinary_unresolved = 0
+            for fact in module_facts:
+                ledger.excluded(fact, MODULE_FACT)
 
             for claim in claims:
                 if _is_salt_mapping_claim(claim):
+                    ledger.excluded(claim, SALT_MAPPING)
                     continue
                 if _is_graphql_claim(claim):
                     # A configured output is decided by the codegen pass below. A type or
                     # document claim stays a claim: one file is no schema, and nothing yet
                     # decides which schema it belongs to. Neither is resolved by name, and
                     # neither is ever handed to the HTTP pass.
+                    ledger.excluded(claim, GRAPHQL_PLANNER)
                     role = claim_role(claim)
                     if role == GRAPHQL_CODEGEN_OUTPUT:
                         generation.append(claim)
@@ -705,24 +750,38 @@ class ReferenceLinker:
                         artifact_claims.append(claim)
                     else:
                         unresolved += 1
+                        graphql_unknown_role += 1
                     continue
                 if claim_role(claim) in _DEPLOYMENT_FACT_ROLES:
                     # CI, workload, ConfigMap and values-file facts: decided by the CI pass
                     # below (repoatlas.graph.ci_facts), and joined from DF2 -- never handed
                     # to the HTTP pass, whose accounting they must not change.
+                    ledger.excluded(claim, DEPLOYMENT_FACT)
                     continue
                 if claim_role(claim) in _PERSISTENCE_ROLES:
                     # Decided after uses resolve: a mapping's types are what it uses.
+                    ledger.excluded(claim, PERSISTENCE_PLANNER)
                     persistence_claims.append(claim)
                     continue
                 if claim_role(claim) is not None:
                     # Never proven by symbol resolution: decided below, together.
+                    ledger.excluded(claim, HTTP_PLANNER)
                     pending.append(claim)
                     continue
                 origin = by_id.get(claim.file_id)
                 if origin is None:
                     unresolved += 1
+                    ordinary_unresolved += 1
+                    ledger.refused(
+                        claim,
+                        None,
+                        "other",
+                        Decision(EVIDENCE_UNREADABLE, ORIGIN_FILE_MISSING, "claim", "file-row"),
+                    )
                     continue
+                language = languages.get(origin.file_id)
+                if language is None:
+                    language = languages[origin.file_id] = flavor_for(origin.rel_path) or "other"
                 salt_resolution = salt_resolutions.get(id(claim))
                 if salt_resolution is not None:
                     definition = salt_resolution.definition
@@ -745,12 +804,23 @@ class ReferenceLinker:
                         )
                         salt_crossings.add((definition.repo_id, origin.repo_id))
                     resolved += 1
+                    ledger.linked(claim, language, PILLAR_READ)
                     continue
-                edge = self._resolve(claim, origin, index, by_file.get(claim.file_id, []))
+                siblings = by_file.get(claim.file_id, [])
+                edge = self._resolve(claim, origin, index, siblings)
                 if edge is None:
                     unresolved += 1
+                    ordinary_unresolved += 1
+                    meta = _claim_meta(claim.meta_json)
+                    ledger.refused(
+                        claim,
+                        origin,
+                        language,
+                        classifier.classify(claim, origin, meta, _flavor(origin, meta), siblings),
+                    )
                     continue
                 resolved += 1
+                ledger.linked(claim, language)
                 edges.append(edge)
 
             # Part of resolving claims, not a phase of its own: the pass keeps its
@@ -764,7 +834,7 @@ class ReferenceLinker:
                 file_rows,
                 producer=GLOBAL_PARSER,
                 served_routes=served,
-                module_facts=[claim for claim in recorded if _is_module_fact(claim)],
+                module_facts=module_facts,
                 route_servers=self._knowledge.list_route_servers(exclude_parser=GLOBAL_PARSER),
             )
             edges.extend(decided.edges)
@@ -843,12 +913,13 @@ class ReferenceLinker:
             resolved += (
                 decided.resolved + codegen.resolved + documents.resolved + resolvers.resolved
             )
-            unresolved += (
+            planners_unresolved = (
                 decided.unresolved
                 + codegen.unresolved
                 + documents.unresolved
                 + resolvers.unresolved
             )
+            unresolved += planners_unresolved
             watch.candidates_out = resolved
             watch.detail = (
                 f"{unresolved} still unresolved; {decided.detail}; {crossings.detail}; "
@@ -923,6 +994,9 @@ class ReferenceLinker:
             watch.detail = "cross-repository edges"
         stages.append(_timing(watch))
 
+        outcome_plan = ledger.plan()
+        standing_claims, uses_rows = self._knowledge.count_standing_claims()
+
         return GlobalPlan(
             edges=tuple(edges),
             dependencies=tuple(dependencies),
@@ -930,6 +1004,7 @@ class ReferenceLinker:
             http_crossings=crossings,
             uses=uses_plan,
             decisions=(
+                *outcome_plan.decisions,
                 *codegen.decisions,
                 *documents.decisions,
                 *resolvers.decisions,
@@ -942,6 +1017,12 @@ class ReferenceLinker:
                 *deployed.decisions,
                 *environment.decisions,
             ),
+            outcomes=outcome_plan,
+            standing_claims=standing_claims,
+            uses_rows=uses_rows,
+            legacy_ordinary=ordinary_unresolved,
+            legacy_graphql_unknown_role=graphql_unknown_role,
+            legacy_planners=planners_unresolved,
             resolved=resolved,
             unresolved=unresolved,
             cross_repository=cross
@@ -992,6 +1073,7 @@ class ReferenceLinker:
                 self._knowledge.replace_http_call_decisions(decision_rows(plan.http_crossings))
                 self._knowledge.replace_link_decisions(plan.decisions)
                 applied = apply_uses(self._knowledge, uses, producer=GLOBAL_PARSER)
+                ordinary = self._ordinary_account(plan, applied.claims - applied.edges)
                 self._knowledge.gc_orphan_entities()
             watch.candidates_out = len(edges) + len(uses.edges)
             watch.detail = f"{removed + applied.work.edges_deleted} replaced"
@@ -1003,6 +1085,7 @@ class ReferenceLinker:
             resolved=plan.resolved + applied.edges,
             unresolved=plan.unresolved + applied.claims - applied.edges,
             cross_repository=plan.cross_repository,
+            ordinary=ordinary,
             trace=LinkTrace(
                 duration_ms=round(sum(stage.duration_ms for stage in stages), 3),
                 claims_considered=plan.claims_considered,
@@ -1012,6 +1095,29 @@ class ReferenceLinker:
                 uses=applied.work,
             ),
         )
+
+    def _ordinary_account(self, plan: GlobalPlan, uses_remainder: int) -> OrdinarySummary | None:
+        """Store the ordinary-claim account with the graph it accounts for.
+
+        Runs inside the swap transaction, after the USES stage has said how many uses it left
+        open. The account is its own model: the legacy ``unresolved`` scalar is neither an
+        input nor something this makes equal, and the parts of it are recorded so their sum can
+        be compared with it rather than assumed.
+        """
+        if plan.outcomes is None:
+            return None
+        accounting = finish_accounting(
+            plan.outcomes,
+            standing=plan.standing_claims,
+            uses_rows=plan.uses_rows,
+            plan_unresolved=plan.unresolved,
+            legacy_ordinary=plan.legacy_ordinary,
+            graphql_unknown_role=plan.legacy_graphql_unknown_role,
+            planners=plan.legacy_planners,
+            uses_remainder=uses_remainder,
+        )
+        self._knowledge.replace_ordinary_outcomes(plan.outcomes.rows, accounting)
+        return summarize(plan.outcomes, accounting)
 
     def _materialize(self, pending: Sequence[PendingEdge]) -> list[EdgeRecord]:
         """Intern the planned endpoints and turn the plan into real edges.
@@ -1477,7 +1583,18 @@ def _unobserved(stage: str) -> None:
     """The stage listener of a pass nobody is following."""
 
 
-def _flavor(origin: FileRow, meta: dict[str, str]) -> str | None:
+@functools.lru_cache(maxsize=65536)
+def _decoded_meta(meta_json: str) -> Mapping[str, str]:
+    """A claim's metadata, decoded once per distinct text. Callers only read it: the
+    outcome account never changes a claim, and the many claims of one import share a text."""
+    return MappingProxyType(json.loads(meta_json))
+
+
+def _claim_meta(meta_json: str | None) -> Mapping[str, str]:
+    return _decoded_meta(meta_json) if meta_json else MappingProxyType({})
+
+
+def _flavor(origin: FileRow, meta: Mapping[str, str]) -> str | None:
     """Import flavor for a claim: from the parser's own hint, else the extension."""
     parser = meta.get("parser", "")
     if parser.startswith("python"):

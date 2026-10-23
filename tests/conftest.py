@@ -223,7 +223,20 @@ def fact_snapshot(workspace: Workspace) -> dict[str, object]:
         "d.line_start, d.line_end, s.key FROM link_decisions d "
         "JOIN repositories r ON r.id = d.repo_id JOIN files f ON f.id = d.file_id "
         "JOIN entities s ON s.id = d.src_id "
-        "ORDER BY d.family, d.subject, d.decision"
+        # Total order: the ordinary family has one row per open site, and many sites share a
+        # subject and a decision (`IMPORTS:module:react`, unsupported) in different files.
+        "ORDER BY d.family, d.subject, d.decision, r.slug, f.rel_path, d.line_start, "
+        "d.decision_ref"
+    ).fetchall()
+    outcomes = workspace.database.execute(
+        # The ordinary-claim account (repoatlas.graph.ordinary_outcomes) is replaced with the
+        # graph by every global pass, so a sync and a full reindex must agree on it.
+        "SELECT r.slug, o.language, o.edge_type, o.target_kind, o.outcome, o.subreason, o.claims "
+        "FROM ordinary_outcomes o JOIN repositories r ON r.id = o.repo_id "
+        "ORDER BY r.slug, o.language, o.edge_type, o.target_kind, o.outcome, o.subreason"
+    ).fetchall()
+    accounting = workspace.database.execute(
+        "SELECT key, value FROM ordinary_accounting ORDER BY key"
     ).fetchall()
     return {
         "repositories": [tuple(r) for r in repositories],
@@ -234,6 +247,8 @@ def fact_snapshot(workspace: Workspace) -> dict[str, object]:
         "unresolved_refs": [tuple(r) for r in claims],
         "chunks": [tuple(r) for r in chunks],
         "link_decisions": [tuple(r) for r in decisions],
+        "ordinary_outcomes": [tuple(r) for r in outcomes],
+        "ordinary_accounting": [tuple(r) for r in accounting],
     }
 
 
