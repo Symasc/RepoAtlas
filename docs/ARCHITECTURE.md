@@ -2246,10 +2246,17 @@ name, a `.Values` path, a `range` item, the release name or namespace, or an opa
 could not read), with its paths, backends, a literal `listen-ports` annotation and the `if` guards around it. A
 chart's `values.yaml` adds the `listen-ports` annotations it holds. Nothing is rendered there.
 
-`repoatlas/graph/deployment_targets.py` builds the targets when asked; none is stored. Each Ingress target, each
-server an OpenAPI document or framework declares (`DECLARES_HTTP_DEPLOYMENT`), and each user link becomes a
-target resolved under every context that can supply its variables: the chart's defaults, each Tilt or CI release
-of the chart, each link naming the target. Four states stay distinct on every resolution:
+`repoatlas/graph/deployment_targets.py` builds the targets when asked; none is stored. Each Ingress target (one per
+rule host and path; TLS hosts written as a block or a flow sequence), each server an OpenAPI document or framework
+declares (`DECLARES_HTTP_DEPLOYMENT`), and each user link becomes a target resolved under every context that can
+supply its variables: the chart's defaults, each Tilt or CI release of the chart, each link naming the target. A CI
+release's values are layered exactly as the artifact join layers them (`repoatlas/graph/release_values.py`: the
+chart's `values.yaml`, each `-f` file in order, each `--set`), so a release resolves to the host the HTTP join links
+through, and each value cites where it is stated (`at`). An empty value names no host: it stays a hole. What keeps a
+release from resolving (a values file not read, a value set from a CI expression) is a note on that release's
+resolution. Asked about a repository whose image another repository's release is configured to run (a `linked`
+`container_artifact` decision), the targets also list that repository's Ingress, resolved under those releases
+alone, marked `runs`. Four states stay distinct on every resolution:
 
 - **configured:** what the source or the user states, cited by path and line;
 - **conditions:** whether the branch, environment, pull-request and variable conditions match the context the
@@ -2265,9 +2272,24 @@ names where an identity provider may send a browser back to, not where the syste
 one. A deployment that no source states (a CI orb step RepoAtlas does not interpret, a hand-run `helm upgrade`)
 is recorded by the user as a link.
 
-Links live in the `deployment_links` table (migration `003_deployment_links.sql`), keyed by repository slug so a
-removing a repository from the index never removes them: a label, an optional environment, a URL or a target id, variables, conditions and a
-verification state, at most 200 per repository. They are the only user-written state in the index.
+Links live in the `deployment_links` table (migration `003_deployment_links.sql`), keyed by repository slug so
+removing a repository from the index never removes them: a label, an optional environment, a URL or a target id,
+variables, conditions and a verification state, at most 200 per repository. A variable that names or holds a
+credential is refused. They are the only user-written state in the index, so `repoatlas links export` writes them
+to a file (`repoatlas/deployment-links/v1`) and `repoatlas links import` adds them back, skipping any already
+recorded.
+
+**Links in the HTTP join.** A link states what no indexed source established for its repository: that it is
+reached at the link's URL, or at the URL its target resolves to under the link's values. The global pass reads the
+links (`repoatlas/graph/link_exposures.py`) and offers one exposure per route the repository's code serves at that
+base, marked `identity_source: deployment-link`. The join never weighs them against the source: it consults them
+only for a request the source left unlinked, and links it when exactly one handler of the linked repository serves
+it. That link's identity, binding and source hops are `declared`, each place `@deployment-links/<id>` with basis
+`link` (never a file, so never evidence); its route and handler are proven as ever, and the edge records the link's
+id, label, environment and verification. A source-proven link is never overridden, and a link under which two
+handlers would answer links nothing. A link changed between syncs takes part from the next sync, which reruns the
+global pass whether or not a file changed. Under a deployment-specific impact context (DF3d) such a link states no
+established deployment, so it is followed only on unconstrained paths.
 
 **Security.** HTTP extraction reads only files the sync already admitted, so an excluded `.env` holding `API_URL`
 declares nothing and is not cross-resolved. Nothing resolves DNS, fetches a specification or `$ref`, probes an
