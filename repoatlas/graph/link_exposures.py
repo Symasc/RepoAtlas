@@ -87,6 +87,7 @@ def plan_link_exposures(
                 "link_id": str(link.id),
                 "link_in": place,
                 "link_label": link.label,
+                "link_callers": json.dumps(sorted(link.callers)),
                 "link_verification": link.verification,
                 **({"link_environment": link.environment} if link.environment else {}),
             }

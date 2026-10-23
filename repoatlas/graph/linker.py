@@ -48,7 +48,7 @@ from repoatlas.config.settings import DECLARATIONS_SLUG, SaltSettings
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
 from repoatlas.graph.ci_facts import plan_ci_facts
 from repoatlas.graph.deploy_artifacts import plan_deployment_artifacts
-from repoatlas.graph.deploy_identity import DOCKERFILE_UNREAD, NO_BUILD, NOT_IN_IMAGE
+from repoatlas.graph.deploy_identity import DOCKERFILE_UNREAD, NO_BUILD, NOT_IN_IMAGE, ServedRoute
 from repoatlas.graph.deployment_env import plan_deployment_env
 from repoatlas.graph.deployment_targets import build_targets
 from repoatlas.graph.fields import (
@@ -66,7 +66,7 @@ from repoatlas.graph.graphql_documents import plan_documents
 from repoatlas.graph.graphql_ownership import Identity, origin_of, plan_ownership
 from repoatlas.graph.graphql_resolvers import plan_resolvers
 from repoatlas.graph.graphql_schema import symbols_by_file
-from repoatlas.graph.http_claims import HttpClaimPlan, plan_http_claims
+from repoatlas.graph.http_claims import HttpClaimPlan, plan_http_claims, served_by_servers
 from repoatlas.graph.http_crossings import (
     HttpCrossingPlan,
     decision_rows,
@@ -292,6 +292,9 @@ class GlobalPlan:
     decisions: tuple[LinkDecisionRow, ...] = ()
     #: The ordinary-claim account, and the figures it is reconciled with (ordinary_outcomes).
     outcomes: OutcomePlan | None = None
+    #: Each deployment link the join read, with the revision it read (a declaration changed
+    #: since is pending until the next pass).
+    link_reads: tuple[tuple[int, str], ...] = ()
     standing_claims: int = 0
     uses_rows: int = 0
     legacy_ordinary: int = 0
@@ -886,8 +889,9 @@ class ReferenceLinker:
             # Where users say repositories are deployed: exposures the join falls back on
             # for a request the source leaves unlinked, never weighed against the source
             # (repoatlas.graph.link_exposures).
+            read_links = self._knowledge.list_deployment_links()
             stated_links = plan_link_exposures(
-                *_deployment_links(self._knowledge.list_deployment_links(), claims, by_id),
+                *_deployment_links(read_links, claims, by_id),
                 decided.code_routes,
                 {row.repo_slug: row.repo_id for row in by_id.values()},
             )
@@ -1047,6 +1051,7 @@ class ReferenceLinker:
                 *environment.decisions,
             ),
             outcomes=outcome_plan,
+            link_reads=tuple((link.id, link.updated_at.isoformat()) for link in read_links),
             standing_claims=standing_claims,
             uses_rows=uses_rows,
             legacy_ordinary=ordinary_unresolved,
@@ -1101,6 +1106,7 @@ class ReferenceLinker:
                 # edges they account for.
                 self._knowledge.replace_http_call_decisions(decision_rows(plan.http_crossings))
                 self._knowledge.replace_link_decisions(plan.decisions)
+                self._knowledge.record_link_pass(plan.link_reads)
                 applied = apply_uses(self._knowledge, uses, producer=GLOBAL_PARSER)
                 ordinary = self._ordinary_account(plan, applied.claims - applied.edges)
                 self._knowledge.gc_orphan_entities()
@@ -1512,6 +1518,23 @@ def plan_repository_http(knowledge: SqliteKnowledgeStore, repo_id: int) -> Repos
         claims, index, files, producer=GLOBAL_PARSER, served_routes=served, module_facts=facts
     )
     return RepositoryHttp(plan=plan, files=files, claims=claims, index=index)
+
+
+def repository_routes(knowledge: SqliteKnowledgeStore, repo_id: int) -> list[ServedRoute]:
+    """Every route a repository's code serves, as the global pass sees them: the routes its files'
+    own edges state, and those the plan promoted from claims. What an operator's declaration is
+    matched against."""
+    servers = knowledge.list_route_servers(exclude_parser=GLOBAL_PARSER, repo_id=repo_id)
+    seen: set[tuple[int, str]] = set()
+    found: list[ServedRoute] = []
+    for route in (
+        *served_by_servers(servers),
+        *plan_repository_http(knowledge, repo_id).plan.code_routes,
+    ):
+        if (route.src_id, route.body) not in seen:
+            seen.add((route.src_id, route.body))
+            found.append(route)
+    return found
 
 
 def claim_role(claim: UnresolvedRefRecord) -> str | None:

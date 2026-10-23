@@ -152,6 +152,27 @@ _MAX_MODULES = 4096
 #: Parsers whose route edges a specification document states: a document is no application.
 _NOT_APPLICATIONS = frozenset({"structured-config"})
 
+
+def served_by_servers(route_servers: Sequence[RouteServerRow]) -> list[ServedRoute]:
+    """The routes the per-file ``SERVES_HTTP_ROUTE`` edges say code serves, as the join reads
+    them. Public so a preview of an operator's declaration reads a service's routes exactly as the
+    global pass does."""
+    return [
+        ServedRoute(
+            repo_id=row.repo_id,
+            file_id=row.file_id,
+            src_id=row.src_id,
+            body=row.body,
+            line_start=row.line_start,
+            line_end=row.line_end,
+            roots=frozenset({row.file_id}),
+            declared_at=row.line_start,
+        )
+        for row in route_servers
+        if row.file_id is not None and row.parser not in _NOT_APPLICATIONS
+    ]
+
+
 PROMOTED = "promoted"
 #: A call to an imported function that is no request helper: not an HTTP claim.
 NOT_HTTP = "no request helper of that name is declared in the imported module"
@@ -652,20 +673,7 @@ def plan_http_claims(
             call_decisions[claim.id] = decisions
 
     # -- service identities a deployment declares, and the code they reach -----------
-    code_routes = [
-        ServedRoute(
-            repo_id=row.repo_id,
-            file_id=row.file_id,
-            src_id=row.src_id,
-            body=row.body,
-            line_start=row.line_start,
-            line_end=row.line_end,
-            roots=frozenset({row.file_id}),
-            declared_at=row.line_start,
-        )
-        for row in route_servers
-        if row.file_id is not None and row.parser not in _NOT_APPLICATIONS
-    ]
+    code_routes = served_by_servers(route_servers)
     # Routes this pass promoted, with the applications that serve them where their stage
     # traces them; an untraced one (a NestJS route, say) has none, and so leaves its
     # repository's applications unknown.
