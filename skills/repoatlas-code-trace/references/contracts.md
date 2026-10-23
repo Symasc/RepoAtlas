@@ -275,7 +275,9 @@ Read those lines before stating the relationship, and state it as source evidenc
 {"tool": "repoatlas_deployment_targets", "arguments": {"context": {"scope": "repository", "repository": "web"}, "branch": "main"}}
 ```
 
-Keep its four states apart when you report one: the `pattern` is what is configured; `conditions` say when a release applies; each resolution's `variables` give the basis of every value it filled (`chart-defaults`, `release`, `context`, `link`), and a value nothing supplies stays a named hole; `verification` is `unverified` unless the user confirmed it. Nothing here is checked over the network. An OAuth callback or redirect URL is not a deployment target and is never listed as one.
+Keep its four states apart when you report one: the `pattern` is what is configured; `conditions` say when a release applies; each resolution's `variables` give the basis of every value it filled (`chart-defaults`, `release`, `context`, `configured` for a link) and where it is stated (`at`), its `notes` say what keeps it from resolving, and a value nothing supplies stays a named hole; `verification` is `unverified` unless the user confirmed it. A target marked `runs` is stated by another repository whose release runs this one's code. Nothing here is checked over the network. An OAuth callback or redirect URL is not a deployment target and is never listed as one.
+
+A user's link also takes part in HTTP links from the next sync: a request the source left unlinked is linked when exactly one handler of the linked repository serves it at the link's URL. Its `service_identity`, `deployment_binding` and `source_binding` hops are then `declared`, each place `@deployment-links/<id>` with basis `link` -- a person's statement, not source evidence; say so when you report it. A link never overrides a link the source proves.
 
 ## HTTP inventory and coverage
 
