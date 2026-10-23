@@ -1514,7 +1514,8 @@ permitted shortcut for skipping the hash, and it is **disabled** whenever anythi
   files while preserving or back-dating mtime;
 - the repository's dirty/clean state changed since the last sync;
 - the previous sync did not complete cleanly;
-- the **facts version** — the schema version, the parser and dependency-parser registries, and the chunking rules
+- the **facts version** — the facts layout version (how a file's parse is stored, not the database schema
+  version), the parser and dependency-parser registries, and the chunking rules
   — differs from the one recorded on the file row. This one is handled *per file* rather than by rehashing the
   tree, since the version is stored on the row itself. The embedding model is deliberately not part of it: vectors
   are keyed by the model that produced them, so a model change re-embeds without reparsing anything;
