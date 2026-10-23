@@ -92,6 +92,14 @@ from repoatlas.models.deployment_targets import (
     DeploymentTargetsRequest,
     DeploymentTargetsResponse,
 )
+from repoatlas.models.http_connections import (
+    HttpConnectionPreviewRequest,
+    HttpConnectionPreviewResponse,
+    HttpConnectionsRequest,
+    HttpConnectionsResponse,
+    HttpDeclarationHistoryRequest,
+    HttpDeclarationHistoryResponse,
+)
 from repoatlas.models.http_inventory import HttpOperationsRequest, HttpOperationsResponse
 from repoatlas.models.impact import ImpactRequest, ImpactResponse
 from repoatlas.models.inspection import InspectRequest, InspectResponse
@@ -171,6 +179,21 @@ ENDPOINTS: tuple[Endpoint, ...] = (
     Endpoint("impact", ImpactRequest, ImpactResponse, "impact"),
     Endpoint("dependencies", DependenciesRequest, DependenciesResponse, "dependencies"),
     Endpoint("http_operations", HttpOperationsRequest, HttpOperationsResponse, "http_operations"),
+    Endpoint(
+        "http_connections", HttpConnectionsRequest, HttpConnectionsResponse, "http_connections"
+    ),
+    Endpoint(
+        "http_connections/preview",
+        HttpConnectionPreviewRequest,
+        HttpConnectionPreviewResponse,
+        "http_connection_preview",
+    ),
+    Endpoint(
+        "http_connections/history",
+        HttpDeclarationHistoryRequest,
+        HttpDeclarationHistoryResponse,
+        "http_declaration_history",
+    ),
     Endpoint(
         "deployment_targets",
         DeploymentTargetsRequest,
