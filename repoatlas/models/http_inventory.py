@@ -129,11 +129,14 @@ class HttpOperationsRequest(BaseModel):
     context: CapabilityContext
     discover: bool = Field(
         default=False,
-        description="With global scope and a non-root route_prefix, discover "
-        "compatible operations across repositories. Rows retain repository-local "
-        "statuses and source identity; compatibility does not prove a deployment "
-        "identity or a runtime dependency, which only a row's crossings state. "
-        "Results are paginated.",
+        description="With global scope and a non-root route_prefix, or with `crossing` "
+        "naming decisions (the requests the workspace join refused, such as "
+        "`http-service-unmatched`: with `role` caller, the unresolved requests of every "
+        "repository), discover operations across repositories. Rows retain "
+        "repository-local statuses and source identity; compatibility does not prove a "
+        "deployment identity or a runtime dependency, which only a row's crossings "
+        "state. Read-only: nothing is declared or linked by listing them. Results are "
+        "paginated.",
     )
     role: OperationRole = Field(
         default=OperationRole.BOTH,
@@ -209,8 +212,10 @@ class HttpOperationsRequest(BaseModel):
         if self.discover:
             if self.context.scope is not CapabilityScope.GLOBAL:
                 raise ValueError("discover requires global scope")
-            if not self.route_prefix or not self.route_prefix.strip("/"):
-                raise ValueError("global discovery requires a non-root route_prefix")
+            if not self.crossing and (not self.route_prefix or not self.route_prefix.strip("/")):
+                raise ValueError(
+                    "global discovery requires a non-root route_prefix or a crossing filter"
+                )
             if self.within_path is not None:
                 raise ValueError("within_path requires repository scope")
         return self

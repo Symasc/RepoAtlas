@@ -377,6 +377,15 @@ function LinkEditor({
         value={form.conditions}
         onChange={(e) => set("conditions", e.currentTarget.value)}
       />
+      <Textarea
+        size="xs"
+        label="Callers"
+        description="One repository slug per line: only their requests join this link. Required for a localhost URL; empty serves every caller."
+        autosize
+        minRows={1}
+        value={form.callers}
+        onChange={(e) => set("callers", e.currentTarget.value)}
+      />
       <Checkbox
         size="xs"
         label="I confirmed this deployment myself"

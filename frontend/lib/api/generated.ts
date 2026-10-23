@@ -130,13 +130,6 @@ export type EdgeType =
   | "CALLS_HTTP_HANDLER"
   | "MAPS_TO";
 /**
- * Where the text in this response came from. Exactly one per inspection.
- *
- * This interface was referenced by `ApiIndex`'s JSON-Schema
- * via the `definition` "InspectionSource".
- */
-export type InspectionSource = "verified_worktree" | "indexed_chunks";
-/**
  * The workspace join's decision for one request, as the global link pass stored it.
  *
  * This interface was referenced by `ApiIndex`'s JSON-Schema
@@ -151,6 +144,13 @@ export type CrossingStatus =
   | "http-service-unmatched"
   | "http-base-unknown"
   | "http-claim-unread";
+/**
+ * Where the text in this response came from. Exactly one per inspection.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "InspectionSource".
+ */
+export type InspectionSource = "verified_worktree" | "indexed_chunks";
 /**
  * How hard RepoAtlas looked, and therefore what it is entitled to say.
  *
@@ -481,6 +481,20 @@ export interface AppliedPageLimits {
   requested?: number | null;
 }
 /**
+ * An indexed service whose served routes match some of a group's requests: a hypothesis.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "CandidateService".
+ */
+export interface CandidateService {
+  repository: string;
+  requests_ambiguous: number;
+  requests_matched: number;
+  requests_unique: number;
+  routes_served: number;
+  suggested_base_path?: string;
+}
+/**
  * An explicit statement of scope. Never inferred, never ambient.
  *
  * A capability server has no meaningful working directory: the process may have
@@ -689,6 +703,116 @@ export interface ConfigurationCrossing {
   workload_in?: string | null;
 }
 /**
+ * Requests that share a target: one stated origin, or one unstated base expression.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ConnectionGroup".
+ */
+export interface ConnectionGroup {
+  base_expression?: string | null;
+  callers: string[];
+  declarable: number;
+  declarations?: DeclarationView[];
+  key: string;
+  kind: "stated-origin" | "base-not-stated";
+  languages: {
+    [k: string]: number | undefined;
+  };
+  loopback?: boolean;
+  origin?: string | null;
+  reasons: {
+    [k: string]: number | undefined;
+  };
+  requests: number;
+  samples?: ConnectionRequest[];
+  statuses: {
+    [k: string]: number | undefined;
+  };
+}
+/**
+ * One operator's link and what became of it.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeclarationView".
+ */
+export interface DeclarationView {
+  callers?: string[];
+  created_at: string;
+  declined?: {
+    [k: string]: number | undefined;
+  };
+  environment?: string | null;
+  id: number;
+  joined?: number;
+  label: string;
+  reason?:
+    | ""
+    | "applies-at-next-sync"
+    | "ambiguous"
+    | "route-unmatched"
+    | "callers-excluded"
+    | "source-established"
+    | "no-request-matched"
+    | "repository-not-indexed"
+    | "repository-serves-no-routes"
+    | "origin-no-longer-requested"
+    | "target-url-unresolved";
+  repository: string;
+  state: "pending" | "applied" | "ineffective" | "invalidated";
+  updated_at: string;
+  url?: string | null;
+  verification: "unverified" | "user_confirmed";
+}
+/**
+ * One request and the join's decision for it.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ConnectionRequest".
+ */
+export interface ConnectionRequest {
+  decision_ref: string;
+  declarable?: boolean;
+  declaration_ids?: number[];
+  declaration_outcome?: string | null;
+  joined_by?: number | null;
+  language: string;
+  method?: string | null;
+  reason?: string;
+  route: string;
+  site: ConnectionSite;
+  status: CrossingStatus;
+}
+/**
+ * Where a request is written.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ConnectionSite".
+ */
+export interface ConnectionSite {
+  line_end?: number | null;
+  line_start?: number | null;
+  path: string;
+  repository: string;
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ConnectionsSummary".
+ */
+export interface ConnectionsSummary {
+  base_not_stated: number;
+  by_status?: {
+    [k: string]: number | undefined;
+  };
+  declarable: number;
+  declarations?: {
+    [k: string]: number | undefined;
+  };
+  linked_by_declaration: number;
+  linked_by_source: number;
+  requests: number;
+  unresolved: number;
+}
+/**
  * What the context resolved to, as identities rather than rows.
  *
  * A transport-neutral projection of
@@ -753,6 +877,17 @@ export interface CrossingBasis {
   establishes?: string[];
   projection: "own_repository" | "cross_repository" | "global";
   source?: "stored_link_pass";
+}
+/**
+ * Where a declaration came from, for the history only; never what the link states.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeclarationProvenance".
+ */
+export interface DeclarationProvenance {
+  note?: string | null;
+  request_group?: string | null;
+  via?: "ui" | "api";
 }
 /**
  * Ask what the index records about declared and resolved packages.
@@ -1088,6 +1223,10 @@ export interface DeploymentGuard {
  */
 export interface DeploymentLink {
   /**
+   * At most 20 repository slugs.
+   */
+  callers?: string[];
+  /**
    * At most 16; all must hold.
    */
   conditions?: DeploymentCondition[];
@@ -1114,6 +1253,7 @@ export interface DeploymentLink {
 export interface DeploymentLinkCreateRequest {
   context: CapabilityContext;
   link: DeploymentLinkFields;
+  provenance?: DeclarationProvenance | null;
 }
 /**
  * What a user states about a deployment: where it is, under which conditions, and
@@ -1123,6 +1263,10 @@ export interface DeploymentLinkCreateRequest {
  * via the `definition` "DeploymentLinkFields".
  */
 export interface DeploymentLinkFields {
+  /**
+   * At most 20 repository slugs.
+   */
+  callers?: string[];
   /**
    * At most 16; all must hold.
    */
@@ -1137,7 +1281,7 @@ export interface DeploymentLinkFields {
   verification?: "unverified" | "user_confirmed";
 }
 /**
- * Remove a stored link.
+ * Remove a stored link. The history keeps what it stated and who revoked it.
  *
  * This interface was referenced by `ApiIndex`'s JSON-Schema
  * via the `definition` "DeploymentLinkDeleteRequest".
@@ -1145,6 +1289,7 @@ export interface DeploymentLinkFields {
 export interface DeploymentLinkDeleteRequest {
   context: CapabilityContext;
   id: number;
+  provenance?: DeclarationProvenance | null;
 }
 /**
  * This interface was referenced by `ApiIndex`'s JSON-Schema
@@ -1173,6 +1318,7 @@ export interface DeploymentLinkUpdateRequest {
   context: CapabilityContext;
   id: number;
   link: DeploymentLinkFields;
+  provenance?: DeclarationProvenance | null;
 }
 /**
  * A target under one context: the chart's defaults, a release, or a user's link.
@@ -1406,6 +1552,315 @@ export interface GraphPath {
   nodes?: EntityRef[];
 }
 /**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "HistoryEntry".
+ */
+export interface HistoryEntry {
+  action: "create" | "update" | "revoke" | "import";
+  after?: {
+    [k: string]: unknown | undefined;
+  } | null;
+  at: string;
+  before?: {
+    [k: string]: unknown | undefined;
+  } | null;
+  id: number;
+  note?: string | null;
+  repository: string;
+  request_group?: string | null;
+  subject_id: number;
+  via: "ui" | "api" | "cli" | "import";
+}
+/**
+ * What declaring that an origin is served by one repository would do, before it is stored.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "HttpConnectionPreviewRequest".
+ */
+export interface HttpConnectionPreviewRequest {
+  base_path?: string;
+  /**
+   * @maxItems 20
+   */
+  callers?:
+    | []
+    | [string]
+    | [string, string]
+    | [string, string, string]
+    | [string, string, string, string]
+    | [string, string, string, string, string]
+    | [string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string, string, string]
+    | [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ]
+    | [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ]
+    | [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ]
+    | [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ]
+    | [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ]
+    | [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ]
+    | [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ]
+    | [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ]
+    | [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ];
+  context: CapabilityContext;
+  environment?: string | null;
+  group: string;
+  limit?: number;
+  repository: string;
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "HttpConnectionPreviewResponse".
+ */
+export interface HttpConnectionPreviewResponse {
+  basis?: string;
+  can_create: boolean;
+  conflicts_with?: number | null;
+  context: CapabilityContext;
+  counts: {
+    [k: string]: number | undefined;
+  };
+  duplicate_of?: number | null;
+  group: string;
+  has_more?: boolean;
+  origin: string;
+  repository: string;
+  requirements?: string[];
+  routes_served: number;
+  rows?: PreviewRow[];
+  url: string;
+  warnings?: string[];
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "PreviewRow".
+ */
+export interface PreviewRow {
+  decision_ref: string;
+  handler?: string | null;
+  method?: string | null;
+  outcome:
+    | "would-link"
+    | "ambiguous"
+    | "no-matching-route"
+    | "caller-excluded"
+    | "source-established"
+    | "not-declarable";
+  route: string;
+  site: ConnectionSite;
+}
+/**
+ * List the workspace's unresolved HTTP requests, grouped by what they target.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "HttpConnectionsRequest".
+ */
+export interface HttpConnectionsRequest {
+  /**
+   * Only requests made in this repository.
+   */
+  caller?: string | null;
+  context: CapabilityContext;
+  cursor?: string | null;
+  /**
+   * Only groups with a declaration in this state.
+   */
+  declaration_state?: ("pending" | "applied" | "ineffective" | "invalidated") | null;
+  /**
+   * Expand one group: its requests (paged) and its candidate services.
+   */
+  group?: string | null;
+  /**
+   * Also list groups every request of which is already joined.
+   */
+  include_resolved?: boolean;
+  /**
+   * `python` or `typescript`.
+   */
+  language?: string | null;
+  limit?: number;
+  /**
+   * Only requests with these decisions. Empty: every unresolved one.
+   */
+  status?: CrossingStatus[];
+  /**
+   * Only groups whose origin or base expression contains this text.
+   */
+  text?: string | null;
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "HttpConnectionsResponse".
+ */
+export interface HttpConnectionsResponse {
+  basis?: string;
+  built: boolean;
+  candidates?: CandidateService[];
+  context: CapabilityContext;
+  declarations?: DeclarationView[];
+  groups?: ConnectionGroup[];
+  has_more?: boolean;
+  next_cursor?: string | null;
+  requests?: ConnectionRequest[];
+  summary: ConnectionsSummary;
+  synced?: boolean;
+}
+/**
  * How one step crossed from a repository serving a handler into one requesting it.
  *
  * The evidence an HTTP join recorded (:mod:`repoatlas.graph.http_crossings`), each
@@ -1434,6 +1889,7 @@ export interface HttpCrossing {
   built_in?: string | null;
   called_at: string;
   consumer_repository: string;
+  declaration?: string | null;
   declared_in?: string | null;
   deployment: string;
   deployment_repository?: string | null;
@@ -1444,6 +1900,7 @@ export interface HttpCrossing {
   image?: string | null;
   image_in?: string | null;
   method: string;
+  operator_declared?: boolean;
   provider_repository: string;
   published_in?: string | null;
   release?: string | null;
@@ -1453,6 +1910,30 @@ export interface HttpCrossing {
   variant?: string | null;
   version_relation?: string | null;
   workload_in?: string | null;
+}
+/**
+ * What operators did to their declarations, newest first.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "HttpDeclarationHistoryRequest".
+ */
+export interface HttpDeclarationHistoryRequest {
+  context: CapabilityContext;
+  /**
+   * One declaration's history.
+   */
+  id?: number | null;
+  limit?: number;
+  repository?: string | null;
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "HttpDeclarationHistoryResponse".
+ */
+export interface HttpDeclarationHistoryResponse {
+  basis?: string;
+  context: CapabilityContext;
+  entries?: HistoryEntry[];
 }
 /**
  * This interface was referenced by `ApiIndex`'s JSON-Schema
@@ -1484,7 +1965,7 @@ export interface HttpOperationsRequest {
   decision_ref?: string | null;
   depth?: FreshnessDepth;
   /**
-   * With global scope and a non-root route_prefix, discover compatible operations across repositories. Rows retain repository-local statuses and source identity; compatibility does not prove a deployment identity or a runtime dependency, which only a row's crossings state. Results are paginated.
+   * With global scope and a non-root route_prefix, or with `crossing` naming decisions (the requests the workspace join refused, such as `http-service-unmatched`: with `role` caller, the unresolved requests of every repository), discover operations across repositories. Rows retain repository-local statuses and source identity; compatibility does not prove a deployment identity or a runtime dependency, which only a row's crossings state. Read-only: nothing is declared or linked by listing them. Results are paginated.
    */
   discover?: boolean;
   /**
@@ -2535,7 +3016,7 @@ export interface TopologyReferencesResponse {
 export const CONTRACT = "repoatlas-local-api/1" as const;
 
 /** Every endpoint the local API serves, in the server's registry order. */
-export const ENDPOINT_NAMES = ["repositories","status","search","inspect","relationships","impact","dependencies","http_operations","deployment_targets","deployment_links/create","deployment_links/update","deployment_links/delete","topology/overview","topology/children","topology/edge","topology/files","topology/names","topology/references"] as const;
+export const ENDPOINT_NAMES = ["repositories","status","search","inspect","relationships","impact","dependencies","http_operations","http_connections","http_connections/preview","http_connections/history","deployment_targets","deployment_links/create","deployment_links/update","deployment_links/delete","topology/overview","topology/children","topology/edge","topology/files","topology/names","topology/references"] as const;
 
 export type EndpointName = (typeof ENDPOINT_NAMES)[number];
 
@@ -2549,6 +3030,9 @@ export interface Endpoints {
   "impact": { request: ImpactRequest; response: ImpactResponse };
   "dependencies": { request: DependenciesRequest; response: DependenciesResponse };
   "http_operations": { request: HttpOperationsRequest; response: HttpOperationsResponse };
+  "http_connections": { request: HttpConnectionsRequest; response: HttpConnectionsResponse };
+  "http_connections/preview": { request: HttpConnectionPreviewRequest; response: HttpConnectionPreviewResponse };
+  "http_connections/history": { request: HttpDeclarationHistoryRequest; response: HttpDeclarationHistoryResponse };
   "deployment_targets": { request: DeploymentTargetsRequest; response: DeploymentTargetsResponse };
   "deployment_links/create": { request: DeploymentLinkCreateRequest; response: DeploymentLinkResponse };
   "deployment_links/update": { request: DeploymentLinkUpdateRequest; response: DeploymentLinkResponse };
