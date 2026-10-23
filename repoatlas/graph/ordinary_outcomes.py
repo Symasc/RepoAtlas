@@ -45,16 +45,20 @@ from repoatlas.graph.modules import ModuleResolver, split_package
 from repoatlas.graph.resolution import ResolutionIndex, _normalize
 from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.models.ordinary_outcomes import (
+    ALIAS_TARGET_NOT_INDEXED,
     AMBIGUOUS,
     AMBIGUOUS_SALT_SOURCE,
     ANY_LANGUAGE,
     BINDING_FORM_UNTRACED,
     COMPUTED_SPECIFIER,
     CONFIGURED_ALIAS,
+    CONFLICTING_PACKAGE_ENTRY,
     CROSS_REPOSITORY_PROVIDER,
+    DECLARATION_NAMES_OTHER_SOURCE,
     DECLARED_PACKAGE,
     DUPLICATE_KEY_IN_SCOPE,
     DUPLICATE_STATE_ID,
+    DUPLICATE_WORKSPACE_PROVIDER,
     DYNAMIC,
     EXCLUDED_PREFIX,
     EXCLUSIONS,
@@ -90,6 +94,7 @@ from repoatlas.models.ordinary_outcomes import (
     ORDINARY_NOT_LINKED,
     OUTSIDE_MANAGED_ROOTS,
     OUTSIDE_REPOSITORY,
+    PACKAGE_ENTRY_NOT_FOUND,
     PARTITION_RESIDUAL,
     RECEIVER_MEMBER,
     RELATIVE_NO_FILE,
@@ -168,6 +173,10 @@ NODE_BUILTINS: Final = frozenset(
 #: claim of one that stays unlinked still has an edge, to the name and not to a source file.
 _INTERNED_CLAIM_KINDS: Final = frozenset({EntityType.MODULE, EntityType.CONFIG})
 _INTERNED_KIND_CODES: Final = frozenset(str(kind) for kind in _INTERNED_CLAIM_KINDS)
+#: Refusals that say a package entry names no indexed file.
+_ENTRY_NOT_FOUND: Final = frozenset(
+    {"entry-unresolved", "entry-not-exported", "subpath-not-exported", "subpath-outside-package"}
+)
 _PATH_KINDS: Final = frozenset({EntityType.SCRIPT, EntityType.FILE})
 _SYMBOL_KINDS: Final = frozenset({EntityType.SYMBOL, EntityType.CLASS, EntityType.FUNCTION})
 _SAFE_SUBJECT: Final = re.compile(r"^[A-Za-z0-9_.@/:$#~\-]{1,120}$")
@@ -194,10 +203,13 @@ class Classifier:
         index: ResolutionIndex,
         records: Sequence[DependencyRecord],
         module_facts: Sequence[UnresolvedRefRecord],
+        modules: ModuleResolver | None = None,
     ) -> None:
         self._index = index
         self._module_facts = module_facts
-        self._modules: ModuleResolver | None = None
+        #: The resolver the link pass resolved imports with (so its refusals are the ones
+        #: explained); built from the same facts when the caller has none.
+        self._modules = modules
         #: (repo_id, ecosystem, normalized name) of every package a repository declares, and
         #: the repositories that provide each (ecosystem, normalized name).
         self._declared: set[tuple[int, str, str]] = set()
@@ -254,7 +266,45 @@ class Classifier:
             return Decision(
                 TARGET_NOT_FOUND, SUBMODULE_CANDIDATE_ABSENT, "package-submodule", "indexed-files"
             )
+        if flavor == "node":
+            return self._import(origin, specifier)
         return self._module(origin, specifier, flavor)
+
+    def _import(self, origin: FileRow, specifier: str) -> Decision:
+        """Why an import the link pass could not resolve, configuration included, is unlinked.
+
+        The refusal is the resolver's own (:meth:`ModuleResolver.workspace_refusal`); nothing is
+        concluded from a missing file alone.
+        """
+        if (
+            not specifier
+            or specifier.startswith((".", "/", "node:"))
+            or "$" in specifier
+            or "{" in specifier
+            or specifier.split("/", 1)[0] in NODE_BUILTINS
+        ):
+            return self._module(origin, specifier, "node")
+        if self._modules is None:
+            self._modules = ModuleResolver(self._index, list(self._module_facts))
+        if self._modules.resolve(origin, specifier) is not None:
+            # Resolved to a file of another repository: refused by the link pass, never linked.
+            return Decision(
+                UNSUPPORTED, CROSS_REPOSITORY_PROVIDER, "repository-manifests", "other-repository"
+            )
+        why = self._modules.workspace_refusal(origin, specifier)
+        if why == "provider-ambiguous":
+            return Decision(AMBIGUOUS, DUPLICATE_WORKSPACE_PROVIDER, "workspace-members", why)
+        if why == "entry-ambiguous":
+            return Decision(AMBIGUOUS, CONFLICTING_PACKAGE_ENTRY, "package-entry", why)
+        if why in _ENTRY_NOT_FOUND:
+            return Decision(TARGET_NOT_FOUND, PACKAGE_ENTRY_NOT_FOUND, "package-entry", why)
+        if why is not None and why.startswith("dependency-"):
+            return Decision(UNSUPPORTED, DECLARATION_NAMES_OTHER_SOURCE, "importer-manifest", why)
+        if self._modules.aliased(origin, specifier):
+            return Decision(
+                TARGET_NOT_FOUND, ALIAS_TARGET_NOT_INDEXED, "tsconfig-paths", "no-indexed-file"
+            )
+        return self._node_module(origin, specifier)
 
     def _module(self, origin: FileRow, specifier: str, flavor: str) -> Decision:
         """Why a specifier names no file. It depends on the importing file only through its

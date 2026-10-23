@@ -1,10 +1,9 @@
 """Workspace-aware module resolution: aliases, workspace packages and barrels.
 
 :class:`~repoatlas.graph.modules.ModuleResolver` answers one question from indexed
-facts: which file a specifier names. It serves declaration uses and package links
-only. The import,
-reference and call edges the global pass writes are resolved exactly as before, and
-the last tests here pin that.
+facts: which file a specifier names. It serves declaration uses and package links, and the
+global pass's ``IMPORTS`` edges for bare specifiers a configuration names. The reference and
+call edges are resolved exactly as before, and the last tests here pin both.
 
 One pnpm monorepo carries every shape resolution has to get right, and three more
 repositories check that a package name never resolves into another repository. Each
@@ -368,23 +367,81 @@ def global_edges(workspace: Workspace, path: str) -> set[tuple[Any, ...]]:
     return {tuple(row) for row in rows}
 
 
-def test_alias_workspace_and_barrel_imports_add_no_import_graph_edges(indexed: Workspace) -> None:
-    """The resolver serves declaration uses and package links, and nothing else.
+def import_edges(workspace: Workspace, path: str) -> set[tuple[int, str | None, str]]:
+    """(line, how resolved, target path) of the ordinary ``IMPORTS`` edges one file asserts."""
+    found: set[tuple[int, str | None, str]] = set()
+    for _, line, resolution, target in (
+        row for row in global_edges(workspace, path) if row[0] == "IMPORTS"
+    ):
+        basis = json.loads(resolution)["basis"] if resolution else None
+        found.add((line, basis, target))
+    return found
 
-    Every import in ``app.ts`` above resolves through the resolver, yet the global
-    pass links the file exactly as it did before the resolver existed: its one
-    literal relative import, recorded with no resolution. Workspace, alias and barrel
-    imports gain no import, reference or call edge, so search expansion and the
-    relationships walk see the graph they always saw.
-    """
-    assert global_edges(indexed, APP) == {("IMPORTS", 14, None, "apps/web/src/components/index.ts")}
+
+def test_a_specifier_a_configuration_names_gets_an_import_edge_to_exactly_that_file(
+    indexed: Workspace,
+) -> None:
+    """Every import in ``app.ts`` that resolves to one indexed file of its own repository
+    gets an ``IMPORTS`` edge to it, recorded with how it was mapped, as the declaration-use
+    edge is; the one relative import is as it always was, with no resolution recorded."""
+    shapes = "packages/shapes/src/index.ts"
+    assert import_edges(indexed, APP) == {
+        *{(line, "workspace-package", shapes) for line in range(1, 9)},
+        (9, "workspace-package", "packages/colors/src/main.ts"),
+        (10, "workspace-package", "packages/colors/src/tokens/spacing.ts"),
+        (11, "tsconfig-paths", "apps/web/src/api/client.ts"),
+        (12, "tsconfig-paths", "apps/web/src/lib/index.ts"),
+        (13, "tsconfig-base-url", "apps/web/src/util/helpers.ts"),
+        (14, None, "apps/web/src/components/index.ts"),
+    }
+    # the nearest tsconfig decides, and a member in the importer's own workspace resolves
+    assert import_edges(indexed, "apps/web/src/legacy/use.ts") == {
+        (1, "tsconfig-paths", "apps/web/src/legacy/old/thing.ts")
+    }
+    assert import_edges(indexed, "apps/use/src/use.ts") == {
+        (1, "workspace-package", "packages/common-lib/src/index.ts")
+    }
     for i in range(FANOUT):
-        assert global_edges(indexed, f"apps/web/src/consumers/c{i}.ts") == set()
-    assert global_edges(indexed, "apps/use/src/use.ts") == set()
+        assert import_edges(indexed, f"apps/web/src/consumers/c{i}.ts") == {
+            (1, "workspace-package", "packages/big/src/index.ts")
+        }
+
+
+def test_what_cannot_be_resolved_to_one_file_gets_no_import_edge(indexed: Workspace) -> None:
+    """Lines 15-20 of ``app.ts``: no entry mapped from build output and no tsconfig to say
+    where its source is, a package outside the workspace, two members of one name, entry
+    fields that lead to different files, an alias into build output that is not indexed, and
+    a third-party package. None is guessed; each stays a claim. The repository with no
+    workspace gets none either, whatever another repository provides under that name."""
+    linked = {line for line, _, _ in import_edges(indexed, APP)}
+    assert linked.isdisjoint(range(15, 21))
+    assert import_edges(indexed, "src/main.ts") == set()
+
+
+def test_no_ordinary_edge_other_than_imports_gains_a_resolution_or_a_target(
+    indexed: Workspace,
+) -> None:
+    """Calls, references and exports keep exactly the resolution they had: this change adds
+    file-level imports, and nothing else of the ordinary graph moves."""
     recorded = indexed.database.execute(
-        "SELECT COUNT(*) FROM edges WHERE resolution IS NOT NULL AND type != 'USES'"
+        "SELECT DISTINCT type FROM edges WHERE resolution IS NOT NULL AND type != 'USES'"
+    ).fetchall()
+    assert {row[0] for row in recorded} == {"IMPORTS"}
+    for path in (APP, "apps/use/src/use.ts", "apps/web/src/legacy/use.ts"):
+        assert {row[0] for row in global_edges(indexed, path)} <= {"IMPORTS"}
+
+
+def test_an_import_edge_never_leaves_the_importing_repository(indexed: Workspace) -> None:
+    crossing = indexed.database.execute(
+        """
+        SELECT COUNT(*) FROM edges e
+        JOIN entities dst ON dst.id = e.dst_id JOIN files df ON df.id = dst.file_id
+        WHERE e.type = 'IMPORTS' AND e.parser = ? AND e.resolution IS NOT NULL
+          AND df.repo_id != e.repo_id
+        """,
+        (GLOBAL_PARSER,),
     ).fetchone()[0]
-    assert recorded == 0
+    assert crossing == 0
 
 
 def _extends_cycle() -> tuple[ModuleResolver, dict[str, FileRow]]:

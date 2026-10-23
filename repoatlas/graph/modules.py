@@ -4,7 +4,8 @@ A relative specifier names a file by its text. A bare one -- ``@acme/contracts``
 ``@/api/client`` -- names a file only through configuration, and this module reads
 that configuration from the facts recorded when it was indexed
 (:mod:`repoatlas.parsers.module_facts`), never from the working tree. It resolves
-the uses a declaration makes of imported names, and nothing else: the import,
+the uses a declaration makes of imported names, and the bare specifier of an ``IMPORTS``
+claim (one edge to the one file it names, in the importer's own repository); the
 reference and call edges the global pass writes are resolved exactly as they were
 before this module existed. It reads:
 

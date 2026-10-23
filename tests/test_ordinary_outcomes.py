@@ -229,17 +229,28 @@ def test_a_package_a_managed_repository_provides_is_not_external(corpus: Workspa
         "cross-repository-provider",
     )
     assert rows[("src/index.ts", "22", "CALLS:symbol:shared")][1] == "cross-repository-provider"
-    # a member of the repository's own workspace
-    assert rows[("src/index.ts", "8", "IMPORTS:module:@toy/codec")][1] == "workspace-package"
+    # a member of the repository's own workspace: the import is linked to its entry now, so it
+    # has no open row; the call through it is still not traced by the ordinary rules
+    assert ("src/index.ts", "8", "IMPORTS:module:@toy/codec") not in rows
     assert rows[("src/index.ts", "21", "CALLS:symbol:parse")][1] == "workspace-package"
 
 
-def test_a_configured_alias_is_named_not_called_missing(corpus: Workspace) -> None:
-    """The ordinary lookup does not read tsconfig ``paths``; saying so is the whole claim."""
-    assert open_rows(corpus)[("src/index.ts", "4", "IMPORTS:module:@/lib/x")] == (
-        UNSUPPORTED,
-        "configured-alias",
-    )
+def test_a_configured_alias_import_is_linked_and_its_calls_are_still_named(
+    corpus: Workspace,
+) -> None:
+    """Imports read tsconfig ``paths`` (Stage 3-B); the call lookup still does not, and says so."""
+    assert ("src/index.ts", "4", "IMPORTS:module:@/lib/x") not in open_rows(corpus)
+    by = counts(corpus)
+    assert ("IMPORTS", "module", UNSUPPORTED, "configured-alias") not in by
+    assert ("IMPORTS", "module", UNSUPPORTED, "workspace-package") not in by
+    linked_to = corpus.database.execute(
+        """SELECT df.rel_path FROM edges e JOIN entities d ON d.id = e.dst_id
+           JOIN files df ON df.id = d.file_id JOIN files sf ON sf.id = e.file_id
+           WHERE e.type = 'IMPORTS' AND e.parser = 'linker:global'
+             AND sf.rel_path = 'src/index.ts' AND e.line_start IN (4, 8)
+           ORDER BY e.line_start"""
+    ).fetchall()
+    assert [row[0] for row in linked_to] == ["src/lib/x.ts", "packages/codec/index.ts"]
 
 
 def test_paths_report_where_the_search_stopped(corpus: Workspace) -> None:

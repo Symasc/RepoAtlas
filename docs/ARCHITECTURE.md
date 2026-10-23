@@ -1711,6 +1711,7 @@ resolves every use: a first index, a database from before this stage, a run that
 | symbol defined in the same file | resolved directly in the per-file pass |
 | symbol defined in another file | resolved **only through an import this file actually wrote** |
 | module specifier | resolved to a file: Python dotted and relative, TS/JS relative with index resolution |
+| TS/JS bare module specifier (`@/api/client`, `@acme/shapes`) | an `IMPORTS` edge to **one** indexed file of the importing repository, when `ModuleResolver` (the resolution the declaration uses read) maps it: a tsconfig `paths` or `baseUrl` mapping, or a member of the importer's own workspace, read from indexed facts. The edge records how in `resolution` (`basis`, `specifier`, the mapping). A duplicate workspace provider, entry fields that lead to different files, an alias into an unindexed or out-of-repository target, a declaration naming another source, or a name only another repository provides resolves to nothing. Calls, references and exports through such an import are not changed |
 | Python `from . import x` | `x` is a *candidate* module in the package the dots name; an edge only when that package and that module both exist |
 | script / file path | joined against the referencing file's directory, then matched to a managed repository — including paths that climb out of one repository into another |
 | Salt `include:` | dotted state path → `x/y.sls` or `x/y/init.sls` |
@@ -1855,9 +1856,11 @@ ordinary         = linked + one classified outcome per claim that did not link
   `evidence-unreadable`, `trace-bound`) each carry a closed *subreason*. `external` needs evidence: the standard
   library (the interpreter's module list, or Node's fixed core list), or a package the claim's repository **declares**
   and no managed repository **provides**. A name nobody declares is `unsupported`, never external, because the ordinary
-  lookup does not read tsconfig `paths`, workspaces or Python project layouts, so "nothing found" is not "nothing
-  there". A package another managed repository provides is `unsupported:cross-repository-provider`: the ordinary rules
-  never cross repositories.
+  lookup does not read Python project layouts (and, for calls, tsconfig `paths` or workspaces), so "nothing found" is
+  not "nothing there". A package another managed repository provides is `unsupported:cross-repository-provider`: the
+  ordinary rules never cross repositories. A bare TS/JS **import** the resolver refuses says why: a duplicate
+  workspace provider and conflicting entry fields are `ambiguous`, an alias or package entry with no indexed target is
+  `target-not-found`, and a declaration naming another source is `unsupported`.
 - **`linked` means a source relationship.** Every `IMPORTS` claim also has an edge to an interned module node, a fact
   about the *name*. It counts as `linked` only when the global pass resolved it to a file; `interned_node_only` counts
   the module and configuration claims that have only the node.
