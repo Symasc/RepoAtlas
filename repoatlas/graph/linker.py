@@ -74,6 +74,7 @@ from repoatlas.graph.http_crossings import (
 )
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
 from repoatlas.graph.link_exposures import plan_link_exposures
+from repoatlas.graph.modules import ModuleResolver, declared_constraints
 from repoatlas.graph.ordinary_outcomes import (
     Classifier,
     Decision,
@@ -728,8 +729,13 @@ class ReferenceLinker:
             # resolution below and never consulted by it. A claim is classified only after
             # `_resolve` has returned nothing for it. Opt-in (`classify`): an ordinary pass keeps
             # none of it, so it does none of the work.
+            # Bare specifiers an ordinary import names through configuration: read from the same
+            # indexed facts, with the importer's declarations, exactly as the uses stage reads them.
+            modules = ModuleResolver(
+                index, module_facts, declared=declared_constraints(index, records)
+            )
             ledger = OutcomeLedger() if classify else None
-            classifier = Classifier(index, records, module_facts) if classify else None
+            classifier = Classifier(index, records, module_facts, modules) if classify else None
             languages: dict[int, str] = {}
             graphql_unknown_role = 0
             ordinary_unresolved = 0
@@ -824,7 +830,7 @@ class ReferenceLinker:
                         ledger.linked(claim, language, PILLAR_READ)
                     continue
                 siblings = by_file.get(claim.file_id, [])
-                edge = self._resolve(claim, origin, index, siblings)
+                edge = self._resolve(claim, origin, index, siblings, modules)
                 if edge is None:
                     unresolved += 1
                     ordinary_unresolved += 1
@@ -1209,12 +1215,13 @@ class ReferenceLinker:
         origin: FileRow,
         index: ResolutionIndex,
         siblings: list[UnresolvedRefRecord],
+        modules: ModuleResolver | None = None,
     ) -> EdgeRecord | None:
         meta = json.loads(claim.meta_json) if claim.meta_json else {}
         kind = claim.target_kind
 
         if kind is EntityType.MODULE:
-            return self._resolve_module(claim, origin, index, meta)
+            return self._resolve_module(claim, origin, index, meta, modules)
         if kind in _PATH_KINDS:
             target = index.resolve_repo_relative_path(origin, claim.target_key)
             return self._edge(claim, origin, target.file_entity_id) if target else None
@@ -1274,6 +1281,7 @@ class ReferenceLinker:
         origin: FileRow,
         index: ResolutionIndex,
         meta: dict[str, str],
+        modules: ModuleResolver | None = None,
     ) -> EdgeRecord | None:
         flavor = _flavor(origin, meta)
         if flavor is None:
@@ -1288,7 +1296,36 @@ class ReferenceLinker:
             )
         else:
             target = index.resolve_module(origin, claim.target_key, flavor)
+            if target is None and modules is not None and flavor == "node":
+                return self._configured_import(claim, origin, modules)
         return self._edge(claim, origin, target.file_entity_id) if target else None
+
+    def _configured_import(
+        self, claim: UnresolvedRefRecord, origin: FileRow, modules: ModuleResolver
+    ) -> EdgeRecord | None:
+        """A bare specifier a tsconfig ``paths`` pattern, a workspace member or a package entry
+        names: the same resolution the declaration uses read (:class:`ModuleResolver`), from
+        indexed facts only, and only when it leads to **one** file of the importer's own
+        repository. A relative path was decided above; a duplicate provider, conflicting entry
+        conditions, an unindexed target, a path out of the repository or a declaration naming
+        another source is no target, and the claim stays a claim. The edge says which of these
+        mapped it, as the declaration-use edge does."""
+        specifier = claim.target_key
+        if specifier.startswith((".", "/", "node:")):
+            return None
+        found = modules.resolve(origin, specifier)
+        if found is None or found.file.repo_id != origin.repo_id:
+            return None
+        return self._edge(
+            claim,
+            origin,
+            found.file.file_entity_id,
+            resolution=json.dumps(
+                {"basis": found.basis, "specifier": specifier, **dict(found.detail)},
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
 
     def _resolve_symbol(
         self,
@@ -1337,6 +1374,7 @@ class ReferenceLinker:
         dst_id: int,
         *,
         confidence: float | None = None,
+        resolution: str | None = None,
     ) -> EdgeRecord:
         return EdgeRecord(
             src_id=claim.src_id,
@@ -1348,6 +1386,7 @@ class ReferenceLinker:
             line_start=claim.line_start,
             line_end=claim.line_end,
             parser=GLOBAL_PARSER,
+            resolution=resolution,
         )
 
     # -- dependencies and cross-repository edges -----------------------------
