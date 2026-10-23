@@ -480,10 +480,10 @@ def test_two_services_at_one_place_for_the_same_callers_are_refused(built: Works
 def test_a_declaration_never_overrides_what_the_source_establishes(
     built: Workspace, tmp_path: Path
 ) -> None:
-    """F1/F2/F14: svc's published origin is the source's; shop declared there changes nothing, and
-    the refusal of a request to an unserved route there says the source decided."""
+    """F1/F2/F14: svc's published origin is the source's; a service declared there changes nothing,
+    even one that serves the route svc does not: the refusal says the source decided."""
     before = decisions(built)
-    link_id = declare(built, "shop", "http://svc:8080")
+    link_id = declare(built, "orders", "http://svc:8080")
     sync(built, tmp_path)
     after = decisions(built)
     assert after["fetch_published"] == before["fetch_published"]  # still the source's link

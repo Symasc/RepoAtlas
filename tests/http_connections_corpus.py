@@ -86,7 +86,7 @@ BUYER = dedent("""\
 
 
     def fetch_unserved() -> dict:
-        return requests.get("http://svc:8080/v1/missing", timeout=5).json()
+        return requests.get("http://svc:8080/v1/orders/7", timeout=5).json()
 
 
     def fetch_local() -> dict:
