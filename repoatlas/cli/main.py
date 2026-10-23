@@ -438,6 +438,7 @@ def links_export(
                         include={
                             "label",
                             "environment",
+                            "callers",
                             "url",
                             "target_id",
                             "variables",

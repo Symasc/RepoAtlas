@@ -684,6 +684,30 @@ def test_an_import_is_recorded_as_an_import_and_importing_twice_adds_nothing(
     assert [(a, v) for a, _, _, v, *_ in audit_rows(built)] == [("import", "import")]
 
 
+def test_the_cli_export_carries_callers_so_a_loopback_declaration_imports_again(
+    built: Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A loopback link is valid only with its callers: an export that drops them cannot be imported."""
+    from repoatlas.cli.main import app
+    from repoatlas.models.deployment_targets import LinksExport
+    from typer.testing import CliRunner
+
+    monkeypatch.setenv("REPOATLAS_CONFIG", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("REPOATLAS_DB", str(built.settings.storage.database))
+    declare(
+        built,
+        "shop",
+        "http://localhost:8000",
+        callers=(slug(built, "buyer"),),
+        environment="dev",
+    )
+    target = tmp_path / "out.json"
+    result = CliRunner().invoke(app, ["links", "export", str(target)])
+    assert result.exit_code == 0, result.output
+    links = LinksExport.model_validate_json(target.read_text()).links
+    assert [link.callers for link in links] == [[slug(built, "buyer")]]
+
+
 def test_the_history_endpoint_reads_newest_first_and_filters_by_repository(
     built: Workspace,
 ) -> None:
