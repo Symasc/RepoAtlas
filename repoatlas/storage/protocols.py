@@ -15,6 +15,7 @@ from typing import NamedTuple, Protocol
 from pydantic import BaseModel, ConfigDict
 
 from repoatlas.models.dependencies import DependencyPackage, DependencyRecord
+from repoatlas.models.deployment_targets import DeploymentLink
 from repoatlas.models.parsing import EdgeDirection, EdgeType, EntityType, NeighborOrder
 from repoatlas.models.repository import Repository
 
@@ -729,6 +730,7 @@ class KnowledgeStore(Protocol):
         self, entity_keys: Sequence[str]
     ) -> list[tuple[str, str, str, str, str, int | None]]: ...
     def http_decisions_near(self, entity_keys: Sequence[str]) -> list[HttpRefusalNear]: ...
+    def list_deployment_links(self) -> list[DeploymentLink]: ...
     def list_link_decisions(
         self, family: str | None = None, repo_id: int | None = None
     ) -> list[LinkDecisionRow]: ...

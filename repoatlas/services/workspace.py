@@ -42,7 +42,7 @@ class Workspace:
     files: SqliteFileStore
     knowledge: SqliteKnowledgeStore
     dependencies: SqliteDependencyStore
-    #: The one store a user writes: where repositories are deployed. No sync touches it.
+    #: The one store a user writes: where repositories are deployed. A sync reads it, never writes it.
     deployment_links: SqliteDeploymentLinkStore
     search: SqliteSearchIndex
     registry: ParserRegistry
