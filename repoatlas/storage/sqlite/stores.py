@@ -106,6 +106,8 @@ def _parse_dt(raw: str | None) -> datetime | None:
 _HTTP_KEY_PREFIX = "http-"
 
 
+#: The ``meta`` key holding when the global pass last committed.
+LINKS_PASS_KEY = "links_pass_at"  # noqa: S105 - a key name
 #: The ``meta`` key under which the ``USES`` stage records whether its edges are complete.
 USES_LINKS_KEY = "uses_links"
 #: The ``meta`` key the global commit sets once it has written ``http_call_decisions``:
@@ -988,6 +990,16 @@ class SqliteKnowledgeStore:
             (str(EdgeType.USES), USES_EXPORT_TABLE),
         ).fetchone()
         return int(row["n"])
+
+    def record_link_pass(self, at: str) -> None:
+        """Note when the global pass last committed. Written inside its transaction, so the time
+        and the graph it describes are visible together; a declaration stated after it is
+        pending, and one stated before it has been joined or has been refused."""
+        self._db.set_meta(LINKS_PASS_KEY, at)
+
+    def link_pass_at(self) -> str | None:
+        """When the global pass last committed, or ``None`` before the first."""
+        return self._db.get_meta(LINKS_PASS_KEY)
 
     def uses_links_state(self) -> str | None:
         """What the ``USES`` stage last recorded about the edges it keeps (``graph/uses_link``)."""

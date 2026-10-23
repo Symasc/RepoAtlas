@@ -248,6 +248,12 @@ class HttpCrossing(BaseModel):
     published_in: str | None = None
     built_in: str | None = None
     declared_in: str | None = None
+    #: Whether an operator's declaration, not the source, supplied the service identity,
+    #: deployment binding and source binding of this crossing. The route and the handler are the
+    #: source's. ``declaration`` says which: ``link <id>: <label>``, its environment and whether
+    #: the operator confirmed it. A declaration is a statement, never evidence.
+    operator_declared: bool = False
+    declaration: str | None = None
 
 
 class ConfigurationCrossing(BaseModel):
