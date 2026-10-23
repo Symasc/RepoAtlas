@@ -535,6 +535,23 @@ def test_a_declaration_whose_origin_is_no_longer_requested_is_invalidated(
     assert state_of(built, link_id) == ("invalidated", "origin-no-longer-requested")
 
 
+def test_a_declaration_outlives_its_repository_and_is_invalidated_not_deleted(
+    built: Workspace, tmp_path: Path
+) -> None:
+    """F7/P5: removing the service from the index leaves the declaration stored, shown as
+    invalidated, and without effect; the requests it joined are refused again at the next sync."""
+    link_id = declare(built, "shop", SHOP_URL)
+    sync(built, tmp_path)
+    assert state_of(built, link_id) == ("applied", "")
+    shop = next(r for r in built.repositories.list_all() if r.name == "shop")
+    assert shop.id is not None
+    built.repositories.delete(shop.id)
+
+    assert [link.id for link in built.deployment_links.list_all()] == [link_id]
+    assert state_of(built, link_id) == ("invalidated", "repository-not-indexed")
+    assert all(d.state != "applied" for d in worklist(built).declarations)
+
+
 def test_a_declaration_for_a_service_that_stopped_serving_routes_is_invalidated(
     built: Workspace, tmp_path: Path
 ) -> None:
