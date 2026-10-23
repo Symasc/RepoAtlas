@@ -301,7 +301,14 @@ def test_a_failing_sync_erases_its_progress_before_the_error(
     runner = CliRunner()
     assert runner.invoke(app, ["init", str(workspace_root)]).exit_code == 0
 
-    def failing(workspace: object, context: object, *, full: bool, progress: SyncProgress) -> None:
+    def failing(
+        workspace: object,
+        context: object,
+        *,
+        full: bool,
+        progress: SyncProgress,
+        classify: bool,
+    ) -> None:
         progress.indexing(1, 1, "python-service", 1, 2)
         raise RepoAtlasError("the sync went wrong")
 
