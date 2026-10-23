@@ -365,6 +365,8 @@ export function stationsOf(crossing: Crossing): Station[] {
 
 /** `repository/path:line` (or `–end`), or the file alone when the hop is the whole file. */
 export function placeLabel(place: HopPlace): string {
+  // A deployment link the user recorded: a statement, not a file.
+  if (place.basis === "link") return `${place.repository}: deployment link #${place.path.split("/").pop() ?? ""}`;
   const at = `${place.repository}/${place.path}`;
   if (place.line_start == null) return at;
   const end = place.line_end != null && place.line_end !== place.line_start ? `–${place.line_end}` : "";
