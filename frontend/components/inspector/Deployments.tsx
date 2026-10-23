@@ -99,6 +99,10 @@ export function Deployments({ repository }: { repository: string }) {
           <TargetCard key={target.target_id} target={target} />
         ))}
         {(data.links ?? []).length === 0 && <Quiet>No links recorded for this repository.</Quiet>}
+        <p className={classes.detail}>
+          From the next sync, a link with a URL (or a target its values resolve) also joins requests the source leaves
+          unlinked to this repository&apos;s handlers, marked declared. It never overrides a link the source proves.
+        </p>
         <LinkList
           links={data.links ?? []}
           onEdit={(link) => setEditing({ id: link.id, form: formOf(link) })}

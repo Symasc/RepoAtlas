@@ -93,7 +93,7 @@ function Places({
         const label = placeLabel(place);
         return (
           <li key={`${label}#${i}`} className={classes.place}>
-            {onOpenPlace ? (
+            {onOpenPlace && place.basis !== "link" ? (
               <button type="button" className={classes.placeLink} onClick={() => onOpenPlace(place)}>
                 {label}
               </button>
