@@ -182,6 +182,64 @@ class DeploymentTarget(BaseModel):
     runs: str | None = None
 
 
+_SCOPE_SYMBOL = re.compile(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*")
+#: What a scope may show of a base: a plain name in braces, or the masked form ``{…}`` that
+#: ``http_declarations.display_base`` shows for anything else.
+_SCOPE_SHOWN_BASE = re.compile(r"\{(?:[A-Za-z_$][\w$]*|…)\}")
+
+
+class DeclarationScope(BaseModel):
+    """The words of a scoped declaration: which unstated base, in which file (and symbol) of its
+    one caller, it serves. The base is kept by hash; only a plain name is ever shown."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    #: Relative POSIX path of the file in the caller repository.
+    path: str = Field(min_length=1, max_length=MAX_LINK_TEXT)
+    #: A dotted qualified name of one entity of that file; ``None``: the file's module level.
+    symbol: str | None = Field(default=None, min_length=1, max_length=MAX_LINK_TEXT)
+    #: ``hbk1-`` and the hash of the base text (``http_scopes.base_key``), never the text.
+    base_key: str = Field(pattern=r"^hbk1-[0-9a-f]{20}$")
+    #: The base as shown: ``{name}`` for a plain name, else ``{…}``.
+    base_shown: str = Field(max_length=MAX_LINK_TEXT)
+    #: A literal path prefix after the base, like a preview's ``base_path``.
+    base_path: str = Field(default="", max_length=MAX_LINK_TEXT)
+
+    @field_validator("path")
+    @classmethod
+    def _path(cls, value: str) -> str:
+        if value.startswith("/") or "\\" in value or ".." in value.split("/"):
+            raise ValueError("a scope path is relative, with `/` separators and no `..` segment")
+        return value
+
+    @field_validator("symbol")
+    @classmethod
+    def _symbol(cls, value: str | None) -> str | None:
+        if value is not None and not _SCOPE_SYMBOL.fullmatch(value):
+            raise ValueError("a scope symbol is a dotted qualified name")
+        return value
+
+    @field_validator("base_shown")
+    @classmethod
+    def _base_shown(cls, value: str) -> str:
+        if not _SCOPE_SHOWN_BASE.fullmatch(value) or secret_bearing(value):
+            raise ValueError("a shown base is `{name}` for a plain name, or `{…}`")
+        return value
+
+    @field_validator("base_path")
+    @classmethod
+    def _base_path(cls, value: str) -> str:
+        # Kept in step with HttpConnectionPreviewRequest._base_path, which this module cannot
+        # import (that module imports this one).
+        if value and (
+            not value.startswith("/")
+            or any(c in value for c in "?#{}")
+            or any(c.isspace() for c in value)
+        ):
+            raise ValueError("a base path is empty or starts with `/`, with no query or holes")
+        return value.rstrip("/")
+
+
 class DeploymentLinkFields(BaseModel):
     """What a user states about a deployment: where it is, under which conditions, and
     the values of the variables a stated target leaves open."""
@@ -207,6 +265,9 @@ class DeploymentLinkFields(BaseModel):
     callers: list[str] = Field(
         default_factory=list, description=f"At most {MAX_LINK_CALLERS} repository slugs."
     )
+    #: A declaration scoped to one file (and symbol) of its one caller, for a base the caller's
+    #: code does not state. ``None``: an ordinary link.
+    scope: DeclarationScope | None = None
 
     @field_validator("callers")
     @classmethod
@@ -234,6 +295,18 @@ class DeploymentLinkFields(BaseModel):
                 )
             if not self.environment:
                 raise ValueError("a loopback origin belongs to an environment: name it")
+        return self
+
+    @model_validator(mode="after")
+    def _scope_is_alone(self) -> DeploymentLinkFields:
+        if self.scope is None:
+            return self
+        if self.url is not None or self.target_id is not None:
+            raise ValueError("a scoped declaration states no URL and resolves no target")
+        if self.variables or self.conditions:
+            raise ValueError("a scoped declaration binds no variables and holds no conditions")
+        if len(self.callers) != 1:
+            raise ValueError("a scoped declaration names exactly one caller repository")
         return self
 
     @field_validator("conditions")
@@ -282,6 +355,13 @@ class LinkConflictError(ValueError):
         )
         self.link_id = link_id
         self.repository = repository
+
+
+class ScopeConflictError(LinkConflictError):
+    """A scoped declaration contradicts another declaration over the same scope."""
+
+    def __init__(self, message: str) -> None:
+        ValueError.__init__(self, message)
 
 
 MAX_NOTE = 500
@@ -445,6 +525,7 @@ __all__ = [
     "TARGETS_BASIS",
     "ConditionContext",
     "DeclarationProvenance",
+    "DeclarationScope",
     "DeploymentCondition",
     "DeploymentGuard",
     "DeploymentLink",
@@ -460,6 +541,7 @@ __all__ = [
     "DeploymentTargetsResponse",
     "DeploymentVariable",
     "LinkConflictError",
+    "ScopeConflictError",
     "declared_base",
     "is_loopback_url",
     "link_url_problem",
