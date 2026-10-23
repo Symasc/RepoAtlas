@@ -556,7 +556,7 @@ link_decisions(                    -- derived: every link family's decisions, re
   subject, decision, evidence_json -- the family's spelling of what was decided, and what it read
 )
 
-ordinary_outcomes(                 -- derived: how many ordinary claims share an outcome, rebuilt by every global commit (§5)
+ordinary_outcomes(                 -- derived, only after `sync -v`: how many ordinary claims share an outcome; cleared by every other commit (§5)
   repo_id → repositories ON DELETE CASCADE,
   language, edge_type, target_kind,   -- closed codes
   outcome, subreason,                 -- closed codes (repoatlas/models/ordinary_outcomes.py)
@@ -564,7 +564,7 @@ ordinary_outcomes(                 -- derived: how many ordinary claims share an
   PRIMARY KEY (repo_id, language, edge_type, target_kind, outcome, subreason)
 ) WITHOUT ROWID
 
-ordinary_accounting(               -- derived: the figures that reconcile the account (closed keys), same transaction
+ordinary_accounting(               -- derived, only after `sync -v`: the figures that reconcile the account (closed keys), same transaction
   key PRIMARY KEY, value
 ) WITHOUT ROWID
 ```
@@ -1838,7 +1838,10 @@ path, Salt requisite or template include that names its target by text — with 
 planners decide and what the `USES` stage left open. It cannot say *why*, and most of what it counts could never become
 an edge (a call into `react`, `os` or a declared package).
 
-`repoatlas/graph/ordinary_outcomes.py` keeps a second account beside it, with its own definition:
+`repoatlas/graph/ordinary_outcomes.py` keeps a second account beside it, with its own definition. **It is opt-in**:
+`repoatlas sync -v` (or `repoatlas -v sync`) computes it in the same link pass and prints the breakdown; a plain
+`repoatlas sync` skips the work entirely (no ledger, no classifier, no extra query), so an ordinary sync costs what it
+did before the account existed:
 
 ```text
 standing claims  = ordinary + excluded(reason) + USES-stage rows            (a partition of unresolved_refs)
@@ -1863,6 +1866,10 @@ ordinary         = linked + one classified outcome per claim that did not link
   legacy_uses_remainder` its parts, and `legacy_residual` what the parts do not explain. `partition_residual` is what
   the ledger and the `USES` rows fail to cover of `standing_claims`. Both are reported as measured and are expected to
   be zero; a non-zero value is a defect to find, not a number to absorb.
+- **Never stale.** A plain sync stores no account, and clears the one an earlier verbose sync stored, in the same
+  transaction that replaces the graph; a failed commit rolls both back together. The tables therefore hold the account
+  of the graph beside them or nothing, and a breakdown is never shown for a graph it does not describe. `sync -v` after
+  a plain sync needs no reindex: the link pass is global and runs at the end of every sync.
 - **Storage.** Counts go to `ordinary_outcomes` and `ordinary_accounting` in the global commit's transaction, keyed
   only by closed codes, so their size is bounded by the codes and they hold no source text. What is still open
   (`not-indexed`, `target-not-found`, `dynamic`, `ambiguous`, `unsupported`, `evidence-unreadable`, `trace-bound`) also

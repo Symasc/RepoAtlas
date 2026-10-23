@@ -944,6 +944,7 @@ class SyncEngine:
         full: bool = False,
         scope: str = "global",
         progress: SyncProgress | None = None,
+        classify: bool = False,
     ) -> SyncReport:
         """One synchronization run, from working tree to complete knowledge state.
 
@@ -980,7 +981,7 @@ class SyncEngine:
         self._knowledge.set_uses_links_state(PENDING)
         self._progress = progress if progress is not None else SILENT
         try:
-            return self._run(repositories, full=full, scope=scope)
+            return self._run(repositories, full=full, scope=scope, classify=classify)
         finally:
             self._uses = None
             self._progress = SILENT
@@ -995,6 +996,7 @@ class SyncEngine:
         *,
         full: bool,
         scope: str,
+        classify: bool,
     ) -> SyncReport:
         reports: list[RepositorySyncReport] = []
         completions: list[SyncCompletion] = []
@@ -1028,7 +1030,7 @@ class SyncEngine:
 
         # Computed outside the transaction: this is the expensive half, and none
         # of it touches the graph it is going to replace.
-        plan = self._linker.prepare_global(self._uses, on_stage=stage)
+        plan = self._linker.prepare_global(self._uses, on_stage=stage, classify=classify)
 
         # The swap is reported here rather than by the linker, so `commit_global` keeps
         # the one-argument signature the failure-injection tests replace it with.

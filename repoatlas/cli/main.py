@@ -39,9 +39,38 @@ _JsonOption = Annotated[bool, typer.Option("--json", help="Emit machine-readable
 _VerboseOption = Annotated[
     bool, typer.Option("--verbose", "-v", help="Print diagnostics to stderr.")
 ]
+_SyncVerboseOption = Annotated[
+    bool,
+    typer.Option(
+        "--verbose",
+        "-v",
+        help="Print diagnostics to stderr, and classify every ordinary reference "
+        "(what became of each, and why). The classification costs time, so a plain sync skips it.",
+    ),
+]
 _RepoOption = Annotated[
     str | None, typer.Option("--repo", help="Explicit repository; overrides the current directory.")
 ]
+
+
+@app.callback()
+def _root(
+    ctx: typer.Context,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose", "-v", help="Verbose output for the command that follows (`-v sync`)."
+        ),
+    ] = False,
+) -> None:
+    """Local multi-repository engineering intelligence."""
+    # `repoatlas -v sync` and `repoatlas sync -v` mean the same: the flag a command always
+    # took after its name is kept, and the one before it is remembered here for it.
+    ctx.obj = {"verbose": verbose}
+
+
+def _verbose(ctx: typer.Context, flag: bool) -> bool:
+    return flag or bool((ctx.obj or {}).get("verbose"))
 
 
 def _fail(error: RepoAtlasError) -> None:
@@ -129,21 +158,30 @@ def init(
 
 @app.command()
 def sync(
+    ctx: typer.Context,
     repository: Annotated[str | None, typer.Argument(help="Repository to sync.")] = None,
     repo: _RepoOption = None,
     full: Annotated[bool, typer.Option("--full", help="Rehash every file.")] = False,
     json_output: _JsonOption = False,
-    verbose: _VerboseOption = False,
+    verbose: _SyncVerboseOption = False,
 ) -> None:
     """Incrementally synchronize the index with the working tree.
 
     Inside a managed repository, that repository; anywhere else, the whole workspace.
+
+    With --verbose (before or after the command), the same link pass also classifies every
+    ordinary reference and prints what became of each: linked, external, unsupported,
+    ambiguous, the rest, and why. That is no second run, but it is slower, so it is off
+    otherwise.
     """
+    verbose = _verbose(ctx, verbose)
     workspace = _open()
     try:
         context = _resolve(workspace, repo or repository, "sync", verbose, anywhere=True)
         with _progress() as progress:
-            report = services.sync(workspace, context, full=full, progress=progress)
+            report = services.sync(
+                workspace, context, full=full, progress=progress, classify=verbose
+            )
     except RepoAtlasError as exc:
         _fail(exc)
         return
@@ -163,12 +201,14 @@ def sync(
 
 @app.command()
 def status(
+    ctx: typer.Context,
     repository: Annotated[str | None, typer.Argument(help="Repository to report on.")] = None,
     repo: _RepoOption = None,
     json_output: _JsonOption = False,
     verbose: _VerboseOption = False,
 ) -> None:
     """Show index status for a repository or the whole workspace."""
+    verbose = _verbose(ctx, verbose)
     workspace = _open()
     try:
         context = _resolve(workspace, repo or repository, "status", verbose)
@@ -219,12 +259,14 @@ def decisions(
 
 @app.command()
 def locate(
+    ctx: typer.Context,
     question: Annotated[str, typer.Argument(help="What to locate.")],
     repo: _RepoOption = None,
     json_output: _JsonOption = False,
     verbose: _VerboseOption = False,
 ) -> None:
     """Find where something is implemented or configured."""
+    verbose = _verbose(ctx, verbose)
     workspace = _open()
     try:
         context = _resolve(workspace, repo, "locate", verbose)

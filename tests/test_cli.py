@@ -248,3 +248,44 @@ def test_end_to_end_success_scenario(cli_env: Path, workspace_root: Path) -> Non
     refused = run_in(outside, "status")
     assert refused.exit_code == ExitCode.CONTEXT
     assert "Unable to determine repository." in refused.output
+
+
+def test_a_plain_sync_skips_the_ordinary_classification(
+    cli_env: Path, workspace_root: Path
+) -> None:
+    run_in(workspace_root, "init", str(workspace_root))
+    result = run_in(workspace_root, "sync")
+    assert result.exit_code == ExitCode.OK, result.output
+    assert "Ordinary references" not in result.output
+    assert "references still unresolved" in result.output
+
+
+@pytest.mark.parametrize("arguments", [("sync", "-v"), ("sync", "--verbose"), ("-v", "sync")])
+def test_verbose_sync_prints_the_ordinary_breakdown_whichever_side_the_flag_is_on(
+    cli_env: Path, workspace_root: Path, arguments: tuple[str, ...]
+) -> None:
+    run_in(workspace_root, "init", str(workspace_root))
+    result = run_in(workspace_root, *arguments)
+    assert result.exit_code == ExitCode.OK, result.output
+    assert "Ordinary references:" in result.output
+    for heading in ("linked", "external", "unsupported", "ambiguous", "other unresolved"):
+        assert heading in result.output
+    assert "references still unresolved" in result.output
+
+
+def test_a_verbose_sync_then_a_plain_one_leaves_no_breakdown_to_mistake_for_current(
+    cli_env: Path, workspace_root: Path
+) -> None:
+    run_in(workspace_root, "init", str(workspace_root))
+    assert "Ordinary references:" in run_in(workspace_root, "sync", "-v").output
+    assert "Ordinary references" not in run_in(workspace_root, "sync").output
+    listed = run_in(workspace_root, "decisions", "--family", "ordinary")
+    assert listed.exit_code == ExitCode.OK, listed.output
+    assert "ordinary" not in listed.output.replace("ordinary references", "")
+
+
+def test_a_verbose_flag_before_a_command_that_has_none_to_use_is_still_accepted(
+    cli_env: Path, workspace_root: Path
+) -> None:
+    run_in(workspace_root, "init", str(workspace_root))
+    assert run_in(workspace_root, "-v", "status").exit_code == ExitCode.OK

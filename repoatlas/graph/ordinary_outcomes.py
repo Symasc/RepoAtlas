@@ -644,13 +644,16 @@ def summarize(
 ) -> OrdinarySummary:
     """The counts a sync reports, summed over repositories."""
     outcomes: Counter[str] = Counter()
+    reasons: Counter[str] = Counter()
     for row in (*plan.rows, *sources):
         if row.outcome != "excluded":
             outcomes[row.outcome] += row.claims
-    excluded = dict(plan.excluded)
+            if row.outcome != LINKED:
+                reasons[f"{row.outcome}:{row.subreason}"] += row.claims
     return OrdinarySummary(
         outcomes=dict(sorted(outcomes.items())),
-        excluded=excluded,
+        reasons=dict(sorted(reasons.items())),
+        excluded=dict(plan.excluded),
         accounting=dict(sorted(accounting.items())),
     )
 
