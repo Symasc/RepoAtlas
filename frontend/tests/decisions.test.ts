@@ -266,6 +266,9 @@ describe("places and files", () => {
     expect(placeLabel({ repository: "svc-c7", path: "src/app.ts", role: "source_in" })).toBe("svc-c7/src/app.ts");
     expect(placeLabel({ repository: "svc-c7", path: "Tiltfile", line_start: 3, line_end: 3, role: "bound_at" })).toBe("svc-c7/Tiltfile:3");
     expect(placeLabel({ repository: "a", path: "b.ts", line_start: 3, line_end: 5, role: "at" })).toBe("a/b.ts:3–5");
+    expect(placeLabel({ repository: "shop", path: "@deployment-links/7", role: "link_in", basis: "link" })).toBe(
+      "shop: deployment link #7",
+    );
   });
 
   it("groups rows by file in the API's order", () => {
