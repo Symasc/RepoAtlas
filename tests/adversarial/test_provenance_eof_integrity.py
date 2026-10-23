@@ -742,9 +742,10 @@ def test_the_facts_version_covers_every_input_that_changes_a_fact() -> None:
     `chunks` are cited evidence exactly as an entity's are."""
     from repoatlas.dependencies.registry import DependencyRegistry
     from repoatlas.indexing.chunking import CHUNKING_VERSION
-    from repoatlas.sync.planner import facts_version
+    from repoatlas.sync.planner import PARSER_FACTS_VERSION, facts_version
 
     version = facts_version(ParserRegistry(), DependencyRegistry())
+    assert version.startswith(f"schema:{PARSER_FACTS_VERSION}||")
     assert f"chunks:{CHUNKING_VERSION}" in version
     for parser in ParserRegistry()._parsers:
         assert f"{parser.name}:{parser.version}" in version, parser.name

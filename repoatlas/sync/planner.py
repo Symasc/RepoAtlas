@@ -18,23 +18,32 @@ from repoatlas.gitstate.client import GitRepositoryState
 from repoatlas.indexing.chunking import CHUNKING_VERSION
 from repoatlas.models.repository import FileState, Repository, SyncStatus
 from repoatlas.parsers.registry import ParserRegistry
-from repoatlas.storage.sqlite.database import SCHEMA_VERSION
 from repoatlas.sync.scanner import ScannedFile
+
+#: Version of how the engine stores one file's facts (the per-file tables and columns a parse
+#: fills), independent of the database schema. The ``schema:`` label is historical and kept so
+#: existing rows stay current. Bump it when a migration adds or changes a column or table that a
+#: file's parse writes, or when engine-side per-file storage logic changes. Parser-specific changes
+#: bump that parser's own version instead.
+PARSER_FACTS_VERSION = 5
 
 
 def facts_version(registry: ParserRegistry, dependency_registry: DependencyRegistry) -> str:
     """Version of everything that turns a file into facts (V1_SPEC §12).
 
-    The schema version, both registries and the chunking rules contribute, because
+    The facts layout version, both registries and the chunking rules contribute, because
     a change to any of them makes stored facts stale even though the file on disk
     is untouched. It is stored per file, so a version change reparses the affected
     files directly instead of hashing the whole tree to learn that nothing moved.
+
+    The database schema version is deliberately not a component: a migration that does not
+    change what a parse stores must not reparse every file (see :data:`PARSER_FACTS_VERSION`).
 
     A free function rather than a method on the engine so that ``status`` can
     compare an index against it without constructing a sync engine.
     """
     return (
-        f"schema:{SCHEMA_VERSION}"
+        f"schema:{PARSER_FACTS_VERSION}"
         f"||{registry.version}"
         f"||deps:{dependency_registry.version}"
         f"||chunks:{CHUNKING_VERSION}"
