@@ -3314,7 +3314,7 @@ is treated as **changed**. Parsing then fails conservatively for that file and i
 nothing. The alternative, letting the error escape, would abort the whole sync over one unreadable file and leave
 every other repository's facts stale.
 
-The **facts version** — the schema version, both registries and the chunking rules — is handled **per file** rather
+The **facts version** — the facts layout version (`PARSER_FACTS_VERSION`, not the database schema version: a migration that does not change what a parse stores must not reparse every file), both registries and the chunking rules — is handled **per file** rather
 than as a sixth global trigger: it is stored on the file row, so affected files are reparsed directly instead of
 hashing the entire tree to learn that nothing moved. Chunking is in it because a chunk range is cited evidence like
 any other, so a chunking fix that did not move the version would never reach an existing index. `status` reports a file row carrying an older facts version as stale, which is the only
