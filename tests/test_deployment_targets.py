@@ -28,6 +28,7 @@ from repoatlas.models.deployment_targets import (
     DeploymentLinkDeleteRequest,
     DeploymentLinkFields,
     DeploymentLinkUpdateRequest,
+    DeploymentResolution,
     DeploymentTarget,
     DeploymentTargetsRequest,
     DeploymentTargetsResponse,
@@ -36,6 +37,7 @@ from repoatlas.parsers.deploy_helm import ingress_references
 from repoatlas.parsers.deploy_targets import ingress_target_references
 from repoatlas.parsers.http_facts import DEPLOYMENT_TARGET_INGRESS, PENDING_FACT
 from repoatlas.services.workspace import Workspace
+from tests.artifact_corpus import repos as artifact_repos
 from tests.impact_corpus import build
 
 
@@ -323,7 +325,7 @@ def test_a_release_supplies_values_and_a_ci_branch_variable_is_context(
         "https://web-local.apps.example.test/",
         "https://web-main.apps.example.test/",
     }
-    urls = sorted(r.url for r in resolutions if r.basis == "release")
+    urls = sorted(r.url or "" for r in resolutions if r.basis == "release")
     assert urls == ["https://web-local.apps.example.test/", "https://web-main.apps.example.test/"]
     ci = next(r for r in resolutions if r.url == "https://web-main.apps.example.test/")
     assert ci.conditions == "match"
@@ -569,7 +571,7 @@ def test_a_link_url_that_could_carry_a_secret_or_is_not_a_place_is_refused(url: 
 def test_conditions(
     conditions: list[dict[str, str]], context: dict[str, object], expected: str
 ) -> None:
-    parsed = [DeploymentCondition(**c) for c in conditions]
+    parsed = [DeploymentCondition.model_validate(c) for c in conditions]
     assert evaluate(parsed, ConditionContext(**context)) == expected  # type: ignore[arg-type]
 
 
@@ -578,3 +580,112 @@ def test_a_variable_condition_must_name_its_variable() -> None:
         DeploymentCondition(kind="variable", value="x")
     with pytest.raises(ValidationError):
         DeploymentCondition(kind="branch", name="x", value="main")
+
+
+# -- release values, as the HTTP join renders them ------------------------------------
+
+
+def _resolution(target: DeploymentTarget, label: str) -> DeploymentResolution:
+    [found] = [r for r in target.resolutions if r.label.startswith(label)]
+    return found
+
+
+def _web(response: DeploymentTargetsResponse) -> DeploymentTarget:
+    [target] = [t for t in response.targets if t.path == "charts/web/templates/ingress.yaml"]
+    return target
+
+
+def test_a_release_s_values_files_give_its_host_as_the_http_join_reads_them(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """``-f env/test/api.yaml`` sets the host the join links through: the release resolves
+    to it, citing that file, never the chart's empty default."""
+    built = build(workspace, tmp_path, artifact_repos())
+    web = _web(targets(built, "deployer", branch="main"))
+    api = _resolution(web, "release `api`")
+    assert api.url == "https://api.test.example/"
+    [host] = [v for v in api.variables if v.name == "ingress.host"]
+    assert (host.value, host.basis) == ("api.test.example", "release")
+    assert host.at == "env/test/api.yaml:2"
+    linked = {
+        json.loads(r[0])["http"]["deployment"]
+        for r in built.database.execute(
+            "SELECT resolution FROM edges WHERE type = 'CALLS_HTTP_HANDLER'"
+        )
+    }
+    assert api.origin in linked
+
+
+def test_an_empty_value_is_a_hole_and_says_where_it_is_empty(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    built = build(workspace, tmp_path, artifact_repos())
+    defaults = _resolution(_web(targets(built, "deployer")), "chart defaults")
+    assert defaults.url is None and defaults.state == "unresolved"
+    assert "{ingress.host}" in defaults.rendered
+    assert defaults.notes == ["`ingress.host` is empty at charts/web/values.yaml:8"]
+
+
+def test_what_keeps_a_release_from_resolving_is_on_that_resolution(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """``canary`` names a values file by an expression: its own resolution says so, and the
+    target's diagnostics, which belong to no one context, do not."""
+    built = build(workspace, tmp_path, artifact_repos())
+    web = _web(targets(built, "deployer"))
+    canary = _resolution(web, "release `canary`")
+    assert canary.url is None
+    assert any("not a literal path" in note for note in canary.notes)
+    assert not any("canary" in diagnostic for diagnostic in web.diagnostics)
+
+
+def test_where_another_repository_deploys_this_repository_s_code(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """``api`` states no deployment of its own; ``deployer``'s release ``api`` runs the
+    image ``api``'s CI is configured to publish, so asking about ``api`` lists that
+    Ingress, under that release alone."""
+    built = build(workspace, tmp_path, artifact_repos())
+    response = targets(built, "api", branch="main")
+    web = _web(response)
+    assert (web.repository, web.runs) == ("deployer", "api")
+    assert [r.label.split(" (")[0] for r in web.resolutions] == ["release `api`"]
+    assert web.resolutions[0].url == "https://api.test.example/"
+    # what the deploying repository states for itself is unchanged
+    assert _web(targets(built, "deployer")).runs is None
+
+
+def test_each_path_of_a_rule_is_its_own_target(workspace: Workspace, tmp_path: Path) -> None:
+    manifest = d("""
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: site
+        spec:
+          tls:
+            - hosts: [site.example.test]
+          rules:
+            - host: site.example.test
+              http:
+                paths:
+                  - path: /api
+                    pathType: Prefix
+                    backend: {service: {name: api, port: {number: 80}}}
+                  - path: /docs
+                    pathType: Prefix
+                    backend: {service: {name: docs, port: {number: 80}}}
+    """)
+    built = build(workspace, tmp_path, {"site": {"k8s/ingress.yaml": manifest}})
+    found = [t for t in targets(built, "site").targets if t.kind == "ingress"]
+    urls = sorted(r.url or "" for t in found for r in t.resolutions)
+    assert urls == ["https://site.example.test/api", "https://site.example.test/docs"]
+    assert len({t.target_id for t in found}) == 2
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("db.password", "x"), ("apiKey", "x"), ("host", "secrets.TOKEN")],
+)
+def test_a_link_variable_naming_or_holding_a_credential_is_refused(name: str, value: str) -> None:
+    with pytest.raises(ValidationError, match="credential"):
+        DeploymentLinkFields(label="prod", variables={name: value})
