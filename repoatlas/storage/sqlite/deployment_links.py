@@ -22,10 +22,12 @@ from pydantic import BaseModel, ConfigDict
 from repoatlas.models.deployment_conditions import DeploymentCondition
 from repoatlas.models.deployment_targets import (
     DeclarationProvenance,
+    DeclarationScope,
     DeploymentLink,
     DeploymentLinkFields,
     LinkConflictError,
     LinkLimitError,
+    ScopeConflictError,
     declared_base,
 )
 from repoatlas.storage.sqlite.database import Database
@@ -35,8 +37,8 @@ MAX_LINKS_PER_REPOSITORY = 200
 
 DEPLOYMENT_LINKS_SELECT = (
     "SELECT id, repository, label, environment, url, target_id, variables_json, "
-    "conditions_json, verification, verified_at, created_at, updated_at, callers_json "
-    "FROM deployment_links "
+    "conditions_json, verification, verified_at, created_at, updated_at, callers_json, "
+    "scope_json FROM deployment_links "
 )
 
 #: Audit rows one read returns at most.
@@ -71,6 +73,11 @@ def deployment_link(row: sqlite3.Row) -> DeploymentLink:
         variables=json.loads(row["variables_json"]),
         conditions=[DeploymentCondition(**c) for c in json.loads(row["conditions_json"])],
         callers=json.loads(row["callers_json"]),
+        scope=(
+            DeclarationScope.model_validate(json.loads(row["scope_json"]))
+            if row["scope_json"]
+            else None
+        ),
         verification=row["verification"],
         verified_at=datetime.fromisoformat(row["verified_at"]) if row["verified_at"] else None,
         created_at=datetime.fromisoformat(row["created_at"]),
@@ -94,6 +101,14 @@ def _stated(link: DeploymentLink) -> DeploymentLinkFields:
     return DeploymentLinkFields.model_validate(
         link.model_dump(include=set(DeploymentLinkFields.model_fields))
     )
+
+
+def _symbols_overlap(one: str | None, other: str | None) -> bool:
+    """Whether two scoped symbols cover a common entity: equal, one inside the other at a dot
+    boundary, or either absent (the whole file)."""
+    if one is None or other is None:
+        return True
+    return one == other or one.startswith(other + ".") or other.startswith(one + ".")
 
 
 class SqliteDeploymentLinkStore:
@@ -143,8 +158,9 @@ class SqliteDeploymentLinkStore:
             self._refuse_conflict(repository, fields, own_id=None)
             cursor = conn.execute(
                 "INSERT INTO deployment_links (repository, label, environment, url, target_id, "
-                "variables_json, conditions_json, verification, callers_json, verified_at, "
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "variables_json, conditions_json, verification, callers_json, scope_json, "
+                "verified_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     repository,
                     *self._values(fields),
@@ -181,11 +197,17 @@ class SqliteDeploymentLinkStore:
             before = self.get(link_id)
             if before is None:
                 return None
+            if before.scope != fields.scope:
+                # What a scoped declaration was made about is its identity: another scope, or
+                # none, is another declaration, and the history then says so in two rows.
+                raise ScopeConflictError(
+                    "a scope cannot change: revoke the declaration and declare it anew"
+                )
             self._refuse_conflict(before.repository, fields, own_id=link_id)
             conn.execute(
                 "UPDATE deployment_links SET label = ?, environment = ?, url = ?, target_id = ?, "
                 "variables_json = ?, conditions_json = ?, verification = ?, callers_json = ?, "
-                "verified_at = ?, updated_at = ? WHERE id = ?",
+                "scope_json = ?, verified_at = ?, updated_at = ? WHERE id = ?",
                 (*self._values(fields), _verified_at(fields, before, now), now, link_id),
             )
             if _stated(before) != fields:
@@ -260,7 +282,11 @@ class SqliteDeploymentLinkStore:
     def _refuse_conflict(
         self, repository: str, fields: DeploymentLinkFields, *, own_id: int | None
     ) -> None:
-        """Refuse a URL another repository already states for callers this one would serve."""
+        """Refuse a URL another repository already states for callers this one would serve, and
+        a scope another service already holds."""
+        if fields.scope is not None:
+            self._refuse_scope_conflict(repository, fields.scope, fields.callers, own_id=own_id)
+            return
         base = declared_base(fields.url) if fields.url else None
         if base is None:
             return
@@ -272,6 +298,33 @@ class SqliteDeploymentLinkStore:
             mine, theirs = set(fields.callers), set(other.callers)
             if not mine or not theirs or mine & theirs:
                 raise LinkConflictError(other.id, other.repository)
+
+    def _refuse_scope_conflict(
+        self,
+        repository: str,
+        scope: DeclarationScope,
+        callers: list[str],
+        *,
+        own_id: int | None,
+    ) -> None:
+        """Refuse a second service for one caller's base over a file (and symbol) another scoped
+        declaration covers: the same repository at the same base path is the same service."""
+        for other in self.list_all():
+            held = other.scope
+            if other.id == own_id or held is None or other.callers != callers:
+                continue
+            if (held.base_key, held.path) != (scope.base_key, scope.path):
+                continue
+            if not _symbols_overlap(held.symbol, scope.symbol):
+                continue
+            if (other.repository, held.base_path) == (repository, scope.base_path):
+                continue
+            raise ScopeConflictError(
+                f"link {other.id} already states that {other.repository}"
+                f"{held.base_path} is the service behind {scope.base_shown} in "
+                f"{scope.path} for {callers[0]}: two services over one scope join nothing; "
+                "revoke it first"
+            )
 
     @staticmethod
     def _audit(
@@ -313,4 +366,5 @@ class SqliteDeploymentLinkStore:
             json.dumps([c.model_dump(exclude_none=True) for c in fields.conditions]),
             fields.verification,
             json.dumps(sorted(fields.callers)),
+            json.dumps(fields.scope.model_dump(), sort_keys=True) if fields.scope else None,
         )

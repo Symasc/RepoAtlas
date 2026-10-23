@@ -25,7 +25,7 @@ from repoatlas.storage.sqlite.migrator import (
     user_version,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 #: How long a statement waits for SQLite's own write lock before raising
 #: ``database is locked``. This is *contention behaviour*, not the synchronization
