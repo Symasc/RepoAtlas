@@ -59,6 +59,8 @@ from repoatlas.storage.sqlite.stores import (
     SqliteFileStore,
     SqliteKnowledgeStore,
 )
+from repoatlas.sync.derive import WORKERS_ENV
+from repoatlas.sync.engine import GROUP_MAX_FILES
 from tests.conftest import git, init_git_repository
 
 pytestmark = pytest.mark.adversarial
@@ -1312,3 +1314,41 @@ def test_the_signal_children_never_reach_real_repoatlas_state(tmp_path: Path) ->
 
     for path in (config_path(), database_path()):
         assert "pytest" in str(path) or "tmp" in str(path) or not path.exists(), path
+
+
+# -- a large pass, committed in groups ---------------------------------------
+
+#: Enough files to be parsed by workers and committed in groups (repoatlas.sync.engine),
+#: and more than one group's worth, so the failing file is not in the first.
+LARGE_PASS = 2 * GROUP_MAX_FILES + 20
+
+
+@pytest.mark.parametrize("point", ["after_file_row", "mid_facts", "mid_link", "after_dependencies"])
+def test_a_failure_inside_a_commit_group_leaves_no_half_indexed_file_and_recovers(
+    point: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A group commits several whole files at once; a failure rolls the group back whole.
+
+    The target is the last file the pass writes, so earlier groups have committed and
+    the one holding it has not: the survivors must each be complete, and an ordinary sync
+    must converge on a clean build.
+    """
+    root = tmp_path / "large"
+    root.mkdir()
+    _build_tree(root, LARGE_PASS)
+    monkeypatch.setenv(WORKERS_ENV, "2")
+    target = "package.json" if point == "after_dependencies" else "run.sh"
+    if point in {"mid_link"}:
+        target = sorted(f"m{i}.py" for i in range(1, LARGE_PASS + 1))[-1]
+    reference = _settings(tmp_path, "clean")
+    _index(reference, root, tmp_path, "clean")
+
+    observed = _settings(tmp_path, "crashed")
+    _plant(monkeypatch, point, target)
+    with pytest.raises(Injected):
+        _index(observed, root, tmp_path, "crashed")
+
+    assert_no_partial_file(observed, reference)
+    monkeypatch.undo()
+    _resync(observed, root)
+    assert_converged(observed, reference)
