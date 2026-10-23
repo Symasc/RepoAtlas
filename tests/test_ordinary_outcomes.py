@@ -21,6 +21,7 @@ import pytest
 from repoatlas.capabilities.service import CapabilityService
 from repoatlas.config.settings import Settings
 from repoatlas.graph import ordinary_outcomes as outcomes_module
+from repoatlas.graph.linker import GlobalLinkResult, ReferenceLinker
 from repoatlas.graph.ordinary_outcomes import Decision, OutcomeLedger
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.impact import ImpactRequest, Presentation
@@ -39,7 +40,9 @@ from repoatlas.models.ordinary_outcomes import (
     UNSUPPORTED,
 )
 from repoatlas.models.parsing import EdgeType, EntityType
+from repoatlas.models.reports import SyncReport
 from repoatlas.rendering.text import render_sync
+from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace
 from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
 from tests.conftest import fact_snapshot
@@ -49,6 +52,16 @@ from tests.ordinary_corpus import TOY_PY, repos
 GLOBAL = CapabilityContext(scope=CapabilityScope.GLOBAL)
 
 
+def classified_sync(workspace: Workspace, root: Path) -> SyncReport:
+    """A sync that was asked for the account (``repoatlas sync -v``): the same link pass."""
+    return sync(workspace, workspace.resolver().resolve(root), classify=True)
+
+
+def classified_pass(workspace: Workspace) -> GlobalLinkResult:
+    linker = ReferenceLinker(workspace.knowledge, workspace.dependencies)
+    return linker.commit_global(linker.prepare_global(classify=True))
+
+
 @pytest.fixture(scope="module")
 def corpus(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Workspace]:
     root = tmp_path_factory.mktemp("ordinary")
@@ -56,7 +69,9 @@ def corpus(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Workspace]:
         settings=Settings.model_validate({"storage": {"database": str(root / "state/atlas.db")}}),
         require_root=False,
     )
-    yield build(workspace, root, repos())
+    build(workspace, root, repos())
+    classified_sync(workspace, root / "repos")
+    yield workspace
     workspace.close()
 
 
@@ -282,12 +297,18 @@ def test_what_the_ordinary_rules_link_is_counted_linked(corpus: Workspace) -> No
 
 
 def graph_state(workspace: Workspace) -> dict[str, object]:
+    """Every fact table but the account itself: the ordinary family's decision rows and the
+    two account tables are what an opt-in classification adds, so they are not the graph."""
     snapshot = fact_snapshot(workspace)
-    return {
+    state = {
         key: value
         for key, value in snapshot.items()
         if key not in {"ordinary_outcomes", "ordinary_accounting"}
     }
+    decisions = state["link_decisions"]
+    assert isinstance(decisions, list)
+    state["link_decisions"] = [row for row in decisions if row[0] != ORDINARY_FAMILY]
+    return state
 
 
 def non_ordinary(snapshot: dict[str, object]) -> list[object]:
@@ -307,9 +328,7 @@ def test_classifying_differently_changes_no_edge_and_no_other_decision(
         return Decision(UNCLASSIFIED, "no-rule")
 
     monkeypatch.setattr(outcomes_module.Classifier, "classify", anything)
-    from repoatlas.graph.linker import ReferenceLinker
-
-    result = ReferenceLinker(corpus.knowledge, corpus.dependencies).link_global()
+    result = classified_pass(corpus)
     after = graph_state(corpus)
 
     assert after["edges"] == before["edges"]
@@ -323,7 +342,7 @@ def test_classifying_differently_changes_no_edge_and_no_other_decision(
     assert {r.outcome for r in corpus.knowledge.list_ordinary_outcomes()} >= {UNCLASSIFIED}
     # leave the module corpus as it was found
     monkeypatch.undo()
-    ReferenceLinker(corpus.knowledge, corpus.dependencies).link_global()
+    classified_pass(corpus)
 
 
 def test_impact_answers_do_not_list_or_count_the_ordinary_family(corpus: Workspace) -> None:
@@ -515,14 +534,12 @@ def test_aggregate_rows_and_accounting_carry_no_path_name_or_host(corpus: Worksp
 
 
 def test_two_passes_over_unchanged_facts_store_the_same_account(corpus: Workspace) -> None:
-    from repoatlas.graph.linker import ReferenceLinker
-
     first = (
         corpus.knowledge.list_ordinary_outcomes(),
         corpus.knowledge.ordinary_accounting(),
         corpus.knowledge.list_link_decisions(family=ORDINARY_FAMILY),
     )
-    ReferenceLinker(corpus.knowledge, corpus.dependencies).link_global()
+    classified_pass(corpus)
     second = (
         corpus.knowledge.list_ordinary_outcomes(),
         corpus.knowledge.ordinary_accounting(),
@@ -535,7 +552,6 @@ def test_a_changed_declaration_changes_the_outcome_with_the_next_pass(
     tmp_path: Path,
 ) -> None:
     """``requests`` is external only while a manifest declares it."""
-    from repoatlas.services.sync_service import sync
     from tests.incremental_corpus import edit
 
     workspace = open_workspace(
@@ -544,9 +560,10 @@ def test_a_changed_declaration_changes_the_outcome_with_the_next_pass(
     )
     try:
         build(workspace, tmp_path, {"toy-py": TOY_PY})
+        classified_sync(workspace, tmp_path / "repos")
         assert counts(workspace)[("CALLS", "symbol", EXTERNAL, "declared-package")] == 1
         edit(tmp_path / "repos", "toy-py", "requirements.txt", "")
-        sync(workspace, workspace.resolver().resolve(tmp_path / "repos"))
+        classified_sync(workspace, tmp_path / "repos")
         assert ("CALLS", "symbol", EXTERNAL, "declared-package") not in counts(workspace)
         assert (
             counts(workspace)[("CALLS", "symbol", UNSUPPORTED, "undeclared-absolute-module")] == 2
@@ -555,29 +572,176 @@ def test_a_changed_declaration_changes_the_outcome_with_the_next_pass(
         workspace.close()
 
 
-def test_the_sync_report_states_the_account_apart_from_the_legacy_line(
-    tmp_path: Path,
-) -> None:
-    from repoatlas.services.sync_service import sync
-
-    workspace = open_workspace(
+def fresh_workspace(tmp_path: Path) -> Workspace:
+    return open_workspace(
         settings=Settings.model_validate({"storage": {"database": str(tmp_path / "s/atlas.db")}}),
         require_root=False,
     )
+
+
+def stored_account(workspace: Workspace) -> tuple[object, ...]:
+    return (
+        workspace.knowledge.list_ordinary_outcomes(),
+        workspace.knowledge.ordinary_accounting(),
+        workspace.knowledge.list_link_decisions(family=ORDINARY_FAMILY),
+    )
+
+
+def test_a_verbose_sync_reports_the_account_apart_from_the_legacy_line(tmp_path: Path) -> None:
+    workspace = fresh_workspace(tmp_path)
     try:
         build(workspace, tmp_path, repos())
-        report = sync(workspace, workspace.resolver().resolve(tmp_path / "repos"), full=True)
+        report = sync(
+            workspace, workspace.resolver().resolve(tmp_path / "repos"), full=True, classify=True
+        )
         accounting = workspace.knowledge.ordinary_accounting()
         assert report.ordinary is not None
         assert report.ordinary.accounting == accounting
         assert report.ordinary.considered == accounting["ordinary_considered"]
         assert report.ordinary.linked == accounting["ordinary_linked"]
         assert report.unresolved_references == accounting["legacy_unresolved"]
+        assert sum(report.ordinary.reasons.values()) == accounting["ordinary_not_linked"]
         text = render_sync(report)
         assert f"{report.unresolved_references} references still unresolved" in text
-        assert f"{accounting['ordinary_considered']} ordinary references considered" in text
-        assert "counted apart from the unresolved total above" in text
+        block = text.split("Ordinary references:")[1]
+        assert f"{accounting['ordinary_considered']:,}  considered" in block
+        for heading in ("linked", "external", "unsupported", "ambiguous", "other unresolved"):
+            assert heading in block
+        assert "Why they are not linked:" in block
+        assert "external / declared-package" in block
+        assert "nothing is unexplained" in block
         # nothing source-specific reaches the report
-        assert "toy_app" not in text.split("ordinary references considered")[1]
+        for needle in ("toy_app", "toy-web", "undeclared_lib", "undeclared-pkg", "main.py"):
+            assert needle not in block
     finally:
         workspace.close()
+
+
+def test_an_ordinary_sync_does_none_of_the_classification_and_keeps_no_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("an ordinary sync must not classify")
+
+    monkeypatch.setattr(outcomes_module.Classifier, "__init__", forbidden)
+    monkeypatch.setattr(outcomes_module.OutcomeLedger, "__init__", forbidden)
+    workspace = fresh_workspace(tmp_path)
+    try:
+        build(workspace, tmp_path, repos())
+        report = sync(workspace, workspace.resolver().resolve(tmp_path / "repos"), full=True)
+        assert report.ordinary is None
+        assert stored_account(workspace) == ([], {}, [])
+        text = render_sync(report)
+        assert "Ordinary references" not in text
+        assert f"{report.unresolved_references} references still unresolved" in text
+    finally:
+        workspace.close()
+
+
+def test_an_ordinary_pass_changes_no_edge_claim_or_legacy_count(tmp_path: Path) -> None:
+    """Asking for the account is the only difference between the two passes."""
+    workspace = fresh_workspace(tmp_path)
+    try:
+        build(workspace, tmp_path, repos())
+        root = tmp_path / "repos"
+        ordinary = sync(workspace, workspace.resolver().resolve(root), full=True)
+        plain = graph_state(workspace)
+        asked = sync(workspace, workspace.resolver().resolve(root), classify=True)
+        assert graph_state(workspace) == plain
+        assert asked.unresolved_references == ordinary.unresolved_references
+        assert asked.linked_references == ordinary.linked_references
+    finally:
+        workspace.close()
+
+
+def test_a_stored_account_cannot_outlive_the_graph_it_describes(tmp_path: Path) -> None:
+    """An ordinary sync clears the account in the commit that replaces the graph."""
+    workspace = fresh_workspace(tmp_path)
+    try:
+        build(workspace, tmp_path, repos())
+        root = tmp_path / "repos"
+        classified_sync(workspace, root)
+        asked = stored_account(workspace)
+        assert asked[0] and asked[2]
+
+        sync(workspace, workspace.resolver().resolve(root))
+        assert stored_account(workspace) == ([], {}, [])
+        assert ORDINARY_FAMILY not in {
+            row.family for row in workspace.knowledge.list_link_decisions()
+        }
+
+        # and asking again brings back exactly the account it first gave: no second reindex
+        classified_sync(workspace, root)
+        assert stored_account(workspace) == asked
+    finally:
+        workspace.close()
+
+
+def test_a_changed_tree_with_an_ordinary_sync_leaves_no_account_of_the_old_one(
+    tmp_path: Path,
+) -> None:
+    from tests.incremental_corpus import edit
+
+    workspace = fresh_workspace(tmp_path)
+    try:
+        build(workspace, tmp_path, {"toy-py": TOY_PY})
+        classified_sync(workspace, tmp_path / "repos")
+        assert counts(workspace)[("CALLS", "symbol", EXTERNAL, "declared-package")] == 1
+        edit(tmp_path / "repos", "toy-py", "requirements.txt", "")
+        sync(workspace, workspace.resolver().resolve(tmp_path / "repos"))
+        # the account of the graph before the edit is gone, not shown beside the new graph
+        assert stored_account(workspace) == ([], {}, [])
+    finally:
+        workspace.close()
+
+
+def test_a_failed_commit_leaves_the_account_that_matches_the_graph_it_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = fresh_workspace(tmp_path)
+    try:
+        build(workspace, tmp_path, repos())
+        classified_sync(workspace, tmp_path / "repos")
+        before = (graph_state(workspace), stored_account(workspace))
+
+        def broken(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("injected")
+
+        monkeypatch.setattr(type(workspace.knowledge), "replace_ordinary_outcomes", broken)
+        with pytest.raises(RuntimeError, match="injected"):
+            sync(workspace, workspace.resolver().resolve(tmp_path / "repos"))
+        monkeypatch.undo()
+        assert (graph_state(workspace), stored_account(workspace)) == before
+    finally:
+        workspace.close()
+
+
+def test_a_classified_incremental_sync_equals_a_classified_fresh_index(tmp_path: Path) -> None:
+    from tests.incremental_corpus import edit
+
+    root = tmp_path / "incremental"
+    workspace = fresh_workspace(root)
+    fresh = fresh_workspace(tmp_path / "fresh")
+    try:
+        build(workspace, root, repos())
+        classified_sync(workspace, root / "repos")
+        edit(
+            root / "repos",
+            "toy-web",
+            "src/index.ts",
+            (root / "repos/toy-web/src/index.ts").read_text() + "\nfoo();\n",
+        )
+        classified_sync(workspace, root / "repos")
+
+        build(fresh, tmp_path / "fresh", repos())
+        edit(
+            tmp_path / "fresh" / "repos",
+            "toy-web",
+            "src/index.ts",
+            (tmp_path / "fresh/repos/toy-web/src/index.ts").read_text() + "\nfoo();\n",
+        )
+        classified_sync(fresh, tmp_path / "fresh" / "repos")
+        assert stored_account(workspace) == stored_account(fresh)
+    finally:
+        workspace.close()
+        fresh.close()

@@ -182,22 +182,77 @@ def _named(identities: Sequence[str], limit: int = 5) -> list[str]:
     return shown
 
 
-def _ordinary_notice(report: SyncReport) -> list[str]:
-    """The ordinary-claim account: what became of each ordinary reference this run considered.
+#: The headline outcomes of the breakdown, in reading order; every other refusal is "other".
+_HEADLINE_OUTCOMES = ("linked", "external", "unsupported", "ambiguous")
+#: Reasons listed before the rest are folded into one line.
+_REASON_LINES = 14
 
-    Its own count, not a breakdown of the unresolved line above, which also holds claims the
-    HTTP and GraphQL planners decide and the declaration uses left open. ``external`` is a
-    claim whose target is outside the managed index by evidence; the rest of what is not
-    linked is named by the reason the ordinary rules could not establish a target.
+
+def _ordinary_notice(report: SyncReport) -> list[str]:
+    """The ordinary-claim account of a run that was asked for it (``sync -v``).
+
+    What became of each ordinary reference the link pass considered, and why those that did
+    not link did not. It is its own count, not a breakdown of the unresolved line above: that
+    one also holds claims the HTTP and GraphQL planners decide and what the declaration uses
+    left open, and the bridge below says exactly how the two differ. A run that was not asked
+    for it has none, and prints nothing.
     """
     summary = report.ordinary
     if summary is None or not summary.considered:
         return []
-    parts = [f"{count} {outcome}" for outcome, count in summary.outcomes.items() if count]
-    return [
-        f"  {summary.considered} ordinary references considered: " + ", ".join(parts),
-        "    (counted apart from the unresolved total above)",
-    ]
+    total = summary.considered
+
+    def share(count: int) -> str:
+        return f"{100 * count / total:5.1f}%"
+
+    lines = ["", "Ordinary references:", f"  {total:>9,}  considered"]
+    other = 0
+    other_parts: list[str] = []
+    for outcome, count in summary.outcomes.items():
+        if outcome not in _HEADLINE_OUTCOMES and count:
+            other += count
+            other_parts.append(f"{outcome} {count:,}")
+    for outcome in _HEADLINE_OUTCOMES:
+        count = summary.outcomes.get(outcome, 0)
+        lines.append(f"    {count:>9,}  {outcome:<18}{share(count)}")
+    detail = f"  ({', '.join(other_parts)})" if other_parts else ""
+    lines.append(f"    {other:>9,}  {'other unresolved':<18}{share(other)}{detail}")
+    reasons = sorted(summary.reasons.items(), key=lambda item: (-item[1], item[0]))
+    if reasons:
+        lines.append("  Why they are not linked:")
+        for reason, count in reasons[:_REASON_LINES]:
+            outcome, _, sub = reason.partition(":")
+            lines.append(f"    {count:>9,}  {outcome} / {sub}")
+        rest = reasons[_REASON_LINES:]
+        if rest:
+            lines.append(
+                f"    {sum(count for _, count in rest):>9,}  in {len(rest)} smaller reasons"
+            )
+    accounting = summary.accounting
+    if accounting:
+        excluded = sum(summary.excluded.values())
+        uses = accounting.get("uses_rows", 0)
+        lines.append(
+            f"  Not counted here: {uses:,} declaration-use claims (own stage) and {excluded:,} "
+            "claims the HTTP, GraphQL, CI and persistence planners decide."
+        )
+        planners = accounting.get("legacy_planners", 0) + accounting.get(
+            "legacy_graphql_unknown_role", 0
+        )
+        unexplained = accounting.get("legacy_residual", 0)
+        ending = f" + {unexplained:,} unexplained." if unexplained else "; nothing is unexplained."
+        lines.append(
+            f"  The unresolved total above, {accounting.get('legacy_unresolved', 0):,}, is "
+            f"{accounting.get('legacy_ordinary', 0):,} of these + {planners:,} planner + "
+            f"{accounting.get('legacy_uses_remainder', 0):,} declaration-use{ending}"
+        )
+        interned = accounting.get("interned_node_only", 0)
+        if interned:
+            lines.append(
+                f"  {interned:,} of the unlinked module and configuration claims have an "
+                "interned node but no source relationship."
+            )
+    return lines
 
 
 def _discovered_notice(report: SyncReport) -> list[str]:

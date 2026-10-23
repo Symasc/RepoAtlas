@@ -252,6 +252,8 @@ class OrdinarySummary(BaseModel):
 
     #: Claims by outcome (``linked`` and every refusal), ordinary claims only.
     outcomes: dict[str, int] = Field(default_factory=dict)
+    #: Not-linked claims by ``outcome:subreason``, over every repository and relationship.
+    reasons: dict[str, int] = Field(default_factory=dict)
     #: Standing claims by the reason another planner (or the USES stage) owns them.
     excluded: dict[str, int] = Field(default_factory=dict)
     #: The accounting keys above, as stored.
