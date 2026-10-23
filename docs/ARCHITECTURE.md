@@ -2358,6 +2358,33 @@ handlers would answer links nothing. A link changed between syncs takes part fro
 global pass whether or not a file changed. Under a deployment-specific impact context (DF3d) such a link states no
 established deployment, so it is followed only on unconstrained paths.
 
+**HTTP connections: declaring what a request goes to.** The workspace worklist (`http_connections`, reachable from
+the header totals' unresolved-request figure) reads the join's stored decisions and groups the unresolved requests by
+the origin they state; nothing is searched in source and nothing is relinked on demand. Every unresolved request is
+listed with its method, a masked route template, its source location and the join's own refusal reason, and may be
+filtered by decision, language, calling repository and text. Only a request whose origin the source states, and
+whose refusal is that no service is identified there (`http-service-unmatched`, `http-deployment-source-unresolved`,
+`http-deployment-binding-unresolved`), can be mapped; a base the source does not state is listed and not mappable,
+and a request refused because a service is published but does not serve its route, or because several providers fit,
+is never offered a mapping. A mapping names an indexed repository that serves routes and is stored as an ordinary
+deployment link (migration `005_http_declarations.sql` adds its `callers`, the caller repositories it applies to). A
+loopback origin names a different program in each repository's development setup, so a loopback link requires named
+callers and an environment. Before anything is stored the preview (`http_connections/preview`) plans the link
+exactly as the join would and reports, request by request, whether it would link, is ambiguous, matches no route, or
+is excluded by its callers; the server refuses a mapping from a worklist group whose preview would link nothing.
+Overlapping declarations of one base for different repositories are refused, and an identical declaration returns the
+existing one.
+
+A declaration takes effect at the next sync, never on demand. Its state is derived from the last global pass, not
+stored: `pending` (stated after that pass), `applied` (a request is joined through it), `ineffective` (considered,
+joined nothing, with the join's reason) or `invalidated` (the service is no longer indexed or serves no route, or
+nothing requests the origin). Declarations are written to an append-only `declaration_audit` table (create, update,
+revoke, import; who-via, note, before and after), enforced by triggers; the sync never appends to it and exports do
+not carry it. The join consults declarations only where the source established nothing, so a declaration never
+overrides a proven relationship, and its hops stay `declared`: impact labels such a crossing as operator-declared
+and otherwise walks it as before. The MCP surface is read-only: `repoatlas_http_operations` can list the unresolved
+requests of the workspace by decision, and no tool writes a declaration.
+
 **Security.** HTTP extraction reads only files the sync already admitted, so an excluded `.env` holding `API_URL`
 declares nothing and is not cross-resolved. Nothing resolves DNS, fetches a specification or `$ref`, probes an
 endpoint, starts a server, or imports repository code.

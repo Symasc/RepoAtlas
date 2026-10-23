@@ -95,6 +95,18 @@ SOURCE_UNRESOLVED = "http-deployment-source-unresolved"
 #: local source establishes: the chain stops at the deployment binding.
 BINDING_UNRESOLVED = "http-deployment-binding-unresolved"
 
+#: The decisions an operator's declaration may change. In each the source leaves the request
+#: unlinked without having identified the service the origin names: no identity at all, an
+#: identity that reaches no code, a host pattern no deployment binds. In every other refusal the
+#: source has already said something about the origin (a published service, rival handlers), and a
+#: declaration never overrides that.
+DECLARABLE = frozenset({SERVICE_UNMATCHED, SOURCE_UNRESOLVED, BINDING_UNRESOLVED})
+#: What an operator's declaration did to a request it concerns, in the refusal's evidence
+#: (``declaration_outcome``) so an ineffective one says why. ``applied`` is a link, never a refusal.
+DECLARATION_OUTCOMES = frozenset(
+    {"ambiguous", "route-unmatched", "callers-excluded", "source-established"}
+)
+
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 #: What a pattern's hole may stand for in a host the request states (already a valid
 #: hostname): part of one label, or whole labels with the dots between them.
@@ -512,18 +524,75 @@ def plan_http_crossings(
                 Hop(hops.SERVICE_IDENTITY, hops.UNRESOLVED, reason="no_identity"),
                 *hops.unreached(*hops.HOPS[3:]),
             ]
-        if decision != LINKED and linked_by_user:
-            stated = _user_linked(request, linked_by_user, start, by_file, producer, ref)
+        declared = (
+            linked_by_user.get((request.method, request.origin), ()) if linked_by_user else ()
+        )
+        if decision != LINKED and declared:
+            stated = None
+            if decision in DECLARABLE:
+                stated = _user_linked(request, linked_by_user, start, by_file, producer, ref)
             if stated is not None:
                 decision, edge, chain = LINKED, stated[0], stated[1]
                 found = dict(_called(claim, meta, by_file))
                 record = json.loads(edge.resolution or "{}").get(HTTP_CROSSING, {})
                 found.update({str(k): str(v) for k, v in record.items()})
                 edges.append(edge)
+            else:
+                # The declaration did not join this request, and the refusal says why beside
+                # the source's own reason: it never replaces it.
+                why = (
+                    declared_candidates(request.segments, declared, _caller_of(request, by_file))[1]
+                    if decision in DECLARABLE
+                    else "source-established"
+                )
+                found["declaration_ids"] = ",".join(
+                    sorted({e.meta.get("link_id", "") for e in declared} - {""}, key=int)
+                )
+                found["declaration_outcome"] = why or "route-unmatched"
         calls.append(HttpCallDecision(ref, claim, variant, decision, found, tuple(chain), edge))
     edges.sort(key=lambda e: (e.file_id or 0, e.line_start or 0, e.src_id, e.dst_id))
     calls.sort(key=lambda call: call.ref)
     return HttpCrossingPlan(edges=tuple(edges), calls=tuple(calls))
+
+
+def _caller_of(request: _Request, by_file: Mapping[int, FileRow]) -> str | None:
+    consumer = by_file.get(request.claim.file_id)
+    return consumer.repo_slug if consumer is not None else None
+
+
+def parse_exposure(claim: UnresolvedRefRecord) -> _Exposure | None:
+    """An ``http-exposed-endpoint`` claim as the join reads it, or ``None``. Public so a
+    preview reads a declaration's exposures exactly as the sync will."""
+    return _exposure(claim, _meta(claim))
+
+
+def _callers_allow(meta: Mapping[str, str], caller: str | None) -> bool:
+    """Whether a link's exposure may serve a request made by ``caller``: a link names the
+    repositories it applies to, or none and so all."""
+    try:
+        callers = json.loads(meta.get("link_callers", "[]"))
+    except json.JSONDecodeError:
+        return False
+    return not callers or (caller in callers if isinstance(callers, list) else False)
+
+
+def declared_candidates(
+    segments: Sequence[str | None],
+    at_origin: Sequence[_Exposure],
+    caller: str | None,
+) -> tuple[list[_Exposure], str]:
+    """The distinct handlers operators' links give a request at this origin, and why there is
+    not exactly one: ``callers-excluded`` (every link at the origin names other callers),
+    ``route-unmatched`` (no served route of theirs has the request's method and shape) or
+    ``ambiguous`` (two handlers). Empty reason: exactly one."""
+    allowed = [e for e in at_origin if _callers_allow(e.meta, caller)]
+    if at_origin and not allowed:
+        return [], "callers-excluded"
+    matched = [e for e in allowed if http.endpoint_matches(segments, e.path)]
+    distinct = list({(e.claim.src_id, e.endpoint): e for e in matched}.values())
+    if not distinct:
+        return [], "route-unmatched"
+    return distinct, "ambiguous" if len(distinct) > 1 else ""
 
 
 def _user_linked(
@@ -538,15 +607,11 @@ def _user_linked(
     exactly one handler of the linked repository serves it at the link's URL. Its
     identity, binding and source hops are ``declared``, each citing the link, never a
     file; its route and handler are proven by the source as ever."""
-    matched = [
-        exposure
-        for exposure in linked_by_user.get((request.method, request.origin), ())
-        if http.endpoint_matches(request.segments, exposure.path)
-    ]
-    distinct = {(e.claim.src_id, e.endpoint): e for e in matched}
-    if len(distinct) != 1:
+    at_origin = linked_by_user.get((request.method, request.origin), ())
+    candidates, why = declared_candidates(request.segments, at_origin, _caller_of(request, by_file))
+    if why or len(candidates) != 1:
         return None
-    exposure = next(iter(distinct.values()))
+    exposure = candidates[0]
     edge = _edge(request, exposure, by_file, producer, ref)
     loaded = json.loads(edge.resolution or "{}")
     record = loaded.get(HTTP_CROSSING, {})
