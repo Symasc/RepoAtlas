@@ -18,6 +18,7 @@ def sync(
     *,
     full: bool = False,
     progress: SyncProgress | None = None,
+    classify: bool = False,
 ) -> SyncReport:
     """Reconcile the repository *set*, then the contents of every repository in it.
 
@@ -55,6 +56,11 @@ def sync(
     Syncing the repository that *is* the managed root is syncing the managed root.
 
     ``progress`` hears how far rediscovery and the run have got, and nothing else.
+
+    ``classify`` adds the ordinary-claim account to the link pass (what became of each
+    ordinary reference, and why): a diagnostic that costs time, so only asked for
+    (``repoatlas sync -v``). It changes no edge, and it needs no second run: the same link
+    pass computes it. A run without it stores none, and clears any stored by an earlier run.
     """
     listener = progress if progress is not None else SILENT
     root = workspace.root
@@ -105,6 +111,7 @@ def sync(
             full=full,
             scope=str(context.scope),
             progress=listener,
+            classify=classify,
         )
 
     return report.model_copy(update={"repositories_added": added, "unreadable_paths": unreadable})
