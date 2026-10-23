@@ -369,6 +369,31 @@ def test_a_declaration_is_pending_until_the_next_sync_then_joins_what_the_target
     assert [d.state for d in group_after.declarations] == ["applied"]
 
 
+def test_a_declaration_edited_after_a_sync_is_pending_again_and_the_record_holds_no_clock(
+    built: Workspace, tmp_path: Path
+) -> None:
+    """The pass records which revision of each link it read, not when: two syncs of the same
+    links leave the same record, and a change after a sync is pending until the next one."""
+    link_id = declare(built, "shop", SHOP_URL)
+    sync(built, tmp_path)
+    assert state_of(built, link_id) == ("applied", "")
+    first = built.knowledge.link_pass_reads()
+    sync(built, tmp_path)
+    assert built.knowledge.link_pass_reads() == first and list(first or {}) == [link_id]
+
+    service(built).deployment_link_update(
+        DeploymentLinkUpdateRequest(
+            context=repository_context(built, "shop"),
+            id=link_id,
+            link=DeploymentLinkFields(label="renamed", url=SHOP_URL),
+            provenance=DeclarationProvenance(via="api"),
+        )
+    )
+    assert state_of(built, link_id) == ("pending", "applies-at-next-sync")
+    sync(built, tmp_path)
+    assert state_of(built, link_id) == ("applied", "")
+
+
 def _chain(workspace: Workspace, caller: str) -> list[dict[str, str]]:
     [(chain,)] = workspace.database.execute(
         """SELECT d.chain_json FROM http_call_decisions d
