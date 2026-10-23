@@ -12,7 +12,6 @@ import {
   summaryLine,
   type ConnectionFilters,
 } from "@/lib/model/connections";
-import { absoluteTime } from "@/lib/model/format";
 import type { RepositoryModel } from "@/lib/model/repositories";
 
 import classes from "./Connections.module.css";
@@ -85,8 +84,7 @@ export function ConnectionsPanel({
             )}
             {pending > 0 && (
               <p className={classes.banner} data-tone="warning" role="status">
-                {pending} declaration{pending === 1 ? " is" : "s are"} pending: it takes effect at the next sync
-                {data.pass_at ? ` (the last one applied declarations at ${absoluteTime(data.pass_at)})` : ""}.
+                {pending} declaration{pending === 1 ? " is" : "s are"} pending: it takes effect at the next sync.
               </p>
             )}
             <Tabs value={tab} onChange={(value) => setTab(value ?? "requests")} keepMounted={false}>
@@ -167,7 +165,7 @@ export function ConnectionsPanel({
                 </div>
               </Tabs.Panel>
               <Tabs.Panel value="declarations" pt="md">
-                <Declarations declarations={data.declarations ?? []} passAt={data.pass_at ?? null} />
+                <Declarations declarations={data.declarations ?? []} synced={data.synced ?? false} />
               </Tabs.Panel>
               <Tabs.Panel value="history" pt="md">
                 <History />

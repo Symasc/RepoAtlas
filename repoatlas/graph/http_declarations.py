@@ -18,7 +18,6 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import PurePosixPath
 
 from repoatlas.graph.http_chain import ESTABLISHED
@@ -193,7 +192,7 @@ def _evidence(text: str) -> Mapping[str, object]:
 def declaration_state(
     link: DeploymentLink,
     *,
-    pass_at: datetime | None,
+    pass_reads: Mapping[int, str] | None,
     indexed: bool,
     serves_routes: bool,
     requests_at_base: int,
@@ -203,7 +202,7 @@ def declaration_state(
     """Where a declaration stands against the last global pass; the first rule that holds."""
     if not indexed:
         return "invalidated", "repository-not-indexed"
-    if pass_at is None or link.updated_at > pass_at:
+    if pass_reads is None or pass_reads.get(link.id) != link.updated_at.isoformat():
         return "pending", "applies-at-next-sync"
     if joined:
         return "applied", ""
