@@ -110,7 +110,11 @@ KEY_NOT_IN_SCOPE: Final = "key-not-in-scope"
 # dynamic
 COMPUTED_SPECIFIER: Final = "computed-specifier"
 RUNTIME_SUBSTITUTION: Final = "runtime-substitution"
+ALIAS_TARGET_NOT_INDEXED: Final = "alias-target-not-indexed"
+PACKAGE_ENTRY_NOT_FOUND: Final = "package-entry-not-found"
 # ambiguous
+DUPLICATE_WORKSPACE_PROVIDER: Final = "duplicate-workspace-provider"
+CONFLICTING_PACKAGE_ENTRY: Final = "conflicting-package-entry"
 MULTIPLE_DECLARATIONS: Final = "multiple-declarations-in-module"
 DUPLICATE_STATE_ID: Final = "duplicate-state-id"
 AMBIGUOUS_SALT_SOURCE: Final = "ambiguous-salt-source"
@@ -124,6 +128,7 @@ IN_PROJECT_PACKAGE: Final = "in-project-package"
 CROSS_REPOSITORY_PROVIDER: Final = "cross-repository-provider"
 UNDECLARED_BARE_SPECIFIER: Final = "undeclared-bare-specifier"
 UNDECLARED_ABSOLUTE_MODULE: Final = "undeclared-absolute-module"
+DECLARATION_NAMES_OTHER_SOURCE: Final = "declaration-names-other-source"
 RECEIVER_MEMBER: Final = "receiver-member"
 BINDING_FORM_UNTRACED: Final = "binding-form-untraced"
 NON_PILLAR_CONFIG: Final = "non-pillar-config"
@@ -153,6 +158,11 @@ SUBREASONS: Final = frozenset(
         KEY_NOT_IN_SCOPE,
         COMPUTED_SPECIFIER,
         RUNTIME_SUBSTITUTION,
+        ALIAS_TARGET_NOT_INDEXED,
+        PACKAGE_ENTRY_NOT_FOUND,
+        DUPLICATE_WORKSPACE_PROVIDER,
+        CONFLICTING_PACKAGE_ENTRY,
+        DECLARATION_NAMES_OTHER_SOURCE,
         MULTIPLE_DECLARATIONS,
         DUPLICATE_STATE_ID,
         AMBIGUOUS_SALT_SOURCE,
