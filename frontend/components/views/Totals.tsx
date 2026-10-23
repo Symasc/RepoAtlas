@@ -7,10 +7,16 @@ import classes from "./Views.module.css";
 export function Totals({
   repositories,
   crossing,
+  unresolved,
+  onOpenConnections,
 }: {
   repositories: RepositoryModel[];
   /** Relationships whose ends sit in two repositories; null until known. */
   crossing: number | null;
+  /** HTTP requests the join left unlinked; null until known. */
+  unresolved?: number | null;
+  /** Opens the HTTP connections worklist. */
+  onOpenConnections?: () => void;
 }) {
   const sum = totals(repositories);
   const figures: { label: string; value: number | null }[] = [
@@ -30,6 +36,16 @@ export function Totals({
           <dd>{value === null ? "…" : formatCount(value)}</dd>
         </div>
       ))}
+      {onOpenConnections && (
+        <div className={classes.figure}>
+          <dt>
+            <button type="button" className={classes.figureAction} onClick={onOpenConnections}>
+              unresolved HTTP requests
+            </button>
+          </dt>
+          <dd>{unresolved == null ? "…" : formatCount(unresolved)}</dd>
+        </div>
+      )}
     </dl>
   );
 }

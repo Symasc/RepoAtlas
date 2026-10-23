@@ -172,6 +172,7 @@ Content-Length: <n>
 | `dependencies`, `http_operations` | declared packages; HTTP operations made and served |
 | `deployment_targets` | where one repository says it is deployed, resolved per release, link and branch context |
 | `deployment_links/create`, `deployment_links/update`, `deployment_links/delete` | record, change or remove a user's deployment link |
+| `http_connections`, `http_connections/preview`, `http_connections/history` | the workspace's unresolved HTTP requests grouped by origin with the user's declarations; what mapping an origin to a service would do, request by request; the declaration history |
 | `topology/overview` | which repositories are linked to which, by kind: `observed`, `http`, `dependency` |
 | `topology/children` | one page of a directory's or file's children, and how every child links |
 | `topology/edge` | one exact stored edge: its evidence, crossing, and multiplicity |
@@ -179,7 +180,8 @@ Content-Length: <n>
 | `topology/names` | declared names (variables, functions, classes, methods, environment variables) that hold every term of a query, best-named first |
 | `topology/references` | what each line of one file declares and refers to, in source order |
 
-The `deployment_links/*` names are the only writes served here. They change only the user's own links, never
+The `deployment_links/*` names are the only writes served here (a declaration from the HTTP connections worklist is
+one of them, with its origin recorded in the history). They change only the user's own links, never
 an indexed fact, and pass the same Host, token and Origin checks as every other request.
 
 **Not served:** `sync`, the index's write, and `verify_grounding`, which checks an agent's answer. Both remain
