@@ -289,18 +289,45 @@ class ResolutionIndex:
         A Python file's ``symbol`` entities are its module values, which a use lands on
         (``USES_ONLY_KINDS``) and a callee matched by name never is.
         """
+        exact = self.symbol_candidates(file_row, name)
+        return exact[0] if len(exact) == 1 else None
+
+    def symbol_candidates(self, file_row: FileRow, name: str) -> list[SymbolRow]:
+        """Every definition of ``name`` in ``file_row`` a callee matched by name may land on.
+
+        :meth:`resolve_symbol` links when this has exactly one; the outcome report counts it
+        to tell *nothing declared* from *several declared*.
+        """
         matches = self.symbols_by_file.get(file_row.file_id, {}).get(name, [])
         python = flavor_for(file_row.rel_path) == "python"
         # An enum member is reached through its enum, never by its bare name, and a model
         # field only through a use of its model (DF3b).
-        exact = [
+        return [
             s
             for s in matches
             if s.name == name
             and not (python and s.type is EntityType.SYMBOL)
             and s.meta.get("kind") not in {ENUM_MEMBER, EMBEDDED_DOCUMENT, FIELD}
         ]
-        return exact[0] if len(exact) == 1 else None
+
+    def salt_state_candidates(self, repo_id: int, name: str) -> int:
+        """How many Salt states of this repository carry the ID ``name``."""
+        return len(self.salt_states_by_repo.get(repo_id, {}).get(name, []))
+
+    def salt_source_candidates(self, url: str) -> int:
+        """How many managed files a ``salt://`` URL could name, by the rule
+        :meth:`resolve_salt_source` applies: its written path is the file's path or its tail."""
+        if not url.startswith(_SALT_SCHEME):
+            return 0
+        path = _normalize(url[len(_SALT_SCHEME) :])
+        if not path:
+            return 0
+        name = PurePosixPath(path).name
+        return sum(
+            1
+            for row in self.files_by_name.get(name, [])
+            if row.rel_path == path or row.rel_path.endswith(f"/{path}")
+        )
 
     def resolve_salt_state(self, repo_id: int, name: str) -> SymbolRow | None:
         """A Salt state ID, which is unique within a repository's state tree."""

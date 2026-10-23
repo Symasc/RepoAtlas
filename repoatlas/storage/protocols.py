@@ -7,7 +7,7 @@ so the backend can be replaced without touching a caller.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import NamedTuple, Protocol
@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict
 
 from repoatlas.models.dependencies import DependencyPackage, DependencyRecord
 from repoatlas.models.deployment_targets import DeploymentLink
+from repoatlas.models.ordinary_outcomes import OutcomeRow
 from repoatlas.models.parsing import EdgeDirection, EdgeType, EntityType, NeighborOrder
 from repoatlas.models.repository import Repository
 
@@ -734,6 +735,12 @@ class KnowledgeStore(Protocol):
     def list_link_decisions(
         self, family: str | None = None, repo_id: int | None = None
     ) -> list[LinkDecisionRow]: ...
+    def replace_ordinary_outcomes(
+        self, rows: Sequence[OutcomeRow], accounting: Mapping[str, int]
+    ) -> None: ...
+    def list_ordinary_outcomes(self) -> list[OutcomeRow]: ...
+    def ordinary_accounting(self) -> dict[str, int]: ...
+    def count_standing_claims(self) -> tuple[int, int]: ...
     def chunks_for_file(self, file_id: int, line_start: int, line_end: int) -> list[ChunkHit]: ...
     def gc_orphan_entities(self) -> int: ...
 
