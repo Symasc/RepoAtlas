@@ -365,6 +365,10 @@ def ui(
         raise typer.Exit(130) from None
 
 
+#: The largest links file ``repoatlas links import`` reads: far past any real export (a few
+#: hundred links), so a wrong path never reads a large file whole.
+_LINKS_FILE_CEILING = 8 * 1024 * 1024
+
 links_app = typer.Typer(
     help="Export or import the deployment links you recorded. They are the one thing you "
     "write into the index, so keep a copy before rebuilding or moving it.",
@@ -428,6 +432,8 @@ def links_import(
     )
 
     try:
+        if file.stat().st_size > _LINKS_FILE_CEILING:
+            raise OSError(f"larger than {_LINKS_FILE_CEILING} bytes")
         exported = LinksExport.model_validate_json(file.read_text(encoding="utf-8"))
     except (OSError, ValidationError) as exc:
         typer.echo(f"Not an export of deployment links: {exc}", err=True)
