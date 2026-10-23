@@ -479,6 +479,25 @@ def test_an_update_that_names_a_worklist_group_is_checked_like_a_declaration(
     assert [row[0] for row in audit_rows(built)] == ["create"]
 
 
+def test_an_update_that_keeps_the_group_origin_is_stored_and_recorded_as_an_update(
+    built: Workspace,
+) -> None:
+    """The positive side of the check: naming the group is fine while the link stays on the
+    group's origin, and the change is stored and audited as an update."""
+    group = group_of(worklist(built), SHOP_URL)
+    link_id = declare(built, "shop", SHOP_URL, group=group.key)
+    response = service(built).deployment_link_update(
+        DeploymentLinkUpdateRequest(
+            context=repository_context(built, "shop"),
+            id=link_id,
+            link=DeploymentLinkFields(label="relabelled", url=SHOP_URL),
+            provenance=DeclarationProvenance(via="ui", request_group=group.key),
+        )
+    )
+    assert response.link.label == "relabelled"
+    assert [row[0] for row in audit_rows(built)] == ["create", "update"]
+
+
 def test_a_confirm_after_the_service_stopped_serving_routes_is_refused(
     built: Workspace, tmp_path: Path
 ) -> None:
@@ -492,7 +511,7 @@ def test_a_confirm_after_the_service_stopped_serving_routes_is_refused(
     assert preview.can_create
     (tmp_path / "repos" / "shop" / "shop" / "main.py").write_text("# no routes\n")
     sync(built, tmp_path)
-    with pytest.raises(InvalidDeploymentLinkError):
+    with pytest.raises(InvalidDeploymentLinkError, match="serves no route"):
         declare(built, "shop", SHOP_URL, group=group.key)
     assert audit_rows(built) == []
 
