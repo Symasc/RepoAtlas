@@ -1156,6 +1156,10 @@ READERS = {
     # it back under `CONNECTION_FILE_CEILING` before removing it on exit. Its
     # `CapabilityService.open` reads as `.open`, as in the MCP server.
     "repoatlas/api/server.py": "its own connection file, read back under a small ceiling",
+    # Reads the one file a person names to `repoatlas links import`, refusing it past
+    # `_LINKS_FILE_CEILING`, and writes the one they name to `links export`.
+    "repoatlas/cli/main.py": "a deployment-links file the person names to `links import`, "
+    "under its own ceiling",
 }
 
 
