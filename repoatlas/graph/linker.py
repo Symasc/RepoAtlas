@@ -651,6 +651,7 @@ class ReferenceLinker:
         uses: UsesChangeLog | None = None,
         *,
         on_stage: Callable[[str], None] | None = None,
+        classify: bool = False,
     ) -> GlobalPlan:
         """Compute the complete replacement graph. **Writes nothing.**
 
@@ -670,6 +671,11 @@ class ReferenceLinker:
         anyone restructuring it to find out (V1_SPEC §20). ``on_stage`` hears each
         stage's name as it starts, so a progress bar can follow the pass; it is
         told, never asked, and nothing it does reaches the plan.
+
+        ``classify`` asks for the ordinary-claim account (repoatlas.graph.ordinary_outcomes):
+        what became of each ordinary claim and why. It is a diagnostic, kept out of an
+        ordinary pass because it costs time every sync would pay; without it none of that
+        work is done and the plan carries no account. It never changes an edge.
         """
         stages: list[StageTiming] = []
         entered = on_stage or _unobserved
@@ -720,25 +726,29 @@ class ReferenceLinker:
             salt_crossings: set[tuple[int, int]] = set()
             # The ordinary-claim account (repoatlas.graph.ordinary_outcomes): counted beside the
             # resolution below and never consulted by it. A claim is classified only after
-            # `_resolve` has returned nothing for it.
-            ledger = OutcomeLedger()
-            classifier = Classifier(index, records, module_facts)
+            # `_resolve` has returned nothing for it. Opt-in (`classify`): an ordinary pass keeps
+            # none of it, so it does none of the work.
+            ledger = OutcomeLedger() if classify else None
+            classifier = Classifier(index, records, module_facts) if classify else None
             languages: dict[int, str] = {}
             graphql_unknown_role = 0
             ordinary_unresolved = 0
-            for fact in module_facts:
-                ledger.excluded(fact, MODULE_FACT)
+            if ledger is not None:
+                for fact in module_facts:
+                    ledger.excluded(fact, MODULE_FACT)
 
             for claim in claims:
                 if _is_salt_mapping_claim(claim):
-                    ledger.excluded(claim, SALT_MAPPING)
+                    if ledger is not None:
+                        ledger.excluded(claim, SALT_MAPPING)
                     continue
                 if _is_graphql_claim(claim):
                     # A configured output is decided by the codegen pass below. A type or
                     # document claim stays a claim: one file is no schema, and nothing yet
                     # decides which schema it belongs to. Neither is resolved by name, and
                     # neither is ever handed to the HTTP pass.
-                    ledger.excluded(claim, GRAPHQL_PLANNER)
+                    if ledger is not None:
+                        ledger.excluded(claim, GRAPHQL_PLANNER)
                     role = claim_role(claim)
                     if role == GRAPHQL_CODEGEN_OUTPUT:
                         generation.append(claim)
@@ -756,32 +766,38 @@ class ReferenceLinker:
                     # CI, workload, ConfigMap and values-file facts: decided by the CI pass
                     # below (repoatlas.graph.ci_facts), and joined from DF2 -- never handed
                     # to the HTTP pass, whose accounting they must not change.
-                    ledger.excluded(claim, DEPLOYMENT_FACT)
+                    if ledger is not None:
+                        ledger.excluded(claim, DEPLOYMENT_FACT)
                     continue
                 if claim_role(claim) in _PERSISTENCE_ROLES:
                     # Decided after uses resolve: a mapping's types are what it uses.
-                    ledger.excluded(claim, PERSISTENCE_PLANNER)
+                    if ledger is not None:
+                        ledger.excluded(claim, PERSISTENCE_PLANNER)
                     persistence_claims.append(claim)
                     continue
                 if claim_role(claim) is not None:
                     # Never proven by symbol resolution: decided below, together.
-                    ledger.excluded(claim, HTTP_PLANNER)
+                    if ledger is not None:
+                        ledger.excluded(claim, HTTP_PLANNER)
                     pending.append(claim)
                     continue
                 origin = by_id.get(claim.file_id)
                 if origin is None:
                     unresolved += 1
                     ordinary_unresolved += 1
-                    ledger.refused(
-                        claim,
-                        None,
-                        "other",
-                        Decision(EVIDENCE_UNREADABLE, ORIGIN_FILE_MISSING, "claim", "file-row"),
-                    )
+                    if ledger is not None:
+                        ledger.refused(
+                            claim,
+                            None,
+                            "other",
+                            Decision(EVIDENCE_UNREADABLE, ORIGIN_FILE_MISSING, "claim", "file-row"),
+                        )
                     continue
-                language = languages.get(origin.file_id)
-                if language is None:
-                    language = languages[origin.file_id] = flavor_for(origin.rel_path) or "other"
+                language = ""
+                if ledger is not None:
+                    language = languages.get(origin.file_id) or languages.setdefault(
+                        origin.file_id, flavor_for(origin.rel_path) or "other"
+                    )
                 salt_resolution = salt_resolutions.get(id(claim))
                 if salt_resolution is not None:
                     definition = salt_resolution.definition
@@ -804,23 +820,28 @@ class ReferenceLinker:
                         )
                         salt_crossings.add((definition.repo_id, origin.repo_id))
                     resolved += 1
-                    ledger.linked(claim, language, PILLAR_READ)
+                    if ledger is not None:
+                        ledger.linked(claim, language, PILLAR_READ)
                     continue
                 siblings = by_file.get(claim.file_id, [])
                 edge = self._resolve(claim, origin, index, siblings)
                 if edge is None:
                     unresolved += 1
                     ordinary_unresolved += 1
-                    meta = _claim_meta(claim.meta_json)
-                    ledger.refused(
-                        claim,
-                        origin,
-                        language,
-                        classifier.classify(claim, origin, meta, _flavor(origin, meta), siblings),
-                    )
+                    if ledger is not None and classifier is not None:
+                        meta = _claim_meta(claim.meta_json)
+                        ledger.refused(
+                            claim,
+                            origin,
+                            language,
+                            classifier.classify(
+                                claim, origin, meta, _flavor(origin, meta), siblings
+                            ),
+                        )
                     continue
                 resolved += 1
-                ledger.linked(claim, language)
+                if ledger is not None:
+                    ledger.linked(claim, language)
                 edges.append(edge)
 
             # Part of resolving claims, not a phase of its own: the pass keeps its
@@ -994,8 +1015,10 @@ class ReferenceLinker:
             watch.detail = "cross-repository edges"
         stages.append(_timing(watch))
 
-        outcome_plan = ledger.plan()
-        standing_claims, uses_rows = self._knowledge.count_standing_claims()
+        outcome_plan = ledger.plan() if ledger is not None else None
+        standing_claims, uses_rows = (
+            self._knowledge.count_standing_claims() if ledger is not None else (0, 0)
+        )
 
         return GlobalPlan(
             edges=tuple(edges),
@@ -1004,7 +1027,7 @@ class ReferenceLinker:
             http_crossings=crossings,
             uses=uses_plan,
             decisions=(
-                *outcome_plan.decisions,
+                *(outcome_plan.decisions if outcome_plan is not None else ()),
                 *codegen.decisions,
                 *documents.decisions,
                 *resolvers.decisions,
@@ -1105,6 +1128,12 @@ class ReferenceLinker:
         be compared with it rather than assumed.
         """
         if plan.outcomes is None:
+            # An ordinary pass computed no account, and the one a previous pass stored
+            # describes a graph this commit is about to replace. Clearing it here, in the
+            # same transaction, is what keeps a stored account from outliving its graph:
+            # the tables hold this pass's account or nothing. (Its per-claim rows are
+            # `link_decisions`, which every commit replaces whole.)
+            self._knowledge.replace_ordinary_outcomes((), {})
             return None
         accounting = finish_accounting(
             plan.outcomes,
