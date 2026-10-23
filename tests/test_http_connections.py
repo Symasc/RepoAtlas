@@ -687,7 +687,7 @@ def test_an_import_is_recorded_as_an_import_and_importing_twice_adds_nothing(
 def test_the_cli_export_carries_callers_so_a_loopback_declaration_imports_again(
     built: Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A loopback link is valid only with its callers: an export that drops them cannot be imported."""
+    """A loopback link is valid only with its callers; an export without them cannot be imported."""
     from repoatlas.cli.main import app
     from repoatlas.models.deployment_targets import LinksExport
     from typer.testing import CliRunner
