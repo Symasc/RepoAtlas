@@ -1188,6 +1188,7 @@ export interface DeploymentResolution {
   environment?: string | null;
   label: string;
   link_id?: number | null;
+  notes?: string[];
   origin?: string | null;
   rendered: string;
   state: "resolved" | "partial" | "unresolved";
@@ -1202,6 +1203,7 @@ export interface DeploymentResolution {
  * via the `definition` "DeploymentVariable".
  */
 export interface DeploymentVariable {
+  at?: string | null;
   basis?: ("chart-defaults" | "release" | "configured" | "context" | "chart" | "declared") | null;
   name: string;
   source: "value" | "chart" | "release" | "namespace" | "scheme" | "opaque";
@@ -1224,6 +1226,7 @@ export interface DeploymentTarget {
   pattern: string;
   repository: string;
   resolutions?: DeploymentResolution[];
+  runs?: string | null;
   scheme_basis?: string | null;
   schemes?: string[];
   target_id: string;
