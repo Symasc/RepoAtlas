@@ -305,6 +305,10 @@ def test_the_public_callable_surface_is_only_the_intended_operations() -> None:
         "deployment_link_create",
         "deployment_link_update",
         "deployment_link_delete",
+        # HTTP connections: the worklist, its preview and the declaration history (local API only)
+        "http_connections",
+        "http_connection_preview",
+        "http_declaration_history",
         # topology: shipped for the local API, deliberately not an agent tool
         "topology_overview",
         "topology_children",

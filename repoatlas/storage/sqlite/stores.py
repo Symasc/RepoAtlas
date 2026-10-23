@@ -107,7 +107,7 @@ _HTTP_KEY_PREFIX = "http-"
 
 
 #: The ``meta`` key holding when the global pass last committed.
-LINKS_PASS_KEY = "links_pass_at"  # noqa: S105 - a key name
+LINKS_PASS_KEY = "links_pass_reads"  # noqa: S105 - a key name
 #: The ``meta`` key under which the ``USES`` stage records whether its edges are complete.
 USES_LINKS_KEY = "uses_links"
 #: The ``meta`` key the global commit sets once it has written ``http_call_decisions``:
@@ -991,15 +991,20 @@ class SqliteKnowledgeStore:
         ).fetchone()
         return int(row["n"])
 
-    def record_link_pass(self, at: str) -> None:
-        """Note when the global pass last committed. Written inside its transaction, so the time
-        and the graph it describes are visible together; a declaration stated after it is
-        pending, and one stated before it has been joined or has been refused."""
-        self._db.set_meta(LINKS_PASS_KEY, at)
+    def record_link_pass(self, reads: Sequence[tuple[int, str]]) -> None:
+        """Note which deployment links, and which revision of each, the global pass read.
+        Written inside its transaction, so the reads and the graph they produced are visible
+        together; a link absent here, or changed since, is pending. Deterministic: the same
+        links give the same record, whenever the pass ran."""
+        self._db.set_meta(LINKS_PASS_KEY, json.dumps(sorted(reads)))
 
-    def link_pass_at(self) -> str | None:
-        """When the global pass last committed, or ``None`` before the first."""
-        return self._db.get_meta(LINKS_PASS_KEY)
+    def link_pass_reads(self) -> dict[int, str] | None:
+        """Each link id the last global pass read, with the revision it read; ``None`` before
+        the first pass."""
+        raw = self._db.get_meta(LINKS_PASS_KEY)
+        if raw is None:
+            return None
+        return {int(link_id): str(revision) for link_id, revision in json.loads(raw)}
 
     def uses_links_state(self) -> str | None:
         """What the ``USES`` stage last recorded about the edges it keeps (``graph/uses_link``)."""

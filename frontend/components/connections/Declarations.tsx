@@ -17,13 +17,13 @@ import { absoluteTime } from "@/lib/model/format";
 import classes from "./Connections.module.css";
 
 /** The operator's own declarations, each with where it stands against the last sync. */
-export function Declarations({ declarations, passAt }: { declarations: DeclarationView[]; passAt: string | null }) {
+export function Declarations({ declarations, synced }: { declarations: DeclarationView[]; synced: boolean }) {
   return (
     <section className={classes.panel} aria-label="Your declarations">
       <p className={classes.basis}>
         A declaration is your statement about which service answers at an origin. It is stored apart from the
         index, survives re-indexing, and takes effect at the next sync.{" "}
-        {passAt ? `The last sync applied declarations at ${absoluteTime(passAt)}.` : "No sync has applied declarations yet."}
+        {synced ? "A declaration takes effect at the next sync after it is stated." : "No sync has read declarations yet."}
       </p>
       {declarations.length === 0 ? (
         <p className={classes.detail}>You have declared nothing.</p>
