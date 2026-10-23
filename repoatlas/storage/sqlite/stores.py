@@ -634,6 +634,19 @@ class SqliteKnowledgeStore:
         ).fetchone()
         return None if row is None else int(row["id"])
 
+    def file_entity_ids(self, file_id: int) -> dict[str, int]:
+        """:meth:`find_file_entity` for every key of one file, in one query.
+
+        File-scoped keys are not declared unique, so where one recurs the lowest id is
+        kept: the row :meth:`find_file_entity` returns, from either index it is read by.
+        """
+        found: dict[str, int] = {}
+        for row in self._db.execute(
+            "SELECT id, key FROM entities WHERE file_id = ? ORDER BY id", (file_id,)
+        ):
+            found.setdefault(str(row["key"]), int(row["id"]))
+        return found
+
     def add_edges(self, edges: Sequence[EdgeRecord]) -> None:
         if not edges:
             return
