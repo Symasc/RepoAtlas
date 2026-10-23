@@ -444,6 +444,7 @@ def links_export(
                             "variables",
                             "conditions",
                             "verification",
+                            "scope",
                         }
                     ),
                 )
@@ -452,7 +453,14 @@ def links_export(
         )
     finally:
         workspace.close()
+    # exclude_none: an unscoped link has no `scope` key, so a file without scoped declarations is
+    # the file an older RepoAtlas wrote and reads.
     text = exported.model_dump_json(indent=2, exclude_none=True)
+    if any(link.scope is not None for link in exported.links):
+        typer.echo(
+            "Note: the file holds a scoped declaration; an older RepoAtlas will refuse the file.",
+            err=True,
+        )
     if file is None:
         typer.echo(text)
     else:
