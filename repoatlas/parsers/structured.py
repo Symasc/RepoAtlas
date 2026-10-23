@@ -170,7 +170,8 @@ class StructuredParser:
     # 14: an Ingress document of any YAML file is also read leniently for where it is
     #     reached, and a chart's values.yaml records its literal listen-ports annotations
     #     (deployment targets, repoatlas.parsers.deploy_targets).
-    version = "14"
+    # 15: an Ingress's TLS hosts written as a flow sequence (``hosts: [a, b]``) are read.
+    version = "15"
     language = "YAML"
 
     def supports(self, path: Path) -> bool:
