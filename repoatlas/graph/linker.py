@@ -42,12 +42,13 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from repoatlas.config.settings import SaltSettings
+from repoatlas.config.settings import DECLARATIONS_SLUG, SaltSettings
 from repoatlas.dependencies.normalize import REPOSITORY_ECOSYSTEMS
 from repoatlas.graph.ci_facts import plan_ci_facts
 from repoatlas.graph.deploy_artifacts import plan_deployment_artifacts
 from repoatlas.graph.deploy_identity import DOCKERFILE_UNREAD, NO_BUILD, NOT_IN_IMAGE
 from repoatlas.graph.deployment_env import plan_deployment_env
+from repoatlas.graph.deployment_targets import build_targets
 from repoatlas.graph.fields import (
     FIELD_USE,
     Field,
@@ -70,6 +71,7 @@ from repoatlas.graph.http_crossings import (
     plan_http_crossings,
 )
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
+from repoatlas.graph.link_exposures import plan_link_exposures
 from repoatlas.graph.persistence import plan_persistence
 from repoatlas.graph.prisma_schema import plan_prisma, prisma_projects
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
@@ -86,6 +88,8 @@ from repoatlas.graph.uses_link import (
 from repoatlas.graph.value_mappings import plan_value_mappings
 from repoatlas.models import http
 from repoatlas.models.dependencies import DependencyRecord
+from repoatlas.models.deployment_conditions import ConditionContext
+from repoatlas.models.deployment_targets import DeploymentLink
 from repoatlas.models.parsing import (
     EMBEDDED_DOCUMENT,
     ENUM_MEMBER,
@@ -198,6 +202,47 @@ class PendingEdge:
     source: EntityRecord
     target: EntityRecord
     record: DependencyRecord
+
+
+def _deployment_links(
+    links: Sequence[DeploymentLink],
+    claims: Sequence[UnresolvedRefRecord],
+    by_id: Mapping[int, FileRow],
+) -> tuple[list[DeploymentLink], dict[int, str]]:
+    """The links, and the URL each one naming a stated target resolves that target to
+    under the link's own values -- as the deployment targets tool resolves it, with no
+    branch or environment assumed. A link that resolves nothing adds no exposure."""
+    urls: dict[int, str] = {}
+    wanted = {link.repository for link in links if link.url is None and link.target_id}
+    if not wanted:
+        return list(links), urls
+    by_repo: dict[str, list[UnresolvedRefRecord]] = defaultdict(list)
+    declarations: list[UnresolvedRefRecord] = []
+    for claim in claims:
+        row = by_id.get(claim.file_id)
+        if row is None:
+            continue
+        if row.repo_slug == DECLARATIONS_SLUG:
+            declarations.append(claim)
+        if row.repo_slug in wanted:
+            by_repo[row.repo_slug].append(claim)
+    for slug in sorted(wanted):
+        files = {f: row for f, row in by_id.items() if row.repo_slug in (slug, DECLARATIONS_SLUG)}
+        own = [link for link in links if link.repository == slug]
+        targets, _ = build_targets(
+            slug,
+            by_repo.get(slug, []),
+            files,
+            (),
+            own,
+            ConditionContext(),
+            declarations=declarations,
+        )
+        for target in targets:
+            for resolution in target.resolutions:
+                if resolution.link_id is not None and resolution.url:
+                    urls[resolution.link_id] = resolution.url
+    return list(links), urls
 
 
 @dataclass(frozen=True, slots=True)
@@ -739,6 +784,14 @@ class ReferenceLinker:
                 producer=GLOBAL_PARSER,
             )
             edges.extend(environment.edges)
+            # Where users say repositories are deployed: exposures the join falls back on
+            # for a request the source leaves unlinked, never weighed against the source
+            # (repoatlas.graph.link_exposures).
+            stated_links = plan_link_exposures(
+                *_deployment_links(self._knowledge.list_deployment_links(), claims, by_id),
+                decided.code_routes,
+                {row.repo_slug: row.repo_id for row in by_id.values()},
+            )
             # The one HTTP decision that joins two repositories: exposure and request
             # claims, both per file or derived from them, never this pass's previous output.
             crossings = plan_http_crossings(
@@ -749,6 +802,7 @@ class ReferenceLinker:
                     *decided.identities,
                     *deployed.exposures,
                     *deployed.identities,
+                    *stated_links,
                 ],
                 file_rows,
                 producer=GLOBAL_PARSER,
