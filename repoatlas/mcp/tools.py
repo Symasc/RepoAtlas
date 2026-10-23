@@ -220,9 +220,11 @@ DEPLOYMENT_TARGETS = ToolSpec(
         "resolution with the basis of every variable it filled (chart defaults, a "
         "release's values, the request's context, a link), and verification, which is "
         "unverified unless the user confirmed it. A value nothing supplies stays a named "
-        "hole, never a guess. Reads the local index and the stored links; it reaches no "
+        "hole, never a guess. A target another repository states for this one's code "
+        "is marked `runs`. Reads the local index and the stored links; it reaches no "
         "network and never checks that a URL answers. An OAuth callback or redirect URL "
-        "is not a deployment target and is not listed."
+        "is not a deployment target and is not listed. From the next sync, a link also "
+        "joins requests the source leaves unlinked, its hops `declared`."
     ),
     request=DeploymentTargetsRequest,
     capability="deployment_targets",
