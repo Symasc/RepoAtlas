@@ -1856,9 +1856,9 @@ export interface HttpConnectionsResponse {
   groups?: ConnectionGroup[];
   has_more?: boolean;
   next_cursor?: string | null;
-  pass_at?: string | null;
   requests?: ConnectionRequest[];
   summary: ConnectionsSummary;
+  synced?: boolean;
 }
 /**
  * How one step crossed from a repository serving a handler into one requesting it.

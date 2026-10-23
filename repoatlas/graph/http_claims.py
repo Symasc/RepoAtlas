@@ -172,6 +172,7 @@ def served_by_servers(route_servers: Sequence[RouteServerRow]) -> list[ServedRou
         if row.file_id is not None and row.parser not in _NOT_APPLICATIONS
     ]
 
+
 PROMOTED = "promoted"
 #: A call to an imported function that is no request helper: not an HTTP claim.
 NOT_HTTP = "no request helper of that name is declared in the imported module"

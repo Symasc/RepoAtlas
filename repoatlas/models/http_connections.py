@@ -226,8 +226,8 @@ class HttpConnectionsResponse(BaseModel):
     context: CapabilityContext
     #: Whether the last sync stored the join's decisions; before it there is nothing to list.
     built: bool
-    #: When the last global pass committed: a declaration stated after it is pending.
-    pass_at: datetime | None = None
+    #: Whether a global pass has run: a declaration it has not read is pending.
+    synced: bool = False
     summary: ConnectionsSummary
     groups: tuple[ConnectionGroup, ...] = ()
     #: Every declaration, newest first, whatever the filters: the operator's own list.

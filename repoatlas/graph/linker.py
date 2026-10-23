@@ -42,7 +42,6 @@ import json
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from types import MappingProxyType
 
 from repoatlas.config.settings import DECLARATIONS_SLUG, SaltSettings
@@ -293,6 +292,9 @@ class GlobalPlan:
     decisions: tuple[LinkDecisionRow, ...] = ()
     #: The ordinary-claim account, and the figures it is reconciled with (ordinary_outcomes).
     outcomes: OutcomePlan | None = None
+    #: Each deployment link the join read, with the revision it read (a declaration changed
+    #: since is pending until the next pass).
+    link_reads: tuple[tuple[int, str], ...] = ()
     standing_claims: int = 0
     uses_rows: int = 0
     legacy_ordinary: int = 0
@@ -887,8 +889,9 @@ class ReferenceLinker:
             # Where users say repositories are deployed: exposures the join falls back on
             # for a request the source leaves unlinked, never weighed against the source
             # (repoatlas.graph.link_exposures).
+            read_links = self._knowledge.list_deployment_links()
             stated_links = plan_link_exposures(
-                *_deployment_links(self._knowledge.list_deployment_links(), claims, by_id),
+                *_deployment_links(read_links, claims, by_id),
                 decided.code_routes,
                 {row.repo_slug: row.repo_id for row in by_id.values()},
             )
@@ -1048,6 +1051,7 @@ class ReferenceLinker:
                 *environment.decisions,
             ),
             outcomes=outcome_plan,
+            link_reads=tuple((link.id, link.updated_at.isoformat()) for link in read_links),
             standing_claims=standing_claims,
             uses_rows=uses_rows,
             legacy_ordinary=ordinary_unresolved,
@@ -1102,7 +1106,7 @@ class ReferenceLinker:
                 # edges they account for.
                 self._knowledge.replace_http_call_decisions(decision_rows(plan.http_crossings))
                 self._knowledge.replace_link_decisions(plan.decisions)
-                self._knowledge.record_link_pass(datetime.now(timezone.utc).isoformat())
+                self._knowledge.record_link_pass(plan.link_reads)
                 applied = apply_uses(self._knowledge, uses, producer=GLOBAL_PARSER)
                 ordinary = self._ordinary_account(plan, applied.claims - applied.edges)
                 self._knowledge.gc_orphan_entities()

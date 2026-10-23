@@ -90,7 +90,7 @@ def _snapshot(workspace: Workspace) -> tuple[list[RequestFacts], Mapping[str, ob
     }
     return facts, {
         "built": knowledge.http_call_decisions_built(),
-        "pass_at": knowledge.link_pass_at(),
+        "pass_reads": knowledge.link_pass_reads(),
         "links": workspace.deployment_links.list_all(),
         "indexed": indexed,
         "served": served_by_slug,
@@ -104,8 +104,7 @@ def _declarations(
     links: list[DeploymentLink] = context["links"]  # type: ignore[assignment]
     indexed: set[str] = context["indexed"]  # type: ignore[assignment]
     served: Mapping[str, list[str]] = context["served"]  # type: ignore[assignment]
-    raw = context["pass_at"]
-    pass_at = datetime.fromisoformat(raw) if isinstance(raw, str) else None
+    pass_reads: Mapping[int, str] | None = context["pass_reads"]  # type: ignore[assignment]
     joined = Counter(f.joined_by for f in facts if f.joined_by is not None)
     declined: dict[int, Counter[str]] = defaultdict(Counter)
     at_origin: Counter[str] = Counter()
@@ -120,7 +119,7 @@ def _declarations(
         origin = origin_of_link(link)
         state, reason = declaration_state(
             link,
-            pass_at=pass_at,
+            pass_reads=pass_reads,
             indexed=link.repository in indexed,
             serves_routes=bool(served.get(link.repository)),
             requests_at_base=at_origin[origin] if origin is not None else 0,
@@ -265,11 +264,10 @@ def connections(workspace: Workspace, request: HttpConnectionsRequest) -> HttpCo
                 context["served"],  # type: ignore[arg-type]
             )
 
-    raw = context["pass_at"]
     return HttpConnectionsResponse(
         context=request.context,
         built=bool(context["built"]),
-        pass_at=datetime.fromisoformat(raw) if isinstance(raw, str) else None,
+        synced=context["pass_reads"] is not None,
         summary=summary,
         groups=tuple(listed),
         declarations=tuple(declarations),
