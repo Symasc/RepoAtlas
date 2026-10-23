@@ -52,7 +52,6 @@ export function ConnectionsPanel({
       position="right"
       size="min(980px, 100vw)"
       title="HTTP connections"
-      aria-label="HTTP connections"
       closeButtonProps={{ "aria-label": "Close HTTP connections" }}
     >
       <div className={classes.panel}>
