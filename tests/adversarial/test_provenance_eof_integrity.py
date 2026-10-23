@@ -19,6 +19,8 @@ invariant rather than checking five known sites.
 
 from __future__ import annotations
 
+import random
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -27,7 +29,7 @@ from repoatlas.config.settings import Settings
 from repoatlas.grounding import ground_answer
 from repoatlas.indexing.chunking import chunk_content
 from repoatlas.models.evidence import Evidence, Hypothesis, RepoAtlasAnswer
-from repoatlas.parsers.marks import line_count, whole_file_span
+from repoatlas.parsers.marks import line_at, line_count, whole_file_span
 from repoatlas.parsers.registry import ParserRegistry
 from repoatlas.services.init_service import initialize
 from repoatlas.services.workspace import Workspace, open_workspace
@@ -797,3 +799,27 @@ def test_a_dependency_line_survives_a_change_of_line_ending() -> None:
         if not with_cr:
             continue  # tomllib and json refuse a lone CR; a refusal cites nothing.
         assert with_lf == with_cr, name
+
+
+def _counted_line_at(content: str, index: int) -> int:
+    """``line_at`` as it was defined before it kept line starts: count every break before."""
+    return 1 if index < 0 else len(re.findall(r"\r\n|\r|\n", content[:index])) + 1
+
+
+def test_line_at_answers_what_counting_every_break_answers() -> None:
+    """``line_at`` bisects cached line starts; it must agree with counting at every offset.
+
+    Including the one offset the two models part on --- the ``\\n`` of a ``\\r\\n`` pair,
+    where counting stops at the ``\\r`` and so counts it --- and offsets past either end,
+    and a second, equal content that is a different string object.
+    """
+    rng = random.Random(7)  # noqa: S311 -- a reproducible test input, not a secret
+    for _ in range(3000):
+        content = "".join(rng.choice("ab\r\n\f ") for _ in range(rng.randint(0, 30)))
+        twin = "".join(list(content))
+        for candidate in (content, twin):
+            for index in range(-2, len(candidate) + 3):
+                assert line_at(candidate, index) == _counted_line_at(candidate, index), (
+                    repr(candidate),
+                    index,
+                )

@@ -36,6 +36,7 @@ a comment, a wrapper's ``{% endif %}`` — is by definition not a leaf of it.
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from collections.abc import Sequence
 from typing import Any
 
@@ -115,7 +116,25 @@ def line_at(content: str, index: int) -> int:
     """
     if index < 0:
         return 1
-    return len(_LINE_BREAK.findall(content, 0, index)) + 1
+    # A manifest parser asks about one offset per package, and counting the breaks before
+    # each from the start made a lockfile with thousands of packages quadratic: one
+    # pnpm-lock.yaml cost seconds. The line starts of the content last asked about are kept
+    # and bisected instead, which answers the same, including the one place the two
+    # differ: the "\n" of a "\r\n" pair, where counting stops at the "\r" and so counts
+    # it as a break of its own. Kept as one tuple, so a reader sees a matching pair.
+    global _last_starts
+    cached = _last_starts
+    if cached is None or cached[0] is not content:
+        cached = (content, line_starts(content))
+        _last_starts = cached
+    line = bisect_right(cached[1], index)
+    if 0 < index < len(content) and content[index] == "\n" and content[index - 1] == "\r":
+        line += 1
+    return line
+
+
+#: The content :func:`line_at` was last asked about, and its line starts.
+_last_starts: tuple[str, list[int]] | None = None
 
 
 def line_starts(content: str) -> list[int]:
