@@ -47,11 +47,12 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from repoatlas.graph import http_chain as hops
 from repoatlas.graph.http_chain import Hop
+from repoatlas.graph.link_exposures import LINK_SOURCE
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType
 from repoatlas.parsers.http_facts import (
@@ -332,6 +333,9 @@ def plan_http_crossings(
     """
     by_file = {row.file_id: row for row in files}
     exposures: dict[tuple[str, str], list[_Exposure]] = defaultdict(list)
+    #: What users' deployment links state (repoatlas.graph.link_exposures): consulted only
+    #: for a request the source leaves unlinked, never weighed against it.
+    linked_by_user: dict[tuple[str, str], list[_Exposure]] = defaultdict(list)
     served: list[_Exposure] = []
     #: Origin → the identities resolved to it that reach no code.
     unsourced: dict[str, list[UnresolvedRefRecord]] = defaultdict(list)
@@ -344,6 +348,9 @@ def plan_http_crossings(
         if role == HTTP_EXPOSED_ENDPOINT:
             exposure = _exposure(claim, meta)
             if exposure is not None and claim.file_id in by_file:
+                if meta.get("identity_source") == LINK_SOURCE:
+                    linked_by_user[(exposure.method, exposure.origin)].append(exposure)
+                    continue
                 exposures[(exposure.method, exposure.origin)].append(exposure)
                 served.append(exposure)
         elif role == HTTP_UNSOURCED_IDENTITY:
@@ -505,10 +512,67 @@ def plan_http_crossings(
                 Hop(hops.SERVICE_IDENTITY, hops.UNRESOLVED, reason="no_identity"),
                 *hops.unreached(*hops.HOPS[3:]),
             ]
+        if decision != LINKED and linked_by_user:
+            stated = _user_linked(request, linked_by_user, start, by_file, producer, ref)
+            if stated is not None:
+                decision, edge, chain = LINKED, stated[0], stated[1]
+                found = dict(_called(claim, meta, by_file))
+                record = json.loads(edge.resolution or "{}").get(HTTP_CROSSING, {})
+                found.update({str(k): str(v) for k, v in record.items()})
+                edges.append(edge)
         calls.append(HttpCallDecision(ref, claim, variant, decision, found, tuple(chain), edge))
     edges.sort(key=lambda e: (e.file_id or 0, e.line_start or 0, e.src_id, e.dst_id))
     calls.sort(key=lambda call: call.ref)
     return HttpCrossingPlan(edges=tuple(edges), calls=tuple(calls))
+
+
+def _user_linked(
+    request: _Request,
+    linked_by_user: Mapping[tuple[str, str], list[_Exposure]],
+    start: Sequence[Hop],
+    by_file: dict[int, FileRow],
+    producer: str,
+    ref: str,
+) -> tuple[EdgeRecord, list[Hop]] | None:
+    """A request the source left unlinked, joined through a user's deployment link: when
+    exactly one handler of the linked repository serves it at the link's URL. Its
+    identity, binding and source hops are ``declared``, each citing the link, never a
+    file; its route and handler are proven by the source as ever."""
+    matched = [
+        exposure
+        for exposure in linked_by_user.get((request.method, request.origin), ())
+        if http.endpoint_matches(request.segments, exposure.path)
+    ]
+    distinct = {(e.claim.src_id, e.endpoint): e for e in matched}
+    if len(distinct) != 1:
+        return None
+    exposure = next(iter(distinct.values()))
+    edge = _edge(request, exposure, by_file, producer, ref)
+    loaded = json.loads(edge.resolution or "{}")
+    record = loaded.get(HTTP_CROSSING, {})
+    for key in ("link_id", "link_label", "link_environment", "link_verification"):
+        if key in exposure.meta:
+            record[key] = exposure.meta[key]
+    loaded[HTTP_CROSSING] = record
+    edge = edge.model_copy(update={"resolution": json.dumps(loaded, sort_keys=True)})
+    place = hops.Provenance(
+        exposure.claim.repo_id,
+        exposure.meta.get("link_in", ""),
+        None,
+        None,
+        "link_in",
+        basis="link",
+    )
+    stated = f"{exposure.meta.get('link_label', '')}: {exposure.deployment}"
+    route = _route(exposure, by_file)
+    return edge, [
+        *start,
+        Hop(hops.SERVICE_IDENTITY, hops.DECLARED, (place,), detail=stated),
+        Hop(hops.DEPLOYMENT_BINDING, hops.DECLARED, (place,)),
+        Hop(hops.SOURCE_BINDING, hops.DECLARED, (place,)),
+        Hop(hops.ROUTE, hops.PROVEN, route, detail=exposure.endpoint),
+        Hop(hops.HANDLER, hops.PROVEN, route, entity_id=exposure.claim.src_id),
+    ]
 
 
 def decision_rows(plan: HttpCrossingPlan) -> list[HttpCallDecisionRow]:
