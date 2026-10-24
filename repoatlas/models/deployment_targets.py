@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from repoatlas.models import http
 from repoatlas.models.capability import CapabilityContext
@@ -423,6 +423,30 @@ class LinksExport(BaseModel):
 
     format: Literal["repoatlas/deployment-links/v1"] = LINKS_EXPORT_FORMAT
     links: list[ExportedLink] = Field(default_factory=list)
+    #: The external-service declarations (``repoatlas.models.service_declarations``). ``None``, and
+    #: so written as no key at all, unless there are some: a file without them is the file an
+    #: older RepoAtlas wrote and reads, and one with them is refused by it (``extra="forbid"``).
+    #: Typed ``Any`` only because that module imports this one; every item is read into the class
+    #: its ``kind`` names.
+    service_declarations: list[Any] | None = None
+
+    @field_validator("service_declarations")
+    @classmethod
+    def _service_declarations(cls, value: list[Any] | None) -> list[Any] | None:
+        if value is None:
+            return None
+        from repoatlas.models.service_declarations import SERVICE_DECLARATION_FIELDS
+
+        read: list[Any] = []
+        for item in value:
+            if isinstance(item, BaseModel):
+                read.append(item)
+                continue
+            try:
+                read.append(SERVICE_DECLARATION_FIELDS.validate_python(item))
+            except ValidationError as exc:
+                raise ValueError(f"a service declaration is not valid: {exc}") from exc
+        return read
 
 
 #: Every deployment-targets answer says what it rests on, since a reader may take a URL for

@@ -20,7 +20,7 @@ or an edge.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from repoatlas.graph.http_crossings import SERVICE_UNMATCHED
@@ -130,15 +130,26 @@ def classification_check(
     classified: Mapping[str, Classification],
     *,
     own_id: int | None = None,
+    indexed: Collection[str] | None = None,
 ) -> ClassificationCheck:
     """Whether ``fields`` may be stored (``own_id``: as the replacement of that classification).
 
     Refused when the origin names this machine; when any stored decision at the origin is not
     ``http-service-unmatched`` (the source has already said something there, linked or refused);
-    when an unscoped deployment link states the origin as a deployment; or when the origin is
-    already classified in other words. Every refusal is listed, none is resolved."""
+    when an unscoped deployment link states the origin as a deployment; when the origin is
+    already classified in other words; or, with ``indexed`` (the slugs of the indexed
+    repositories), when an authentication target is not one of them. Every refusal is listed,
+    none is resolved. An import does not run this check: :func:`external_state` judges it at read
+    time."""
     origin = fields.origin
     requirements: list[str] = []
+    if indexed is not None:
+        for target in fields.authenticates:
+            if target.repository not in indexed:
+                requirements.append(
+                    f"{target.repository} is not an indexed repository: an authentication target "
+                    "is an application service or deployment the index holds"
+                )
     if is_loopback_origin(origin):
         requirements.append(
             f"{origin} names this machine, which is a different service in each repository: "

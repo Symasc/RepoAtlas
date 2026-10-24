@@ -100,8 +100,9 @@ def preview(
 
     Read-only. The rule is the one the write applies: no stored decision at the origin may be other
     than ``http-service-unmatched``, no deployment link may state it, it may not name this machine
-    and it may not be classified in other words. With a ``group`` the origin must be that group's
-    and one of its requests must be unmatched. Every refusal is listed and none is resolved."""
+    and it may not be classified in other words; each repository it authenticates for must be an
+    indexed one. With a ``group`` the origin must be that group's and one of its requests must be
+    unmatched. Every refusal is listed and none is resolved."""
     fields = external_fields(request.fields)
     facts, context = _snapshot(workspace)
     externals = _externals(facts, context)
@@ -125,6 +126,7 @@ def preview(
         context["links"],  # type: ignore[arg-type]
         classifications(context["external"]),  # type: ignore[arg-type]
         own_id=request.id,
+        indexed=context["indexed"],  # type: ignore[arg-type]
     )
     requirements.extend(check.requirements)
     requirements = list(dict.fromkeys(requirements))
