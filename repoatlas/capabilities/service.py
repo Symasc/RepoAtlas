@@ -239,6 +239,7 @@ from repoatlas.models.dependency_inventory import (
 from repoatlas.models.deployment_conditions import ConditionContext
 from repoatlas.models.deployment_targets import (
     DeclarationProvenance,
+    DeclarationScope,
     DeploymentLinkCreateRequest,
     DeploymentLinkDeleteRequest,
     DeploymentLinkDeleteResponse,
@@ -260,6 +261,7 @@ from repoatlas.models.http_connections import (
     HttpConnectionsResponse,
     HttpDeclarationHistoryRequest,
     HttpDeclarationHistoryResponse,
+    PreviewScope,
 )
 from repoatlas.models.http_inventory import (
     CrossingBasis,
@@ -1310,7 +1312,13 @@ class CapabilityService:
                 edges = knowledge.list_http_edges(
                     repository.id, (EdgeType.DECLARES_HTTP_DEPLOYMENT,)
                 )
-                links = self._workspace.deployment_links.list(repository.slug)
+                # A scoped declaration names a base in one file of a caller, not a place the
+                # repository is deployed: it is no deployment target and no link of this view.
+                links = [
+                    link
+                    for link in self._workspace.deployment_links.list(repository.slug)
+                    if link.scope is None
+                ]
                 # The operator's declarations, so a release they make interpretable is read.
                 declarations: list[UnresolvedRefRecord] = []
                 for repo in registered:
@@ -1348,6 +1356,13 @@ class CapabilityService:
         with self._operation():
             repository = self._deployment_repository(request.context)
             provenance = request.provenance
+            if request.link.scope is not None and (
+                provenance is None or provenance.request_group is None
+            ):
+                # The store is not the only guard: a scope is named from a worklist group, whose
+                # base the write then checks, or it is not made over the API (an import is the
+                # one other way in, and the sync decides it alone).
+                raise InvalidDeploymentLinkError("a scoped declaration is made from the worklist")
             if provenance is not None and provenance.request_group is not None:
                 self._require_declarable(request.context, repository, request.link, provenance)
             try:
@@ -1368,6 +1383,23 @@ class CapabilityService:
             current = store.get(request.id)
             if current is None or current.repository != repository.slug:
                 raise DeploymentLinkNotFoundError()
+            if request.link.scope != current.scope or (
+                current.scope is not None and request.link.callers != current.callers
+            ):
+                # What a scoped declaration was made about, its caller included, is its
+                # identity: another is another declaration (the store refuses a changed scope
+                # too, but this is the error the caller reads).
+                raise InvalidDeploymentLinkError(
+                    "a scope cannot change: revoke the declaration and declare it anew"
+                )
+            if current.scope is not None and (
+                request.provenance is None or request.provenance.request_group is None
+            ):
+                # An update of a scoped declaration is revalidated like its creation, and that
+                # needs the worklist group it is stated against.
+                raise InvalidDeploymentLinkError(
+                    "a scoped declaration is updated from the worklist"
+                )
             if request.provenance is not None and request.provenance.request_group is not None:
                 self._require_declarable(
                     request.context, repository, request.link, request.provenance
@@ -1450,6 +1482,11 @@ class CapabilityService:
         That is acceptable because the join decides every link again at each sync and the
         worklist shows a drifted declaration as invalidated or ineffective."""
         assert provenance.request_group is not None
+        if fields.scope is not None:
+            # A scoped declaration states no URL: its place is a file of its caller, checked by
+            # the same preview the sync's matching answers.
+            self._require_scoped_declarable(repository, fields, fields.scope, provenance)
+            return
         if fields.url is None:
             raise InvalidDeploymentLinkError("a declaration made from the worklist states a URL")
         base = declared_base(fields.url)
@@ -1475,6 +1512,56 @@ class CapabilityService:
             )
         if checked.requirements:
             raise InvalidDeploymentLinkError(checked.requirements[0])
+
+    def _require_scoped_declarable(
+        self,
+        repository: Repository,
+        fields: DeploymentLinkFields,
+        scope: DeclarationScope,
+        provenance: DeclarationProvenance,
+    ) -> None:
+        """A scoped declaration made from a worklist group is previewed as the sync will decide it,
+        inside one read snapshot, and stored only if that preview has nothing to require.
+
+        The preview is the one the worklist shows (`http_connections.preview`, which runs the
+        join's own `covers` and `declared_candidates`): the scope's base key and shown base must be
+        the group's own, the file and symbol must identify one scope, the base kind must allow its
+        level, the service must serve a route, no other service may hold the scope, and at least
+        one covered request must be one the service answers exactly once. Nothing is copied here.
+        The caller of the scope is the declaration's one caller (the fields' validator makes sure
+        there is one)."""
+        assert provenance.request_group is not None
+        with self._workspace.database.read_snapshot():
+            checked = http_connections.preview(
+                self._workspace,
+                HttpConnectionPreviewRequest(
+                    context=CapabilityContext(scope=CapabilityScope.GLOBAL),
+                    group=provenance.request_group,
+                    repository=repository.slug,
+                    environment=fields.environment,
+                    scope=PreviewScope(
+                        caller=fields.callers[0],
+                        path=scope.path,
+                        symbol=scope.symbol,
+                        base_key=scope.base_key,
+                        base_shown=scope.base_shown,
+                        base_path=scope.base_path,
+                    ),
+                ),
+            )
+        if checked.requirements:
+            raise InvalidDeploymentLinkError(checked.requirements[0])
+        # The words the preview derived from the group must be the ones being stored, and one
+        # covered request must join: the requirements above say so, and this holds it if they
+        # ever stop to.
+        if checked.scope != scope:
+            raise InvalidDeploymentLinkError(
+                "the scope does not name the base of the group it was made from"
+            )
+        if not checked.counts.get("would-link"):
+            raise InvalidDeploymentLinkError(
+                "no request this scope covers matches a route this service serves"
+            )
 
     def _deployed_elsewhere(
         self, repository: Repository, registered: Sequence[Repository]
