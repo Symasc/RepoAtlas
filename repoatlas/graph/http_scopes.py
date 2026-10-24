@@ -80,9 +80,23 @@ def root_name(text: str) -> str:
     return held.group(0) if held is not None else ""
 
 
+def level_allowed(kind: str, symbol: str | None) -> bool:
+    """Whether a base of this kind (:func:`base_kind`) may be declared at this level: a receiver
+    base (``self.x``) names no single binding in a whole file, so it needs a symbol."""
+    return symbol is not None or kind != "receiver"
+
+
 def symbol_covers(declared: str, actual: str) -> bool:
     """Whether ``actual`` is ``declared`` or lies inside it, at a dot boundary."""
     return actual == declared or actual.startswith(declared + ".")
+
+
+def symbols_overlap(one: str | None, other: str | None) -> bool:
+    """Whether two declared symbols cover a common entity: equal, one inside the other at a dot
+    boundary, or either absent (the whole file)."""
+    if one is None or other is None:
+        return True
+    return symbol_covers(one, other) or symbol_covers(other, one)
 
 
 class ScopeSymbol(NamedTuple):
@@ -163,9 +177,11 @@ def covers(declaration: ScopeDeclaration, request: ScopeRequest, scope: FileScop
             return OUT_OF_SCOPE
     if refusal == "injected-transport":
         return INJECTED_ROOT_UNSELECTED
-    if base_kind(text) == "receiver":
-        if symbol is None:
-            return SCOPE_TOO_BROAD
+    kind = base_kind(text)
+    if not level_allowed(kind, symbol):
+        return SCOPE_TOO_BROAD
+    if kind == "receiver":
+        assert symbol is not None  # level_allowed: a receiver base is declared by a symbol
         member = own.removeprefix(symbol + ".")
         return COVERED if own == symbol or "." not in member else SCOPE_TOO_BROAD
     if symbol is not None:
