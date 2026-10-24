@@ -725,6 +725,7 @@ export interface ConnectionGroup {
   };
   requests: number;
   samples?: ConnectionRequest[];
+  scope_choices?: ScopeChoice[];
   statuses: {
     [k: string]: number | undefined;
   };
@@ -756,12 +757,33 @@ export interface DeclarationView {
     | "repository-not-indexed"
     | "repository-serves-no-routes"
     | "origin-no-longer-requested"
-    | "target-url-unresolved";
+    | "target-url-unresolved"
+    | "caller-not-indexed"
+    | "scope-too-broad"
+    | "scope-unidentified"
+    | "injected-root-unselected"
+    | "scope-not-found"
+    | "base-no-longer-requested";
   repository: string;
+  scope?: DeclarationScope | null;
   state: "pending" | "applied" | "ineffective" | "invalidated";
   updated_at: string;
   url?: string | null;
   verification: "unverified" | "user_confirmed";
+}
+/**
+ * The words of a scoped declaration: which unstated base, in which file (and symbol) of its
+ * one caller, it serves. The base is kept by hash; only a plain name is ever shown.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "DeclarationScope".
+ */
+export interface DeclarationScope {
+  base_key: string;
+  base_path?: string;
+  base_shown: string;
+  path: string;
+  symbol?: string | null;
 }
 /**
  * One request and the join's decision for it.
@@ -770,6 +792,7 @@ export interface DeclarationView {
  * via the `definition` "ConnectionRequest".
  */
 export interface ConnectionRequest {
+  base_key?: string | null;
   decision_ref: string;
   declarable?: boolean;
   declaration_ids?: number[];
@@ -779,8 +802,11 @@ export interface ConnectionRequest {
   method?: string | null;
   reason?: string;
   route: string;
+  scopable?: boolean;
+  scope_refusal?: string | null;
   site: ConnectionSite;
   status: CrossingStatus;
+  symbol?: string | null;
 }
 /**
  * Where a request is written.
@@ -793,6 +819,21 @@ export interface ConnectionSite {
   line_start?: number | null;
   path: string;
   repository: string;
+}
+/**
+ * A scope an operator may name for an unstated base: a file of a caller, or one symbol of it.
+ * A choice is shown, never preselected; the counts are what the sync's own rule
+ * (:func:`repoatlas.graph.http_scopes.covers`) says of the group's requests in that file.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ScopeChoice".
+ */
+export interface ScopeChoice {
+  covered?: number;
+  path: string;
+  repository: string;
+  symbol?: string | null;
+  too_broad?: number;
 }
 /**
  * This interface was referenced by `ApiIndex`'s JSON-Schema
@@ -810,6 +851,7 @@ export interface ConnectionsSummary {
   linked_by_declaration: number;
   linked_by_source: number;
   requests: number;
+  scopable?: number;
   unresolved: number;
 }
 /**
@@ -1235,6 +1277,7 @@ export interface DeploymentLink {
   id: number;
   label: string;
   repository: string;
+  scope?: DeclarationScope | null;
   target_id?: string | null;
   updated_at: string;
   url?: string | null;
@@ -1273,6 +1316,7 @@ export interface DeploymentLinkFields {
   conditions?: DeploymentCondition[];
   environment?: string | null;
   label: string;
+  scope?: DeclarationScope | null;
   target_id?: string | null;
   url?: string | null;
   variables?: {
@@ -1574,6 +1618,9 @@ export interface HistoryEntry {
 /**
  * What declaring that an origin is served by one repository would do, before it is stored.
  *
+ * With ``scope`` it is about a base the source does not state: the group is that base's, the
+ * scope names the caller's file (and symbol), and the base path is the scope's own.
+ *
  * This interface was referenced by `ApiIndex`'s JSON-Schema
  * via the `definition` "HttpConnectionPreviewRequest".
  */
@@ -1762,6 +1809,24 @@ export interface HttpConnectionPreviewRequest {
   group: string;
   limit?: number;
   repository: string;
+  scope?: PreviewScope | null;
+}
+/**
+ * The scope a preview asks about: one file (and symbol) of one caller, and the base its code
+ * does not state. The base is named by its key (``hbk1-...``, a hash), never by its text; the
+ * shown form, when given, must be the one the group has (:attr:`base_shown` is optional because
+ * the preview derives it).
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "PreviewScope".
+ */
+export interface PreviewScope {
+  base_key: string;
+  base_path?: string;
+  base_shown?: string | null;
+  caller: string;
+  path: string;
+  symbol?: string | null;
 }
 /**
  * This interface was referenced by `ApiIndex`'s JSON-Schema
@@ -1778,12 +1843,13 @@ export interface HttpConnectionPreviewResponse {
   duplicate_of?: number | null;
   group: string;
   has_more?: boolean;
-  origin: string;
+  origin?: string | null;
   repository: string;
   requirements?: string[];
   routes_served: number;
   rows?: PreviewRow[];
-  url: string;
+  scope?: DeclarationScope | null;
+  url?: string | null;
   warnings?: string[];
 }
 /**
@@ -1800,7 +1866,11 @@ export interface PreviewRow {
     | "no-matching-route"
     | "caller-excluded"
     | "source-established"
-    | "not-declarable";
+    | "not-declarable"
+    | "scope-too-broad"
+    | "scope-unidentified"
+    | "injected-root-unselected"
+    | "out-of-scope";
   route: string;
   site: ConnectionSite;
 }

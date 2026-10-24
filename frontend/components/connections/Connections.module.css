@@ -190,6 +190,13 @@
   gap: 10px;
 }
 
+.scopeChoices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+
 .previewCounts {
   margin: 0;
   font-size: var(--mantine-font-size-sm);
