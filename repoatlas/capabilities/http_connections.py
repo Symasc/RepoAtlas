@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -22,11 +23,13 @@ from repoatlas.config.settings import DECLARATIONS_SLUG
 from repoatlas.graph.http_crossings import (
     DECLARABLE,
     LINKED,
+    _scoped_exposure,
     declared_candidates,
     parse_exposure,
 )
 from repoatlas.graph.http_declarations import (
     RequestFacts,
+    base_requested,
     declaration_state,
     display_base,
     facts_of,
@@ -34,11 +37,23 @@ from repoatlas.graph.http_declarations import (
     is_loopback_origin,
     origin_of_link,
     safe_route,
+    scope_found,
+    scoped_declaration_state,
 )
-from repoatlas.graph.link_exposures import plan_link_exposures
+from repoatlas.graph.http_scopes import (
+    COVERED,
+    SCOPE_TOO_BROAD,
+    FileScope,
+    ScopeDeclaration,
+    ScopeRequest,
+    ScopeSymbol,
+    covers,
+)
+from repoatlas.graph.link_exposures import plan_link_exposures, plan_scoped_exposures
 from repoatlas.graph.linker import GLOBAL_PARSER, repository_routes
 from repoatlas.models import http
 from repoatlas.models.deployment_targets import (
+    DeclarationScope,
     DeploymentLink,
     DeploymentLinkFields,
     declared_base,
@@ -58,6 +73,7 @@ from repoatlas.models.http_connections import (
     HttpDeclarationHistoryRequest,
     HttpDeclarationHistoryResponse,
     PreviewRow,
+    ScopeChoice,
 )
 from repoatlas.models.http_inventory import CrossingStatus
 from repoatlas.models.repository import Repository
@@ -88,13 +104,65 @@ def _snapshot(workspace: Workspace) -> tuple[list[RequestFacts], Mapping[str, ob
     served_by_slug = {
         by_id[repo_id]: bodies for repo_id, bodies in served.items() if repo_id in by_id
     }
+    links = workspace.deployment_links.list_all()
     return facts, {
         "built": knowledge.http_call_decisions_built(),
         "pass_reads": knowledge.link_pass_reads(),
-        "links": workspace.deployment_links.list_all(),
+        "links": links,
         "indexed": indexed,
         "served": served_by_slug,
+        "scopes": _declared_files(workspace, links),
     }
+
+
+def _file_scope(workspace: Workspace, file_id: int, *, uses: bool) -> FileScope:
+    """What one file offers a scope: its named entities and, with ``uses``, the ``USES`` pairs
+    its per-file pass asserted (the global pass's own are replaced at a sync, so never read),
+    read as the linker reads them for the join."""
+    knowledge = workspace.knowledge
+    members = knowledge.list_symbols(file_id=file_id)
+    pairs: list[tuple[int, int]] = []
+    if uses:
+        pairs = [
+            (user, used)
+            for user, used, asserted_in, producer in knowledge.list_uses_targets(
+                [symbol.entity_id for symbol in members]
+            )
+            if asserted_in == file_id and producer != GLOBAL_PARSER
+        ]
+    return FileScope.build(
+        (
+            ScopeSymbol(s.entity_id, s.file_id, s.type.value, s.qualified_name)
+            for s in members
+            if s.qualified_name
+        ),
+        pairs,
+    )
+
+
+def _declared_files(
+    workspace: Workspace, links: Sequence[DeploymentLink]
+) -> dict[tuple[str, str], FileScope]:
+    """The entities of each file a scoped declaration names, by the caller's slug and the path:
+    what its state needs to say whether the file and the symbol are still there. A file that is
+    not indexed is absent."""
+    named = {
+        (link.callers[0], link.scope.path)
+        for link in links
+        if link.scope is not None and len(link.callers) == 1
+    }
+    if not named:
+        return {}
+    ids = {repo.slug: repo.id for repo in workspace.repositories.list_all()}
+    found: dict[tuple[str, str], FileScope] = {}
+    for slug in sorted({caller for caller, _ in named}):
+        repo_id = ids.get(slug)
+        if repo_id is None:
+            continue
+        for row in workspace.knowledge.list_file_rows(repo_id):
+            if (slug, row.rel_path) in named:
+                found[(slug, row.rel_path)] = _file_scope(workspace, row.file_id, uses=False)
+    return found
 
 
 def _declarations(
@@ -105,6 +173,7 @@ def _declarations(
     indexed: set[str] = context["indexed"]  # type: ignore[assignment]
     served: Mapping[str, list[str]] = context["served"]  # type: ignore[assignment]
     pass_reads: Mapping[int, str] | None = context["pass_reads"]  # type: ignore[assignment]
+    scopes: Mapping[tuple[str, str], FileScope] = context["scopes"]  # type: ignore[assignment]
     joined = Counter(f.joined_by for f in facts if f.joined_by is not None)
     declined: dict[int, Counter[str]] = defaultdict(Counter)
     at_origin: Counter[str] = Counter()
@@ -116,16 +185,33 @@ def _declarations(
                 declined[link_id][fact.declaration_outcome] += 1
     views: list[DeclarationView] = []
     for link in sorted(links, key=lambda item: -item.id):
-        origin = origin_of_link(link)
-        state, reason = declaration_state(
-            link,
-            pass_reads=pass_reads,
-            indexed=link.repository in indexed,
-            serves_routes=bool(served.get(link.repository)),
-            requests_at_base=at_origin[origin] if origin is not None else 0,
-            joined=joined[link.id],
-            declined=declined[link.id],
-        )
+        scope = link.scope
+        if scope is None:
+            origin = origin_of_link(link)
+            state, reason = declaration_state(
+                link,
+                pass_reads=pass_reads,
+                indexed=link.repository in indexed,
+                serves_routes=bool(served.get(link.repository)),
+                requests_at_base=at_origin[origin] if origin is not None else 0,
+                joined=joined[link.id],
+                declined=declined[link.id],
+            )
+        else:
+            # A scoped declaration states no URL: it never reaches the origin rules above.
+            caller = link.callers[0] if len(link.callers) == 1 else None
+            place = scopes.get((caller, scope.path)) if caller is not None else None
+            state, reason = scoped_declaration_state(
+                link,
+                pass_reads=pass_reads,
+                indexed=link.repository in indexed,
+                caller_indexed=caller in indexed,
+                serves_routes=bool(served.get(link.repository)),
+                found=scope_found(place, scope),
+                requested=caller is not None and base_requested(facts, caller, scope),
+                joined=joined[link.id],
+                declined=declined[link.id],
+            )
         views.append(
             DeclarationView(
                 id=link.id,
@@ -141,6 +227,7 @@ def _declarations(
                 reason=reason,  # type: ignore[arg-type]
                 joined=joined[link.id],
                 declined=dict(sorted(declined[link.id].items())),
+                scope=scope,
             )
         )
     return views
@@ -165,6 +252,10 @@ def _request_view(fact: RequestFacts) -> ConnectionRequest:
         declaration_ids=fact.declaration_ids,
         declaration_outcome=fact.declaration_outcome,
         joined_by=fact.joined_by,
+        symbol=fact.symbol,
+        base_key=fact.base_key,
+        scopable=fact.scopable,
+        scope_refusal=fact.scope_refusal,
     )
 
 
@@ -176,11 +267,15 @@ def connections(workspace: Workspace, request: HttpConnectionsRequest) -> HttpCo
     facts, context = _snapshot(workspace)
     declarations = _declarations(facts, context)
     by_origin: dict[str, list[DeclarationView]] = defaultdict(list)
+    by_base: dict[str, list[DeclarationView]] = defaultdict(list)
     for link, view in zip(
         sorted(context["links"], key=lambda item: -item.id),  # type: ignore[arg-type,attr-defined]
         declarations,
         strict=True,
     ):
+        if link.scope is not None:
+            by_base[link.scope.base_key].append(view)
+            continue
         origin = origin_of_link(link)
         if origin is not None:
             by_origin[origin].append(view)
@@ -194,6 +289,7 @@ def connections(workspace: Workspace, request: HttpConnectionsRequest) -> HttpCo
         unresolved=len(open_facts),
         declarable=sum(1 for f in open_facts if f.declarable),
         base_not_stated=sum(1 for f in open_facts if f.target.origin is None),
+        scopable=sum(1 for f in open_facts if f.scopable),
         declarations=dict(sorted(Counter(d.state for d in declarations).items())),
         by_status=dict(sorted(Counter(f.status for f in open_facts).items())),
     )
@@ -217,7 +313,12 @@ def connections(workspace: Workspace, request: HttpConnectionsRequest) -> HttpCo
         text = request.text.lower() if request.text else None
         if text and text not in (origin or "").lower() and text not in (expression or "").lower():
             continue
-        views = tuple(by_origin.get(origin, ())) if origin else ()
+        if origin:
+            views = tuple(by_origin.get(origin, ()))
+        else:
+            # An unstated base is declared by the hash of its text, in a file of one caller.
+            keys = sorted({m.base_key for m in members if m.base_key is not None})
+            views = tuple(view for base in keys for view in by_base.get(base, ()))
         if request.declaration_state and not any(
             v.state == request.declaration_state for v in views
         ):
@@ -226,6 +327,8 @@ def connections(workspace: Workspace, request: HttpConnectionsRequest) -> HttpCo
         if not unresolved and not request.include_resolved:
             continue
         ordered = sorted(unresolved or members, key=_order)
+        # Read from the index per file, so only for the one group an operator has opened.
+        choices = _scope_choices(workspace, members) if key == request.group and not origin else ()
         listed.append(
             ConnectionGroup(
                 key=key,
@@ -241,6 +344,7 @@ def connections(workspace: Workspace, request: HttpConnectionsRequest) -> HttpCo
                 reasons=dict(sorted(Counter(m.reason for m in unresolved if m.reason).items())),
                 samples=tuple(_request_view(m) for m in ordered[:SAMPLES]),
                 declarations=views,
+                scope_choices=choices,
             )
         )
     listed.sort(key=lambda g: (-g.requests, g.origin or "~", g.base_expression or "", g.key))
@@ -260,6 +364,12 @@ def connections(workspace: Workspace, request: HttpConnectionsRequest) -> HttpCo
             candidates = _candidates(
                 workspace,
                 origin_of,
+                members,
+                context["served"],  # type: ignore[arg-type]
+            )
+        elif members:
+            candidates = _scoped_candidates(
+                workspace,
                 members,
                 context["served"],  # type: ignore[arg-type]
             )
@@ -298,20 +408,12 @@ def _cursor(offset: int) -> str:
 MAX_CANDIDATES = 12
 
 
-def _candidates(
-    workspace: Workspace,
-    origin: str,
-    members: Sequence[RequestFacts],
-    served: Mapping[str, Sequence[str]],
-) -> tuple[CandidateService, ...]:
-    """Services whose served routes some declarable request's shape matches, best first.
-
-    A hypothesis, never applied and never chosen by a name: route shapes prefilter (the root, or a
-    literal prefix of the requests' own paths, as the base), then each survivor is evaluated
-    exactly as a preview would, so the counts are the sync's own."""
-    wanted = [m for m in members if m.declarable]
-    if not wanted:
-        return ()
+def _shortlist(
+    wanted: Sequence[RequestFacts], served: Mapping[str, Sequence[str]]
+) -> list[tuple[int, str, str]]:
+    """(requests matched, repository, base path) of each service one of whose served routes some
+    wanted request's shape matches, best first. The base path is the root or a literal prefix of
+    the requests' own paths, whichever matches the most (the shorter on a tie)."""
     prefixes: list[tuple[str, ...]] = [()]
     for member in wanted:
         literal: list[str] = []
@@ -342,6 +444,24 @@ def _candidates(
         if best is not None:
             shortlist.append((best[0], repository, best[1]))
     shortlist.sort(key=lambda item: (-item[0], item[1]))
+    return shortlist
+
+
+def _candidates(
+    workspace: Workspace,
+    origin: str,
+    members: Sequence[RequestFacts],
+    served: Mapping[str, Sequence[str]],
+) -> tuple[CandidateService, ...]:
+    """Services whose served routes some declarable request's shape matches, best first.
+
+    A hypothesis, never applied and never chosen by a name: route shapes prefilter (the root, or a
+    literal prefix of the requests' own paths, as the base), then each survivor is evaluated
+    exactly as a preview would, so the counts are the sync's own."""
+    wanted = [m for m in members if m.declarable]
+    if not wanted:
+        return ()
+    shortlist = _shortlist(wanted, served)
     registered = {repo.slug: repo for repo in workspace.repositories.list_all()}
     found: list[CandidateService] = []
     for _, repository, base in shortlist[:MAX_CANDIDATES]:
@@ -363,6 +483,163 @@ def _candidates(
             )
     found.sort(key=lambda c: (-c.requests_unique, -c.requests_matched, c.repository))
     return tuple(found)
+
+
+def _scoped_candidates(
+    workspace: Workspace,
+    members: Sequence[RequestFacts],
+    served: Mapping[str, Sequence[str]],
+) -> tuple[CandidateService, ...]:
+    """Services whose served routes some scopable request of an unstated base matches, best first.
+
+    As for a stated origin, a hypothesis never applied and never chosen by a name: the same route
+    shapes prefilter, then each survivor is evaluated as a scoped declaration of it would be
+    decided (:func:`_evaluate_scoped`). ``suggested_base_path`` is the prefix the service would
+    mount its routes under for the requests to match as they are written."""
+    wanted = [m for m in members if m.scopable]
+    if not wanted:
+        return ()
+    registered = {repo.slug: repo for repo in workspace.repositories.list_all()}
+    found: list[CandidateService] = []
+    for _, repository, base in _shortlist(wanted, served)[:MAX_CANDIDATES]:
+        repo = registered.get(repository)
+        if repo is None:
+            continue
+        outcomes, routes_served = _evaluate_scoped(workspace, repo, base, wanted)
+        counts = Counter(outcome for _, outcome, _ in outcomes)
+        if counts["would-link"] + counts["ambiguous"]:
+            found.append(
+                CandidateService(
+                    repository=repository,
+                    routes_served=routes_served,
+                    requests_matched=counts["would-link"] + counts["ambiguous"],
+                    requests_unique=counts["would-link"],
+                    requests_ambiguous=counts["ambiguous"],
+                    suggested_base_path=base,
+                )
+            )
+    found.sort(key=lambda c: (-c.requests_unique, -c.requests_matched, c.repository))
+    return tuple(found)
+
+
+def _evaluate_scoped(
+    workspace: Workspace,
+    repository: Repository,
+    base_path: str,
+    members: Sequence[RequestFacts],
+) -> tuple[list[tuple[RequestFacts, str, str | None]], int]:
+    """What a scoped declaration of ``repository`` under ``base_path`` would do to each scopable
+    request, as :func:`_evaluate` does for a URL: the repository's routes as the global pass sees
+    them, the exposures a scoped declaration would add (with the route prefix before each route),
+    and the join's own matching of the request's path as it is written. Whether a request is
+    inside the scope an operator names is not asked here: every request given is taken as covered.
+    Returns each request with its outcome and handler place, and how many routes it serves."""
+    assert repository.id is not None
+    routes = [
+        route
+        for route in repository_routes(workspace.knowledge, repository.id)
+        if route.repo_id == repository.id
+    ]
+    ids = {repo.slug: repo.id for repo in workspace.repositories.list_all() if repo.id is not None}
+    files = {row.file_id: row for row in workspace.knowledge.list_file_rows(repository.id)}
+    now = datetime.now(timezone.utc)
+    mine = [f for f in members if f.scopable and not f.linked]
+    offers = {}
+    for caller, shown in sorted({(f.repository, _shown(f)) for f in mine}):
+        # Never stored, so not validated: the words of the scope are the group's own.
+        synthetic = DeploymentLink.model_construct(
+            id=0,
+            repository=repository.slug,
+            label="preview",
+            environment=None,
+            url=None,
+            target_id=None,
+            variables={},
+            conditions=[],
+            verification="unverified",
+            callers=[caller],
+            scope=DeclarationScope.model_construct(
+                path="", symbol=None, base_key="", base_shown=shown, base_path=base_path
+            ),
+            created_at=now,
+            updated_at=now,
+            verified_at=None,
+        )
+        offered = (
+            _scoped_exposure(claim, json.loads(claim.meta_json or "{}"))
+            for claim in plan_scoped_exposures([synthetic], {repository.id: routes}, ids)
+        )
+        offers[(caller, shown)] = [e for e in offered if e is not None]
+    result: list[tuple[RequestFacts, str, str | None]] = []
+    for fact in mine:
+        at_method = [
+            e for e in offers[(fact.repository, _shown(fact))] if e.method == fact.row.method
+        ]
+        found, why = declared_candidates(fact.target.segments, at_method, fact.repository)
+        outcome = {
+            "": "would-link",
+            "ambiguous": "ambiguous",
+            "route-unmatched": "no-matching-route",
+            "callers-excluded": "caller-excluded",
+        }[why]
+        handler = None
+        if outcome == "would-link":
+            claim = found[0].claim
+            where = files.get(claim.file_id)
+            handler = f"{where.rel_path}:{claim.line_start}" if where is not None else None
+        result.append((fact, outcome, handler))
+    return result, len(routes)
+
+
+def _shown(fact: RequestFacts) -> str:
+    """How a request's base is shown, as a scoped declaration's exposures show it."""
+    return display_base(fact.target.base_expression) or "{…}"
+
+
+def _scope_choices(
+    workspace: Workspace, members: Sequence[RequestFacts]
+) -> tuple[ScopeChoice, ...]:
+    """The scopes an operator may name for one group of unstated-base requests, never one chosen.
+
+    Per file of a caller that has scopable requests in the group: the file, and each dotted prefix
+    of an enclosing symbol that names exactly one entity of that file. Each choice counts the
+    group's requests of that file it covers, and those it would reach and refuse as too broad,
+    by asking :func:`repoatlas.graph.http_scopes.covers` with the declaration it would be."""
+    placed: dict[tuple[str, str, int], list[RequestFacts]] = defaultdict(list)
+    for member in members:
+        if member.scopable and member.base_key is not None:
+            placed[(member.repository, member.row.path or "", member.row.file_id)].append(member)
+    choices: list[ScopeChoice] = []
+    for (repository, path, file_id), here in sorted(placed.items()):
+        scope = _file_scope(workspace, file_id, uses=True)
+        symbols: set[str | None] = {None}
+        for member in here:
+            parts = member.symbol.split(".") if member.symbol else []
+            for depth in range(1, len(parts) + 1):
+                name = ".".join(parts[:depth])
+                if scope.entity_count(name) == 1:
+                    symbols.add(name)
+        for symbol in sorted(symbols, key=lambda item: (item is not None, item or "")):
+            verdicts = Counter(
+                covers(
+                    ScopeDeclaration(repository, path, member.base_key or "", symbol),
+                    ScopeRequest(
+                        repository, path, member.row.url, member.symbol or "", member.row.src_id
+                    ),
+                    scope,
+                )
+                for member in here
+            )
+            choices.append(
+                ScopeChoice(
+                    repository=repository,
+                    path=path,
+                    symbol=symbol,
+                    covered=verdicts[COVERED],
+                    too_broad=verdicts[SCOPE_TOO_BROAD],
+                )
+            )
+    return tuple(choices)
 
 
 def _evaluate(

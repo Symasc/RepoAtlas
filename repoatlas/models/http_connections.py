@@ -27,6 +27,7 @@ from repoatlas.models.deployment_targets import (
     MAX_LINK_CALLERS,
     MAX_LINK_TEXT,
     DeclarationProvenance,
+    DeclarationScope,
     Verification,
 )
 from repoatlas.models.http_inventory import DECISION_REF_PATTERN, CrossingStatus
@@ -60,6 +61,13 @@ DeclarationReason = Literal[
     "repository-serves-no-routes",
     "origin-no-longer-requested",
     "target-url-unresolved",
+    # A scoped declaration (Phase A2).
+    "caller-not-indexed",
+    "scope-too-broad",
+    "scope-unidentified",
+    "injected-root-unselected",
+    "scope-not-found",
+    "base-no-longer-requested",
 ]
 
 BASIS = (
@@ -105,6 +113,15 @@ class ConnectionRequest(BaseModel):
     declaration_outcome: str | None = None
     #: The declaration that joined it, when one did.
     joined_by: int | None = None
+    #: The qualified name of the entity that makes the request; ``None`` at module level.
+    symbol: str | None = None
+    #: For a request whose base the source does not state: the identity of its base text
+    #: (``hbk1-...``, a hash, never the text) and whether a scoped declaration can name it.
+    base_key: str | None = None
+    scopable: bool = False
+    #: Why it cannot be scoped: ``base-text-truncated``, ``base-text-unreadable``,
+    #: ``host-expression``, ``injected-transport`` or ``not-base-unknown``; ``None`` when it can.
+    scope_refusal: str | None = None
 
 
 class DeclarationView(BaseModel):
@@ -126,6 +143,8 @@ class DeclarationView(BaseModel):
     #: Requests joined through it, and requests at its origin the pass declined to join, by why.
     joined: int = 0
     declined: dict[str, int] = Field(default_factory=dict)
+    #: The words of a scoped declaration (a file, a symbol, a base by hash); ``None`` for a URL.
+    scope: DeclarationScope | None = None
 
 
 class CandidateService(BaseModel):
@@ -141,6 +160,24 @@ class CandidateService(BaseModel):
     requests_ambiguous: int
     #: The base path under which the most requests match (empty for the origin's root).
     suggested_base_path: str = ""
+
+
+class ScopeChoice(BaseModel):
+    """A scope an operator may name for an unstated base: a file of a caller, or one symbol of it.
+    A choice is shown, never preselected; the counts are what the sync's own rule
+    (:func:`repoatlas.graph.http_scopes.covers`) says of the group's requests in that file."""
+
+    model_config = ConfigDict(frozen=True)
+
+    repository: str
+    path: str
+    #: A dotted qualified name of exactly one entity of the file; ``None``: the whole file.
+    symbol: str | None = None
+    #: Requests of the group this scope covers.
+    covered: int = 0
+    #: Requests of the group in this file it would reach and refuse as too broad (a receiver base
+    #: at file scope, a name its code is not proven to read, a member below a direct member).
+    too_broad: int = 0
 
 
 class ConnectionGroup(BaseModel):
@@ -165,6 +202,9 @@ class ConnectionGroup(BaseModel):
     reasons: dict[str, int]
     samples: tuple[ConnectionRequest, ...] = ()
     declarations: tuple[DeclarationView, ...] = ()
+    #: For an expanded group whose base the source does not state: the scopes a declaration may
+    #: name, each with how many of the group's requests it covers. Empty otherwise.
+    scope_choices: tuple[ScopeChoice, ...] = ()
 
 
 class ConnectionsSummary(BaseModel):
@@ -178,6 +218,8 @@ class ConnectionsSummary(BaseModel):
     declarable: int
     #: Unresolved requests whose base the source does not state (A2: not mappable here).
     base_not_stated: int
+    #: Of those, the requests whose base text a scoped declaration can name.
+    scopable: int = 0
     declarations: dict[str, int] = Field(default_factory=dict)
     by_status: dict[str, int] = Field(default_factory=dict)
 
@@ -365,4 +407,5 @@ __all__ = [
     "HttpDeclarationHistoryRequest",
     "HttpDeclarationHistoryResponse",
     "PreviewRow",
+    "ScopeChoice",
 ]

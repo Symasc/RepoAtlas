@@ -1263,7 +1263,8 @@ class SqliteKnowledgeStore:
         where = "WHERE d.repo_id = ?" if repo_id is not None else ""
         rows = self._db.execute(
             f"""
-            SELECT d.*, f.rel_path AS path, s.key AS src_key
+            SELECT d.*, f.rel_path AS path, s.key AS src_key,
+                   s.qualified_name AS src_qualified_name, s.type AS src_type
             FROM http_call_decisions d
             JOIN files f ON f.id = d.file_id
             JOIN entities s ON s.id = d.src_id
@@ -1288,6 +1289,8 @@ class SqliteKnowledgeStore:
                 chain_json=row["chain_json"],
                 path=row["path"],
                 src_key=row["src_key"],
+                src_qualified_name=row["src_qualified_name"],
+                src_type=row["src_type"],
             )
             for row in rows
         ]
