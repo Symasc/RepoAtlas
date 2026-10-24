@@ -317,15 +317,16 @@ def test_a_scoped_export_round_trips_and_an_unscoped_export_is_byte_identical(
 
 
 def test_migration_006_reparses_nothing(built: Workspace, tmp_path: Path) -> None:
-    """What this asserts, and no more. (1) The newest migration is one statement that only adds
+    """What this asserts, and no more. (1) Migration 006 is one statement that only adds
     ``deployment_links.scope_json``; applied to a version-5 schema holding a link it leaves that
-    link's scope NULL and its other columns as they were. (2) A freshly built index is at user
-    version 6 and has the column. (3) Two syncs of the unchanged tree after the build report 0
-    changed files: the facts version is untouched by the schema bump, so no file is parsed again.
-    It does not open a version-5 index file: SQLite cannot drop the column from a built one."""
+    link's scope NULL and its other columns as they were. (2) A freshly built index is at the
+    current user version and has the column. (3) Two syncs of the unchanged tree after the build
+    report 0 changed files: the facts version is untouched by the schema bump, so no file is parsed
+    again. It does not open a version-5 index file: SQLite cannot drop the column from a built
+    one."""
     migrations = load_migrations()
-    newest = migrations[-1]
-    assert newest.version == SCHEMA_VERSION == 6
+    newest = next(m for m in migrations if m.version == 6)
+    assert newest.version == 6
     assert len(newest.statements) == 1
     assert (
         newest.statements[0]
@@ -334,7 +335,9 @@ def test_migration_006_reparses_nothing(built: Workspace, tmp_path: Path) -> Non
     )
 
     old = sqlite3.connect(":memory:")
-    for migration in migrations[:-1]:
+    for migration in migrations:
+        if migration.version >= newest.version:
+            break
         for statement in migration.statements:
             old.execute(statement)
     old.execute(
@@ -347,7 +350,7 @@ def test_migration_006_reparses_nothing(built: Workspace, tmp_path: Path) -> Non
     assert after[: len(before)] == before and after[len(before) :] == (None,)
     old.close()
 
-    assert user_version(built.database.connection) == 6
+    assert user_version(built.database.connection) == SCHEMA_VERSION
     columns = [row[1] for row in built.database.execute("PRAGMA table_info(deployment_links)")]
     assert "scope_json" in columns
 
