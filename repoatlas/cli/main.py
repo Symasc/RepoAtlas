@@ -504,10 +504,10 @@ def _import_services(workspace: Workspace, services: Sequence[ExternalServiceFie
     (or the file states twice in other words), or one more than the store keeps, refuses the
     import. One stated word for word again is skipped."""
     from repoatlas.models.service_declarations import (
+        MAX_SERVICE_DECLARATIONS,
         ServiceDeclarationConflictError,
         ServiceDeclarationLimitError,
     )
-    from repoatlas.storage.sqlite.service_declarations import MAX_SERVICE_DECLARATIONS
 
     store = workspace.service_declarations
     present = store.list_all()
