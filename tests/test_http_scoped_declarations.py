@@ -12,11 +12,13 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
 import pytest
+from repoatlas.capabilities.service import CapabilityService
 from repoatlas.graph import link_exposures
 from repoatlas.graph.deploy_identity import ServedRoute
 from repoatlas.graph.http_crossings import (
@@ -28,8 +30,19 @@ from repoatlas.graph.http_crossings import (
     ScopedDeclarations,
     plan_http_crossings,
 )
-from repoatlas.graph.http_scopes import HTTP_SCOPED_EXPOSURE, FileScope, ScopeSymbol, base_key
+from repoatlas.graph.http_declarations import facts_of, scoped_declaration_state
+from repoatlas.graph.http_scopes import (
+    HTTP_SCOPED_EXPOSURE,
+    FileScope,
+    ScopeDeclaration,
+    ScopeRequest,
+    ScopeSymbol,
+    base_key,
+    covers,
+)
 from repoatlas.graph.link_exposures import plan_link_exposures, plan_scoped_exposures
+from repoatlas.graph.linker import GLOBAL_PARSER
+from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.deployment_targets import (
     DeclarationScope,
     DeploymentLink,
@@ -38,11 +51,18 @@ from repoatlas.models.deployment_targets import (
     LinksExport,
     ScopeConflictError,
 )
+from repoatlas.models.http_connections import (
+    CandidateService,
+    ConnectionGroup,
+    ConnectionRequest,
+    HttpConnectionsRequest,
+    HttpConnectionsResponse,
+)
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.parsers.http_facts import HTTP_CLIENT_CALL, PENDING_FACT
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace
-from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
+from repoatlas.storage.protocols import FileRow, HttpCallDecisionRow, UnresolvedRefRecord
 from repoatlas.storage.sqlite.database import SCHEMA_VERSION
 from repoatlas.storage.sqlite.migrator import load_migrations, user_version
 from tests.http_connections_corpus import repos
@@ -1201,3 +1221,496 @@ def test_plan_link_exposures_ignores_a_scoped_link() -> None:
     )
     routes = [ServedRoute(2, 2, 21, "GET /v1/items", 3, 4, frozenset())]
     assert plan_link_exposures([link], {}, routes, {"web": 1, "api": 2}) == []
+
+
+# -- Phase A2, slice S6: the worklist shows each request's scope and each declaration's state -----
+#
+# Read side only: nothing here previews or writes a declaration. Declarations are made with
+# ``via="import"`` (``declare`` above) and judged by the sync; the worklist is then read.
+
+GLOBAL = CapabilityContext(scope=CapabilityScope.GLOBAL)
+
+
+def worklist(workspace: Workspace, **filters: Any) -> HttpConnectionsResponse:
+    return CapabilityService(workspace).http_connections(
+        HttpConnectionsRequest(context=GLOBAL, **filters)
+    )
+
+
+def all_requests(workspace: Workspace) -> list[ConnectionRequest]:
+    """Every unresolved request of the worklist, each group opened in turn."""
+    found: list[ConnectionRequest] = []
+    for group in worklist(workspace).groups:
+        found.extend(worklist(workspace, group=group.key).requests)
+    return found
+
+
+def request_in(
+    workspace: Workspace,
+    requests: list[ConnectionRequest],
+    name: str,
+    path: str,
+    symbol: str | None,
+) -> ConnectionRequest:
+    place = (slug(workspace, name), path, symbol)
+    return next(r for r in requests if (r.site.repository, r.site.path, r.symbol) == place)
+
+
+def group_with(workspace: Workspace, expression: str) -> ConnectionGroup:
+    return next(g for g in worklist(workspace).groups if g.base_expression == expression)
+
+
+def opened(
+    workspace: Workspace, expression: str
+) -> tuple[ConnectionGroup, HttpConnectionsResponse]:
+    """The group that shows ``expression`` as its base, opened: the group as the worklist lists it
+    then, and the whole answer (its requests and candidate services)."""
+    key = group_with(workspace, expression).key
+    page = worklist(workspace, group=key)
+    return next(g for g in page.groups if g.key == key), page
+
+
+def choices_of(group: ConnectionGroup) -> dict[tuple[str, str, str | None], tuple[int, int]]:
+    """(caller, file, symbol) of each scope the group offers, with (covered, too broad)."""
+    return {(c.repository, c.path, c.symbol): (c.covered, c.too_broad) for c in group.scope_choices}
+
+
+def state_of(workspace: Workspace, link_id: int) -> tuple[str, str]:
+    view = next(d for d in worklist(workspace).declarations if d.id == link_id)
+    return view.state, view.reason
+
+
+def file_scope_by_sql(workspace: Workspace, repository: str, path: str) -> FileScope:
+    """What the join would read of one file, taken from the tables directly: its named entities
+    and the ``USES`` pairs its per-file pass asserted there."""
+    file_id = workspace.database.execute(
+        "SELECT f.id FROM files f JOIN repositories r ON r.id = f.repo_id "
+        "WHERE r.slug = ? AND f.rel_path = ?",
+        (repository, path),
+    ).fetchone()[0]
+    symbols = workspace.database.execute(
+        "SELECT id, file_id, type, qualified_name FROM entities "
+        "WHERE file_id = ? AND qualified_name IS NOT NULL AND qualified_name != ''",
+        (file_id,),
+    ).fetchall()
+    uses = workspace.database.execute(
+        "SELECT src_id, dst_id FROM edges WHERE type = 'USES' AND file_id = ? "
+        "AND COALESCE(parser, '') != ? AND src_id IN (SELECT id FROM entities WHERE file_id = ?)",
+        (file_id, GLOBAL_PARSER, file_id),
+    ).fetchall()
+    return FileScope.build(
+        (ScopeSymbol(*row) for row in symbols), [(user, used) for user, used in uses]
+    )
+
+
+def test_base_unknown_requests_show_their_scope_and_whether_it_can_be_declared(
+    scoped_built: Workspace,
+) -> None:
+    """A request whose base the source does not state shows the qualified name of the function or
+    method that makes it, the identity of its base text (a hash, never the text), and that a
+    scoped declaration can name it. A request that states its origin is not one of these; a
+    transport handed in at run time cannot be named by a symbol; the summary counts the scopable."""
+    ws = scoped_built
+    requests = all_requests(ws)
+
+    read = request_in(ws, requests, "caller", "client.py", "read_item")
+    assert (read.symbol, read.base_key, read.scopable, read.scope_refusal) == (
+        "read_item",
+        base_key("BASE"),
+        True,
+        None,
+    )
+    method = request_in(ws, requests, "caller", "client.py", "UsersClient.get_item")
+    assert (method.base_key, method.scopable, method.scope_refusal) == (
+        base_key("self.base_url"),
+        True,
+        None,
+    )
+    typed = request_in(ws, requests, "webts", "src/api.ts", "listItem")
+    assert (typed.base_key, typed.scopable, typed.scope_refusal) == (base_key("BASE"), True, None)
+
+    stated = request_in(ws, requests, "caller", "odd.py", "stated_read")
+    assert (stated.base_key, stated.scopable, stated.scope_refusal) == (
+        None,
+        False,
+        "not-base-unknown",
+    )
+    handed = request_in(ws, requests, "webts", "src/root.ts", "unstated")
+    assert (handed.scopable, handed.scope_refusal) == (False, "injected-transport")
+
+    for request in requests:
+        assert request.scopable == (request.scope_refusal is None), request
+    summary = worklist(ws).summary
+    assert summary.scopable == sum(1 for r in requests if r.scopable) > 0
+    assert summary.scopable < summary.base_not_stated
+
+    # The text itself is nowhere in the answer: only its hash.
+    text = json.dumps(worklist(ws).model_dump(mode="json"))
+    assert "self.base_url" not in text.replace("{self.base_url}", "")
+
+
+def test_a_request_at_module_level_has_no_symbol() -> None:
+    """The decision row says what entity asks and its type: a request made by the file itself has
+    no symbol to name, one made inside a function or method has its qualified name. A request that
+    states its origin, or whose transport is injected, is not scopable and says why."""
+    row = HttpCallDecisionRow(
+        decision_ref="hcd1-" + "0" * 20,
+        repo_id=1,
+        file_id=1,
+        src_id=1,
+        method="GET",
+        url="{BASE}/v1/items",
+        variant="",
+        decision=UNKNOWN_BASE,
+        evidence_json="{}",
+        chain_json="[]",
+        path="client.py",
+        src_qualified_name="client.py",
+        src_type="file",
+    )
+    top = facts_of(row, "caller")
+    assert top.symbol is None and top.scopable and top.scope_refusal is None
+    assert top.base_key == base_key("BASE")
+
+    inside = row.model_copy(update={"src_qualified_name": "Client.get", "src_type": "method"})
+    assert facts_of(inside, "caller").symbol == "Client.get"
+
+    injected = row.model_copy(update={"evidence_json": json.dumps({"injected_at": "root.ts:3"})})
+    handed = facts_of(injected, "caller")
+    assert (handed.scopable, handed.scope_refusal) == (False, "injected-transport")
+
+    stated = row.model_copy(
+        update={"url": "https://items.example.test/v1/items", "decision": SERVICE_UNMATCHED}
+    )
+    fact = facts_of(stated, "caller")
+    assert (fact.base_key, fact.scopable, fact.scope_refusal) == (None, False, "not-base-unknown")
+
+
+def test_a_truncated_base_expression_is_not_scopable(scoped_built: Workspace) -> None:
+    """A base the parser may have cut (60 characters or more) is never compared: the request says
+    so, no scope is offered for it, and no service is suggested for it."""
+    ws = scoped_built
+    requests = all_requests(ws)
+    long = request_in(ws, requests, "caller", "odd.py", "long_read")
+    assert len(LONG_BASE) == 60
+    assert long.scope_refusal == "base-text-truncated" and long.scopable is False
+
+    for group in worklist(ws).groups:
+        page = worklist(ws, group=group.key)
+        if long.decision_ref in {r.decision_ref for r in page.requests}:
+            assert page.candidates == ()
+            assert [g.scope_choices for g in page.groups if g.key == group.key] == [()]
+            break
+    else:
+        pytest.fail("the request is in no group")
+
+
+def test_a_scheme_with_an_unread_host_is_not_scopable(scoped_built: Workspace) -> None:
+    """``http://{host}/x`` states a scheme and leaves the host unread: it is not a base text, so no
+    scope can name it."""
+    ws = scoped_built
+    host = request_in(ws, all_requests(ws), "caller", "odd.py", "host_read")
+    assert host.scope_refusal == "host-expression" and host.scopable is False
+    assert host.base_key is None
+
+
+def test_scope_choices_are_the_file_and_each_enclosing_symbol_with_their_counts(
+    scoped_built: Workspace,
+) -> None:
+    """Opening a group offers, per file of a caller, the whole file and each dotted prefix of the
+    symbol that makes a request, when it names one entity of the file; each with the requests of the
+    group it covers and those it would refuse as too broad. A receiver base is covered by no whole
+    file; a class covers its methods and not a class whose name only starts like it; a module name
+    covers what proves it reads that name. The counts are those of ``http_scopes.covers``. A group
+    that is not opened offers nothing."""
+    ws = scoped_built
+    caller = slug(ws, "caller")
+    assert all(g.scope_choices == () for g in worklist(ws).groups)
+
+    group, page = opened(ws, "{self.base_url}")
+    assert choices_of(group) == {
+        (caller, "client.py", None): (0, 3),
+        (caller, "client.py", "UsersClient"): (2, 0),
+        (caller, "client.py", "UsersClient.get_item"): (1, 0),
+        (caller, "client.py", "UsersClient.make_item"): (1, 0),
+        (caller, "client.py", "UsersClientV2"): (1, 0),
+        (caller, "client.py", "UsersClientV2.get_item"): (1, 0),
+    }
+
+    group, page = opened(ws, "{BASE}")
+    second, webts = slug(ws, "second"), slug(ws, "webts")
+    assert choices_of(group) == {
+        (caller, "client.py", None): (3, 1),
+        (caller, "client.py", "read_item"): (1, 0),
+        (caller, "client.py", "write_item"): (1, 0),
+        (caller, "client.py", "list_items"): (1, 0),
+        (caller, "client.py", "shadowed_read"): (1, 0),
+        (caller, "other.py", None): (1, 0),
+        (caller, "other.py", "other_read"): (1, 0),
+        (second, "client.py", None): (1, 0),
+        (second, "client.py", "read_item"): (1, 0),
+        (webts, "src/api.ts", None): (2, 1),
+        (webts, "src/api.ts", "listItem"): (1, 0),
+        (webts, "src/api.ts", "createItem"): (1, 0),
+        (webts, "src/api.ts", "shadowedItem"): (1, 0),
+    }
+    # the same numbers, from `covers` over the tables
+    for choice in group.scope_choices:
+        scope = file_scope_by_sql(ws, choice.repository, choice.path)
+        declaration = ScopeDeclaration(
+            choice.repository, choice.path, base_key("BASE"), choice.symbol
+        )
+        verdicts: Counter[str] = Counter()
+        for request in page.requests:
+            if (request.site.repository, request.site.path) != (choice.repository, choice.path):
+                continue
+            url, src_id = ws.database.execute(
+                "SELECT url, src_id FROM http_call_decisions WHERE decision_ref = ?",
+                (request.decision_ref,),
+            ).fetchone()
+            asked = ScopeRequest(choice.repository, choice.path, url, request.symbol or "", src_id)
+            verdicts[covers(declaration, asked, scope)] += 1
+        assert (choice.covered, choice.too_broad) == (
+            verdicts["covered"],
+            verdicts["scope-too-broad"],
+        ), choice
+
+
+def test_candidates_for_a_scope_are_services_whose_routes_match_never_preselected(
+    scoped_built: Workspace,
+) -> None:
+    """Opening a group of an unstated base offers the services whose served routes its requests'
+    shapes match, counted as a scoped declaration would be decided: ``alpha`` and ``beta`` serve
+    the same routes (tied, neither preferred), ``twin`` answers one route from two files
+    (ambiguous, nothing unique), ``mounted`` serves under a ``/v1`` prefix the requests write. A
+    repository that serves no route is never offered. The answer chooses none and stores nothing."""
+    ws = scoped_built
+    alpha, beta = slug(ws, "alpha"), slug(ws, "beta")
+    twin, mounted = slug(ws, "twin"), slug(ws, "mounted")
+    _, page = opened(ws, "{BASE}")
+
+    names = {c.repository: c for c in page.candidates}
+    assert set(names) == {alpha, beta, twin, mounted}
+    assert names[alpha].suggested_base_path == names[beta].suggested_base_path == ""
+    assert names[mounted].suggested_base_path == "/v1"
+    assert (names[alpha].requests_matched, names[alpha].requests_unique) == (
+        names[beta].requests_matched,
+        names[beta].requests_unique,
+    )
+    assert names[alpha].requests_unique > 0 and names[alpha].requests_ambiguous == 0
+    assert names[mounted].requests_unique > 0 and names[mounted].requests_ambiguous == 0
+    assert names[twin].requests_unique == 0 and names[twin].requests_ambiguous > 0
+    unique = [c.requests_unique for c in page.candidates]
+    assert unique == sorted(unique, reverse=True)
+
+    # a candidate is a hypothesis: nothing in it says chosen, and nothing was stored
+    assert set(CandidateService.model_fields) == {
+        "repository",
+        "routes_served",
+        "requests_matched",
+        "requests_unique",
+        "requests_ambiguous",
+        "suggested_base_path",
+    }
+    assert ws.deployment_links.list_all() == [] and page.declarations == ()
+
+
+def test_a_scoped_declaration_state_follows_its_scope(
+    scoped_built: Workspace, tmp_path: Path
+) -> None:
+    """A scoped declaration is pending until the next sync, applied once a request is joined
+    through it, and ineffective with the pass's reason when a rival service covers the same
+    requests; with the rival gone it applies again. The worklist shows its scope (never a URL) and
+    attaches it to the group of its base."""
+    ws = scoped_built
+    link = declare(ws, "alpha", "caller", "client.py", "BASE")
+    assert state_of(ws, link) == ("pending", "applies-at-next-sync")
+    resync(ws, tmp_path)
+    assert state_of(ws, link) == ("applied", "")
+
+    view = next(d for d in worklist(ws).declarations if d.id == link)
+    assert view.scope == words("client.py", "BASE") and view.url is None
+    assert view.repository == slug(ws, "alpha") and view.callers == (slug(ws, "caller"),)
+    assert view.joined == 2
+    group = group_with(ws, "{BASE}")
+    assert [d.id for d in group.declarations] == [link]
+    assert [g.base_expression for g in worklist(ws, declaration_state="applied").groups] == [
+        "{BASE}"
+    ]
+    assert worklist(ws, declaration_state="pending").groups == ()
+    assert group_with(ws, "{self.base_url}").declarations == ()
+
+    rival = insert_raw(ws, "beta", "caller", words("client.py", "BASE"))
+    assert state_of(ws, rival) == ("pending", "applies-at-next-sync")
+    resync(ws, tmp_path)
+    assert state_of(ws, link) == ("ineffective", "ambiguous")
+    assert state_of(ws, rival) == ("ineffective", "ambiguous")
+    assert next(d for d in worklist(ws).declarations if d.id == link).joined == 0
+
+    assert ws.deployment_links.delete(rival)
+    resync(ws, tmp_path)
+    assert state_of(ws, link) == ("applied", "")
+
+
+def test_scoped_declaration_state_takes_the_first_rule_that_holds() -> None:
+    """The order of the rules decides which reason is shown when several hold: the service, then
+    the caller, then the pass that has not read the declaration, then a joined request, then what
+    the index lost, then what the pass declined (the most telling first), else nothing matched."""
+    link = DeploymentLink(
+        id=7,
+        repository="api",
+        label="scoped",
+        callers=["web"],
+        scope=words("client.py", "BASE"),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+    def state(**change: Any) -> tuple[str, str]:
+        arguments: dict[str, Any] = {
+            "pass_reads": {7: NOW.isoformat()},
+            "indexed": True,
+            "caller_indexed": True,
+            "serves_routes": True,
+            "found": True,
+            "requested": True,
+            "joined": 0,
+            "declined": {},
+        }
+        arguments.update(change)
+        return scoped_declaration_state(link, **arguments)
+
+    assert state(indexed=False, caller_indexed=False, pass_reads=None, joined=3) == (
+        "invalidated",
+        "repository-not-indexed",
+    )
+    assert state(caller_indexed=False, pass_reads=None, joined=3) == (
+        "invalidated",
+        "caller-not-indexed",
+    )
+    assert state(pass_reads=None, joined=3, serves_routes=False) == (
+        "pending",
+        "applies-at-next-sync",
+    )
+    assert state(pass_reads={7: "an older revision"}) == ("pending", "applies-at-next-sync")
+    assert state(joined=2, serves_routes=False, found=False, requested=False) == ("applied", "")
+    assert state(serves_routes=False, found=False, requested=False) == (
+        "invalidated",
+        "repository-serves-no-routes",
+    )
+    assert state(found=False, requested=False, declined={"ambiguous": 1}) == (
+        "invalidated",
+        "scope-not-found",
+    )
+    assert state(requested=False, declined={"ambiguous": 1}) == (
+        "invalidated",
+        "base-no-longer-requested",
+    )
+    declined = {
+        "scope-unidentified": 1,
+        "injected-root-unselected": 1,
+        "route-unmatched": 1,
+        "scope-too-broad": 1,
+        "ambiguous": 1,
+    }
+    for reason in (
+        "ambiguous",
+        "scope-too-broad",
+        "route-unmatched",
+        "scope-unidentified",
+        "injected-root-unselected",
+    ):
+        assert state(declined=declined) == ("ineffective", reason)
+        del declined[reason]
+    assert state(declined={"callers-excluded": 1}) == ("ineffective", "no-request-matched")
+    assert state() == ("ineffective", "no-request-matched")
+
+
+def test_a_scoped_declaration_whose_symbol_is_gone_is_invalidated(
+    scoped_built: Workspace, tmp_path: Path
+) -> None:
+    """The declaration names ``read_item``; the function is renamed away and the sync runs: the
+    symbol is not in the file any more, so the declaration is invalidated with the reason that
+    its scope was not found, whatever else the file still does. It is kept, not deleted."""
+    ws = scoped_built
+    link = declare(ws, "alpha", "caller", "client.py", "BASE", symbol="read_item")
+    resync(ws, tmp_path)
+    assert state_of(ws, link) == ("applied", "")
+
+    source = tmp_path / "repos" / "caller" / "client.py"
+    text = source.read_text()
+    assert text.count("def read_item(item_id):") == 1
+    source.write_text(text.replace("def read_item(item_id):", "def read_item_renamed(item_id):"))
+    resync(ws, tmp_path)
+
+    assert state_of(ws, link) == ("invalidated", "scope-not-found")
+    assert [d.id for d in ws.deployment_links.list_all()] == [link]
+    assert decided(ws)[(*CLIENT, "read_item_renamed")].decision == UNKNOWN_BASE
+
+
+def test_a_scoped_declaration_whose_base_is_now_stated_is_invalidated(
+    scoped_built: Workspace, tmp_path: Path
+) -> None:
+    """The declaration names ``read_item`` and the base it reads. The source now states the URL
+    there, so no request in that symbol leaves its base unstated: the declaration is invalidated
+    with that reason. The other functions that read ``BASE`` do not keep it alive."""
+    ws = scoped_built
+    link = declare(ws, "alpha", "caller", "client.py", "BASE", symbol="read_item")
+    resync(ws, tmp_path)
+    assert state_of(ws, link) == ("applied", "")
+
+    source = tmp_path / "repos" / "caller" / "client.py"
+    text = source.read_text()
+    before = 'def read_item(item_id):\n    return requests.get(f"{BASE}/v1/items/{item_id}"'
+    after = (
+        'def read_item(item_id):\n    return requests.get(f"https://items.example.test/v1/items/'
+        '{item_id}"'
+    )
+    assert text.count(before) == 1
+    source.write_text(text.replace(before, after))
+    resync(ws, tmp_path)
+
+    assert decided(ws)[(*CLIENT, "read_item")].decision != UNKNOWN_BASE
+    assert decided(ws)[(*CLIENT, "shadowed_read")].decision == UNKNOWN_BASE
+    assert state_of(ws, link) == ("invalidated", "base-no-longer-requested")
+
+
+def test_a_symbol_named_twice_in_a_file_is_not_an_identifiable_scope(
+    scoped_built: Workspace, tmp_path: Path
+) -> None:
+    """A second ``def read_item`` makes the name stand for two entities, so it identifies no scope:
+    the declaration on it joins nothing, every request it concerns says ``scope-unidentified`` and
+    names the declaration, the declaration is invalidated (its scope is not found), and the worklist
+    no longer offers ``read_item`` as a scope while it still offers the file and other symbols."""
+    ws = scoped_built
+    link = declare(ws, "alpha", "caller", "client.py", "BASE", symbol="read_item")
+    resync(ws, tmp_path)
+    assert state_of(ws, link) == ("applied", "")
+
+    source = tmp_path / "repos" / "caller" / "client.py"
+    source.write_text(
+        source.read_text()
+        + '\n\ndef read_item(item_id):\n    return requests.get(f"{BASE}/v1/items/{item_id}")\n'
+    )
+    resync(ws, tmp_path)
+
+    twice = [
+        r
+        for r in all_requests(ws)
+        if r.site.repository == slug(ws, "caller")
+        and r.site.path == "client.py"
+        and r.symbol == "read_item"
+    ]
+    assert len(twice) == 2
+    for request in twice:
+        assert request.status == UNKNOWN_BASE
+        assert request.declaration_outcome == "scope-unidentified"
+        assert request.declaration_ids == (link,)
+    assert state_of(ws, link) == ("invalidated", "scope-not-found")
+
+    group, _ = opened(ws, "{BASE}")
+    caller = slug(ws, "caller")
+    symbols = {
+        c.symbol for c in group.scope_choices if c.repository == caller and c.path == "client.py"
+    }
+    assert symbols == {None, "write_item", "list_items", "shadowed_read"}

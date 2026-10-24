@@ -365,6 +365,10 @@ class HttpCallDecisionRow(BaseModel):
     #: Read back with the row; ignored when one is written.
     path: str | None = None
     src_key: str | None = None
+    #: The asking entity's qualified name and type (``file`` for a request at module level),
+    #: read back with the row; ignored when one is written.
+    src_qualified_name: str | None = None
+    src_type: str | None = None
 
 
 class HttpRefusalNear(BaseModel):
