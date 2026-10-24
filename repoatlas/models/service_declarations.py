@@ -417,6 +417,9 @@ class ServiceDeclarationView(BaseModel):
     updated_at: datetime
     state: ServiceDeclarationState
     reason: ServiceDeclarationReason = ""
+    #: What it rests on: always an operator's statement, never source evidence, so a surface can
+    #: label it apart from what the source shows.
+    basis: Literal["declared"] = "declared"
     #: For an applied classification: the requests it shows as a known external dependency.
     requests: int = 0
 
