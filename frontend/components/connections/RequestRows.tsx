@@ -1,7 +1,7 @@
 "use client";
 
 import type { ConnectionRequest } from "@/lib/api/generated";
-import { refusalText, SCOPE_REFUSAL_TEXT } from "@/lib/model/connections";
+import { identityLabel, refusalText, SCOPE_REFUSAL_TEXT } from "@/lib/model/connections";
 
 import classes from "./Connections.module.css";
 
@@ -21,6 +21,13 @@ export function RequestRows({
             {request.method && <span className={classes.method}>{request.method}</span>}
             <span className={classes.route}>{request.route || "(path not read)"}</span>
             <span className={classes.tag}>{request.status}</span>
+            <span
+              className={classes.tag}
+              data-identity={request.identity ?? "unresolved"}
+              title="Who answers this request, as the index and your classifications say"
+            >
+              {identityLabel(request.identity)}
+            </span>
             {request.joined_by != null && (
               <span className={classes.tag} data-tone="success">
                 joined by declaration #{request.joined_by}
@@ -67,6 +74,12 @@ export function RequestRows({
           {!request.scopable && request.scope_refusal && request.scope_refusal !== "not-base-unknown" && (
             <p className={classes.detail}>
               <span className={classes.tag}>{request.scope_refusal}</span> {SCOPE_REFUSAL_TEXT[request.scope_refusal] ?? ""}
+            </p>
+          )}
+          {request.identity === "known-external" && (
+            <p className={classes.detail}>
+              Classified by you as external service #{request.external_service_id}. The decision stays{" "}
+              <span className={classes.tag}>{request.status}</span>; nothing is joined.
             </p>
           )}
           {request.declaration_outcome && request.status !== "linked" && (

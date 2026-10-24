@@ -3,10 +3,17 @@ import type {
   ConnectionRequest,
   DeclarationView,
   DeploymentLinkCreateRequest,
+  ExternalServiceFields,
   HistoryEntry,
   HttpConnectionPreviewRequest,
   HttpConnectionPreviewResponse,
   PreviewRow,
+  ServiceDeclarationCreateRequest,
+  ServiceDeclarationPreviewRequest,
+  ServiceDeclarationPreviewResponse,
+  ServiceDeclarationUpdateRequest,
+  ServiceDeclarationView,
+  ServiceHistoryEntry,
 } from "@/lib/api/generated";
 
 import { plural } from "./format";
@@ -19,6 +26,7 @@ export interface ConnectionFilters {
   text: string;
   declarationState: string;
   includeResolved: boolean;
+  identity: string;
 }
 
 export const NO_FILTERS: ConnectionFilters = {
@@ -28,6 +36,7 @@ export const NO_FILTERS: ConnectionFilters = {
   text: "",
   declarationState: "",
   includeResolved: false,
+  identity: "",
 };
 
 /** The unresolved decisions a user can filter by, each in the join's own words. */
@@ -123,6 +132,8 @@ export function groupTitle(group: ConnectionGroup): string {
 
 /** Why a group cannot be mapped, or null when it can. */
 export function unmappableReason(group: ConnectionGroup): string | null {
+  // a classified origin is not mapped to an indexed service until the classification is revoked
+  if (group.external_service) return classifiedReason(group.external_service);
   if (group.declarable > 0) return null;
   if (group.kind === "base-not-stated") return "The source does not state this base, so there is no origin to map.";
   return "The source already identified this origin; a declaration never overrides what it establishes.";
@@ -214,10 +225,17 @@ export function summaryLine(s: {
   declarable: number;
   base_not_stated: number;
   linked_by_declaration: number;
+  known_external?: number;
+  unresolved_identity?: number;
 }): string {
   const parts = [`${plural(s.unresolved, "unresolved request")}`, `${s.declarable} can be mapped`];
   if (s.base_not_stated > 0) parts.push(`${s.base_not_stated} with no stated base`);
   if (s.linked_by_declaration > 0) parts.push(`${s.linked_by_declaration} joined by your declarations`);
+  // the identity split is stated once a classification shows some request as a known external dependency
+  const known = s.known_external ?? 0;
+  if (known > 0) {
+    parts.push(`${known} known external`, `${s.unresolved_identity ?? 0} unresolved identity`);
+  }
   return parts.join(" · ");
 }
 
@@ -247,6 +265,7 @@ export function filterFields(filters: ConnectionFilters) {
     ...(filters.caller ? { caller: filters.caller } : {}),
     ...(filters.text.trim() ? { text: filters.text.trim() } : {}),
     ...(filters.declarationState ? { declaration_state: filters.declarationState as never } : {}),
+    ...(filters.identity ? { identity: filters.identity as IdentityName } : {}),
     include_resolved: filters.includeResolved,
   };
 }
@@ -435,4 +454,243 @@ export function scopeSummary(scope: DeclarationScope): string[] {
     `base ${maskedBase(scope.base_shown)}`,
     scope.base_path ? `base path ${scope.base_path}` : "no base path",
   ];
+}
+
+// ---------------------------------------------------------------------------------------------
+// External services: an origin no indexed repository answers, classified by the operator. A
+// classification is a statement read when the worklist is built; it never joins a request, so a
+// request keeps its decision and chain and only its identity is shown differently.
+
+/** Who answers a request, as the index and the operator's classifications say. */
+export type IdentityName = NonNullable<ConnectionRequest["identity"]>;
+
+export const IDENTITY_LABEL: Readonly<Record<IdentityName, string>> = {
+  "known-external": "known external dependency",
+  identified: "identified",
+  unresolved: "unresolved service identity",
+};
+
+/** A request's identity in words. A response without the field is an unresolved identity. */
+export function identityLabel(identity: IdentityName | null | undefined): string {
+  return IDENTITY_LABEL[identity ?? "unresolved"];
+}
+
+/** The identities the worklist can be filtered by. */
+export const IDENTITY_OPTIONS: { value: IdentityName; label: string }[] = [
+  { value: "unresolved", label: IDENTITY_LABEL.unresolved },
+  { value: "known-external", label: IDENTITY_LABEL["known-external"] },
+  { value: "identified", label: IDENTITY_LABEL.identified },
+];
+
+/** An external service's state against the stored decisions (derived on every read, never stored). */
+export type ExternalStateName = ServiceDeclarationView["state"];
+
+export const EXTERNAL_STATE_LABEL: Readonly<Record<ExternalStateName, string>> = {
+  applied: "Applied",
+  ineffective: "Ineffective",
+  invalidated: "Invalidated",
+};
+
+export const EXTERNAL_STATE_MEANING: Readonly<Record<ExternalStateName, string>> = {
+  applied: "The unmatched requests at this origin are shown as a known external dependency.",
+  ineffective: "It changes no request now; the reason says why.",
+  invalidated: "What it states no longer holds in the index.",
+};
+
+/** Why an external service is ineffective or invalidated, in a sentence. */
+export const EXTERNAL_REASON_TEXT: Readonly<Record<string, string>> = {
+  "": "",
+  "index-not-built": "No sync has stored the join's decisions yet.",
+  "origin-no-longer-requested": "No request is made to this origin any more.",
+  "source-identifies-origin": "The source now identifies a service at this origin; a classification never overrides it.",
+  "origin-declared-as-deployment": "A deployment link now states this origin as a deployment.",
+  "authenticated-service-not-indexed": "A repository it authenticates for is no longer indexed.",
+};
+
+/** The fields of an external service, or null for any other kind of declaration. */
+export function externalOf(view: ServiceDeclarationView): ExternalServiceFields | null {
+  const fields = view.fields;
+  return isExternalFields(fields) ? fields : null;
+}
+
+function isExternalFields(fields: ServiceDeclarationView["fields"]): fields is ExternalServiceFields {
+  return fields.kind === "external_service";
+}
+
+/** The external services in a response, newest first as the server lists them. */
+export function externalServices(views: readonly ServiceDeclarationView[]): ServiceDeclarationView[] {
+  return views.filter((view) => externalOf(view) !== null);
+}
+
+/** The group header's tag for a classified origin. Only an applied classification makes requests
+ *  known external dependencies; one that is not applied says its state instead. */
+export function externalTag(view: ServiceDeclarationView): string {
+  const label = externalOf(view)?.label ?? "";
+  return view.state === "applied"
+    ? `known external dependency: ${label}`
+    : `external service ${label} (${view.state})`;
+}
+
+/** What replaces the Map control on a classified origin. */
+export function classifiedReason(view: Pick<ServiceDeclarationView, "id">): string {
+  return `Classified as external service #${view.id}; revoke it to map this origin to an indexed service.`;
+}
+
+/** Whether a group can be classified: it states a non-loopback origin, some of its requests were
+ *  left http-service-unmatched, and it is not classified already. The server remains the authority. */
+export function canClassify(group: ConnectionGroup): boolean {
+  return (
+    group.kind === "stated-origin" &&
+    !!group.origin &&
+    !group.loopback &&
+    !group.external_service &&
+    (group.statuses["http-service-unmatched"] ?? 0) > 0
+  );
+}
+
+/** What the response says an authentication relation rests on. The classification is the operator's
+ *  statement, so it reads "operator-declared" unless the response itself says `source`. */
+export function authenticatesBasis(basis: string | null | undefined): string {
+  return basis === "source" ? "source-backed" : "operator-declared";
+}
+
+/** One authenticated target: its repository, and its environment or any. */
+export function authTargetLine(target: { repository: string; environment?: string | null }): string {
+  return `${target.repository} (${target.environment ? target.environment : "any environment"})`;
+}
+
+/** One row of the authentication target list: both texts, as typed. */
+export interface AuthTargetForm {
+  repository: string;
+  environment: string;
+}
+
+export interface ClassifyForm {
+  label: string;
+  provider: string;
+  category: string;
+  note: string;
+  authenticates: AuthTargetForm[];
+}
+
+export const EMPTY_CLASSIFY: ClassifyForm = { label: "", provider: "", category: "", note: "", authenticates: [] };
+
+// the server's own limits (repoatlas/models/service_declarations.py), stated here to refuse early
+const MAX_LABEL = 300;
+const MAX_WORDS = 100;
+const MAX_NOTE = 500;
+const MAX_TARGETS = 20;
+const ORIGIN_SHAPE = /^https?:\/\/[^\s/?#@*]+$/i;
+
+/** The classify form filled from a stored external service, for editing it. */
+export function classifyFormFrom(fields: ExternalServiceFields): ClassifyForm {
+  return {
+    label: fields.label,
+    provider: fields.provider ?? "",
+    category: fields.category ?? "",
+    note: fields.note ?? "",
+    authenticates: (fields.authenticates ?? []).map((t) => ({
+      repository: t.repository,
+      environment: t.environment ?? "",
+    })),
+  };
+}
+
+/** What the form can tell before asking the server, which remains the authority: a label, an
+ *  origin that is scheme://host[:port], and a target list the server would accept. */
+export function classifyProblems(origin: string | null | undefined, form: ClassifyForm): string[] {
+  const problems: string[] = [];
+  if (!origin) problems.push("This group states no origin to classify.");
+  else if (!ORIGIN_SHAPE.test(origin)) {
+    problems.push("The origin is scheme://host[:port], with no path, query, credential or wildcard.");
+  }
+  const label = form.label.trim();
+  if (!label) problems.push("Give the service a label.");
+  else if (label.length > MAX_LABEL) problems.push(`A label is at most ${MAX_LABEL} characters.`);
+  if (form.provider.trim().length > MAX_WORDS) problems.push(`A provider is at most ${MAX_WORDS} characters.`);
+  if (form.category.trim().length > MAX_WORDS) problems.push(`A category is at most ${MAX_WORDS} characters.`);
+  if (form.note.trim().length > MAX_NOTE) problems.push(`A note is at most ${MAX_NOTE} characters.`);
+  if (form.authenticates.length > MAX_TARGETS) {
+    problems.push(`At most ${MAX_TARGETS} authentication targets.`);
+  }
+  if (form.authenticates.some((t) => !t.repository)) {
+    problems.push("Choose a repository for each authentication target, or remove the row.");
+  }
+  const named = form.authenticates.map((t) => `${t.repository}\u0000${t.environment.trim()}`);
+  if (new Set(named).size !== named.length) {
+    problems.push("A repository and environment is named once.");
+  }
+  return problems;
+}
+
+/** The fields a classification states, as the server stores them. */
+export function classifyFields(origin: string, form: ClassifyForm): ExternalServiceFields {
+  return {
+    kind: "external_service",
+    origin,
+    label: form.label.trim(),
+    provider: form.provider.trim() || null,
+    category: form.category.trim() || null,
+    note: form.note.trim() || null,
+    authenticates: form.authenticates.map((t) => ({
+      repository: t.repository,
+      environment: t.environment.trim() || null,
+    })),
+  };
+}
+
+/** Ask what a classification would do. Null until the form has no problem the page can see. The
+ *  worklist group it is made from goes in `group`; an edit names the declaration in `id`. */
+export function classifyPreviewRequest(
+  origin: string | null | undefined,
+  form: ClassifyForm,
+  options: { group?: string | null; id?: number | null } = {},
+): ServiceDeclarationPreviewRequest | null {
+  if (!origin || classifyProblems(origin, form).length > 0) return null;
+  return {
+    context: { scope: "global" },
+    fields: classifyFields(origin, form),
+    ...(options.group ? { group: options.group } : {}),
+    ...(options.id != null ? { id: options.id } : {}),
+  };
+}
+
+/** The one write a classification is. The group it was made from is its provenance. */
+export function classifyCreateRequest(
+  origin: string,
+  form: ClassifyForm,
+  group: string | null,
+): ServiceDeclarationCreateRequest {
+  return {
+    context: { scope: "global" },
+    fields: classifyFields(origin, form),
+    provenance: { via: "ui", note: null, request_group: group },
+  };
+}
+
+/** An edit: the same origin (what a classification is about never changes), the other words new. */
+export function classifyUpdateRequest(
+  id: number,
+  origin: string,
+  form: ClassifyForm,
+): ServiceDeclarationUpdateRequest {
+  return {
+    context: { scope: "global" },
+    id,
+    fields: classifyFields(origin, form),
+    provenance: { via: "ui", note: null },
+  };
+}
+
+/** A classification's preview as a sentence, in the words the interface commits to. */
+export function servicePreviewLine(preview: ServiceDeclarationPreviewResponse): string {
+  const known = preview.counts?.would_be_known_external ?? 0;
+  const stay = preview.counts?.stay_identified ?? 0;
+  const line = `${plural(known, "request")} would be shown as a known external dependency; their decision stays http-service-unmatched; nothing is joined.`;
+  return stay > 0 ? `${line} ${plural(stay, "request")} the source already identifies stay identified.` : line;
+}
+
+/** One entry of the external services' audit trail as a sentence. */
+export function serviceHistoryLine(entry: ServiceHistoryEntry): string {
+  return `${ACTION_TEXT[entry.action]} external service #${entry.subject_id} ${entry.subject}`;
 }
