@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict
 
 from repoatlas.models.deployment_targets import DeclarationProvenance
 from repoatlas.models.service_declarations import (
+    MAX_SERVICE_DECLARATIONS,
     SERVICE_DECLARATION_FIELDS,
     ServiceDeclaration,
     ServiceDeclarationConflictError,
@@ -28,9 +29,6 @@ from repoatlas.models.service_declarations import (
     ServiceDeclarationLimitError,
 )
 from repoatlas.storage.sqlite.database import Database
-
-#: Declarations the store keeps: a person's list, not a crawl.
-MAX_SERVICE_DECLARATIONS = 500
 
 SERVICE_DECLARATIONS_SELECT = (
     "SELECT id, kind, identity_key, fields_json, created_at, updated_at FROM service_declarations "
