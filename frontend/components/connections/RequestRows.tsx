@@ -1,7 +1,7 @@
 "use client";
 
 import type { ConnectionRequest } from "@/lib/api/generated";
-import { refusalText } from "@/lib/model/connections";
+import { refusalText, SCOPE_REFUSAL_TEXT } from "@/lib/model/connections";
 
 import classes from "./Connections.module.css";
 
@@ -49,6 +49,24 @@ export function RequestRows({
           {request.reason && (
             <p className={classes.detail}>
               <span className={classes.tag}>{request.reason}</span> {refusalText(request.reason)}
+            </p>
+          )}
+          {request.scopable && (
+            <p className={classes.detail}>
+              <span className={classes.tag}>can be scoped</span>
+              {request.symbol ? (
+                <>
+                  {" "}
+                  written in <span className={classes.mono}>{request.symbol}</span>
+                </>
+              ) : (
+                " written at the file's module level"
+              )}
+            </p>
+          )}
+          {!request.scopable && request.scope_refusal && request.scope_refusal !== "not-base-unknown" && (
+            <p className={classes.detail}>
+              <span className={classes.tag}>{request.scope_refusal}</span> {SCOPE_REFUSAL_TEXT[request.scope_refusal] ?? ""}
             </p>
           )}
           {request.declaration_outcome && request.status !== "linked" && (
