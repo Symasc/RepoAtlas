@@ -7,10 +7,10 @@ logic (ARCHITECTURE.md §1 rule 3).
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 
@@ -27,6 +27,9 @@ from repoatlas.rendering import (
 )
 from repoatlas.rendering.progress import TerminalProgress
 from repoatlas.services.workspace import Workspace, open_workspace
+
+if TYPE_CHECKING:
+    from repoatlas.models.service_declarations import ExternalServiceFields
 
 app = typer.Typer(
     name="repoatlas",
@@ -449,23 +452,80 @@ def links_export(
                     ),
                 )
                 for link in workspace.deployment_links.list_all()
+            ],
+            # `None` when there are none: the key is then not written (exclude_none below).
+            service_declarations=[
+                declaration.fields
+                for declaration in workspace.service_declarations.list_all("external_service")
             ]
+            or None,
         )
     finally:
         workspace.close()
-    # exclude_none: an unscoped link has no `scope` key, so a file without scoped declarations is
-    # the file an older RepoAtlas wrote and reads.
+    # exclude_none: an unscoped link has no `scope` key and an export with no external service has
+    # no `service_declarations` key, so a file without either is the file an older RepoAtlas wrote
+    # and reads.
     text = exported.model_dump_json(indent=2, exclude_none=True)
     if any(link.scope is not None for link in exported.links):
         typer.echo(
             "Note: the file holds a scoped declaration; an older RepoAtlas will refuse the file.",
             err=True,
         )
+    services = exported.service_declarations or []
+    if services:
+        typer.echo(
+            "Note: the file holds external service declarations; an older RepoAtlas will refuse "
+            "the file.",
+            err=True,
+        )
     if file is None:
         typer.echo(text)
     else:
         file.write_text(text + "\n", encoding="utf-8")
-        typer.echo(f"Wrote {len(exported.links)} link(s) to {file}", err=True)
+        also = f" and {len(services)} external service(s)" if services else ""
+        typer.echo(f"Wrote {len(exported.links)} link(s){also} to {file}", err=True)
+
+
+def _import_services(workspace: Workspace, services: Sequence[ExternalServiceFields]) -> int:
+    """Store the external services of an import, in the file's order, and return how many were new.
+
+    The whole list is judged before anything is stored: one the index already holds in other words
+    (or the file states twice in other words), or one more than the store keeps, refuses the
+    import. One stated word for word again is skipped."""
+    from repoatlas.models.service_declarations import (
+        ServiceDeclarationConflictError,
+        ServiceDeclarationLimitError,
+    )
+    from repoatlas.storage.sqlite.service_declarations import MAX_SERVICE_DECLARATIONS
+
+    store = workspace.service_declarations
+    present = store.list_all()
+    held = {e.identity_key: e.fields for e in present if e.kind == "external_service"}
+    new: dict[str, ExternalServiceFields] = {}
+    for service in services:
+        earlier = new.get(service.origin) or held.get(service.origin)
+        if earlier is None:
+            new[service.origin] = service
+        elif earlier != service:
+            typer.echo(
+                f"Not imported: {service.origin} is classified as an external service in other "
+                "words (in the index or in this file): revoke one of them first",
+                err=True,
+            )
+            raise typer.Exit(ExitCode.RUNTIME)
+    if len(present) + len(new) > MAX_SERVICE_DECLARATIONS:
+        typer.echo(
+            f"Not imported: at most {MAX_SERVICE_DECLARATIONS} service declarations are kept",
+            err=True,
+        )
+        raise typer.Exit(ExitCode.RUNTIME)
+    for service in new.values():
+        try:
+            store.create(service, via="import")
+        except (ServiceDeclarationConflictError, ServiceDeclarationLimitError) as exc:
+            typer.echo(f"{service.origin}: {exc}", err=True)
+            raise typer.Exit(ExitCode.RUNTIME) from exc
+    return len(new)
 
 
 @links_app.command("import")
@@ -473,7 +533,9 @@ def links_import(
     file: Annotated[Path, typer.Argument(help="A file `repoatlas links export` wrote.")],
 ) -> None:
     """Add the links in FILE. A link already recorded, the same in every field, is skipped.
-    They take part in HTTP links from the next sync."""
+    They take part in HTTP links from the next sync. External service declarations in FILE are
+    added first and skipped the same way; they are read when the worklist is, never joined. A
+    file with a redirect or a permitted callback is refused whole."""
     from pydantic import ValidationError
 
     from repoatlas.models.deployment_targets import (
@@ -481,6 +543,7 @@ def links_import(
         LinkLimitError,
         LinksExport,
     )
+    from repoatlas.models.service_declarations import ExternalServiceFields
 
     try:
         if file.stat().st_size > _LINKS_FILE_CEILING:
@@ -489,9 +552,24 @@ def links_import(
     except (OSError, ValidationError) as exc:
         typer.echo(f"Not an export of deployment links: {exc}", err=True)
         raise typer.Exit(ExitCode.RUNTIME) from exc
+    declared = exported.service_declarations or []
+    services = [item for item in declared if isinstance(item, ExternalServiceFields)]
+    if len(services) != len(declared):
+        # Judged before the index is opened: nothing of this file is stored.
+        typer.echo(
+            "Not imported: redirects and permitted callbacks are not supported in this version",
+            err=True,
+        )
+        raise typer.Exit(ExitCode.RUNTIME)
     workspace = _open()
     added = skipped = 0
     try:
+        if declared:
+            new_services = _import_services(workspace, services)
+            typer.echo(
+                f"Added {new_services} external service(s); {len(services) - new_services} "
+                "already recorded."
+            )
         store = workspace.deployment_links
         present: dict[str, set[str]] = {}
         for item in exported.links:
