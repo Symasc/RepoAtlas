@@ -11,6 +11,12 @@ against what the source establishes. It consults them only for a request the sou
 unlinked, and links it when exactly one handler of the linked repository serves it; those
 three hops are then ``declared``, each place naming the link, never a file. A source-proven
 link is never overridden. Pure: reads the links and routes it is given, writes nothing.
+
+A scoped declaration (``DeploymentLink.scope``) states no URL, so :func:`plan_link_exposures` adds
+nothing for it. :func:`plan_scoped_exposures` gives it one claim per route of the repository it
+names instead, marked :data:`~repoatlas.graph.http_scopes.HTTP_SCOPED_EXPOSURE`: never stored,
+never offered to the ordinary fallback, and consulted by the join only for a request the
+declaration covers.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from repoatlas.graph.deploy_identity import ServedRoute
+from repoatlas.graph.http_scopes import HTTP_SCOPED_EXPOSURE
 from repoatlas.models import http
 from repoatlas.models.deployment_targets import DeploymentLink
 from repoatlas.models.parsing import EdgeType, EntityType
@@ -99,6 +106,74 @@ def plan_link_exposures(
                     edge_type=EdgeType.EXPOSES_HTTP_ENDPOINT,
                     target_kind=EntityType.HTTP_ENDPOINT,
                     target_key=body,
+                    line_start=line,
+                    line_end=route.line_end if route.line_start is not None else line,
+                    meta_json=json.dumps(meta, sort_keys=True),
+                )
+            )
+            added += 1
+            if added >= MAX_LINK_EXPOSURES:
+                break
+    return found
+
+
+def plan_scoped_exposures(
+    links: Iterable[DeploymentLink],
+    routes_by_repo: Mapping[int, Sequence[ServedRoute]],
+    repo_ids: Mapping[str, int],
+) -> list[UnresolvedRefRecord]:
+    """One claim per route the serving repository's code serves, for each scoped declaration whose
+    serving repository and caller are both indexed. A claim carries what an ordinary link's does,
+    and the words of its scope: the file (``scope_path``) and symbol (``scope_symbol``), the hash
+    of the base it serves (``scope_base_key``), how the base is shown (``base_shown``), the route
+    prefix the service mounts its routes under (``base_path``) and the route as the code serves it
+    (``route``, without that prefix). The prefix is the service's, never the request's: the target
+    is the shown base, the prefix and the route, as ``deployment`` is the shown base and the
+    prefix. The base is never a URL, and no claim holds the base text."""
+    found: list[UnresolvedRefRecord] = []
+    for link in sorted(links, key=lambda item: item.id):
+        scope = link.scope
+        if scope is None or len(link.callers) != 1:
+            continue
+        serving, caller = repo_ids.get(link.repository), repo_ids.get(link.callers[0])
+        if serving is None or caller is None:
+            continue
+        place = LINK_PLACE.format(id=link.id)
+        base = f"{scope.base_shown}{scope.base_path}"
+        added = 0
+        for route in routes_by_repo.get(serving, ()):
+            method, _, path = route.body.partition(" ")
+            line = route.line_start if route.line_start is not None else route.declared_at
+            if line is None or http.canonical_route(route.body) is None:
+                continue
+            meta = {
+                PENDING_FACT: HTTP_SCOPED_EXPOSURE,
+                "method": method,
+                "route": path,
+                "deployment": base,
+                "identity_source": LINK_SOURCE,
+                "source": LINK_SOURCE,
+                "scope": f"link:{link.id}",
+                "link_id": str(link.id),
+                "link_in": place,
+                "link_label": link.label,
+                "link_callers": json.dumps(sorted(link.callers)),
+                "link_verification": link.verification,
+                **({"link_environment": link.environment} if link.environment else {}),
+                "scope_path": scope.path,
+                **({"scope_symbol": scope.symbol} if scope.symbol else {}),
+                "scope_base_key": scope.base_key,
+                "base_shown": scope.base_shown,
+                "base_path": scope.base_path,
+            }
+            found.append(
+                UnresolvedRefRecord(
+                    repo_id=route.repo_id,
+                    file_id=route.file_id,
+                    src_id=route.src_id,
+                    edge_type=EdgeType.EXPOSES_HTTP_ENDPOINT,
+                    target_kind=EntityType.HTTP_ENDPOINT,
+                    target_key=http.endpoint_body(method, f"{base}{path}"),
                     line_start=line,
                     line_end=route.line_end if route.line_start is not None else line,
                     meta_json=json.dumps(meta, sort_keys=True),
