@@ -69,11 +69,13 @@ from repoatlas.graph.graphql_schema import symbols_by_file
 from repoatlas.graph.http_claims import HttpClaimPlan, plan_http_claims, served_by_servers
 from repoatlas.graph.http_crossings import (
     HttpCrossingPlan,
+    ScopedDeclarations,
     decision_rows,
     plan_http_crossings,
 )
+from repoatlas.graph.http_scopes import FileScope, ScopeSymbol
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
-from repoatlas.graph.link_exposures import plan_link_exposures
+from repoatlas.graph.link_exposures import plan_link_exposures, plan_scoped_exposures
 from repoatlas.graph.modules import ModuleResolver, declared_constraints
 from repoatlas.graph.ordinary_outcomes import (
     Classifier,
@@ -268,6 +270,60 @@ def _deployment_links(
                 if resolution.link_id is not None and resolution.url:
                     urls[resolution.link_id] = resolution.url
     return list(links), urls
+
+
+def _scoped_declarations(
+    knowledge: SqliteKnowledgeStore,
+    links: Sequence[DeploymentLink],
+    routes: Sequence[ServedRoute],
+    repo_ids: Mapping[str, int],
+    symbols: Sequence[SymbolRow],
+    by_id: Mapping[int, FileRow],
+) -> ScopedDeclarations | None:
+    """What the join needs for the scoped declarations: their exposures, and for each file one
+    names what the file offers its scope -- its entities, and the ``USES`` pairs the per-file
+    pass asserted there (the global pass's own are being replaced, so never read). ``None`` when
+    no declaration has a service and a caller to join."""
+    by_repo: dict[int, list[ServedRoute]] = defaultdict(list)
+    for route in routes:
+        by_repo[route.repo_id].append(route)
+    exposures = plan_scoped_exposures(links, by_repo, repo_ids)
+    if not exposures:
+        return None
+    named = {
+        (link.callers[0], link.scope.path)
+        for link in links
+        if link.scope is not None and len(link.callers) == 1
+    }
+    file_ids = {
+        (row.repo_slug, row.rel_path): row.file_id
+        for row in by_id.values()
+        if (row.repo_slug, row.rel_path) in named
+    }
+    wanted = set(file_ids.values())
+    in_file: dict[int, list[SymbolRow]] = defaultdict(list)
+    for symbol in symbols:
+        if symbol.file_id in wanted:
+            in_file[symbol.file_id].append(symbol)
+    files: dict[tuple[str, str], FileScope] = {}
+    for place, file_id in sorted(file_ids.items()):
+        members = in_file.get(file_id, [])
+        pairs = [
+            (user, used)
+            for user, used, asserted_in, producer in knowledge.list_uses_targets(
+                [symbol.entity_id for symbol in members]
+            )
+            if asserted_in == file_id and producer != GLOBAL_PARSER
+        ]
+        files[place] = FileScope.build(
+            (
+                ScopeSymbol(s.entity_id, s.file_id, s.type.value, s.qualified_name)
+                for s in members
+                if s.qualified_name
+            ),
+            pairs,
+        )
+    return ScopedDeclarations(exposures, files)
 
 
 @dataclass(frozen=True, slots=True)
@@ -890,10 +946,20 @@ class ReferenceLinker:
             # for a request the source leaves unlinked, never weighed against the source
             # (repoatlas.graph.link_exposures).
             read_links = self._knowledge.list_deployment_links()
+            repo_ids = {row.repo_slug: row.repo_id for row in by_id.values()}
+            url_links = [link for link in read_links if link.scope is None]
             stated_links = plan_link_exposures(
-                *_deployment_links(read_links, claims, by_id),
+                *_deployment_links(url_links, claims, by_id), decided.code_routes, repo_ids
+            )
+            # A scoped declaration states no URL: it joins only a request its own words cover
+            # (repoatlas.graph.http_scopes), through the routes of the repository it names.
+            scopes = _scoped_declarations(
+                self._knowledge,
+                [link for link in read_links if link.scope is not None],
                 decided.code_routes,
-                {row.repo_slug: row.repo_id for row in by_id.values()},
+                repo_ids,
+                symbols,
+                by_id,
             )
             # The one HTTP decision that joins two repositories: exposure and request
             # claims, both per file or derived from them, never this pass's previous output.
@@ -910,6 +976,7 @@ class ReferenceLinker:
                 file_rows,
                 producer=GLOBAL_PARSER,
                 handler_key=_handler_keys(symbols, by_id),
+                scopes=scopes,
             )
             edges.extend(crossings.edges)
             # Generated declarations, from the schema files their configuration loads
