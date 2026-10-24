@@ -11,6 +11,9 @@ import { call } from "./client";
 import type {
   DeploymentLinkCreateRequest,
   HttpConnectionPreviewRequest,
+  ServiceDeclarationCreateRequest,
+  ServiceDeclarationPreviewRequest,
+  ServiceDeclarationUpdateRequest,
 } from "./generated";
 
 const GLOBAL = { scope: "global" } as const;
@@ -92,6 +95,57 @@ export function useScopedDeclaration() {
       void client.invalidateQueries({ queryKey: ["deployment_targets"] });
     },
   });
+}
+
+/**
+ * What classifying an origin as an external service would do, request by request: read-only, asked
+ * again whenever the form changes. Nothing is stored by asking.
+ */
+export function useServicePreview(request: ServiceDeclarationPreviewRequest | null) {
+  return useQuery({
+    queryKey: ["service_declarations", "preview", request],
+    queryFn: ({ signal }) => call("service_declarations/preview", request!, signal),
+    enabled: request !== null,
+    staleTime: 0,
+    retry: false,
+  });
+}
+
+/** What operators did to external services, newest first. */
+export function useServiceHistory(enabled: boolean) {
+  return useQuery({
+    queryKey: ["service_declarations", "history"],
+    queryFn: ({ signal }) =>
+      call("service_declarations/history", { context: GLOBAL, kind: "external_service", limit: 100 }, signal),
+    enabled,
+  });
+}
+
+/**
+ * Classify, edit and revoke an external service. A write takes effect when stored: there is no sync
+ * to wait for, so the worklist and the history are read again.
+ */
+export function useServiceDeclarations() {
+  const client = useQueryClient();
+  const settled = () => {
+    void client.invalidateQueries({ queryKey: ["http_connections"] });
+    void client.invalidateQueries({ queryKey: ["service_declarations"] });
+  };
+  return {
+    create: useMutation({
+      mutationFn: (request: ServiceDeclarationCreateRequest) => call("service_declarations/create", request),
+      onSuccess: settled,
+    }),
+    update: useMutation({
+      mutationFn: (request: ServiceDeclarationUpdateRequest) => call("service_declarations/update", request),
+      onSuccess: settled,
+    }),
+    revoke: useMutation({
+      mutationFn: ({ id, note }: { id: number; note: string | null }) =>
+        call("service_declarations/delete", { context: GLOBAL, id, provenance: { via: "ui", note } }),
+      onSuccess: settled,
+    }),
+  };
 }
 
 /** Declare and revoke: the existing deployment-link writes, with where the action came from. */

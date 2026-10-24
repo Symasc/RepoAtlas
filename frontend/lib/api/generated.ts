@@ -481,6 +481,16 @@ export interface AppliedPageLimits {
   requested?: number | null;
 }
 /**
+ * A repository (at an environment) an external service authenticates for.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "AuthenticationTarget".
+ */
+export interface AuthenticationTarget {
+  environment?: string | null;
+  repository: string;
+}
+/**
  * An indexed service whose served routes match some of a group's requests: a hypothesis.
  *
  * This interface was referenced by `ApiIndex`'s JSON-Schema
@@ -713,6 +723,7 @@ export interface ConnectionGroup {
   callers: string[];
   declarable: number;
   declarations?: DeclarationView[];
+  external_service?: ServiceDeclarationView | null;
   key: string;
   kind: "stated-origin" | "base-not-stated";
   languages: {
@@ -786,6 +797,94 @@ export interface DeclarationScope {
   symbol?: string | null;
 }
 /**
+ * A stored declaration and what became of it against the join's stored decisions.
+ *
+ * Nothing is pending: a classification takes effect when it is stored, because it is read, not
+ * joined. ``state`` and ``reason`` are derived on every read.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ServiceDeclarationView".
+ */
+export interface ServiceDeclarationView {
+  basis?: "declared";
+  created_at: string;
+  fields: ExternalServiceFields | RedirectFields | PermittedCallbackFields;
+  id: number;
+  reason?:
+    | ""
+    | "index-not-built"
+    | "origin-no-longer-requested"
+    | "source-identifies-origin"
+    | "origin-declared-as-deployment"
+    | "repository-not-indexed"
+    | "route-no-longer-served"
+    | "provider-not-classified"
+    | "authenticated-service-not-indexed";
+  requests?: number;
+  state: "applied" | "ineffective" | "invalidated";
+  updated_at: string;
+}
+/**
+ * An origin no indexed repository answers, classified as a service outside the index.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ExternalServiceFields".
+ */
+export interface ExternalServiceFields {
+  /**
+   * At most 20, each repository and environment once.
+   */
+  authenticates?: AuthenticationTarget[];
+  category?: string | null;
+  kind?: "external_service";
+  label: string;
+  note?: string | null;
+  origin: string;
+  provider?: string | null;
+}
+/**
+ * A redirect a person states from a source to a destination, or to an unknown one.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "RedirectFields".
+ */
+export interface RedirectFields {
+  condition?: string | null;
+  destination?: string | null;
+  kind?: "redirect";
+  label?: string | null;
+  note?: string | null;
+  source: RedirectSource;
+}
+/**
+ * Where a redirect starts: an origin and a literal path prefix, or a route one repository
+ * serves.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "RedirectSource".
+ */
+export interface RedirectSource {
+  form: "origin" | "route";
+  origin?: string | null;
+  path?: string;
+  repository?: string | null;
+  route?: string | null;
+}
+/**
+ * A destination an external provider is configured to allow: permitted, not proof that a
+ * redirect occurs.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "PermittedCallbackFields".
+ */
+export interface PermittedCallbackFields {
+  destination: string;
+  kind?: "permitted_callback";
+  label?: string | null;
+  note?: string | null;
+  provider_origin: string;
+}
+/**
  * One request and the join's decision for it.
  *
  * This interface was referenced by `ApiIndex`'s JSON-Schema
@@ -797,6 +896,8 @@ export interface ConnectionRequest {
   declarable?: boolean;
   declaration_ids?: number[];
   declaration_outcome?: string | null;
+  external_service_id?: number | null;
+  identity?: "unresolved" | "known-external" | "identified";
   joined_by?: number | null;
   language: string;
   method?: string | null;
@@ -848,11 +949,13 @@ export interface ConnectionsSummary {
   declarations?: {
     [k: string]: number | undefined;
   };
+  known_external?: number;
   linked_by_declaration: number;
   linked_by_source: number;
   requests: number;
   scopable?: number;
   unresolved: number;
+  unresolved_identity?: number;
 }
 /**
  * What the context resolved to, as identities rather than rows.
@@ -1896,6 +1999,10 @@ export interface HttpConnectionsRequest {
    */
   group?: string | null;
   /**
+   * Only requests with this identity: unresolved, known-external or identified.
+   */
+  identity?: ("unresolved" | "known-external" | "identified") | null;
+  /**
    * Also list groups every request of which is already joined.
    */
   include_resolved?: boolean;
@@ -1927,6 +2034,7 @@ export interface HttpConnectionsResponse {
   has_more?: boolean;
   next_cursor?: string | null;
   requests?: ConnectionRequest[];
+  service_declarations?: ServiceDeclarationView[];
   summary: ConnectionsSummary;
   synced?: boolean;
 }
@@ -2853,6 +2961,165 @@ export interface TermMatch {
   term: string;
 }
 /**
+ * State a declaration. The checks of the preview are run again before anything is stored.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ServiceDeclarationCreateRequest".
+ */
+export interface ServiceDeclarationCreateRequest {
+  context: CapabilityContext;
+  fields: ExternalServiceFields | RedirectFields | PermittedCallbackFields;
+  provenance?: DeclarationProvenance | null;
+}
+/**
+ * Revoke a declaration. The history keeps what it stated and who revoked it.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ServiceDeclarationDeleteRequest".
+ */
+export interface ServiceDeclarationDeleteRequest {
+  context: CapabilityContext;
+  id: number;
+  provenance?: DeclarationProvenance | null;
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ServiceDeclarationDeleteResponse".
+ */
+export interface ServiceDeclarationDeleteResponse {
+  context: CapabilityContext;
+  deleted: boolean;
+  id: number;
+}
+/**
+ * What operators did to service declarations, newest first.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ServiceDeclarationHistoryRequest".
+ */
+export interface ServiceDeclarationHistoryRequest {
+  context: CapabilityContext;
+  /**
+   * One declaration's history.
+   */
+  id?: number | null;
+  kind?: ("external_service" | "redirect" | "permitted_callback") | null;
+  limit?: number;
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ServiceDeclarationHistoryResponse".
+ */
+export interface ServiceDeclarationHistoryResponse {
+  basis?: string;
+  context: CapabilityContext;
+  entries?: ServiceHistoryEntry[];
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ServiceHistoryEntry".
+ */
+export interface ServiceHistoryEntry {
+  action: "create" | "update" | "revoke" | "import";
+  after?: {
+    [k: string]: unknown | undefined;
+  } | null;
+  at: string;
+  before?: {
+    [k: string]: unknown | undefined;
+  } | null;
+  id: number;
+  kind: "external_service" | "redirect" | "permitted_callback";
+  note?: string | null;
+  request_group?: string | null;
+  subject: string;
+  subject_id: number;
+  via: "ui" | "api" | "cli" | "import";
+}
+/**
+ * What stating a declaration would change, before it is stored.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ServiceDeclarationPreviewRequest".
+ */
+export interface ServiceDeclarationPreviewRequest {
+  context: CapabilityContext;
+  fields: ExternalServiceFields | RedirectFields | PermittedCallbackFields;
+  /**
+   * The worklist group it is made from: its origin must be the declared one.
+   */
+  group?: string | null;
+  /**
+   * The declaration this one would replace, when editing.
+   */
+  id?: number | null;
+  limit?: number;
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ServiceDeclarationPreviewResponse".
+ */
+export interface ServiceDeclarationPreviewResponse {
+  basis?: string;
+  can_create: boolean;
+  conflicts_with?: number | null;
+  context: CapabilityContext;
+  counts?: ServiceEffectCounts;
+  duplicate_of?: number | null;
+  group?: string | null;
+  has_more?: boolean;
+  kind: "external_service" | "redirect" | "permitted_callback";
+  requirements?: string[];
+  rows?: ServiceDeclarationPreviewRow[];
+  subject: string;
+}
+/**
+ * What a declaration would do, in requests.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ServiceEffectCounts".
+ */
+export interface ServiceEffectCounts {
+  redirect_steps_added?: number;
+  requests_reached?: number;
+  stay_identified?: number;
+  would_be_known_external?: number;
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ServiceDeclarationPreviewRow".
+ */
+export interface ServiceDeclarationPreviewRow {
+  decision_ref: string;
+  identity_after: "unresolved" | "known-external" | "identified";
+  identity_before: "unresolved" | "known-external" | "identified";
+  method?: string | null;
+  route: string;
+  site: ConnectionSite;
+  steps_added?: number;
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ServiceDeclarationResponse".
+ */
+export interface ServiceDeclarationResponse {
+  basis?: string;
+  context: CapabilityContext;
+  declaration: ServiceDeclarationView;
+}
+/**
+ * Replace what a stored declaration states; what it is about cannot change.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ServiceDeclarationUpdateRequest".
+ */
+export interface ServiceDeclarationUpdateRequest {
+  context: CapabilityContext;
+  fields: ExternalServiceFields | RedirectFields | PermittedCallbackFields;
+  id: number;
+  provenance?: DeclarationProvenance | null;
+}
+/**
  * Ask whether the index is current. Read-only.
  *
  * Detection, never reconciliation. Status says the workspace is not current and
@@ -3086,7 +3353,7 @@ export interface TopologyReferencesResponse {
 export const CONTRACT = "repoatlas-local-api/1" as const;
 
 /** Every endpoint the local API serves, in the server's registry order. */
-export const ENDPOINT_NAMES = ["repositories","status","search","inspect","relationships","impact","dependencies","http_operations","http_connections","http_connections/preview","http_connections/history","deployment_targets","deployment_links/create","deployment_links/update","deployment_links/delete","topology/overview","topology/children","topology/edge","topology/files","topology/names","topology/references"] as const;
+export const ENDPOINT_NAMES = ["repositories","status","search","inspect","relationships","impact","dependencies","http_operations","http_connections","http_connections/preview","http_connections/history","deployment_targets","deployment_links/create","deployment_links/update","deployment_links/delete","topology/overview","topology/children","topology/edge","topology/files","topology/names","topology/references","service_declarations/preview","service_declarations/create","service_declarations/update","service_declarations/delete","service_declarations/history"] as const;
 
 export type EndpointName = (typeof ENDPOINT_NAMES)[number];
 
@@ -3113,4 +3380,9 @@ export interface Endpoints {
   "topology/files": { request: TopologyFilesRequest; response: TopologyFilesResponse };
   "topology/names": { request: TopologyNamesRequest; response: TopologyNamesResponse };
   "topology/references": { request: TopologyReferencesRequest; response: TopologyReferencesResponse };
+  "service_declarations/preview": { request: ServiceDeclarationPreviewRequest; response: ServiceDeclarationPreviewResponse };
+  "service_declarations/create": { request: ServiceDeclarationCreateRequest; response: ServiceDeclarationResponse };
+  "service_declarations/update": { request: ServiceDeclarationUpdateRequest; response: ServiceDeclarationResponse };
+  "service_declarations/delete": { request: ServiceDeclarationDeleteRequest; response: ServiceDeclarationDeleteResponse };
+  "service_declarations/history": { request: ServiceDeclarationHistoryRequest; response: ServiceDeclarationHistoryResponse };
 }
