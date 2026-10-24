@@ -51,6 +51,9 @@ ServiceDeclarationKind = Literal["external_service", "redirect", "permitted_call
 #: Longest provider or category a person may write.
 MAX_SERVICE_WORDS = 100
 
+#: Declarations the store keeps: a person's list, not a crawl.
+MAX_SERVICE_DECLARATIONS = 500
+
 
 def _clean(value: str, what: str, *, multiline: bool = False) -> str:
     """``value`` stripped, refused if it holds a control character or a credential."""
