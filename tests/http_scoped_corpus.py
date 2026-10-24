@@ -12,7 +12,9 @@ under that prefix. ``caller`` makes requests on bases it never states, each writ
   (``doubled``), or as ``/v10`` (``longer``), for ``mounted``;
 * ``other.py``: the same ``BASE`` text in another file;
 * ``qualified.py``: ``config.api_base`` on a module binding, and the same text on a parameter;
-* ``odd.py``: a base cut at 60 characters, a host written as ``http://{host}``, and a stated origin.
+* ``odd.py``: a base cut at 60 characters, a host written as ``http://{host}``, and a stated origin;
+* ``vault.py``: a base that is a call whose argument is a secret-like literal (``SECRET_TOKEN``),
+  which no stored declaration, record or answer may carry.
 
 ``second`` makes the same ``BASE`` request in a file of the same path, ``webts`` does the same in
 TypeScript (``src/api.ts``) and hands its base to a function in options (``src/root.ts``). Every
@@ -176,6 +178,22 @@ ODD = dedent("""\
     def stated_read():
         return requests.get("https://items.example.test/v1/items/1", timeout=5).json()
 """).replace("LONGNAME", LONG_BASE)
+#: A secret-like literal written inside a base expression, and the base text that holds it.
+SECRET_TOKEN = "SCOPED_SECRET_TOKEN_XYZ"  # noqa: S105 - a fake token the privacy test searches for
+SECRET_BASE = f"vault_url('{SECRET_TOKEN}')"
+VAULT = dedent("""\
+    import requests
+
+
+    def vault_url(name):
+        return name
+
+
+    def vault_read(item_id):
+        return requests.get(
+            f"{BASETEXT}/v1/items/{item_id}", timeout=5
+        ).json()
+""").replace("BASETEXT", SECRET_BASE)
 SECOND = dedent("""\
     import os
 
@@ -238,6 +256,7 @@ def repos() -> dict[str, dict[str, str]]:
             "other.py": OTHER,
             "qualified.py": QUALIFIED,
             "odd.py": ODD,
+            "vault.py": VAULT,
         },
         "second": {
             "pyproject.toml": PYPROJECT.format(name="second", dep="requests"),

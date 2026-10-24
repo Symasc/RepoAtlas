@@ -52,9 +52,14 @@ from repoatlas.graph.link_exposures import plan_link_exposures, plan_scoped_expo
 from repoatlas.graph.linker import GLOBAL_PARSER
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.deployment_targets import (
+    DeclarationProvenance,
     DeclarationScope,
     DeploymentLink,
+    DeploymentLinkCreateRequest,
+    DeploymentLinkDeleteRequest,
     DeploymentLinkFields,
+    DeploymentLinkUpdateRequest,
+    DeploymentTargetsRequest,
     ExportedLink,
     LinksExport,
     ScopeConflictError,
@@ -67,6 +72,7 @@ from repoatlas.models.http_connections import (
     HttpConnectionPreviewResponse,
     HttpConnectionsRequest,
     HttpConnectionsResponse,
+    HttpDeclarationHistoryRequest,
     PreviewScope,
 )
 from repoatlas.models.parsing import EdgeType, EntityType
@@ -78,7 +84,7 @@ from repoatlas.storage.sqlite.database import SCHEMA_VERSION
 from repoatlas.storage.sqlite.deployment_links import _symbols_overlap
 from repoatlas.storage.sqlite.migrator import load_migrations, user_version
 from tests.http_connections_corpus import repos
-from tests.http_scoped_corpus import LONG_BASE
+from tests.http_scoped_corpus import LONG_BASE, SECRET_BASE, SECRET_TOKEN
 from tests.http_scoped_corpus import repos as scoped_repos
 from tests.impact_corpus import build
 from tests.incremental_corpus import sync_all
@@ -2133,3 +2139,490 @@ def test_the_preview_and_the_store_overlap_symbols_alike() -> None:
         for other in names:
             assert symbols_overlap(one, other) == _symbols_overlap(one, other), (one, other)
     assert symbols_overlap("A", "A.b") and not symbols_overlap("A", "AB")
+
+
+# -- Phase A2, slice S8: the write path ----------------------------------------------------------
+#
+# Over the API a scoped declaration is made from a worklist group, and the write runs the scoped
+# preview (``http_connections.preview``, the function the worklist shows) again inside one read
+# snapshot: a declaration the preview would block is not stored. These tests write through
+# ``deployment_link_create``/``update``/``delete``, as the API does, and read what is left.
+
+
+def repository_context(workspace: Workspace, name: str) -> CapabilityContext:
+    return CapabilityContext(scope=CapabilityScope.REPOSITORY, repository=slug(workspace, name))
+
+
+def write_fields(
+    workspace: Workspace,
+    caller: str,
+    scope: DeclarationScope,
+    *,
+    label: str = "mapped",
+) -> DeploymentLinkFields:
+    return DeploymentLinkFields(label=label, callers=[slug(workspace, caller)], scope=scope)
+
+
+def declare_over_api(
+    workspace: Workspace,
+    served_by: str,
+    group: str | None,
+    caller: str,
+    scope: DeclarationScope,
+    *,
+    label: str = "mapped",
+    note: str | None = None,
+) -> DeploymentLink:
+    """Create the declaration as the API does: ``served_by`` is the repository in scope, ``group``
+    the worklist group the operator made it from (``None``: none)."""
+    return (
+        CapabilityService(workspace)
+        .deployment_link_create(
+            DeploymentLinkCreateRequest(
+                context=repository_context(workspace, served_by),
+                link=write_fields(workspace, caller, scope, label=label),
+                provenance=DeclarationProvenance(via="ui", note=note, request_group=group),
+            )
+        )
+        .link
+    )
+
+
+def update_over_api(
+    workspace: Workspace,
+    served_by: str,
+    link_id: int,
+    group: str | None,
+    fields: DeploymentLinkFields,
+) -> DeploymentLink:
+    return (
+        CapabilityService(workspace)
+        .deployment_link_update(
+            DeploymentLinkUpdateRequest(
+                context=repository_context(workspace, served_by),
+                id=link_id,
+                link=fields,
+                provenance=DeclarationProvenance(via="ui", request_group=group),
+            )
+        )
+        .link
+    )
+
+
+def test_a_scoped_declaration_without_a_worklist_group_is_refused_over_the_api(
+    scoped_built: Workspace,
+) -> None:
+    """Over the API a scope is named from a worklist group: with no provenance, or provenance that
+    names no group, the write is refused whatever the words say, and nothing is stored or
+    recorded. With the group of its base the same declaration is stored, and the history keeps the
+    group it was made from."""
+    ws = scoped_built
+    scope = words("client.py", "BASE")
+    for provenance in (
+        None,
+        DeclarationProvenance(via="api"),
+        DeclarationProvenance(via="ui", note="by hand"),
+    ):
+        with pytest.raises(
+            InvalidDeploymentLinkError, match="a scoped declaration is made from the worklist"
+        ):
+            CapabilityService(ws).deployment_link_create(
+                DeploymentLinkCreateRequest(
+                    context=repository_context(ws, "alpha"),
+                    link=write_fields(ws, "caller", scope),
+                    provenance=provenance,
+                )
+            )
+    assert ws.deployment_links.list_all() == [] and audit_count(ws) == 0
+
+    group = group_with(ws, "{BASE}").key
+    made = declare_over_api(ws, "alpha", group, "caller", scope)
+    assert made.scope == scope and made.url is None and made.repository == slug(ws, "alpha")
+    [entry] = ws.deployment_links.history(link_id=made.id)
+    assert (entry.action, entry.request_group) == ("create", group)
+
+
+def test_a_receiver_rooted_base_needs_a_symbol_scope(scoped_built: Workspace) -> None:
+    """``self.base_url`` names no single binding in a whole file: declared for ``client.py`` it is
+    refused at write with the preview's reason, and nothing is stored or recorded. Declared for the
+    class that holds it, the same base is stored."""
+    ws = scoped_built
+    group = group_with(ws, "{self.base_url}").key
+    with pytest.raises(InvalidDeploymentLinkError, match="names no single binding in a whole file"):
+        declare_over_api(ws, "alpha", group, "caller", words("client.py", "self.base_url"))
+    assert ws.deployment_links.list_all() == [] and audit_count(ws) == 0
+
+    by_class = words("client.py", "self.base_url", symbol="UsersClient")
+    made = declare_over_api(ws, "alpha", group, "caller", by_class)
+    assert made.scope == by_class and audit_count(ws) == 1
+
+
+def test_a_file_scope_without_binding_evidence_is_refused_at_write(
+    scoped_built: Workspace,
+) -> None:
+    """``BASE`` is a module binding that the file's functions read: declared for the whole file it
+    is stored. ``base`` is only ever a parameter, so nothing in the file binds it and no request is
+    shown to read one binding of it: the same whole-file declaration is refused (nothing would be
+    joined), nothing is stored or recorded, and the function that takes it as a parameter can be
+    named as a symbol instead."""
+    ws = scoped_built
+    bound = declare_over_api(
+        ws, "alpha", group_with(ws, "{BASE}").key, "caller", words("client.py", "BASE")
+    )
+    assert bound.scope is not None and bound.scope.symbol is None
+    assert audit_count(ws) == 1
+
+    group = group_with(ws, "{base}").key
+    with pytest.raises(InvalidDeploymentLinkError, match="nothing would be joined"):
+        declare_over_api(ws, "alpha", group, "caller", words("client.py", "base"))
+    assert [link.id for link in ws.deployment_links.list_all()] == [bound.id]
+    assert audit_count(ws) == 1
+
+    named = declare_over_api(
+        ws, "alpha", group, "caller", words("client.py", "base", symbol="param_read")
+    )
+    assert named.scope is not None and named.scope.symbol == "param_read"
+    assert audit_count(ws) == 2
+
+
+def test_a_declaration_whose_base_key_or_shown_base_disagrees_with_its_group_is_refused(
+    scoped_built: Workspace,
+) -> None:
+    """The scope's words are checked against the group the operator says they were made from. A
+    base key that is not the group's base (another base of the same file, one nothing requests, a
+    receiver) is refused with the preview's first requirement, word for word. A shown base that is
+    not the one the group has (``{other}``, or the masked ``{…}`` for a plain name) is refused
+    saying how the group's base is shown. Nothing is stored or recorded by any of them; the
+    declaration with the group's own key and shown base is."""
+    ws = scoped_built
+    group = group_with(ws, "{BASE}").key
+    for text in ("base", "nothing_reads_this", "self.base_url"):
+        scope = words("client.py", text)
+        expected = preview_of(
+            ws, "{BASE}", "alpha", "caller", "client.py", text, base_shown=scope.base_shown
+        )
+        assert not expected.can_create and expected.requirements
+        with pytest.raises(InvalidDeploymentLinkError) as refused:
+            declare_over_api(ws, "alpha", group, "caller", scope)
+        assert refused.value.message == expected.requirements[0], text
+
+    for shown in ("{other}", "{…}"):
+        disagreeing = DeclarationScope(
+            path="client.py", symbol=None, base_key=base_key("BASE"), base_shown=shown
+        )
+        with pytest.raises(InvalidDeploymentLinkError) as refused:
+            declare_over_api(ws, "alpha", group, "caller", disagreeing)
+        assert refused.value.message == "the base of this group is shown as {BASE}", shown
+    assert ws.deployment_links.list_all() == [] and audit_count(ws) == 0
+
+    made = declare_over_api(ws, "alpha", group, "caller", words("client.py", "BASE"))
+    assert made.scope == words("client.py", "BASE") and audit_count(ws) == 1
+
+
+def test_an_update_of_a_scoped_declaration_is_revalidated(
+    scoped_built: Workspace, tmp_path: Path
+) -> None:
+    """An update that names the group and keeps the scope is checked like a creation. While the
+    service answers the covered requests it is stored and recorded as an update. After the service
+    stops serving its routes and a sync, the same update is refused with the preview's reason, and
+    the link and its history stay as they were."""
+    ws = scoped_built
+    scope = words("client.py", "BASE")
+    group = group_with(ws, "{BASE}").key
+    link = declare_over_api(ws, "alpha", group, "caller", scope, label="first")
+
+    renamed = update_over_api(
+        ws, "alpha", link.id, group, write_fields(ws, "caller", scope, label="renamed")
+    )
+    assert renamed.label == "renamed" and renamed.scope == scope
+    assert [e.action for e in ws.deployment_links.history(link_id=link.id)] == ["update", "create"]
+
+    (tmp_path / "repos" / "alpha" / "alpha" / "main.py").write_text("# no routes\n")
+    resync(ws, tmp_path)
+    with pytest.raises(InvalidDeploymentLinkError, match="serves no route"):
+        update_over_api(
+            ws, "alpha", link.id, group, write_fields(ws, "caller", scope, label="refused")
+        )
+    stored = ws.deployment_links.get(link.id)
+    assert stored is not None and stored.label == "renamed" and stored.scope == scope
+    assert audit_count(ws) == 2
+
+
+def test_an_update_cannot_add_or_remove_a_scope(scoped_built: Workspace) -> None:
+    """A scope is what the declaration was made about, its caller included: an update that gives a
+    plain link a scope, takes it from a scoped one, changes any word of it (the base path, the
+    symbol) or names another caller is refused, with or without a group, and the links and the
+    history stay as they were. The same scope under another label is an ordinary update."""
+    ws = scoped_built
+    scope = words("client.py", "BASE")
+    group = group_with(ws, "{BASE}").key
+    caller = slug(ws, "caller")
+    scoped_link = declare_over_api(ws, "alpha", group, "caller", scope)
+    plain = (
+        CapabilityService(ws)
+        .deployment_link_create(
+            DeploymentLinkCreateRequest(
+                context=repository_context(ws, "alpha"),
+                link=DeploymentLinkFields(label="plain", callers=[caller]),
+                provenance=DeclarationProvenance(via="ui"),
+            )
+        )
+        .link
+    )
+    assert plain.scope is None
+    held = [ws.deployment_links.get(scoped_link.id), ws.deployment_links.get(plain.id)]
+    rows = audit_count(ws)
+
+    other_base_path = words("client.py", "BASE", base_path="/v2")
+    other_symbol = words("client.py", "BASE", symbol="read_item")
+    attempts = [
+        (plain.id, write_fields(ws, "caller", scope, label="plain")),
+        (scoped_link.id, DeploymentLinkFields(label="mapped", callers=[caller])),
+        (scoped_link.id, write_fields(ws, "caller", other_base_path)),
+        (scoped_link.id, write_fields(ws, "caller", other_symbol)),
+        (scoped_link.id, write_fields(ws, "second", scope)),
+    ]
+    for link_id, fields in attempts:
+        for named in (group, None):
+            with pytest.raises(InvalidDeploymentLinkError, match="a scope cannot change"):
+                update_over_api(ws, "alpha", link_id, named, fields)
+    assert [ws.deployment_links.get(scoped_link.id), ws.deployment_links.get(plain.id)] == held
+    assert audit_count(ws) == rows
+
+    relabelled = update_over_api(
+        ws, "alpha", scoped_link.id, group, write_fields(ws, "caller", scope, label="relabelled")
+    )
+    assert relabelled.label == "relabelled" and relabelled.scope == scope
+    assert audit_count(ws) == rows + 1
+
+
+def test_overlapping_scoped_declarations_naming_different_services_are_refused(
+    scoped_built: Workspace,
+) -> None:
+    """One caller's base over one file cannot be two services. With ``alpha`` behind ``BASE`` in
+    ``client.py``, the preview names that declaration as the conflict and the write is refused for
+    another service over the whole file, over a symbol inside it, and for the same service at
+    another base path; nothing is stored or recorded. Another file of the same base is not one."""
+    ws = scoped_built
+    group = group_with(ws, "{BASE}").key
+    first = declare_over_api(ws, "alpha", group, "caller", words("client.py", "BASE"))
+    rows = audit_count(ws)
+
+    for served_by, scope in (
+        ("beta", words("client.py", "BASE")),
+        ("beta", words("client.py", "BASE", symbol="read_item")),
+        ("alpha", words("client.py", "BASE", base_path="/v2")),
+    ):
+        preview = preview_of(
+            ws,
+            "{BASE}",
+            served_by,
+            "caller",
+            "client.py",
+            "BASE",
+            symbol=scope.symbol,
+            base_path=scope.base_path,
+        )
+        assert preview.conflicts_with == first.id and not preview.can_create
+        with pytest.raises(InvalidDeploymentLinkError):
+            declare_over_api(ws, served_by, group, "caller", scope)
+    assert [link.id for link in ws.deployment_links.list_all()] == [first.id]
+    assert audit_count(ws) == rows
+
+    elsewhere = declare_over_api(ws, "beta", group, "caller", words("other.py", "BASE"))
+    assert elsewhere.scope is not None and elsewhere.scope.path == "other.py"
+    assert audit_count(ws) == rows + 1
+
+
+def test_scoped_history_records_create_update_and_revoke_with_the_scope(
+    scoped_built: Workspace,
+) -> None:
+    """The history of a scoped declaration keeps the scope in what each row recorded: the creation
+    after it (with the group and the note), the update before and after it with the label that
+    changed, the revocation before it and nothing after. The scope is its words only: the base key
+    and the masked name, never a URL."""
+    ws = scoped_built
+    scope = words("client.py", "BASE")
+    group = group_with(ws, "{BASE}").key
+    alpha, caller = slug(ws, "alpha"), slug(ws, "caller")
+    link = declare_over_api(ws, "alpha", group, "caller", scope, label="first", note="why")
+    update_over_api(ws, "alpha", link.id, group, write_fields(ws, "caller", scope, label="second"))
+    CapabilityService(ws).deployment_link_delete(
+        DeploymentLinkDeleteRequest(
+            context=repository_context(ws, "alpha"),
+            id=link.id,
+            provenance=DeclarationProvenance(via="ui", note="wrong service"),
+        )
+    )
+    assert ws.deployment_links.list_all() == []
+
+    entries = (
+        CapabilityService(ws)
+        .http_declaration_history(HttpDeclarationHistoryRequest(context=GLOBAL, id=link.id))
+        .entries
+    )
+    assert [e.action for e in entries] == ["revoke", "update", "create"]
+    revoke, update, create = entries
+    shown = scope.model_dump()
+    assert create.before is None and create.after is not None
+    assert create.after["scope"] == shown and create.after["label"] == "first"
+    assert (create.request_group, create.note) == (group, "why")
+    assert update.before is not None and update.after is not None
+    assert update.before["scope"] == update.after["scope"] == shown
+    assert (update.before["label"], update.after["label"]) == ("first", "second")
+    assert update.request_group == group
+    assert revoke.before is not None and revoke.after is None
+    assert revoke.before["scope"] == shown and revoke.before["label"] == "second"
+    assert revoke.note == "wrong service"
+    assert shown["base_shown"] == "{BASE}" and shown["base_key"] == base_key("BASE")
+    for entry in entries:
+        assert (entry.repository, entry.subject_id, entry.via) == (alpha, link.id, "ui")
+        for fields in (entry.before, entry.after):
+            if fields is not None:
+                assert fields["url"] is None and fields["callers"] == [caller]
+
+
+def test_a_scoped_declaration_stores_and_shows_no_base_expression_text_beyond_the_masked_name(
+    scoped_built: Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``vault.py`` writes a secret-like literal inside the call that is its request's base. The
+    operator declares that base for its function, over the API, and updates the declaration. The
+    literal, and the call it is in, are in none of: the stored ``scope_json``, every
+    ``declaration_audit`` row, the worklist (the list, each group opened, the history) and the
+    preview, and the links export. What is kept is the hash of the text and the masked name."""
+    from repoatlas.cli.main import app
+    from typer.testing import CliRunner
+
+    ws = scoped_built
+    asking = request_in(ws, all_requests(ws), "caller", "vault.py", "vault_read")
+    assert asking.scopable and asking.base_key == base_key(SECRET_BASE)
+    group = next(
+        g.key
+        for g in worklist(ws).groups
+        if asking.decision_ref in {r.decision_ref for r in worklist(ws, group=g.key).requests}
+    )
+    scope = words("vault.py", SECRET_BASE, symbol="vault_read")
+    assert scope.base_shown == "{…}"
+
+    preview = CapabilityService(ws).http_connection_preview(
+        HttpConnectionPreviewRequest(
+            context=GLOBAL,
+            group=group,
+            repository=slug(ws, "alpha"),
+            scope=PreviewScope(
+                caller=slug(ws, "caller"),
+                path="vault.py",
+                symbol="vault_read",
+                base_key=base_key(SECRET_BASE),
+            ),
+        )
+    )
+    assert preview.can_create and preview.counts == {"would-link": 1}
+    link = declare_over_api(ws, "alpha", group, "caller", scope, note="the vault client")
+    update_over_api(
+        ws, "alpha", link.id, group, write_fields(ws, "caller", scope, label="relabelled")
+    )
+
+    monkeypatch.setenv("REPOATLAS_CONFIG", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("REPOATLAS_DB", str(ws.settings.storage.database))
+    target = tmp_path / "links.json"
+    result = CliRunner().invoke(app, ["links", "export", str(target)])
+    assert result.exit_code == 0, result.output
+
+    history = CapabilityService(ws).http_declaration_history(
+        HttpDeclarationHistoryRequest(context=GLOBAL)
+    )
+    opened_groups = [worklist(ws, group=g.key).model_dump_json() for g in worklist(ws).groups]
+    stored = [row[0] for row in ws.database.execute("SELECT scope_json FROM deployment_links")]
+    audited = [
+        " ".join(str(value) for value in row)
+        for row in ws.database.execute("SELECT * FROM declaration_audit")
+    ]
+    kept = {
+        "scope_json": "\n".join(stored),
+        "audit": "\n".join(audited),
+        "worklist": worklist(ws).model_dump_json() + "".join(opened_groups),
+        "history": history.model_dump_json(),
+        "preview": preview.model_dump_json(),
+        "export": target.read_text(encoding="utf-8"),
+    }
+    assert [e.action for e in history.entries] == ["update", "create"]
+    for name, text in kept.items():
+        assert SECRET_TOKEN not in text and "vault_url" not in text, name
+    # not empty-handed: the declaration is there, by its hash and its masked name
+    assert [json.loads(raw)["base_shown"] for raw in stored] == ["{…}"] and len(audited) == 2
+    for name in ("scope_json", "audit", "export"):
+        assert base_key(SECRET_BASE) in kept[name], name
+    for name in ("audit", "export"):
+        assert "{…}" in kept[name], name
+    assert "vault_read" in kept["worklist"]
+
+
+def test_a_scoped_declaration_is_not_a_deployment_place(
+    scoped_built: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scoped declaration names a base in a caller's file, not a place its repository is
+    deployed. Beside a link that states a URL, it is kept by the store and listed where
+    declarations are, but the targets are built from the URL link alone and the Deployments answer
+    lists the URL link alone: no target is made for it, and no resolution names it."""
+    from repoatlas.graph.deployment_targets import build_targets as real_build_targets
+
+    ws = scoped_built
+    api = CapabilityService(ws)
+    place = api.deployment_link_create(
+        DeploymentLinkCreateRequest(
+            context=repository_context(ws, "alpha"),
+            link=DeploymentLinkFields(label="prod", url="https://alpha.example.test"),
+        )
+    ).link
+    scoped_link = declare_over_api(
+        ws, "alpha", group_with(ws, "{BASE}").key, "caller", words("client.py", "BASE")
+    )
+    assert {link.id for link in ws.deployment_links.list(slug(ws, "alpha"))} == {
+        place.id,
+        scoped_link.id,
+    }
+
+    built_from: list[list[int]] = []
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        # (repository, claims, files, edges, links, context, ...): the fifth is the links
+        built_from.append([link.id for link in args[4]])
+        return real_build_targets(*args, **kwargs)
+
+    monkeypatch.setattr("repoatlas.capabilities.service.build_targets", spy)
+    response = api.deployment_targets(
+        DeploymentTargetsRequest(context=repository_context(ws, "alpha"))
+    )
+    assert built_from == [[place.id]]
+    assert [link.id for link in response.links] == [place.id]
+    assert [t.pattern for t in response.targets if t.kind == "link"] == [
+        "https://alpha.example.test"
+    ]
+    assert f"link_{scoped_link.id}" not in {t.target_id for t in response.targets}
+    assert all(
+        resolution.link_id != scoped_link.id
+        for target in response.targets
+        for resolution in target.resolutions
+    )
+
+
+def test_a_scoped_update_without_a_worklist_group_is_refused(scoped_built: Workspace) -> None:
+    """An update of a scoped declaration is revalidated like its creation, so it names the worklist
+    group, over the API as at creation. The same scope, caller and a new label with provenance that
+    names no group is refused; the stored label is unchanged and the history keeps its one create
+    row."""
+    ws = scoped_built
+    scope = words("client.py", "BASE")
+    group = group_with(ws, "{BASE}").key
+    link = declare_over_api(ws, "alpha", group, "caller", scope, label="first")
+    assert audit_count(ws) == 1
+
+    with pytest.raises(InvalidDeploymentLinkError, match="updated from the worklist"):
+        update_over_api(
+            ws, "alpha", link.id, None, write_fields(ws, "caller", scope, label="renamed")
+        )
+    stored = ws.deployment_links.get(link.id)
+    assert stored is not None and stored.label == "first" and stored.scope == scope
+    assert audit_count(ws) == 1
+    assert [e.action for e in ws.deployment_links.history(link_id=link.id)] == ["create"]
