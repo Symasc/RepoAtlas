@@ -1,7 +1,8 @@
-import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { defineConfig, devices } from "@playwright/test";
+
+import { E2E_STATE, assertScratchDatabase } from "./e2e/isolation";
 
 /**
  * End to end against the real pipeline, three times over:
@@ -26,9 +27,20 @@ export const REPOSITORY = path.join(APP, "..");
  * RepoAtlas discovers repositories nested at any depth, so under the working
  * tree they would join the next sync of the workspace it sits in.
  */
-export const STATE = path.join(tmpdir(), "repoatlas-explorer-e2e");
+export const STATE = E2E_STATE;
 export const PYTHON = process.env.REPOATLAS_PYTHON ?? path.join(REPOSITORY, ".venv/bin/python");
 const LINKED = path.join(STATE, "linked");
+/** The live server's own synthetic index: built fresh for each run, never the operator's. */
+export const LIVE = path.join(STATE, "live");
+export const LIVE_ENV: Record<string, string> = {
+  REPOATLAS_CONFIG: path.join(LIVE, "config.yaml"),
+  REPOATLAS_DB: path.join(LIVE, "state/atlas.db"),
+  XDG_CONFIG_HOME: path.join(STATE, "xdg-config"),
+  XDG_DATA_HOME: path.join(STATE, "xdg-data"),
+};
+// refuse before any server starts if any e2e database could be the operator index; the
+// linked and scoped entries are checked below, once their state paths are defined
+assertScratchDatabase(path.join(LIVE, "state/atlas.db"), STATE);
 /**
  * The scoped corpus (tests/scoped_e2e_corpus.py): a base the source never states, written in two
  * files of one caller. Its own index and server, because its test declares and syncs: nothing
@@ -43,6 +55,8 @@ export const SCOPED_ENV: Record<string, string> = {
   XDG_DATA_HOME: path.join(STATE, "xdg-data"),
 };
 
+assertScratchDatabase(path.join(LINKED, "state/atlas.db"), STATE);
+assertScratchDatabase(path.join(SCOPED, "state/atlas.db"), STATE);
 const PORTS = { liveApi: 7337, live: 7338, linkedApi: 7347, linked: 7348, scopedApi: 7357, scoped: 7358 } as const;
 
 function api(port: number, connectionFile: string, env: Record<string, string> = {}, build = "") {
@@ -109,7 +123,13 @@ export default defineConfig({
   ],
   // started in order: the first explorer builds, the second serves the same build
   webServer: [
-    api(PORTS.liveApi, path.join(STATE, "live-api.json")),
+    api(
+      PORTS.liveApi,
+      path.join(STATE, "live-api.json"),
+      LIVE_ENV,
+      // built fresh by the command itself, like the linked and scoped corpora
+      `rm -rf "${LIVE}" && "${PYTHON}" -m tests.topology_corpus "${LIVE}" && `,
+    ),
     api(
       PORTS.linkedApi,
       path.join(STATE, "linked-api.json"),
