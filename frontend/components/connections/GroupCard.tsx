@@ -9,6 +9,8 @@ import {
   groupTitle,
   refusalText,
   REASON_TEXT,
+  scopeButtonLabel,
+  scopeLine,
   STATE_LABEL,
   STATE_MEANING,
   unmappableReason,
@@ -19,6 +21,7 @@ import { plural } from "@/lib/model/format";
 import classes from "./Connections.module.css";
 import { MapService } from "./MapService";
 import { RequestRows } from "./RequestRows";
+import { ScopeService } from "./ScopeService";
 
 /** One target (a stated origin, or a base the source does not state) and what can be done about it. */
 export function GroupCard({
@@ -34,10 +37,14 @@ export function GroupCard({
 }) {
   const [showAll, setShowAll] = useState(false);
   const [mapping, setMapping] = useState(false);
-  const expanded = showAll || mapping;
+  const [scoping, setScoping] = useState(false);
+  const expanded = showAll || mapping || scoping;
   const page = useGroup(expanded ? group.key : null, filters);
   const requests = page.data?.pages.flatMap((p) => p.requests ?? []) ?? [];
   const candidates = page.data?.pages[0]?.candidates ?? [];
+  // A base the source does not state is declared by scope; the server offers the scopes once the group is opened.
+  const unstated = group.kind === "base-not-stated";
+  const choices = page.data?.pages[0]?.groups?.find((g) => g.key === group.key)?.scope_choices ?? [];
   const blocked = unmappableReason(group);
   const title = groupTitle(group);
 
@@ -80,7 +87,7 @@ export function GroupCard({
       )}
       {(group.declarations ?? []).map((d) => (
         <p key={d.id} className={classes.detail}>
-          Declaration #{d.id}: {d.repository} at {d.url ?? "its target"} ·{" "}
+          Declaration #{d.id}: {d.repository} at {d.url ?? (d.scope ? scopeLine(d.scope) : "its target")} ·{" "}
           <span className={classes.state} data-state={d.state} title={STATE_MEANING[d.state]}>
             {STATE_LABEL[d.state]}
           </span>
@@ -127,7 +134,33 @@ export function GroupCard({
         ) : (
           <span className={classes.detail}>{blocked}</span>
         )}
+        {unstated && (
+          <Button
+            size="compact-sm"
+            variant="default"
+            aria-label={scopeButtonLabel(group)}
+            aria-expanded={scoping}
+            onClick={() => setScoping((value) => !value)}
+          >
+            Declare the base for a scope…
+          </Button>
+        )}
       </div>
+      {scoping && (
+        <>
+          {page.isLoading && <p className={classes.detail}>Looking for the scopes and the services whose routes match…</p>}
+          {!page.isLoading && (
+            <ScopeService
+              group={group}
+              choices={choices}
+              requests={[...(group.samples ?? []), ...requests]}
+              candidates={candidates}
+              repositories={repositories}
+              onDone={() => setScoping(false)}
+            />
+          )}
+        </>
+      )}
       {mapping && (
         <>
           {page.isLoading && <p className={classes.detail}>Looking for services whose routes match…</p>}
