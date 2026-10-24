@@ -21,6 +21,7 @@ from repoatlas.retrieval.retriever import RetrievalLimits, Retriever
 from repoatlas.storage.sqlite.database import Database, open_database
 from repoatlas.storage.sqlite.deployment_links import SqliteDeploymentLinkStore
 from repoatlas.storage.sqlite.search import SqliteSearchIndex
+from repoatlas.storage.sqlite.service_declarations import SqliteServiceDeclarationStore
 from repoatlas.storage.sqlite.stores import (
     SqliteDependencyStore,
     SqliteFileStore,
@@ -45,6 +46,9 @@ class Workspace:
     #: The one store a user writes: where repositories are deployed. A sync reads it, never
     #: writes it.
     deployment_links: SqliteDeploymentLinkStore
+    #: What users state about external services, redirects and permitted callbacks. Also written
+    #: only by a person: a sync never reads or writes it.
+    service_declarations: SqliteServiceDeclarationStore
     search: SqliteSearchIndex
     registry: ParserRegistry
     dependency_registry: DependencyRegistry
@@ -112,6 +116,7 @@ def open_workspace(*, settings: Settings | None = None, require_root: bool = Tru
         knowledge=SqliteKnowledgeStore(database),
         dependencies=SqliteDependencyStore(database),
         deployment_links=SqliteDeploymentLinkStore(database),
+        service_declarations=SqliteServiceDeclarationStore(database),
         search=SqliteSearchIndex(database),
         registry=ParserRegistry(),
         dependency_registry=DependencyRegistry(),
