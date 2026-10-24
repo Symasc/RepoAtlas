@@ -14,6 +14,7 @@ import binascii
 import json
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from pydantic import ValidationError
@@ -23,6 +24,7 @@ from repoatlas.config.settings import DECLARATIONS_SLUG
 from repoatlas.graph.http_crossings import (
     DECLARABLE,
     LINKED,
+    SERVICE_UNMATCHED,
     UNKNOWN_BASE,
     _qualified_of,
     _scoped_exposure,
@@ -58,6 +60,14 @@ from repoatlas.graph.http_scopes import (
 )
 from repoatlas.graph.link_exposures import plan_link_exposures, plan_scoped_exposures
 from repoatlas.graph.linker import GLOBAL_PARSER, repository_routes
+from repoatlas.graph.service_declarations import (
+    KNOWN_EXTERNAL,
+    classifications,
+    classified_text,
+    external_state,
+    identity_of,
+    link_origins,
+)
 from repoatlas.models import http
 from repoatlas.models.deployment_targets import (
     DeclarationScope,
@@ -84,6 +94,11 @@ from repoatlas.models.http_connections import (
 )
 from repoatlas.models.http_inventory import CrossingStatus
 from repoatlas.models.repository import Repository
+from repoatlas.models.service_declarations import (
+    ExternalServiceFields,
+    ServiceDeclaration,
+    ServiceDeclarationView,
+)
 from repoatlas.services.workspace import Workspace
 
 #: Samples a group lists inline; the rest are one expansion away.
@@ -119,6 +134,7 @@ def _snapshot(workspace: Workspace) -> tuple[list[RequestFacts], Mapping[str, ob
         "indexed": indexed,
         "served": served_by_slug,
         "scopes": _declared_files(workspace, links),
+        "external": workspace.service_declarations.list_all("external_service"),
     }
 
 
@@ -240,8 +256,62 @@ def _declarations(
     return views
 
 
-def _request_view(fact: RequestFacts) -> ConnectionRequest:
+@dataclass(frozen=True, slots=True)
+class _Externals:
+    """The external-service classifications, each judged against the stored decisions."""
+
+    #: Newest first, as the declarations are.
+    views: tuple[ServiceDeclarationView, ...]
+    #: The classification of each origin, in any state.
+    by_origin: Mapping[str, ServiceDeclarationView]
+    #: The id of the **applied** classification of each origin: what gives a request its identity.
+    known: Mapping[str, int]
+
+
+def _externals(facts: Sequence[RequestFacts], context: Mapping[str, object]) -> _Externals:
+    """Judge each classification: its state is derived from the stored decisions on every read,
+    never stored, and takes effect the moment the classification is."""
+    declarations: list[ServiceDeclaration] = context["external"]  # type: ignore[assignment]
+    links: list[DeploymentLink] = context["links"]  # type: ignore[assignment]
+    indexed: set[str] = context["indexed"]  # type: ignore[assignment]
+    built = bool(context["built"])
+    link_at = link_origins(links)
+    at_origin: dict[str, list[RequestFacts]] = defaultdict(list)
+    for fact in facts:
+        if fact.target.origin is not None:
+            at_origin[fact.target.origin].append(fact)
+    views: list[ServiceDeclarationView] = []
+    by_origin: dict[str, ServiceDeclarationView] = {}
+    known: dict[str, int] = {}
+    # Newest first; the store holds one classification per origin, so nothing is overwritten.
+    for declaration in sorted(declarations, key=lambda item: -item.id):
+        fields = declaration.fields
+        if not isinstance(fields, ExternalServiceFields):
+            continue
+        members = at_origin.get(fields.origin, [])
+        state, reason = external_state(
+            fields, members, link_at.get(fields.origin), indexed, built=built
+        )
+        unmatched = sum(1 for member in members if member.status == SERVICE_UNMATCHED)
+        view = ServiceDeclarationView(
+            id=declaration.id,
+            fields=fields,
+            created_at=declaration.created_at,
+            updated_at=declaration.updated_at,
+            state=state,
+            reason=reason,
+            requests=unmatched if state == "applied" else 0,
+        )
+        views.append(view)
+        by_origin[fields.origin] = view
+        if state == "applied":
+            known[fields.origin] = declaration.id
+    return _Externals(tuple(views), by_origin, known)
+
+
+def _request_view(fact: RequestFacts, known: Mapping[str, int] | None = None) -> ConnectionRequest:
     row = fact.row
+    identity, external_id = identity_of(fact, known or {})
     return ConnectionRequest(
         decision_ref=row.decision_ref,
         method=row.method or None,
@@ -263,6 +333,8 @@ def _request_view(fact: RequestFacts) -> ConnectionRequest:
         base_key=fact.base_key,
         scopable=fact.scopable,
         scope_refusal=fact.scope_refusal,
+        identity=identity,
+        external_service_id=external_id,
     )
 
 
@@ -287,8 +359,12 @@ def connections(workspace: Workspace, request: HttpConnectionsRequest) -> HttpCo
         if origin is not None:
             by_origin[origin].append(view)
 
+    externals = _externals(facts, context)
     linked = [f for f in facts if f.linked]
     open_facts = [f for f in facts if not f.linked]
+    known_external = sum(
+        1 for f in open_facts if identity_of(f, externals.known)[0] == KNOWN_EXTERNAL
+    )
     summary = ConnectionsSummary(
         requests=len(facts),
         linked_by_source=sum(1 for f in linked if not f.by_declaration),
@@ -299,6 +375,8 @@ def connections(workspace: Workspace, request: HttpConnectionsRequest) -> HttpCo
         scopable=sum(1 for f in open_facts if f.scopable),
         declarations=dict(sorted(Counter(d.state for d in declarations).items())),
         by_status=dict(sorted(Counter(f.status for f in open_facts).items())),
+        known_external=known_external,
+        unresolved_identity=len(open_facts) - known_external,
     )
 
     wanted = [
@@ -307,6 +385,7 @@ def connections(workspace: Workspace, request: HttpConnectionsRequest) -> HttpCo
         if (not request.status or f.status in {s.value for s in request.status} or f.linked)
         and (request.language is None or f.language == request.language)
         and (request.caller is None or f.repository == request.caller)
+        and (request.identity is None or identity_of(f, externals.known)[0] == request.identity)
     ]
     groups: dict[str, list[RequestFacts]] = defaultdict(list)
     for fact in wanted:
@@ -349,9 +428,10 @@ def connections(workspace: Workspace, request: HttpConnectionsRequest) -> HttpCo
                 languages=dict(sorted(Counter(m.language for m in members).items())),
                 callers=tuple(sorted({m.repository for m in members})),
                 reasons=dict(sorted(Counter(m.reason for m in unresolved if m.reason).items())),
-                samples=tuple(_request_view(m) for m in ordered[:SAMPLES]),
+                samples=tuple(_request_view(m, externals.known) for m in ordered[:SAMPLES]),
                 declarations=views,
                 scope_choices=choices,
+                external_service=externals.by_origin.get(origin) if origin else None,
             )
         )
     listed.sort(key=lambda g: (-g.requests, g.origin or "~", g.base_expression or "", g.key))
@@ -363,7 +443,7 @@ def connections(workspace: Workspace, request: HttpConnectionsRequest) -> HttpCo
         members = sorted(groups.get(request.group, ()), key=_order)
         start = _offset(request.cursor)
         page = members[start : start + request.limit]
-        expanded = tuple(_request_view(m) for m in page)
+        expanded = tuple(_request_view(m, externals.known) for m in page)
         has_more = start + request.limit < len(members)
         next_cursor = _cursor(start + request.limit) if has_more else None
         origin_of = members[0].target.origin if members else None
@@ -392,6 +472,7 @@ def connections(workspace: Workspace, request: HttpConnectionsRequest) -> HttpCo
         candidates=candidates,
         has_more=has_more,
         next_cursor=next_cursor,
+        service_declarations=externals.views,
     )
 
 
@@ -1027,6 +1108,11 @@ def preview(
         )
     except ValidationError as exc:
         requirements.extend(str(err["msg"]).removeprefix("Value error, ") for err in exc.errors())
+    # An origin classified as an external service is not mapped to an indexed one until the
+    # classification is revoked; with none classified this adds nothing.
+    classified = classifications(context["external"]).get(origin)  # type: ignore[arg-type]
+    if classified is not None:
+        requirements.append(f"{origin} is {classified_text(classified.id)}")
 
     evaluated, served = _evaluate(
         workspace,

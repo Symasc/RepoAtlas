@@ -309,6 +309,12 @@ def test_the_public_callable_surface_is_only_the_intended_operations() -> None:
         "http_connections",
         "http_connection_preview",
         "http_declaration_history",
+        # service declarations: external services, their preview and history (local API only)
+        "service_declaration_preview",
+        "service_declaration_create",
+        "service_declaration_update",
+        "service_declaration_delete",
+        "service_declaration_history",
         # topology: shipped for the local API, deliberately not an agent tool
         "topology_overview",
         "topology_children",

@@ -52,7 +52,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
 
-from repoatlas.capabilities import http_connections, http_inventory
+from repoatlas.capabilities import http_connections, http_inventory, service_declarations
 from repoatlas.capabilities.budget import (
     apply_budget_policy,
     ceiling_for,
@@ -203,6 +203,7 @@ from repoatlas.graph.impact import ImpactWalk
 from repoatlas.graph.keys import is_positional
 from repoatlas.graph.linker import plan_repository_http
 from repoatlas.graph.release_values import CONTAINER_ARTIFACT
+from repoatlas.graph.service_declarations import classifications, classified_text, origin_of_url
 from repoatlas.graph.traversal import RELATIONSHIP_CROSSING_EDGES, WalkResult, WalkStep, walk
 from repoatlas.graph.units import package_directories, unit_of
 from repoatlas.grounding import NAMED_REFERENCE, GroundingReport, ground_answer
@@ -316,6 +317,17 @@ from repoatlas.models.reports import SyncReport
 from repoatlas.models.repository import FileState, Repository
 from repoatlas.models.retrieval import RetrievalOutcome
 from repoatlas.models.search import SearchMode, SearchRequest, SearchResponse
+from repoatlas.models.service_declaration_io import (
+    ServiceDeclarationCreateRequest,
+    ServiceDeclarationDeleteRequest,
+    ServiceDeclarationDeleteResponse,
+    ServiceDeclarationHistoryRequest,
+    ServiceDeclarationHistoryResponse,
+    ServiceDeclarationPreviewRequest,
+    ServiceDeclarationPreviewResponse,
+    ServiceDeclarationResponse,
+    ServiceDeclarationUpdateRequest,
+)
 from repoatlas.models.sync import EvidenceRevalidationSummary, SyncRequest, SyncResponse
 from repoatlas.models.topology import (
     NAME_TYPES,
@@ -1363,6 +1375,7 @@ class CapabilityService:
                 # base the write then checks, or it is not made over the API (an import is the
                 # one other way in, and the sync decides it alone).
                 raise InvalidDeploymentLinkError("a scoped declaration is made from the worklist")
+            self._require_unclassified(request.link.url)
             if provenance is not None and provenance.request_group is not None:
                 self._require_declarable(request.context, repository, request.link, provenance)
             try:
@@ -1400,6 +1413,7 @@ class CapabilityService:
                 raise InvalidDeploymentLinkError(
                     "a scoped declaration is updated from the worklist"
                 )
+            self._require_unclassified(request.link.url)
             if request.provenance is not None and request.provenance.request_group is not None:
                 self._require_declarable(
                     request.context, repository, request.link, request.provenance
@@ -1455,6 +1469,60 @@ class CapabilityService:
             self._require_global(request.context)
             with self._workspace.database.read_snapshot():
                 return http_connections.history(self._workspace, request)
+
+    def service_declaration_preview(
+        self, request: ServiceDeclarationPreviewRequest
+    ) -> ServiceDeclarationPreviewResponse:
+        """What classifying an origin as an external service would change, request by request,
+        before anything is stored (repoatlas.capabilities.service_declarations)."""
+        with self._operation():
+            self._require_global(request.context)
+            with self._workspace.database.read_snapshot():
+                return service_declarations.preview(self._workspace, request)
+
+    def service_declaration_create(
+        self, request: ServiceDeclarationCreateRequest
+    ) -> ServiceDeclarationResponse:
+        """Classify an origin as an external service: the preview is run again, and nothing is
+        stored while it has a requirement. A sync neither reads nor writes the result."""
+        with self._operation():
+            self._require_global(request.context)
+            return service_declarations.create(self._workspace, request)
+
+    def service_declaration_update(
+        self, request: ServiceDeclarationUpdateRequest
+    ) -> ServiceDeclarationResponse:
+        """Replace what a stored classification states; what it is about cannot change."""
+        with self._operation():
+            self._require_global(request.context)
+            return service_declarations.update(self._workspace, request)
+
+    def service_declaration_delete(
+        self, request: ServiceDeclarationDeleteRequest
+    ) -> ServiceDeclarationDeleteResponse:
+        """Revoke a service declaration. What it stated stays in the history."""
+        with self._operation():
+            self._require_global(request.context)
+            return service_declarations.delete(self._workspace, request)
+
+    def service_declaration_history(
+        self, request: ServiceDeclarationHistoryRequest
+    ) -> ServiceDeclarationHistoryResponse:
+        """What operators did to their service declarations: append-only, local to this index."""
+        with self._operation():
+            self._require_global(request.context)
+            return service_declarations.history(self._workspace, request)
+
+    def _require_unclassified(self, url: str | None) -> None:
+        """A link states where a repository is deployed, so its URL may not name an origin an
+        operator classified as an external service: the two statements contradict. With no
+        classification this refuses nothing."""
+        origin = origin_of_url(url) if url else None
+        if origin is None:
+            return
+        held = classifications(self._workspace.service_declarations.list_all("external_service"))
+        if origin in held:
+            raise InvalidDeploymentLinkError(f"{origin} is {classified_text(held[origin].id)}")
 
     def _require_global(self, context: CapabilityContext) -> None:
         if context.scope is not CapabilityScope.GLOBAL:
