@@ -105,6 +105,17 @@ from repoatlas.models.impact import ImpactRequest, ImpactResponse
 from repoatlas.models.inspection import InspectRequest, InspectResponse
 from repoatlas.models.relationships import RelationshipsRequest, RelationshipsResponse
 from repoatlas.models.search import SearchRequest, SearchResponse
+from repoatlas.models.service_declaration_io import (
+    ServiceDeclarationCreateRequest,
+    ServiceDeclarationDeleteRequest,
+    ServiceDeclarationDeleteResponse,
+    ServiceDeclarationHistoryRequest,
+    ServiceDeclarationHistoryResponse,
+    ServiceDeclarationPreviewRequest,
+    ServiceDeclarationPreviewResponse,
+    ServiceDeclarationResponse,
+    ServiceDeclarationUpdateRequest,
+)
 from repoatlas.models.topology import (
     TopologyChildrenRequest,
     TopologyChildrenResponse,
@@ -238,6 +249,38 @@ ENDPOINTS: tuple[Endpoint, ...] = (
         TopologyReferencesRequest,
         TopologyReferencesResponse,
         "topology_references",
+    ),
+    # Service declarations (external services; redirects and callbacks to follow): appended, so
+    # the order of everything before is kept.
+    Endpoint(
+        "service_declarations/preview",
+        ServiceDeclarationPreviewRequest,
+        ServiceDeclarationPreviewResponse,
+        "service_declaration_preview",
+    ),
+    Endpoint(
+        "service_declarations/create",
+        ServiceDeclarationCreateRequest,
+        ServiceDeclarationResponse,
+        "service_declaration_create",
+    ),
+    Endpoint(
+        "service_declarations/update",
+        ServiceDeclarationUpdateRequest,
+        ServiceDeclarationResponse,
+        "service_declaration_update",
+    ),
+    Endpoint(
+        "service_declarations/delete",
+        ServiceDeclarationDeleteRequest,
+        ServiceDeclarationDeleteResponse,
+        "service_declaration_delete",
+    ),
+    Endpoint(
+        "service_declarations/history",
+        ServiceDeclarationHistoryRequest,
+        ServiceDeclarationHistoryResponse,
+        "service_declaration_history",
     ),
 )
 ENDPOINTS_BY_PATH: Mapping[str, Endpoint] = {endpoint.path: endpoint for endpoint in ENDPOINTS}
