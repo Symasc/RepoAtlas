@@ -53,6 +53,19 @@ than a literal: a module constant that holds a URL, or an f-string whose origin 
 literal or such a constant, with each placeholder filling one whole path segment.
 Only the per-file facts above stay literal-only.
 
+**A client object** -- ``requests.Session()``, ``httpx.Client(...)``, ``httpx.AsyncClient(...)`` --
+is followed only where its identity is lexical: bound by one ``name = C(...)`` or
+``with C(...) as name`` that is the name's only binding in the module, constructed with no
+positional or starred argument and no ``transport``, ``mounts``, ``app`` or ``event_hooks``,
+and reached from the scope the binding lives in. An attribute store on the name, or a read of
+its ``event_hooks`` / ``hooks``, discards it. A literal absolute URL is read as a module-level
+call is (the base is ignored). A rooted URL (``"/users"``, ``f"/users/{uid}"``) is composed
+onto an ``httpx`` ``base_url`` the source states -- a claim for the join, no per-file fact --
+or, on a ``base_url`` it does not state, recorded as a claim with no origin whose host part is
+the synthetic ``{name.base_url}`` (D2: counted, never joined). A client with *no* base has no
+destination for a rooted URL, so one yields nothing. Every such claim carries ``client`` and
+``client_at``.
+
 Parsed, never imported: this reads the syntax tree only (V1_SPEC §17).
 """
 
@@ -62,7 +75,7 @@ import ast
 import json
 import re
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 
 from repoatlas.models import http
@@ -105,6 +118,31 @@ _CLIENT_VERBS = {
 
 _LIBRARIES = frozenset({"fastapi", "flask", "requests", "httpx", "flasgger", "os"})
 _CLIENT_LIBRARIES = frozenset({"requests", "httpx"})
+
+#: What constructs a client object: ``requests.Session()`` takes no argument at all;
+#: an ``httpx`` client takes keywords only.
+_SESSION_CONSTRUCTORS = frozenset({"requests.Session", "requests.session"})
+_HTTPX_CONSTRUCTORS = frozenset({"httpx.Client", "httpx.AsyncClient"})
+#: Keywords that send an ``httpx`` client's requests somewhere else, or run code around them.
+_REDIRECTING_KEYWORDS = frozenset({"transport", "mounts", "app", "event_hooks"})
+#: Attributes whose read makes a client unprovable: a hook can rewrite any request.
+_HOOK_ATTRIBUTES = frozenset({"event_hooks", "hooks"})
+#: Client objects one module may have before none is read.
+_MAX_INSTANCES = 32
+#: A string inside a base expression shown with a claim: a name, a key, a setting.
+_EXPRESSION_STRING = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+#: An integer inside a base expression shown with a claim is a small index, nothing else.
+_MAX_EXPRESSION_INTEGER = 1000
+_MAX_BASE_EXPRESSION = 128
+
+#: A client object's kind, and how much of its base the source states.
+_SESSION = "session"
+_HTTPX = "httpx"
+_NO_BASE = "none"
+_STATED_BASE = "stated"
+_UNSTATED_BASE = "unstated"
+#: A client's ``base_url`` as read: its kind, the stated base, its line, its expression.
+_ClientBase = tuple[str, str | None, int | None, str | None]
 
 _FASTAPI_APP = "fastapi-app"
 _FASTAPI_ROUTER = "fastapi-router"
@@ -275,6 +313,172 @@ class _ClientUrl:
     display: str
     #: The line of the module constant the URL or its base came from.
     base_at: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ClientInstance:
+    """A client object whose binding is lexical, and what the source states of its base."""
+
+    #: :data:`_SESSION` or :data:`_HTTPX`.
+    kind: str
+    #: :data:`_NO_BASE`, :data:`_STATED_BASE` or :data:`_UNSTATED_BASE`.
+    base_kind: str
+    #: The base as the source states it, for :data:`_STATED_BASE` only: an absolute URL with
+    #: no query, fragment or credentials.
+    base_text: str | None
+    #: The line of the base: the keyword's value, or the constant it names.
+    base_at: int | None
+    #: The base's expression, for :data:`_UNSTATED_BASE` when it is a bounded chain of names.
+    base_expr: str | None
+    #: The line of the constructor call.
+    constructed_at: int
+    #: The one name the module binds it to, and the line of that binding.
+    name: str
+    bound_at: int
+    #: ``(line, column, end line, end column)`` of what the name reaches; ``None`` for the
+    #: whole module.
+    reach: tuple[int, int, int, int] | None
+
+    @property
+    def library(self) -> str:
+        return "requests" if self.kind == _SESSION else "httpx"
+
+    def reaches(self, node: ast.expr) -> bool:
+        """Whether the name written at ``node`` is read where this binding is the one in force."""
+        if self.reach is None:
+            return True
+        if node.end_lineno is None or node.end_col_offset is None:
+            return False
+        begin, finish = (self.reach[0], self.reach[1]), (self.reach[2], self.reach[3])
+        ends = (node.end_lineno, node.end_col_offset)
+        return (node.lineno, node.col_offset) >= begin and ends <= finish
+
+
+def _span(body: list[ast.stmt]) -> tuple[int, int, int, int] | None:
+    """The source span of a block of statements, or ``None`` for an empty one."""
+    if not body:
+        return None
+    first, last = body[0], body[-1]
+    if last.end_lineno is None or last.end_col_offset is None:
+        return None
+    return first.lineno, first.col_offset, last.end_lineno, last.end_col_offset
+
+
+def _constructions(
+    tree: ast.Module,
+) -> Iterator[tuple[str, ast.expr, int, tuple[int, int, int, int] | None]]:
+    """Each ``name = value``, ``name: T = value`` and ``with value as name`` outside a class body.
+
+    Yields the name, the value, the line of the binding and what the name reaches: the whole
+    module for a module-level binding, a function's body for one in a function, the ``with``
+    body for a ``with``. A class body binds attributes, not names a method can read.
+    """
+    stack: list[tuple[ast.AST, ast.AST]] = [(tree, tree)]
+    while stack:
+        node, scope = stack.pop()
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                stack.append((child, child))
+            else:
+                stack.append((child, scope))
+            reach: tuple[int, int, int, int] | None
+            if isinstance(scope, ast.Module):
+                reach = None
+            elif isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                reach = _span(scope.body)
+                if reach is None:
+                    continue
+            else:
+                continue
+            if (
+                isinstance(child, ast.Assign)
+                and len(child.targets) == 1
+                and isinstance(child.targets[0], ast.Name)
+            ):
+                yield child.targets[0].id, child.value, child.lineno, reach
+            elif (
+                isinstance(child, ast.AnnAssign)
+                and isinstance(child.target, ast.Name)
+                and child.value is not None
+            ):
+                yield child.target.id, child.value, child.lineno, reach
+            elif isinstance(child, (ast.With, ast.AsyncWith)):
+                body = _span(child.body)
+                for item in child.items:
+                    if isinstance(item.optional_vars, ast.Name) and body is not None:
+                        yield (
+                            item.optional_vars.id,
+                            item.context_expr,
+                            item.optional_vars.lineno,
+                            body,
+                        )
+
+
+def _base_expression(node: ast.expr) -> str | None:
+    """A base expression worth showing: names, attributes, subscripts and calls of them.
+
+    Every string in it must look like a name or a setting's key, every number like an index:
+    anything else -- a URL, a credential, a long string -- keeps the expression out of the
+    claim altogether, so no literal the source puts there is ever copied.
+    """
+    for part in ast.walk(node):
+        if isinstance(part, ast.Constant):
+            value = part.value
+            if isinstance(value, str):
+                if _EXPRESSION_STRING.fullmatch(value) is None:
+                    return None
+            elif not (
+                value is None
+                or (
+                    isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and 0 <= value < _MAX_EXPRESSION_INTEGER
+                )
+            ):
+                return None
+        elif not isinstance(
+            part, (ast.Name, ast.Attribute, ast.Subscript, ast.Call, ast.keyword, ast.Load)
+        ):
+            return None
+    text = ast.unparse(node)
+    return text if len(text) <= _MAX_BASE_EXPRESSION else None
+
+
+def _pieces(operands: list[ast.expr]) -> list[list[str]] | None:
+    """The parts of a URL's later operands: literal text, and one substitution per value.
+
+    The operands of a ``+`` chain, or an f-string's pieces; an operand may itself be an
+    f-string. A conversion or a format specification is not read. ``None`` when an operand
+    is anything else.
+    """
+    parts: list[list[str]] = []
+    for value in operands:
+        for piece in value.values if isinstance(value, ast.JoinedStr) else [value]:
+            if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
+                parts.append([http.TEMPLATE_LITERAL, piece.value])
+            elif isinstance(piece, ast.FormattedValue):
+                if piece.conversion != -1 or piece.format_spec is not None:
+                    return None
+                parts.append([http.TEMPLATE_SUBSTITUTION, ast.unparse(piece.value)])
+            elif isinstance(piece, ast.Name | ast.Attribute | ast.Subscript | ast.Call):
+                parts.append([http.TEMPLATE_SUBSTITUTION, ast.unparse(piece)])
+            else:
+                return None
+    return parts
+
+
+def _dotted(segments: Iterable[str | None]) -> bool:
+    """Whether a path has a ``.`` or ``..`` segment, which a client resolves before it sends."""
+    return any(segment in {".", ".."} for segment in segments)
+
+
+def _display(template: http.RouteTemplate) -> str:
+    """A template's path without its leading ``/``, a substitution shown as ``{expression}``."""
+    expressions = iter(template.expressions)
+    return "/".join(
+        segment if segment is not None else "{" + next(expressions, "")[:_MAX_EXPRESSION] + "}"
+        for segment in template.segments
+    )
 
 
 def _module_statements(tree: ast.Module) -> Iterator[ast.stmt]:
@@ -593,6 +797,8 @@ class PythonHttp:
         self._mount_claims: list[ParsedReference] = []
         #: Module-level names bound once to a list or tuple display.
         self._lists: dict[str, list[ast.expr]] = {}
+        #: Client objects whose binding is lexical, by their one name.
+        self._clients: dict[str, _ClientInstance] = {}
         #: The line of a module-level ``if __name__ == "__main__":``, when there is one.
         self._script = next(
             (statement.lineno for statement in tree.body if _main_guard(statement)), None
@@ -604,6 +810,7 @@ class PythonHttp:
         self._optional_imports(tree, counts)
         self._read_constants(tree, counts)
         self._read_alternatives(tree, counts)
+        self._read_clients(tree, counts)
         self._constructors(tree, counts)
         self._mounts(tree, counts)
         self._factories(tree)
@@ -1367,7 +1574,11 @@ class PythonHttp:
     # -- client calls ---------------------------------------------------------------
 
     def call_references(self, call: ast.Call, source_symbol: str | None) -> list[ParsedReference]:
-        """The request a ``requests`` or ``httpx`` module-level call provably makes."""
+        """The request a ``requests`` or ``httpx`` call provably makes: a module-level function,
+        or a method of a client object whose binding is lexical."""
+        client = self._client_of(call)
+        if client is not None:
+            return self._client_references(call, client, source_symbol)
         resolved = self._resolve(call.func)
         if resolved is None:
             return []
@@ -1376,6 +1587,25 @@ class PythonHttp:
             isinstance(arg, ast.Starred) for arg in call.args
         ):
             return []
+        request = self._request_of(call, function)
+        if request is None:
+            return []
+        method, url_node, end = request
+        url = static_string(url_node)
+        if url is None:
+            # Not literal: at most a claim for the join, never a per-file fact.
+            return self._read_claims(
+                url_node, method, call.lineno, end, library, source_symbol, unread_host=True
+            )
+        target = http.client_target(url)
+        # Neither library resolves a relative URL: it names no request at all.
+        if target is None or target.url is None or target.origin is None:
+            return []
+        return self._literal_references(target, method, call.lineno, end, library, source_symbol)
+
+    @staticmethod
+    def _request_of(call: ast.Call, function: str) -> tuple[str, ast.expr, int] | None:
+        """The method, the URL's expression and the last line of a client's request call."""
         method_node: ast.expr | None = None
         if function == "request":
             method_node = _argument(call, 0, "method")
@@ -1387,31 +1617,26 @@ class PythonHttp:
             url_node = _argument(call, 0, "url")
             method = _CLIENT_VERBS[function]
         else:
-            return []
+            return None
         if method is None or url_node is None:
-            return []
+            return None
         end = max(
             node.end_lineno or node.lineno for node in (url_node, method_node) if node is not None
         )
-        url = static_string(url_node)
-        if url is None:
-            # Not literal: at most a claim for the join, never a per-file fact.
-            alternatives = self._alternative_urls(url_node)
-            if alternatives:
-                # One claim per literal, each decided on its own: none overwrites another.
-                return [
-                    self._client_claim(
-                        read, method, call.lineno, end, library, source_symbol, len(alternatives)
-                    )
-                    for read in alternatives
-                ]
-            read = self._client_url(url_node) or self._unknown_base(url_node)
-            if read is None:
-                return []
-            return [self._client_claim(read, method, call.lineno, end, library, source_symbol)]
-        target = http.client_target(url)
-        # Neither library resolves a relative URL: it names no request at all.
-        if target is None or target.url is None or target.origin is None:
+        return method, url_node, end
+
+    def _literal_references(
+        self,
+        target: http.HttpTarget,
+        method: str,
+        start: int,
+        end: int,
+        library: str,
+        source_symbol: str | None,
+        client: _ClientInstance | None = None,
+    ) -> list[ParsedReference]:
+        """The facts and the claim of a request to a literal absolute URL."""
+        if target.url is None or target.origin is None:
             return []
         literal = _ClientUrl(target.origin, tuple(target.path[1:].split("/")), target.url)
         return [
@@ -1419,7 +1644,7 @@ class PythonHttp:
                 EdgeType.CALLS_HTTP_ENDPOINT,
                 EntityType.HTTP_ENDPOINT,
                 http.endpoint_body(method, target.url),
-                call.lineno,
+                start,
                 end,
                 source=library,
                 composed=False,
@@ -1429,14 +1654,46 @@ class PythonHttp:
                 EdgeType.CALLS_HTTP_ROUTE,
                 EntityType.HTTP_ROUTE,
                 http.route_body(method, target.path),
-                call.lineno,
+                start,
                 end,
                 source=library,
                 composed=False,
                 source_symbol=source_symbol,
             ),
-            self._client_claim(literal, method, call.lineno, end, library, source_symbol),
+            self._client_claim(literal, method, start, end, library, source_symbol, client=client),
         ]
+
+    def _read_claims(
+        self,
+        url_node: ast.expr,
+        method: str,
+        start: int,
+        end: int,
+        library: str,
+        source_symbol: str | None,
+        *,
+        unread_host: bool,
+        client: _ClientInstance | None = None,
+    ) -> list[ParsedReference]:
+        """The claims of a request whose URL is not a literal: through a constant, an
+        environment default or an f-string on a known origin, and -- where ``unread_host`` --
+        on a host the source does not state (D2)."""
+        alternatives = self._alternative_urls(url_node)
+        if alternatives:
+            # One claim per literal, each decided on its own: none overwrites another.
+            return [
+                self._client_claim(
+                    read, method, start, end, library, source_symbol, len(alternatives), client
+                )
+                for read in alternatives
+            ]
+        read = self._client_url(url_node)
+        if read is None and unread_host:
+            read = self._unknown_base(url_node)
+        if read is None:
+            return []
+        claim = self._client_claim(read, method, start, end, library, source_symbol, client=client)
+        return [claim]
 
     @staticmethod
     def _client_claim(
@@ -1447,6 +1704,8 @@ class PythonHttp:
         library: str,
         source_symbol: str | None,
         alternatives: int | None = None,
+        client: _ClientInstance | None = None,
+        base_expr: str | None = None,
     ) -> ParsedReference:
         meta = {
             "method": method,
@@ -1461,6 +1720,12 @@ class PythonHttp:
             meta["origin"] = read.origin
         if read.base_at is not None:
             meta["base_at"] = str(read.base_at)
+        if client is not None:
+            # The object the request is made on: where it is bound, for a reader to find.
+            meta["client"] = client.name
+            meta["client_at"] = str(client.bound_at)
+        if base_expr is not None:
+            meta["base_expr"] = base_expr
         return pending_reference(
             EdgeType.CALLS_HTTP_ENDPOINT,
             EntityType.HTTP_ENDPOINT,
@@ -1471,6 +1736,248 @@ class PythonHttp:
             source_symbol=source_symbol,
             **meta,
         )
+
+    # -- client objects -------------------------------------------------------------
+
+    def _read_clients(self, tree: ast.Module, counts: Counter[str]) -> None:
+        """Client objects the module binds, each to a name nothing else in it binds.
+
+        ``client = httpx.Client(base_url=...)`` or ``with requests.Session() as session``.
+        A name bound twice, anywhere -- a parameter, a loop variable, an import -- names no
+        one object. Past :data:`_MAX_INSTANCES` none is read. An attribute stored on the
+        name (``client.base_url = ...``) or a read of its ``event_hooks`` or ``hooks``
+        discards the object wherever it happens: either can change where a request goes. So
+        does any other read of the name (``configure(client)``): it can escape.
+        """
+        libraries = {
+            *self._modules.values(),
+            *(name.partition(".")[0] for name in self._names.values()),
+        }
+        if not libraries & _CLIENT_LIBRARIES:
+            return
+        found: dict[str, _ClientInstance] = {}
+        for name, value, bound_at, reach in _constructions(tree):
+            client = self._client_instance(name, value, bound_at, reach, counts)
+            if client is not None:
+                found[name] = client
+        if len(found) > _MAX_INSTANCES:
+            return
+        refuted = {
+            node.value.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in found
+            and (not isinstance(node.ctx, ast.Load) or node.attr in _HOOK_ATTRIBUTES)
+        }
+        # A name read any other way (``configure(session)``, ``return client``) can escape, and
+        # whatever receives the object may change where it sends.
+        attribute_objects = {
+            id(node.value)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+        }
+        refuted |= {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id in found
+            and id(node) not in attribute_objects
+        }
+        self._clients = {name: client for name, client in found.items() if name not in refuted}
+
+    def _client_instance(
+        self,
+        name: str,
+        value: ast.expr,
+        bound_at: int,
+        reach: tuple[int, int, int, int] | None,
+        counts: Counter[str],
+    ) -> _ClientInstance | None:
+        """The client object ``value`` constructs, or ``None`` when it is not provably one."""
+        if counts[name] != 1 or len(name) > _MAX_EXPRESSION or not isinstance(value, ast.Call):
+            return None
+        constructor = self._resolve(value.func)
+        if constructor in _SESSION_CONSTRUCTORS:
+            if value.args or value.keywords:
+                return None
+            return _ClientInstance(
+                _SESSION, _NO_BASE, None, None, None, value.lineno, name, bound_at, reach
+            )
+        if constructor not in _HTTPX_CONSTRUCTORS or value.args or _dynamic(value):
+            return None
+        keywords = _keywords(value)
+        if _REDIRECTING_KEYWORDS & keywords.keys():
+            return None
+        base: _ClientBase | None = (_NO_BASE, None, None, None)
+        if "base_url" in keywords:
+            base = self._client_base(keywords["base_url"])
+        if base is None:
+            return None
+        kind, text, base_at, expression = base
+        return _ClientInstance(
+            _HTTPX, kind, text, base_at, expression, value.lineno, name, bound_at, reach
+        )
+
+    def _client_base(self, node: ast.expr) -> _ClientBase | None:
+        """What the source states of a client's ``base_url``: its kind, the base, its line and
+        (for an unstated one) its expression; ``None`` for a base that makes the client unreadable.
+
+        A literal, a module constant bound once, or an environment default is stated -- as
+        a request's own URL is -- and must be an absolute URL with no query, fragment or
+        credentials. An empty one is no base at all, unless the environment may set it. Any
+        other expression is a base the source does not state.
+        """
+        from_environment = False
+        text = static_string(node)
+        stated: tuple[str, int] | None = (text, node.lineno) if text is not None else None
+        if stated is None and isinstance(node, ast.Name) and node.id in self._constants:
+            stated = self._constants[node.id]
+        elif stated is None:
+            stated = self._stated(node)
+            from_environment = True
+        if stated is None:
+            return _UNSTATED_BASE, None, node.lineno, _base_expression(node)
+        text, line = stated
+        if text == "":
+            if from_environment:
+                return _UNSTATED_BASE, None, line, _base_expression(node)
+            return _NO_BASE, None, None, None
+        return (_STATED_BASE, text, line, None) if self._base_url(text) else None
+
+    @staticmethod
+    def _base_url(text: str) -> bool:
+        """Whether a base is an absolute URL a request path can be appended to, as written."""
+        if http.deployment_base(text) is None:
+            return False
+        target = http.client_target(text)
+        return (
+            target is not None
+            and target.origin is not None
+            and "//" not in target.path
+            and not _dotted(target.path.split("/"))
+        )
+
+    def _client_of(self, call: ast.Call) -> _ClientInstance | None:
+        """The client object ``name.method(...)`` is made on, where the name's binding holds."""
+        func = call.func
+        if not (
+            self._clients and isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+        ):
+            return None
+        client = self._clients.get(func.value.id)
+        return client if client is not None and client.reaches(func.value) else None
+
+    def _client_references(
+        self, call: ast.Call, client: _ClientInstance, source_symbol: str | None
+    ) -> list[ParsedReference]:
+        """The request a call on a client object provably makes.
+
+        A literal absolute URL goes where it says, whatever the base. A rooted one is
+        appended to the base the source states, or is a request on a host it does not
+        (D2); on a client with no base it names no destination at all, and neither does a
+        URL with no leading ``/`` that is not an origin the source states.
+        """
+        function = call.func.attr if isinstance(call.func, ast.Attribute) else ""
+        if any(isinstance(arg, ast.Starred) for arg in call.args):
+            return []
+        request = self._request_of(call, function)
+        if request is None:
+            return []
+        method, url_node, end = request
+        library = client.library
+        url = static_string(url_node)
+        if url is not None:
+            target = http.client_target(url)
+            if target is not None and target.url is not None and target.origin is not None:
+                return self._literal_references(
+                    target, method, call.lineno, end, library, source_symbol, client
+                )
+        parts = self._rooted_parts(url_node)
+        if parts is not None:
+            return self._composed(client, parts, method, call.lineno, end, source_symbol)
+        if url is not None:
+            return []
+        # A host the source does not state is read only where a relative URL could not be
+        # meant: a client with a base would join it, a client with none would refuse it.
+        return self._read_claims(
+            url_node,
+            method,
+            call.lineno,
+            end,
+            library,
+            source_symbol,
+            unread_host=client.base_kind == _NO_BASE,
+            client=client,
+        )
+
+    @staticmethod
+    def _rooted_parts(node: ast.expr) -> list[list[str]] | None:
+        """A URL's parts when it begins with one literal ``/``: ``"/users"``, ``f"/users/{uid}"``
+        or ``"/users/" + uid``. ``//`` names a host, so it is not rooted."""
+        if isinstance(node, ast.JoinedStr):
+            operands: list[ast.expr] = list(node.values)
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            added = _added(node)
+            if added is None:
+                return None
+            operands = added
+        else:
+            operands = [node]
+        head = operands[0] if operands else None
+        if not (
+            isinstance(head, ast.Constant)
+            and isinstance(head.value, str)
+            and head.value.startswith("/")
+            and not head.value.startswith("//")
+        ):
+            return None
+        tail = _pieces(operands[1:])
+        return None if tail is None else [[http.TEMPLATE_LITERAL, head.value], *tail]
+
+    def _composed(
+        self,
+        client: _ClientInstance,
+        parts: list[list[str]],
+        method: str,
+        start: int,
+        end: int,
+        source_symbol: str | None,
+    ) -> list[ParsedReference]:
+        """A rooted request on a client that has a base.
+
+        Appended to a base the source states, as ``httpx`` does (its trailing ``/`` is not a
+        second one): a claim with the origin and the base's line, never a per-file fact.
+        On a base it does not state, the host part is the synthetic ``{name.base_url}``: a
+        claim with no origin, which the join counts and never links.
+        """
+        origin: str | None = None
+        host = "{" + f"{client.name}.base_url" + "}"
+        if client.base_kind == _STATED_BASE and client.base_text is not None:
+            base = http.client_target(client.base_text)
+            if base is None or base.origin is None:
+                return []
+            origin = host = base.origin
+            parts = [[http.TEMPLATE_LITERAL, base.path.rstrip("/") + parts[0][1]], *parts[1:]]
+        elif client.base_kind != _UNSTATED_BASE:
+            return []
+        template = http.route_template(parts)
+        if isinstance(template, str) or _dotted(template.segments):
+            return []
+        display = f"{host}/{_display(template)}"
+        read = _ClientUrl(origin, template.segments, display, client.base_at)
+        claim = self._client_claim(
+            read,
+            method,
+            start,
+            end,
+            client.library,
+            source_symbol,
+            client=client,
+            base_expr=client.base_expr,
+        )
+        return [claim]
 
     def _client_url(self, node: ast.expr) -> _ClientUrl | None:
         """A URL named by a module constant or an environment default, or an f-string on
@@ -1561,29 +2068,14 @@ class PythonHttp:
             return None
         if not self._unread_base(head):
             return None
-        parts: list[list[str]] = []
-        for value in rest:
-            for piece in value.values if isinstance(value, ast.JoinedStr) else [value]:
-                if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
-                    parts.append([http.TEMPLATE_LITERAL, piece.value])
-                elif isinstance(piece, ast.FormattedValue):
-                    if piece.conversion != -1 or piece.format_spec is not None:
-                        return None
-                    parts.append([http.TEMPLATE_SUBSTITUTION, ast.unparse(piece.value)])
-                elif isinstance(piece, ast.Name | ast.Attribute | ast.Subscript | ast.Call):
-                    parts.append([http.TEMPLATE_SUBSTITUTION, ast.unparse(piece)])
-                else:
-                    return None
+        parts = _pieces(rest)
+        if parts is None:
+            return None
         template = http.route_template(parts)
         if isinstance(template, str):
             return None
-        expressions = iter(template.expressions)
-        display = "/".join(
-            segment if segment is not None else "{" + next(expressions, "")[:_MAX_EXPRESSION] + "}"
-            for segment in template.segments
-        )
         base = "{" + ast.unparse(head)[:_MAX_EXPRESSION] + "}"
-        return _ClientUrl(None, template.segments, f"{prefix}{base}/{display}")
+        return _ClientUrl(None, template.segments, f"{prefix}{base}/{_display(template)}")
 
     def _unread_base(self, node: ast.expr) -> bool:
         """Whether a URL's host part is a value the source does not state (or states empty)."""
@@ -1650,9 +2142,5 @@ class PythonHttp:
         template = http.route_template(parts)
         if isinstance(template, str):
             return None
-        expressions = iter(template.expressions)
-        display = "/".join(
-            segment if segment is not None else "{" + next(expressions, "")[:_MAX_EXPRESSION] + "}"
-            for segment in template.segments
-        )
+        display = _display(template)
         return _ClientUrl(origin.origin, template.segments, f"{origin.origin}/{display}", base_at)

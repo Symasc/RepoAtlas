@@ -222,7 +222,7 @@ def test_an_unreadable_method_is_refused_whatever_the_url() -> None:
     assert _claims(source) == []
 
 
-def test_a_client_object_is_still_not_followed() -> None:
+def test_a_session_object_reads_a_request_like_a_module_level_call() -> None:
     source = """\
     import requests
     BASE = "https://a.example"
@@ -230,7 +230,30 @@ def test_a_client_object_is_still_not_followed() -> None:
     def load(uid):
         return session.get(f"{BASE}/users/{uid}")
     """
+    assert _facts(source) == []
+    [claim] = _claims(source)
+    assert _shape(claim) == ("GET", "https://a.example", ["users", None])
+    assert claim.meta["base_at"] == "2"
+    assert (claim.meta["client"], claim.meta["client_at"]) == ("session", "3")
+    assert claim.target_key == "GET https://a.example/users/{uid}"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # A relative request on a client with no base names no destination.
+        "import requests\nsession = requests.Session()\n"
+        "def load(uid):\n    return session.get(f'/users/{uid}')\n",
+        # The client is bound twice, so no one object is meant.
+        "import requests\nsession = requests.Session()\nsession = requests.Session()\n"
+        "def load(uid):\n    return session.get('https://a.example/users/1')\n",
+    ],
+)
+def test_a_relative_request_on_an_unconfigured_or_ambiguous_session_invents_nothing(
+    source: str,
+) -> None:
     assert _claims(source) == []
+    assert _facts(source) == []
 
 
 # -- environment defaults (deployment HTTP roadmap, M3) ---------------------------------------
