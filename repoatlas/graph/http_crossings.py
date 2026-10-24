@@ -37,6 +37,14 @@ request one proven service answers with several routes. Each is a handler's natu
 route and the repository, at most :data:`MAX_WOULD_REACH`, the rest counted. It is evidence on
 the refusal, never an edge: which requests link, and every chain, is decided exactly as before.
 
+A request whose base the source does not state (D2) stays :data:`UNKNOWN_BASE` unless an
+operator's **scoped declaration** covers it (:mod:`repoatlas.graph.http_scopes`): its own words
+-- a caller, a file, optionally a symbol, the hash of the base text -- must fit the request, and
+exactly one handler of the declared service must serve it. The join is then an edge whose
+identity, binding and source hops are ``declared`` at the declaration; every other outcome keeps
+the source's chain and says, in the evidence, which declarations concerned the request and why
+none joined it.
+
 Everything here is pure: claims in, edges and decisions out. The global pass applies
 the edges with its other output, replaces them on every run, and never reads them back
 (ARCHITECTURE.md §9).
@@ -48,10 +56,22 @@ import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from repoatlas.graph import http_chain as hops
 from repoatlas.graph.http_chain import Hop
+from repoatlas.graph.http_scopes import (
+    COVERED,
+    INJECTED_ROOT_UNSELECTED,
+    OUT_OF_SCOPE,
+    SCOPE_TOO_BROAD,
+    SCOPE_UNIDENTIFIED,
+    FileScope,
+    ScopeDeclaration,
+    ScopeRequest,
+    base_text,
+    covers,
+)
 from repoatlas.graph.link_exposures import LINK_SOURCE
 from repoatlas.models import http
 from repoatlas.models.parsing import EdgeType
@@ -104,8 +124,20 @@ DECLARABLE = frozenset({SERVICE_UNMATCHED, SOURCE_UNRESOLVED, BINDING_UNRESOLVED
 #: What an operator's declaration did to a request it concerns, in the refusal's evidence
 #: (``declaration_outcome``) so an ineffective one says why. ``applied`` is a link, never a refusal.
 DECLARATION_OUTCOMES = frozenset(
-    {"ambiguous", "route-unmatched", "callers-excluded", "source-established"}
+    {
+        "ambiguous",
+        "route-unmatched",
+        "callers-excluded",
+        "source-established",
+        # A scoped declaration (Phase A2) that concerns a request it does not cover.
+        SCOPE_TOO_BROAD,
+        SCOPE_UNIDENTIFIED,
+        INJECTED_ROOT_UNSELECTED,
+    }
 )
+#: Why a scoped declaration that concerns a request does not cover it, most telling first: the
+#: one a refusal's ``declaration_outcome`` names when several declarations concern the request.
+_SCOPE_REFUSALS = (INJECTED_ROOT_UNSELECTED, SCOPE_TOO_BROAD, SCOPE_UNIDENTIFIED)
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 #: What a pattern's hole may stand for in a host the request states (already a valid
@@ -231,6 +263,19 @@ class HttpCrossingPlan:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ScopedDeclarations:
+    """What a pass hands the join for the operators' scoped declarations (Phase A2).
+
+    ``exposures`` are the claims of :func:`repoatlas.graph.link_exposures.plan_scoped_exposures`,
+    one per route of each declaration's service; they never enter the ordinary fallback.
+    ``files`` gives, for each file a declaration names, what the file offers its scope, by the
+    caller's slug and the file's path."""
+
+    exposures: Sequence[UnresolvedRefRecord] = ()
+    files: Mapping[tuple[str, str], FileScope] = field(default_factory=dict)
+
+
 def _meta(claim: UnresolvedRefRecord) -> dict[str, str]:
     if not claim.meta_json:
         return {}
@@ -337,11 +382,17 @@ def plan_http_crossings(
     *,
     producer: str,
     handler_key: Callable[[int], str | None] | None = None,
+    scopes: ScopedDeclarations | None = None,
 ) -> HttpCrossingPlan:
     """Decide every request claim: joined to at most one handler, or refused at a hop.
 
     ``handler_key`` names a handler declaration by its natural key, for a refusal's
     ``would_reach``; without it no refusal records one.
+
+    ``scopes`` carries the operators' scoped declarations. They are consulted only for a request
+    whose base the source does not state, and join it only when a declaration's own words cover
+    it (:func:`repoatlas.graph.http_scopes.covers`) and exactly one handler of its service serves
+    it; without any, no request is looked at for them.
     """
     by_file = {row.file_id: row for row in files}
     exposures: dict[tuple[str, str], list[_Exposure]] = defaultdict(list)
@@ -379,6 +430,9 @@ def plan_http_crossings(
             asked.append((claim, meta, request))
 
     refs = _refs([(claim, meta) for claim, meta, _ in asked], by_file)
+    #: The scoped declarations by the caller's slug and file: empty (so never looked at) unless
+    #: operators declared some whose service and caller are both indexed.
+    scoped = _declarations(scopes, by_file) if scopes is not None and scopes.exposures else {}
     edges: list[EdgeRecord] = []
     calls: list[HttpCallDecision] = []
     for (claim, meta, request), (ref, variant) in zip(asked, refs, strict=True):
@@ -399,7 +453,21 @@ def plan_http_crossings(
                 Hop(hops.ORIGIN, hops.UNRESOLVED, origin, reason=reason),
                 *hops.unreached(*hops.HOPS[2:]),
             ]
-            calls.append(HttpCallDecision(ref, claim, variant, decision, found, tuple(chain)))
+            if decision == UNKNOWN_BASE and scoped and scopes is not None:
+                held = _scoped_outcome(
+                    claim, meta, consumer, scoped, scopes.files, start, ref, by_file, producer
+                )
+                if held is not None and held.edge is not None:
+                    decision, edge, chain = LINKED, held.edge, list(held.chain)
+                    record = json.loads(edge.resolution or "{}").get(HTTP_CROSSING, {})
+                    found.update({str(k): str(v) for k, v in record.items()})
+                    edges.append(edge)
+                elif held is not None:
+                    # A declaration concerns this request and does not join it: the chain stays
+                    # the source's, and the evidence says which declarations and why.
+                    found["declaration_ids"] = ",".join(str(i) for i in held.ids)
+                    found["declaration_outcome"] = held.outcome
+            calls.append(HttpCallDecision(ref, claim, variant, decision, found, tuple(chain), edge))
             continue
         # A literal URL states its origin at the call itself.
         stated = origin or tuple(replace(p, role="stated_at") for p in start[0].provenance)
@@ -558,6 +626,194 @@ def plan_http_crossings(
 def _caller_of(request: _Request, by_file: Mapping[int, FileRow]) -> str | None:
     consumer = by_file.get(request.claim.file_id)
     return consumer.repo_slug if consumer is not None else None
+
+
+@dataclass(frozen=True, slots=True)
+class _Declaration:
+    """One scoped declaration, read back from the exposures its service gives."""
+
+    link_id: int
+    words: ScopeDeclaration
+    #: The slug of the repository the declaration says serves the base.
+    service: str
+    base_path: str
+    exposures: tuple[_Exposure, ...]
+
+    @property
+    def symbol(self) -> str | None:
+        return self.words.symbol
+
+
+@dataclass(frozen=True, slots=True)
+class _Scoped:
+    """What the scoped declarations did to one base-unknown request."""
+
+    #: The declarations that concern it, by link id.
+    ids: tuple[int, ...]
+    #: Why none joined it, a ``declaration_outcome``; empty when one did.
+    outcome: str = ""
+    edge: EdgeRecord | None = None
+    chain: tuple[Hop, ...] = ()
+
+
+def _scoped_exposure(claim: UnresolvedRefRecord, meta: dict[str, str]) -> _Exposure | None:
+    """A scoped exposure claim as the join reads it: the route as the service serves it, which is
+    the declared base path (the prefix the service mounts its routes under) before the route the
+    code states. The request's own segments are matched against that whole path as written
+    (:func:`_scoped_outcome`); the prefix is never added to or removed from them. ``endpoint``,
+    ``origin`` and ``deployment`` agree with the claim's target: the shown base, then the prefix
+    and the route. The ``origin`` is the shown base, a label no request's origin is ever compared
+    with."""
+    method = http.http_method(meta.get("method", ""))
+    route, shown = meta.get("route", ""), meta.get("base_shown", "")
+    path = f"{meta.get('base_path', '')}{route}"
+    if method is None or not shown or http.canonical_route(f"{method} {path}") is None:
+        return None
+    return _Exposure(
+        claim=claim,
+        endpoint=claim.target_key,
+        method=method,
+        origin=shown,
+        path=path,
+        deployment=f"{shown}{meta.get('base_path', '')}",
+        # Only a published base (:func:`_covers`) reads this; a scoped exposure is not covered.
+        base=(),
+        meta=meta,
+    )
+
+
+def _declarations(
+    scopes: ScopedDeclarations, by_file: Mapping[int, FileRow]
+) -> dict[tuple[str, str], list[_Declaration]]:
+    """The scoped declarations by the caller's slug and file, each with its service's exposures.
+    A declaration whose service gives no route is not here: it could join nothing."""
+    grouped: dict[int, list[_Exposure]] = defaultdict(list)
+    for claim in scopes.exposures:
+        meta = _meta(claim)
+        exposure = _scoped_exposure(claim, meta)
+        if exposure is not None and claim.file_id in by_file and meta.get("link_id", "").isdigit():
+            grouped[int(meta["link_id"])].append(exposure)
+    found: dict[tuple[str, str], list[_Declaration]] = defaultdict(list)
+    for link_id in sorted(grouped):
+        exposures = grouped[link_id]
+        meta = exposures[0].meta
+        try:
+            callers = json.loads(meta.get("link_callers", "[]"))
+        except json.JSONDecodeError:
+            continue
+        path, key = meta.get("scope_path", ""), meta.get("scope_base_key", "")
+        if not (isinstance(callers, list) and len(callers) == 1) or not path or not key:
+            continue
+        words = ScopeDeclaration(str(callers[0]), path, key, meta.get("scope_symbol") or None)
+        service = by_file[exposures[0].claim.file_id].repo_slug
+        declaration = _Declaration(
+            link_id, words, service, meta.get("base_path", ""), tuple(exposures)
+        )
+        found[(words.caller, words.path)].append(declaration)
+    return found
+
+
+def _qualified_of(scope: FileScope, entity_id: int) -> str:
+    """The qualified name of the entity that makes a request, ``""`` for the file itself."""
+    for name, ids in scope.entities.items():
+        if entity_id in ids:
+            return name
+    return ""
+
+
+def _scoped_outcome(
+    claim: UnresolvedRefRecord,
+    meta: dict[str, str],
+    consumer: FileRow | None,
+    declarations: Mapping[tuple[str, str], list[_Declaration]],
+    files: Mapping[tuple[str, str], FileScope],
+    start: Sequence[Hop],
+    ref: str,
+    by_file: dict[int, FileRow],
+    producer: str,
+) -> _Scoped | None:
+    """What the scoped declarations of the request's file do to a request whose base the source
+    does not state, or ``None`` when none concerns it.
+
+    A declaration joins it only when it covers it. Covering declarations naming more than one
+    service (or base path) are ambiguous and join nothing; otherwise the most specific one -- a
+    symbol before a whole file, the longer symbol, the lower id -- offers its service's routes,
+    and exactly one handler must serve the request, as for any declaration.
+
+    A declaration's base path is a service-side route prefix: each route it offers is the prefix
+    before the route the code serves (:func:`_scoped_exposure`). The request's segments are
+    matched as written, never with the prefix added or removed, so a prefix matches only whole
+    segments (``/v1`` is not ``/v10``) and a request that writes it twice does not join a route
+    the service serves once under it."""
+    segments = _segments(meta)
+    here = declarations.get((consumer.repo_slug, consumer.rel_path)) if consumer else None
+    method = http.http_method(meta.get("method", ""))
+    if consumer is None or not here or segments is None or method is None:
+        return None
+    url = claim.target_key.partition(" ")[2]
+    scope = files.get((consumer.repo_slug, consumer.rel_path))
+    scope = scope if scope is not None else FileScope()
+    request = ScopeRequest(
+        consumer.repo_slug,
+        consumer.rel_path,
+        url,
+        _qualified_of(scope, claim.src_id),
+        claim.src_id,
+        meta,
+    )
+    verdicts = [(item, covers(item.words, request, scope)) for item in here]
+    covering = [item for item, verdict in verdicts if verdict == COVERED]
+    if not covering:
+        seen = {verdict for _, verdict in verdicts if verdict != OUT_OF_SCOPE}
+        for outcome in _SCOPE_REFUSALS:
+            if outcome in seen:
+                named = sorted(item.link_id for item, verdict in verdicts if verdict == outcome)
+                return _Scoped(tuple(named), outcome)
+        return None
+    ids = tuple(sorted(item.link_id for item in covering))
+    if len({(item.service, item.base_path) for item in covering}) > 1:
+        return _Scoped(ids, "ambiguous")
+    by = min(
+        covering, key=lambda item: (item.symbol is None, -len(item.symbol or ""), item.link_id)
+    )
+    # Only the routes that answer the request's method, as an ordinary declaration's are keyed.
+    offered = [exposure for exposure in by.exposures if exposure.method == method]
+    candidates, why = declared_candidates(segments, offered, consumer.repo_slug)
+    if why or len(candidates) != 1:
+        return _Scoped(ids, why or "route-unmatched")
+    exposure = candidates[0]
+    # The URL as the edge shows it: the declaration's shown base and the path as written, never
+    # the base expression itself.
+    path = url[len(base_text(url) or "") + 2 :]
+    shown = _Request(claim, method, exposure.origin, segments, f"{exposure.origin}{path}", meta)
+    edge = _edge(shown, exposure, by_file, producer, ref)
+    where = by.words.path + (f"#{by.symbol}" if by.symbol else "")
+    loaded = json.loads(edge.resolution or "{}")
+    record = loaded.get(HTTP_CROSSING, {})
+    for key in ("link_id", "link_label", "link_environment", "link_verification"):
+        if key in exposure.meta:
+            record[key] = exposure.meta[key]
+    record["link_scope"] = where
+    loaded[HTTP_CROSSING] = record
+    edge = edge.model_copy(update={"resolution": json.dumps(loaded, sort_keys=True)})
+    place = (
+        hops.Provenance(
+            exposure.claim.repo_id, exposure.meta.get("link_in", ""), None, None, "link_in", "link"
+        ),
+    )
+    label, shown_base = exposure.meta.get("link_label", ""), exposure.meta.get("base_shown", "")
+    stated = f"{label}: {shown_base} in {where}"
+    route = _route(exposure, by_file)
+    chain = (
+        *start,
+        Hop(hops.ORIGIN, hops.DECLARED, place, detail=stated),
+        Hop(hops.SERVICE_IDENTITY, hops.DECLARED, place),
+        Hop(hops.DEPLOYMENT_BINDING, hops.DECLARED, place),
+        Hop(hops.SOURCE_BINDING, hops.DECLARED, place),
+        Hop(hops.ROUTE, hops.PROVEN, route, detail=exposure.endpoint),
+        Hop(hops.HANDLER, hops.PROVEN, route, entity_id=exposure.claim.src_id),
+    )
+    return _Scoped(ids, edge=edge, chain=chain)
 
 
 def parse_exposure(claim: UnresolvedRefRecord) -> _Exposure | None:
