@@ -649,6 +649,50 @@ def test_n4_a_classification_whose_authenticated_repository_is_gone_is_invalidat
     assert requests_at(built, AUTH)[TOKEN_REQUEST].identity == "unresolved"
 
 
+def test_an_authentication_target_must_be_an_indexed_repository_at_write_time(
+    built: Workspace,
+) -> None:
+    """Amendment 2: the write refuses an authenticated repository the index does not hold (a
+    preview lists it, a create stores nothing and writes no audit row, an update keeps what was
+    stored), and accepts an indexed one. An import still bypasses the write, and the read-time
+    invalidation above stays."""
+    reason = "nowhere is not an indexed repository: an authentication target is an application "
+    reason += "service or deployment the index holds"
+    unindexed = external(authenticates=[AuthenticationTarget(repository="nowhere")])
+    checked = preview(built, unindexed)
+    assert not checked.can_create and checked.requirements == (reason,)
+    with pytest.raises(InvalidDeploymentLinkError, match="nowhere is not an indexed repository"):
+        classify(built, unindexed)
+    assert built.service_declarations.list_all() == [] and audit_rows(built) == []
+
+    # a mix names only the one the index does not hold
+    portal = slug(built, "portal")
+    mixed = external(
+        authenticates=[
+            AuthenticationTarget(repository=portal),
+            AuthenticationTarget(repository="nowhere"),
+        ]
+    )
+    assert preview(built, mixed).requirements == (reason,)
+
+    indexed = external(authenticates=[AuthenticationTarget(repository=portal, environment="prod")])
+    assert preview(built, indexed).can_create
+    held = classify(built, indexed).declaration
+    assert (held.state, held.reason) == ("applied", "")
+    assert held.basis == "declared"  # an operator's statement, never source evidence
+    assert [t.repository for t in stated(held).authenticates] == [portal]
+    assert [row[0] for row in audit_rows(built)] == ["create"]
+
+    # an update that names an unindexed repository is refused and the stored one is unchanged
+    with pytest.raises(InvalidDeploymentLinkError, match="nowhere is not an indexed repository"):
+        service(built).service_declaration_update(
+            ServiceDeclarationUpdateRequest(context=GLOBAL, id=held.id, fields=unindexed)
+        )
+    [stored] = built.service_declarations.list_all()
+    assert stored.fields == indexed
+    assert [row[0] for row in audit_rows(built)] == ["create"]
+
+
 # -- N16: a workspace view -------------------------------------------------------------------------
 
 
