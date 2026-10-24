@@ -2626,3 +2626,77 @@ def test_a_scoped_update_without_a_worklist_group_is_refused(scoped_built: Works
     assert stored is not None and stored.label == "first" and stored.scope == scope
     assert audit_count(ws) == 1
     assert [e.action for e in ws.deployment_links.history(link_id=link.id)] == ["create"]
+
+
+def test_an_imported_scoped_declaration_whose_base_key_matches_no_request_joins_nothing(
+    scoped_built: Workspace, tmp_path: Path
+) -> None:
+    """An import never passes the preview or the service, so nothing there checks that its base key
+    names a base some request writes. The sync's join does: the declaration is read, covers no
+    request (every request of its file is out of its scope), and joins and mentions nothing -- the
+    stored decisions are byte for byte those of a sync without it. A declaration that does match,
+    made beside it, still joins, so the first was read by the same join and refused by it."""
+    ws = scoped_built
+    before = decision_table(ws)
+    assert not any(decision == LINKED for _, decision, _, _ in before)
+
+    nothing = DeclarationScope(path="client.py", base_key="hbk1-" + "0" * 20, base_shown="{…}")
+    stray = ws.deployment_links.create(
+        slug(ws, "alpha"),
+        DeploymentLinkFields(label="stray", callers=[slug(ws, "caller")], scope=nothing),
+        via="import",
+    ).id
+    resync(ws, tmp_path)
+
+    assert decision_table(ws) == before
+    assert crossings(ws) == []
+    for key, call in decided(ws).items():
+        assert call.decision != LINKED, key
+        assert call.evidence.get("link_id") != str(stray), key
+        outcome = call.evidence.get("declaration_outcome")
+        assert outcome is None or outcome in {
+            SCOPE_TOO_BROAD,
+            "scope-unidentified",
+            "injected-root-unselected",
+        }, key
+
+    real = declare(ws, "alpha", "caller", "client.py", "BASE")
+    resync(ws, tmp_path)
+    joined = decided(ws)
+    assert joined[(*CLIENT, "read_item")].decision == LINKED
+    assert joined[(*CLIENT, "read_item")].evidence["link_id"] == str(real)
+    assert all(call.evidence.get("link_id") != str(stray) for call in joined.values())
+
+
+def test_an_imported_scoped_declaration_with_a_base_key_is_refused_only_by_the_join(
+    scoped_built: Workspace, tmp_path: Path
+) -> None:
+    """The base key is one a request really writes (``BASE``), but the path is wrong: a file the
+    caller does not have, and a file of the caller whose requests write other bases. The store
+    accepts both as imports (each keeps its one ``import`` history row), so only the join refuses
+    them: it concerns no request, joins nothing and leaves every stored decision as it was. The
+    same words on the right file still join, so the key was a live one."""
+    ws = scoped_built
+    before = decision_table(ws)
+
+    wrong = [
+        declare(ws, "alpha", "caller", "missing.py", "BASE"),
+        declare(ws, "alpha", "caller", "qualified.py", "BASE"),
+    ]
+    for link_id in wrong:
+        assert [e.action for e in ws.deployment_links.history(link_id=link_id)] == ["import"]
+    resync(ws, tmp_path)
+
+    assert decision_table(ws) == before
+    assert crossings(ws) == []
+    assert not any(call.decision == LINKED for call in decided(ws).values())
+
+    real = declare(ws, "alpha", "caller", "client.py", "BASE")
+    resync(ws, tmp_path)
+    joined = decided(ws)
+    assert joined[(*CLIENT, "read_item")].decision == LINKED
+    assert joined[(*CLIENT, "read_item")].evidence["link_id"] == str(real)
+    assert all(
+        call.evidence.get("link_id") not in {str(link_id) for link_id in wrong}
+        for call in joined.values()
+    )
