@@ -401,14 +401,52 @@ def test_client_identity_may_be_spelled_several_ways(header: str, call: str, end
     assert _targets(source, EdgeType.CALLS_HTTP_ENDPOINT) == {endpoint}
 
 
-def test_an_httpx_client_object_is_not_followed() -> None:
-    """Only module-level functions: ``base_url`` would need object flow to read."""
+def test_an_httpx_client_object_with_a_stated_base_is_a_claim_and_no_fact() -> None:
+    """The client's lexical binding is proven, so ``base_url`` is read: for the join only."""
     source = """\
     import httpx
     client = httpx.Client(base_url="https://api.example.com")
     def f():
         return client.get("/hello")
     """
+    assert _targets(source, EdgeType.CALLS_HTTP_ENDPOINT) == set()
+    [claim] = _http(source)
+    assert claim.target_key == "GET https://api.example.com/hello"
+    assert claim.source_symbol == "f"
+    assert claim.meta == {
+        PENDING_FACT: HTTP_CLIENT_CALL,
+        "method": "GET",
+        "segments": '["hello"]',
+        "source": "httpx",
+        "origin": "https://api.example.com",
+        "base_at": "2",
+        "client": "client",
+        "client_at": "2",
+    }
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # No base at all: a relative URL names no destination, so nothing is invented.
+        "import httpx\nclient = httpx.Client()\ndef f():\n    return client.get('/hello')\n",
+        "import requests\ns = requests.Session()\ndef f():\n    return s.get('/hello')\n",
+        # A base something else may change: the client is not provable.
+        (
+            "import httpx\nclient = httpx.Client(base_url='https://api.example.com')\n"
+            "client.base_url = 'https://other.example'\n"
+            "def f():\n    return client.get('/hello')\n"
+        ),
+        (
+            "import httpx\nclient = httpx.Client(base_url='https://a.example')\n"
+            "client = httpx.Client(base_url='https://b.example')\n"
+            "def f():\n    return client.get('/hello')\n"
+        ),
+    ],
+)
+def test_a_relative_request_on_an_unconfigured_or_ambiguous_client_invents_nothing(
+    source: str,
+) -> None:
     assert _http(source) == []
 
 

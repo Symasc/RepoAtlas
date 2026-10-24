@@ -2014,6 +2014,17 @@ Until the pass proves one, it stays a pending claim that records the declaration
   becomes its own join claim (`base_at` its branch's line, `alternatives` their count), decided on its own, so no
   alternative's decision overwrites another's. The condition is never read; a branch without a literal, a missing
   `else` or a second binding leaves the request read as before.
+  - A client object (`requests.Session()`, `httpx.Client(...)`, `httpx.AsyncClient(...)`) is followed only where its
+    binding is lexical: the name's one binding in the module, `name = C(...)` or `with C(...) as name`, constructed
+    with no positional or starred argument and no `transport`, `mounts`, `app` or `event_hooks`, and read from the
+    scope that binding lives in (the module, the function, or the `with` body). An attribute store on the name, or a
+    read of its `event_hooks` / `hooks`, discards it; a class-body, `self.x`, tuple or walrus binding is not read.
+  - On such a client a literal absolute URL is read as a module-level call is. A rooted URL (`"/users"`,
+    `f"/users/{uid}"`) is appended to an `httpx` `base_url` the source states (a literal, a module constant or an
+    environment default: absolute, no query, fragment or credentials), as a join claim only. On a `base_url` the
+    source does not state it is a claim with no origin whose host part is the synthetic `{client.base_url}`
+    (`base: unknown`, a bounded `base_expr`): counted, never linked. A client with no base has no destination for a
+    rooted URL, so one yields nothing. Each such claim records `client` and `client_at`.
 - **axios**: the default export's method aliases with absolute URLs only. A relative axios URL is combined with a
   `baseURL` any file may set.
 - **superagent**: `superagent.<verb>(url)` on the default import (or `require`), or on a module-level
