@@ -460,6 +460,10 @@ def links_export(
             ]
             or None,
         )
+        # Stored, but the file has no place for them: said below, never silently dropped.
+        unexported = len(workspace.service_declarations.list_all("redirect")) + len(
+            workspace.service_declarations.list_all("permitted_callback")
+        )
     finally:
         workspace.close()
     # exclude_none: an unscoped link has no `scope` key and an export with no external service has
@@ -484,6 +488,13 @@ def links_export(
         file.write_text(text + "\n", encoding="utf-8")
         also = f" and {len(services)} external service(s)" if services else ""
         typer.echo(f"Wrote {len(exported.links)} link(s){also} to {file}", err=True)
+    if unexported:
+        typer.echo(
+            f"Note: {unexported} redirect or permitted-callback declaration(s) in the index are "
+            "not in this file: this version does not export them, so an import of it does not "
+            "restore them.",
+            err=True,
+        )
 
 
 def _import_services(workspace: Workspace, services: Sequence[ExternalServiceFields]) -> int:
