@@ -429,7 +429,11 @@ class PythonParser:
     #    class's initializer is proven to bind it by keyword), and a use of a class carries the
     #    fields read through a parameter it annotates or set by constructing it (DF3b,
     #    repoatlas.parsers.py_uses).
-    version = f"18+{interpreter_tag()}"
+    # 19: a request made on a `requests.Session()` or `httpx.Client(...)` the module binds once
+    #    (lexically) is a join claim: a literal absolute URL as before, a rooted URL appended to
+    #    a base the source states, and one on a base it does not state a claim with no origin
+    #    (D2); each carries the client's name and line (repoatlas.parsers.http_python).
+    version = f"19+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
