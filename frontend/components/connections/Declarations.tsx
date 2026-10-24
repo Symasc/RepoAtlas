@@ -9,6 +9,7 @@ import {
   declarationDetail,
   historyLine,
   REASON_TEXT,
+  scopeSummary,
   STATE_LABEL,
   STATE_MEANING,
 } from "@/lib/model/connections";
@@ -56,6 +57,9 @@ function Declaration({ declaration: d }: { declaration: DeclarationView }) {
         {d.environment && <span className={classes.tag}>{d.environment}</span>}
       </div>
       {d.url && <p className={classes.mono}>{d.url}</p>}
+      {d.scope && (
+        <p className={classes.mono}>Scope: {scopeSummary(d.scope).join(" · ")}</p>
+      )}
       <p className={classes.detail}>
         {d.label}
         {(d.callers ?? []).length > 0 ? ` · for ${d.callers!.join(", ")}` : " · for every caller"}
