@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import pytest
+from pydantic import ValidationError
+from repoatlas.capabilities.errors import InvalidDeploymentLinkError
 from repoatlas.capabilities.service import CapabilityService
+from repoatlas.config.settings import DECLARATIONS_SLUG
 from repoatlas.graph import link_exposures
 from repoatlas.graph.deploy_identity import ServedRoute
 from repoatlas.graph.http_crossings import (
@@ -32,13 +35,18 @@ from repoatlas.graph.http_crossings import (
 )
 from repoatlas.graph.http_declarations import facts_of, scoped_declaration_state
 from repoatlas.graph.http_scopes import (
+    COVERED,
     HTTP_SCOPED_EXPOSURE,
+    SCOPE_TOO_BROAD,
     FileScope,
     ScopeDeclaration,
     ScopeRequest,
     ScopeSymbol,
     base_key,
+    base_kind,
     covers,
+    level_allowed,
+    symbols_overlap,
 )
 from repoatlas.graph.link_exposures import plan_link_exposures, plan_scoped_exposures
 from repoatlas.graph.linker import GLOBAL_PARSER
@@ -55,8 +63,11 @@ from repoatlas.models.http_connections import (
     CandidateService,
     ConnectionGroup,
     ConnectionRequest,
+    HttpConnectionPreviewRequest,
+    HttpConnectionPreviewResponse,
     HttpConnectionsRequest,
     HttpConnectionsResponse,
+    PreviewScope,
 )
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.parsers.http_facts import HTTP_CLIENT_CALL, PENDING_FACT
@@ -64,6 +75,7 @@ from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace
 from repoatlas.storage.protocols import FileRow, HttpCallDecisionRow, UnresolvedRefRecord
 from repoatlas.storage.sqlite.database import SCHEMA_VERSION
+from repoatlas.storage.sqlite.deployment_links import _symbols_overlap
 from repoatlas.storage.sqlite.migrator import load_migrations, user_version
 from tests.http_connections_corpus import repos
 from tests.http_scoped_corpus import LONG_BASE
@@ -1714,3 +1726,410 @@ def test_a_symbol_named_twice_in_a_file_is_not_an_identifiable_scope(
         c.symbol for c in group.scope_choices if c.repository == caller and c.path == "client.py"
     }
     assert symbols == {None, "write_item", "list_items", "shadowed_read"}
+
+
+# -- Phase A2, slice S7: the scoped preview ------------------------------------------------------
+#
+# A preview answers, for the words of a scope and a service, what the sync will decide for each
+# request of the group, with the sync's own functions. These tests preview first, then declare
+# (``via="import"``: the sync alone decides), sync, and compare request by request.
+
+#: The sync's name for a refusal the preview names in A1's words (route shapes).
+SYNC_NAME = {"no-matching-route": "route-unmatched"}
+
+
+def preview_of(
+    workspace: Workspace,
+    expression: str,
+    service: str,
+    caller: str,
+    path: str,
+    text: str,
+    *,
+    symbol: str | None = None,
+    base_path: str = "",
+    **more: Any,
+) -> HttpConnectionPreviewResponse:
+    """The scoped preview of the group that shows ``expression``: ``service`` behind the base
+    ``text`` in ``caller``'s ``path`` (and ``symbol``). A ``caller`` that is no repository's name
+    is used as it is."""
+    repos = workspace.repositories.list_all()
+    scope = PreviewScope(
+        caller=next((r.slug for r in repos if r.name == caller), caller),
+        path=path,
+        symbol=symbol,
+        base_key=base_key(text),
+        base_path=base_path,
+        **more,
+    )
+    return CapabilityService(workspace).http_connection_preview(
+        HttpConnectionPreviewRequest(
+            context=GLOBAL,
+            group=group_with(workspace, expression).key,
+            repository=slug(workspace, service),
+            scope=scope,
+        )
+    )
+
+
+def places(workspace: Workspace) -> dict[str, tuple[str, str, str | None]]:
+    """Where each unresolved request is, by its decision ref: (repository name, file, symbol)."""
+    names = {r.slug: r.name for r in workspace.repositories.list_all()}
+    return {
+        r.decision_ref: (names[r.site.repository], r.site.path, r.symbol)
+        for r in all_requests(workspace)
+    }
+
+
+def by_ref(workspace: Workspace) -> dict[str, tuple[str, dict[str, Any]]]:
+    """Every stored decision by its ref: the decision and its evidence."""
+    rows = workspace.database.execute(
+        "SELECT decision_ref, decision, evidence_json FROM http_call_decisions"
+    ).fetchall()
+    return {ref: (decision, json.loads(evidence)) for ref, decision, evidence in rows}
+
+
+def blocked(preview: HttpConnectionPreviewResponse, fragment: str) -> None:
+    assert not preview.can_create
+    assert any(fragment in item for item in preview.requirements), preview.requirements
+
+
+def test_a_scoped_preview_states_each_covered_requests_outcome_and_the_rest_as_out_of_scope(
+    scoped_built: Workspace,
+) -> None:
+    """Previewing ``alpha`` behind ``BASE`` for the whole of ``caller``'s ``client.py`` lists every
+    request of the group: the two the service has a handler for as ``would-link`` with that
+    handler, the one it answers no route for as ``no-matching-route``, the shadowed one as
+    ``scope-too-broad`` (the sync's refusal), and every request of another file or repository as
+    ``out-of-scope``, after the ones the scope reaches. The declaration it would store is echoed
+    with the base shown by its name; it states no origin and no URL; nothing is stored."""
+    ws = scoped_built
+    where = places(ws)
+    preview = preview_of(ws, "{BASE}", "alpha", "caller", "client.py", "BASE")
+
+    in_client = ("caller", "client.py")
+    expected = {
+        (*in_client, "read_item"): "would-link",
+        (*in_client, "write_item"): "would-link",
+        (*in_client, "list_items"): "no-matching-route",
+        (*in_client, "shadowed_read"): "scope-too-broad",
+        ("caller", "other.py", "other_read"): "out-of-scope",
+        ("second", "client.py", "read_item"): "out-of-scope",
+        ("webts", "src/api.ts", "listItem"): "out-of-scope",
+        ("webts", "src/api.ts", "createItem"): "out-of-scope",
+        ("webts", "src/api.ts", "shadowedItem"): "out-of-scope",
+    }
+    rows = {where[row.decision_ref]: row for row in preview.rows}
+    assert len(rows) == len(preview.rows) == len(expected) and not preview.has_more
+    assert {place: row.outcome for place, row in rows.items()} == expected
+    assert preview.counts == {
+        "would-link": 2,
+        "no-matching-route": 1,
+        "scope-too-broad": 1,
+        "out-of-scope": 5,
+    }
+    assert [row.outcome for row in preview.rows[:4]].count("out-of-scope") == 0
+    assert {row.outcome for row in preview.rows[4:]} == {"out-of-scope"}
+
+    read, write = rows[(*in_client, "read_item")], rows[(*in_client, "write_item")]
+    assert read.handler == "alpha/main.py:6"
+    assert write.handler is not None and write.handler.startswith("alpha/main.py:")
+    assert write.handler != read.handler
+    assert all(row.handler is None for row in preview.rows if row.outcome != "would-link")
+
+    assert preview.scope == words("client.py", "BASE")
+    assert (preview.origin, preview.url) == (None, None)
+    assert preview.repository == slug(ws, "alpha") and preview.routes_served == 2
+    assert preview.can_create and preview.requirements == ()
+    assert preview.conflicts_with is None and preview.duplicate_of is None
+    assert any("not provably" in warning for warning in preview.warnings)
+    assert ws.deployment_links.list_all() == [] and audit_count(ws) == 0
+
+
+def test_a_scoped_preview_agrees_with_what_the_sync_then_decides(
+    scoped_built: Workspace, tmp_path: Path
+) -> None:
+    """Six scopes of the corpus are previewed, declared, and synced. A request the preview marked
+    ``would-link`` is linked by the sync through that declaration at the handler the preview named
+    (and the sync links no other request); one it marked refused is not linked and the sync
+    refuses it with the same reason, naming the declaration; one it marked ``out-of-scope`` is
+    not concerned by that declaration. The six reach every verdict: a file, a class, a base path
+    that prefixes the route, a request written without the prefix, a service answering twice, and
+    a transport handed in at run time."""
+    ws = scoped_built
+    cases: dict[str, tuple[str, str, str, str, str, str | None, str]] = {
+        "file": ("{BASE}", "alpha", "caller", "client.py", "BASE", None, ""),
+        "class": (
+            "{self.base_url}",
+            "alpha",
+            "caller",
+            "client.py",
+            "self.base_url",
+            "UsersClient",
+            "",
+        ),
+        "mounted": ("{base}", "mounted", "caller", "client.py", "base", "param_read", "/v1"),
+        "unprefixed": ("{root}", "mounted", "caller", "client.py", "root", "prefixed_read", "/v1"),
+        "twice": (
+            "{config.api_base}",
+            "twin",
+            "caller",
+            "qualified.py",
+            "config.api_base",
+            None,
+            "",
+        ),
+        "injected": ("{base}", "alpha", "webts", "src/root.ts", "base", None, ""),
+    }
+    previews = {
+        name: preview_of(ws, *words_of[:5], symbol=words_of[5], base_path=words_of[6])
+        for name, words_of in cases.items()
+    }
+    outcomes = {name: {row.outcome for row in p.rows} for name, p in previews.items()}
+    assert all(p.rows and not p.has_more for p in previews.values())
+    assert {n: p.counts.get("would-link", 0) for n, p in previews.items()} == {
+        "file": 2,
+        "class": 2,
+        "mounted": 1,
+        "unprefixed": 0,
+        "twice": 0,
+        "injected": 0,
+    }
+    assert "no-matching-route" in outcomes["unprefixed"] and "ambiguous" in outcomes["twice"]
+    assert "injected-root-unselected" in outcomes["injected"]
+    assert "scope-too-broad" in outcomes["twice"] and "out-of-scope" in outcomes["class"]
+    would_link = {
+        row.decision_ref for p in previews.values() for row in p.rows if row.outcome == "would-link"
+    }
+
+    links = {
+        name: declare(ws, service, caller, path, text, symbol=symbol, base_path=prefix)
+        for name, (_, service, caller, path, text, symbol, prefix) in cases.items()
+    }
+    resync(ws, tmp_path)
+    after = by_ref(ws)
+
+    assert {ref for ref, (decision, _) in after.items() if decision == LINKED} == would_link
+    for name, preview in previews.items():
+        link = str(links[name])
+        for row in preview.rows:
+            decision, evidence = after[row.decision_ref]
+            concerned = str(evidence.get("declaration_ids", "")).split(",")
+            if row.outcome == "would-link":
+                assert decision == LINKED, (name, row)
+                assert evidence["link_id"] == link, (name, row)
+                assert evidence["served_at"] == row.handler, (name, row)
+                continue
+            if row.outcome == "out-of-scope":
+                # Not linked through THIS declaration. Another independent declaration may
+                # legitimately link the same shared-base request, and then its preview says so.
+                assert link not in concerned, (name, row)
+                if decision == LINKED:
+                    assert evidence["link_id"] != link, (name, row)
+                    assert row.decision_ref in would_link, (name, row)
+                continue
+            assert decision != LINKED, (name, row)
+            assert link in concerned, (name, row)
+            reason = SYNC_NAME.get(row.outcome, row.outcome)
+            assert evidence["declaration_outcome"] == reason, (name, row)
+
+
+def test_a_scoped_preview_refuses_a_base_path_that_is_not_a_prefix() -> None:
+    """A base path is empty or ``/`` and literal segments. ``v1`` (no leading ``/``), ``/v1?x`` (a
+    query) and ``/v1{a}`` (a hole) are refused with the message the A1 preview gives, whether the
+    scope states them or the request does; a valid one is kept, without a trailing ``/``, and the
+    request cannot state a second one beside the scope's."""
+    message = re.escape("a base path is empty or starts with `/`, with no query or holes")
+    words_of_scope: dict[str, Any] = {"caller": "web", "path": "a.py", "base_key": base_key("BASE")}
+    asked: dict[str, Any] = {
+        "context": GLOBAL,
+        "group": "hcg1-" + "0" * 20,
+        "repository": "api",
+    }
+    for value in ("v1", "/v1?x", "/v1{a}"):
+        with pytest.raises(ValidationError, match=message):
+            PreviewScope(**words_of_scope, base_path=value)
+        with pytest.raises(ValidationError, match=message):
+            HttpConnectionPreviewRequest(
+                **asked, scope=PreviewScope(**words_of_scope), base_path=value
+            )
+        with pytest.raises(ValidationError, match=message):
+            HttpConnectionPreviewRequest(**asked, base_path=value)
+    assert PreviewScope(**words_of_scope, base_path="/v1/").base_path == "/v1"
+    assert PreviewScope(**words_of_scope).base_path == ""
+    scoped = PreviewScope(**words_of_scope, base_path="/v1")
+    assert HttpConnectionPreviewRequest(**asked, scope=scoped).scope == scoped
+    with pytest.raises(ValidationError, match="states its base path in the scope"):
+        HttpConnectionPreviewRequest(**asked, scope=scoped, base_path="/v2")
+
+
+def test_a_scoped_preview_request_names_its_caller_once_and_never_the_base_text() -> None:
+    """``callers`` is empty or the scope's caller; the scope names a base by its key, so the text
+    (or any other word) is not accepted; a request without a scope is the A1 request unchanged."""
+    scope = PreviewScope(caller="web", path="a.py", base_key=base_key("BASE"))
+    asked: dict[str, Any] = {
+        "context": GLOBAL,
+        "group": "hcg1-" + "0" * 20,
+        "repository": "api",
+    }
+    assert HttpConnectionPreviewRequest(**asked, scope=scope).callers == ()
+    assert HttpConnectionPreviewRequest(**asked, scope=scope, callers=("web",)).callers == ("web",)
+    with pytest.raises(ValidationError, match="names its one caller"):
+        HttpConnectionPreviewRequest(**asked, scope=scope, callers=("other",))
+    with pytest.raises(ValidationError, match="names its one caller"):
+        HttpConnectionPreviewRequest(**asked, scope=scope, callers=("web", "other"))
+    for refused in ("BASE", "self.base_url", "hbk1-" + "A" * 20, "hbk1-" + "0" * 19):
+        with pytest.raises(ValidationError):
+            PreviewScope(caller="web", path="a.py", base_key=refused)
+    with_text: dict[str, Any] = {"caller": "web", "path": "a.py", "base_key": base_key("BASE")}
+    with pytest.raises(ValidationError):
+        PreviewScope(**with_text, base_text="BASE")
+    plain = HttpConnectionPreviewRequest(**asked, callers=("a", "b"), base_path="/v1")
+    assert plain.scope is None and plain.callers == ("a", "b") and plain.base_path == "/v1"
+
+
+def test_a_scoped_preview_shows_a_dotted_base_as_the_masked_name(scoped_built: Workspace) -> None:
+    """``self.base_url`` is not a name: the declaration the preview echoes shows it as ``{…}``,
+    and the text is nowhere in the answer, not even in a requirement that refuses a shown form
+    that names it. The shown form the group has is accepted when the request states it; a plain
+    name (``BASE``) is shown by its name. The worklist's own display of the group (A1) is
+    unchanged."""
+    ws = scoped_built
+    assert group_with(ws, "{self.base_url}").base_expression == "{self.base_url}"
+    args = ("{self.base_url}", "alpha", "caller", "client.py", "self.base_url")
+
+    preview = preview_of(ws, *args, symbol="UsersClient")
+    assert preview.scope is not None and preview.scope.base_shown == "{…}"
+    assert preview.can_create and preview.counts == {"would-link": 2, "out-of-scope": 1}
+    text = preview.model_dump_json()
+    assert "base_url" not in text and "self." not in text
+
+    stated = preview_of(ws, *args, symbol="UsersClient", base_shown="{…}")
+    assert stated.can_create and stated.scope == preview.scope
+
+    raw = preview_of(ws, *args, symbol="UsersClient", base_shown="{self.base_url}")
+    blocked(raw, "is shown as {…}")
+    assert raw.scope is not None and raw.scope.base_shown == "{…}"
+    assert "base_url" not in raw.model_dump_json()
+
+    plain = preview_of(ws, "{BASE}", "alpha", "caller", "client.py", "BASE")
+    assert plain.scope is not None and plain.scope.base_shown == "{BASE}"
+    named = preview_of(ws, "{BASE}", "alpha", "caller", "client.py", "BASE", base_shown="{BASE}")
+    assert named.can_create
+    blocked(
+        preview_of(ws, "{BASE}", "alpha", "caller", "client.py", "BASE", base_shown="{other}"),
+        "is shown as {BASE}",
+    )
+
+
+def test_a_scoped_preview_blocks_what_the_sync_could_not_decide(scoped_built: Workspace) -> None:
+    """Each requirement of a scoped declaration blocks it, with its own words: the caller is not
+    indexed; the path is not a file of it; the symbol is not exactly one entity of the file; no
+    request in that file leaves that base unstated (the scope cannot be identified); a receiver
+    base for a whole file; a service that serves no route, or answers none of the covered requests
+    once; a base key or shown base that is not the group's; and words that are not a scope at all.
+    A service that is not indexed, the declarations repository and a group that states its origin
+    are refused outright, as for a URL."""
+    ws = scoped_built
+    base = ("{BASE}", "alpha", "caller", "client.py", "BASE")
+    assert preview_of(ws, *base).can_create
+
+    ghost = preview_of(ws, "{BASE}", "alpha", "ghost", "client.py", "BASE")
+    blocked(ghost, "ghost is not an indexed repository")
+    blocked(preview_of(ws, "{BASE}", "alpha", "caller", "missing.py", "BASE"), "is not a file of")
+    blocked(preview_of(ws, *base, symbol="nothing_here"), "not exactly one")
+    blocked(
+        preview_of(ws, "{BASE}", "alpha", "caller", "odd.py", "BASE"),
+        "the scope cannot be identified",
+    )
+    receiver = preview_of(ws, "{self.base_url}", "alpha", "caller", "client.py", "self.base_url")
+    blocked(receiver, "names no single binding in a whole file")
+    assert receiver.counts == {"scope-too-broad": 3}
+    blocked(preview_of(ws, "{BASE}", "second", "caller", "client.py", "BASE"), "serves no route")
+    twin = preview_of(ws, "{BASE}", "twin", "caller", "client.py", "BASE")
+    blocked(twin, "nothing would be joined")
+    assert twin.counts["ambiguous"] == 1 and twin.counts["no-matching-route"] == 2
+    blocked(
+        preview_of(ws, "{BASE}", "alpha", "caller", "client.py", "somethingelse"),
+        "does not name the base expression of this group",
+    )
+
+    invalid = preview_of(ws, "{BASE}", "alpha", "caller", "/etc/passwd", "BASE")
+    blocked(invalid, "a scope path is relative")
+    assert invalid.scope is None and invalid.rows == ()
+
+    scope = PreviewScope(caller=slug(ws, "caller"), path="client.py", base_key=base_key("BASE"))
+    service = CapabilityService(ws)
+    for repository in ("nowhere", DECLARATIONS_SLUG):
+        with pytest.raises(InvalidDeploymentLinkError, match="not indexed"):
+            service.http_connection_preview(
+                HttpConnectionPreviewRequest(
+                    context=GLOBAL,
+                    group=group_with(ws, "{BASE}").key,
+                    repository=repository,
+                    scope=scope,
+                )
+            )
+    stated = next(g for g in worklist(ws).groups if g.kind == "stated-origin")
+    with pytest.raises(InvalidDeploymentLinkError, match="do not leave a base expression"):
+        service.http_connection_preview(
+            HttpConnectionPreviewRequest(
+                context=GLOBAL, group=stated.key, repository=slug(ws, "alpha"), scope=scope
+            )
+        )
+    assert ws.deployment_links.list_all() == [] and audit_count(ws) == 0
+
+
+def test_a_scoped_preview_sees_the_declarations_already_stored(scoped_built: Workspace) -> None:
+    """Over a scope another service already holds, the preview names the declaration that holds it
+    (``conflicts_with``) and blocks, and each request both would cover is ``ambiguous`` as the join
+    leaves it, whatever the new service answers; a narrower symbol of the same file conflicts
+    too; another file does not. The same service again is a duplicate, not a conflict."""
+    ws = scoped_built
+    mine = declare(ws, "alpha", "caller", "client.py", "BASE")
+
+    again = preview_of(ws, "{BASE}", "alpha", "caller", "client.py", "BASE")
+    assert again.duplicate_of == mine and again.conflicts_with is None and again.can_create
+    assert again.counts["would-link"] == 2
+
+    rival = preview_of(ws, "{BASE}", "beta", "caller", "client.py", "BASE")
+    blocked(rival, "already states another service")
+    assert rival.conflicts_with == mine and rival.duplicate_of is None
+    assert rival.counts == {"ambiguous": 3, "scope-too-broad": 1, "out-of-scope": 5}
+
+    narrow = preview_of(ws, "{BASE}", "beta", "caller", "client.py", "BASE", symbol="read_item")
+    assert narrow.conflicts_with == mine and not narrow.can_create
+    assert narrow.counts == {"ambiguous": 1, "out-of-scope": 8}
+
+    elsewhere = preview_of(ws, "{BASE}", "beta", "caller", "other.py", "BASE")
+    assert elsewhere.conflicts_with is None and elsewhere.can_create
+    assert elsewhere.counts == {"would-link": 1, "out-of-scope": 8}
+
+
+def test_the_level_rule_the_preview_states_is_the_one_covers_applies() -> None:
+    """A receiver base (``self.x``, ``cls.x``, ``this.x``) needs a symbol: ``level_allowed`` says
+    so for the preview's requirement and ``covers`` refuses the same declaration at a whole file
+    and covers it at the symbol, so the two cannot drift. Other bases are allowed at either level
+    (the join then asks for the evidence they need)."""
+    scope = FileScope.build([ScopeSymbol(11, 1, "function", "f")], [(11, 11)])
+    for text in ("self.base", "cls.base", "this.base", "self['base']"):
+        assert base_kind(text) == "receiver"
+        asked = ScopeRequest("r", "a.py", "{" + text + "}/x", "f", 11)
+        assert not level_allowed(base_kind(text), None)
+        assert covers(ScopeDeclaration("r", "a.py", base_key(text), None), asked, scope) == (
+            SCOPE_TOO_BROAD
+        )
+        assert level_allowed(base_kind(text), "f")
+        assert covers(ScopeDeclaration("r", "a.py", base_key(text), "f"), asked, scope) == COVERED
+    for text in ("BASE", "config.api_base"):
+        assert level_allowed(base_kind(text), None) and level_allowed(base_kind(text), "f")
+
+
+def test_the_preview_and_the_store_overlap_symbols_alike() -> None:
+    """The preview's ``conflicts_with`` and the store's refusal of a second service over a scope
+    ask the same question about two symbols."""
+    names = [None, "A", "A.b", "A.b.c", "AB", "B", "A.bc"]
+    for one in names:
+        for other in names:
+            assert symbols_overlap(one, other) == _symbols_overlap(one, other), (one, other)
+    assert symbols_overlap("A", "A.b") and not symbols_overlap("A", "AB")

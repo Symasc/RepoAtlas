@@ -23,6 +23,8 @@ from repoatlas.config.settings import DECLARATIONS_SLUG
 from repoatlas.graph.http_crossings import (
     DECLARABLE,
     LINKED,
+    UNKNOWN_BASE,
+    _qualified_of,
     _scoped_exposure,
     declared_candidates,
     parse_exposure,
@@ -42,12 +44,17 @@ from repoatlas.graph.http_declarations import (
 )
 from repoatlas.graph.http_scopes import (
     COVERED,
+    OUT_OF_SCOPE,
     SCOPE_TOO_BROAD,
     FileScope,
     ScopeDeclaration,
     ScopeRequest,
     ScopeSymbol,
+    base_key,
+    base_kind,
     covers,
+    level_allowed,
+    symbols_overlap,
 )
 from repoatlas.graph.link_exposures import plan_link_exposures, plan_scoped_exposures
 from repoatlas.graph.linker import GLOBAL_PARSER, repository_routes
@@ -591,9 +598,18 @@ def _evaluate_scoped(
     return result, len(routes)
 
 
+def _masked(expression: str | None) -> str:
+    """How a scoped declaration shows a base: its name when that is a plain one, otherwise only
+    that it is a value (``{…}``). A dotted name (``self.base_url``) is masked too: a scope never
+    shows an expression (``DeclarationScope`` refuses one). ``display_base`` is the A1 display and
+    is not changed."""
+    shown = display_base(expression)
+    return "{…}" if shown is None or "." in shown else shown
+
+
 def _shown(fact: RequestFacts) -> str:
     """How a request's base is shown, as a scoped declaration's exposures show it."""
-    return display_base(fact.target.base_expression) or "{…}"
+    return _masked(fact.target.base_expression)
 
 
 def _scope_choices(
@@ -711,13 +727,270 @@ def _evaluate(
     return result, served
 
 
+#: What a preview cautions of the requests the sync would leave unjoined, by the verdict.
+_SCOPED_WARNINGS = (
+    ("ambiguous", "match more than one handler or service and would stay refused"),
+    (
+        "scope-too-broad",
+        "are on this base but not provably the one this scope names (a receiver base outside "
+        "the symbol's own methods, or a name its code is not shown to read) and would stay "
+        "refused",
+    ),
+    (
+        "scope-unidentified",
+        "are on this base but cannot be identified in this scope and would stay refused",
+    ),
+    (
+        "injected-root-unselected",
+        "are made by a function handed its transport at run time, which one scope cannot name, "
+        "and would stay refused",
+    ),
+)
+
+
+def _problems(error: ValidationError) -> list[str]:
+    return [str(err["msg"]).removeprefix("Value error, ") for err in error.errors()]
+
+
+def _meta_of(fact: RequestFacts) -> dict[str, object]:
+    """The evidence the join stored for a request: what its claim said, as the sync read it."""
+    try:
+        loaded = json.loads(fact.row.evidence_json or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _preview_scoped(
+    workspace: Workspace,
+    request: HttpConnectionPreviewRequest,
+    facts: Sequence[RequestFacts],
+    members: Sequence[RequestFacts],
+    context: Mapping[str, object],
+) -> HttpConnectionPreviewResponse:
+    """What a scoped declaration of one repository would do to each request of a group whose base
+    the source does not state, as the sync will decide it.
+
+    Each verdict is the sync's own function. ``http_scopes.covers`` says whether the declared
+    file, symbol, base text and base kind cover a request, or why not; the handler comes from the
+    exposures ``plan_scoped_exposures`` gives the service's routes, matched by
+    ``declared_candidates`` through :func:`_evaluate_scoped` (the candidates use it too); and a
+    stored declaration of another service that covers the same request makes it ``ambiguous``, as
+    the join does. The base path is the service's route prefix: it is never added to or removed
+    from a request. The base is named by its key and shown masked; its text is not carried."""
+    asked = request.scope
+    assert asked is not None
+    expression = members[0].target.base_expression
+    if members[0].target.origin is not None or expression is None:
+        raise InvalidDeploymentLinkError(
+            "these requests do not leave a base expression unstated",
+            detail="A scope names a base the source writes as an expression and does not state; "
+            "a stated origin is mapped without one.",
+        )
+    repositories = {repo.slug: repo for repo in workspace.repositories.list_all()}
+    service = repositories.get(request.repository)
+    if service is None or service.id is None or service.slug == DECLARATIONS_SLUG:
+        raise InvalidDeploymentLinkError(
+            "that repository is not indexed",
+            detail="A mapping names an indexed service: one this index holds routes of.",
+        )
+    links: list[DeploymentLink] = context["links"]  # type: ignore[assignment]
+    indexed: set[str] = context["indexed"]  # type: ignore[assignment]
+    served_by: Mapping[str, list[str]] = context["served"]  # type: ignore[assignment]
+    shown = _masked(expression)
+    requirements: list[str] = []
+    warnings: list[str] = []
+    try:
+        scope = DeclarationScope(
+            path=asked.path,
+            symbol=asked.symbol,
+            base_key=asked.base_key,
+            base_shown=shown,
+            base_path=asked.base_path,
+        )
+    except ValidationError as exc:
+        # The words are not a scope at all: nothing further can be asked of them.
+        return HttpConnectionPreviewResponse(
+            context=request.context,
+            group=request.group,
+            repository=service.slug,
+            routes_served=0,
+            counts={},
+            requirements=tuple(dict.fromkeys(_problems(exc))),
+            can_create=False,
+        )
+    try:
+        DeploymentLinkFields(
+            label="mapped from the HTTP Connections worklist",
+            environment=request.environment,
+            callers=[asked.caller],
+            scope=scope,
+        )
+    except ValidationError as exc:
+        requirements.extend(_problems(exc))
+
+    place = scope.path + (f"#{scope.symbol}" if scope.symbol else "")
+    caller = repositories.get(asked.caller)
+    file_scope = FileScope()
+    if caller is None or caller.id is None:
+        requirements.append(f"{asked.caller} is not an indexed repository")
+    else:
+        file_row = next(
+            (r for r in workspace.knowledge.list_file_rows(caller.id) if r.rel_path == scope.path),
+            None,
+        )
+        if file_row is None:
+            requirements.append(f"{scope.path} is not a file of {asked.caller} in this index")
+        else:
+            file_scope = _file_scope(workspace, file_row.file_id, uses=True)
+            if scope.symbol is not None and file_scope.entity_count(scope.symbol) != 1:
+                requirements.append(
+                    f"{scope.symbol} names {file_scope.entity_count(scope.symbol)} entities of "
+                    f"{scope.path}, not exactly one: it identifies no scope"
+                )
+    if not base_requested(facts, asked.caller, scope):
+        requirements.append(
+            f"the scope cannot be identified: no request of {asked.caller} in {place} leaves "
+            f"the base {shown} unstated"
+        )
+    if not level_allowed(base_kind(expression[1:-1]), scope.symbol):
+        requirements.append(
+            "a receiver-rooted base (`self.`, `cls.`, `this.`) names no single binding in a "
+            "whole file: scope it to a symbol"
+        )
+
+    declared = ScopeDeclaration(asked.caller, scope.path, scope.base_key, scope.symbol)
+    # Declarations of another service (or base path) over this file, as the join weighs them.
+    rivals = [
+        ScopeDeclaration(asked.caller, link.scope.path, link.scope.base_key, link.scope.symbol)
+        for link in links
+        if link.scope is not None
+        and link.callers == [asked.caller]
+        and link.scope.path == scope.path
+        and (link.repository, link.scope.base_path) != (service.slug, scope.base_path)
+        and link.repository in indexed
+        and served_by.get(link.repository)
+    ]
+    waiting: list[tuple[RequestFacts, str]] = []
+    rivalled: set[str] = set()
+    for fact in members:
+        if fact.linked:
+            continue
+        if fact.status != UNKNOWN_BASE:
+            waiting.append((fact, "not-declarable"))
+            continue
+        # Only a request in the declared file needs its symbol and evidence (`covers` looks no
+        # further for another), as the join reads them.
+        inside = fact.repository == asked.caller and (fact.row.path or "") == scope.path
+        ask = ScopeRequest(
+            fact.repository,
+            fact.row.path or "",
+            fact.row.url,
+            _qualified_of(file_scope, fact.row.src_id) if inside else "",
+            fact.row.src_id,
+            _meta_of(fact) if inside else {},
+        )
+        verdict = covers(declared, ask, file_scope)
+        if verdict == COVERED and any(covers(r, ask, file_scope) == COVERED for r in rivals):
+            rivalled.add(fact.row.decision_ref)
+        waiting.append((fact, verdict))
+
+    covered = [fact for fact, verdict in waiting if verdict == COVERED]
+    evaluated, served = _evaluate_scoped(workspace, service, scope.base_path, covered)
+    reached = {fact.row.decision_ref: (outcome, handler) for fact, outcome, handler in evaluated}
+    placed: list[tuple[RequestFacts, str, str | None]] = []
+    for fact, verdict in waiting:
+        if verdict != COVERED:
+            placed.append((fact, verdict, None))
+        elif fact.row.decision_ref in rivalled:
+            placed.append((fact, "ambiguous", None))
+        else:
+            outcome, handler = reached.get(fact.row.decision_ref, ("no-matching-route", None))
+            placed.append((fact, outcome, handler))
+    # What the scope reaches first, then the rest of the group, each in the worklist's order.
+    placed.sort(key=lambda item: item[1] == OUT_OF_SCOPE)
+    counts = Counter(outcome for _, outcome, _ in placed)
+    if served == 0:
+        requirements.append(
+            f"{service.slug} serves no route this index holds: it is not an indexed service"
+        )
+    elif not counts.get("would-link"):
+        requirements.append(
+            "no request this scope covers matches a route this service serves: nothing would be "
+            "joined"
+        )
+    # The group is the base's, so the words must name it: the scope is read from the group, never
+    # from what the request says about it.
+    if asked.base_key != base_key(expression[1:-1]):
+        requirements.append("the base key does not name the base expression of this group")
+    if asked.base_shown is not None and asked.base_shown != shown:
+        requirements.append(f"the base of this group is shown as {shown}")
+
+    duplicate_of = conflicts_with = None
+    for link in links:
+        held = link.scope
+        if held is None or link.callers != [asked.caller]:
+            continue
+        same = link.repository == service.slug and held == scope
+        if same and link.environment == request.environment:
+            duplicate_of = link.id
+        elif (
+            (held.base_key, held.path) == (scope.base_key, scope.path)
+            and symbols_overlap(held.symbol, scope.symbol)
+            and (link.repository, held.base_path) != (service.slug, scope.base_path)
+            and conflicts_with is None
+        ):
+            conflicts_with = link.id
+    if conflicts_with is not None:
+        requirements.append(
+            f"declaration {conflicts_with} already states another service behind {shown} in "
+            f"{scope.path} for {asked.caller}; revoke it first"
+        )
+    for outcome, text in _SCOPED_WARNINGS:
+        if counts.get(outcome):
+            warnings.append(f"{counts[outcome]} request(s) {text}")
+
+    rows = [
+        PreviewRow(
+            decision_ref=fact.row.decision_ref,
+            method=fact.row.method or None,
+            route=safe_route(fact.row.url),
+            site=ConnectionSite(
+                repository=fact.repository,
+                path=fact.row.path or "",
+                line_start=fact.row.line_start,
+                line_end=fact.row.line_end,
+            ),
+            outcome=outcome,  # type: ignore[arg-type]
+            handler=handler,
+        )
+        for fact, outcome, handler in placed
+    ]
+    return HttpConnectionPreviewResponse(
+        context=request.context,
+        group=request.group,
+        repository=service.slug,
+        scope=scope,
+        routes_served=served,
+        counts=dict(sorted(counts.items())),
+        rows=tuple(rows[: request.limit]),
+        has_more=len(rows) > request.limit,
+        requirements=tuple(dict.fromkeys(requirements)),
+        warnings=tuple(warnings),
+        duplicate_of=duplicate_of,
+        conflicts_with=conflicts_with,
+        can_create=not requirements,
+    )
+
+
 def preview(
     workspace: Workspace, request: HttpConnectionPreviewRequest
 ) -> HttpConnectionPreviewResponse:
     """What declaring ``origin`` is served by one repository would do, as the sync will decide.
 
     Exact for the handlers (the repository's own plan, the join's own matching) and for the
-    callers it applies to; nothing is stored."""
+    callers it applies to; nothing is stored. With a ``scope`` it is a base the source does not
+    state, and :func:`_preview_scoped` answers."""
     facts, context = _snapshot(workspace)
     members = sorted((f for f in facts if group_key(f.target) == request.group), key=_order)
     if not members:
@@ -725,6 +998,8 @@ def preview(
             "no request has that target",
             detail="The worklist is rebuilt by every sync; reload it and choose again.",
         )
+    if request.scope is not None:
+        return _preview_scoped(workspace, request, facts, members, context)
     origin = members[0].target.origin
     if origin is None:
         raise InvalidDeploymentLinkError(
