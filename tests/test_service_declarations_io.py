@@ -391,3 +391,58 @@ def test_a_service_declaration_that_is_not_valid_is_not_an_export(
         result = cli("import", write(tmp_path, document([], [bad])))
         assert result.exit_code != 0 and "Not an export of deployment links" in result.output
     assert built.service_declarations.list_all() == []
+
+
+def test_an_export_says_how_many_redirects_and_callbacks_it_leaves_out(
+    built: Workspace, cli: Cli, tmp_path: Path
+) -> None:
+    """The file is still the links-only file and the exit code 0, but a stored redirect and a
+    stored permitted callback are counted on stderr, so an export is never taken for a backup that
+    restores them. None stored: no such note."""
+    built.deployment_links.create(
+        slug(built, "portal"), DeploymentLinkFields(label="prod", url=PORTAL)
+    )
+    quiet = cli("export", tmp_path / "quiet.json")
+    assert quiet.exit_code == 0, quiet.output
+    assert "declaration(s)" not in quiet.output
+
+    built.service_declarations.create(
+        RedirectFields(
+            source=RedirectSource(form="origin", origin=LOGIN, path="/authorize"),
+            destination=f"{PORTAL}/auth/callback",
+        ),
+        via="api",
+    )
+    built.service_declarations.create(
+        PermittedCallbackFields(provider_origin=AUTH, destination=f"{PORTAL}/auth/callback"),
+        via="api",
+    )
+    target = tmp_path / "out.json"
+
+    result = cli("export", target)
+    assert result.exit_code == 0, result.output
+    assert target.read_text() == links_only_export(built)
+    assert "2 redirect or permitted-callback declaration(s)" in result.output
+    assert "does not restore them" in result.output
+    assert "external service" not in result.output
+
+
+def test_a_file_with_a_valid_service_then_a_redirect_stores_nothing(
+    built: Workspace, cli: Cli, tmp_path: Path
+) -> None:
+    """Import is atomic: the valid service comes first and the redirect after it, yet the file is
+    refused whole, no declaration is stored and neither audit table gains a row."""
+    service = json.loads(hosted().model_dump_json())
+    redirect = {
+        "kind": "redirect",
+        "source": {"form": "origin", "origin": LOGIN, "path": "/authorize"},
+        "destination": f"{PORTAL}/auth/callback",
+    }
+    audited = audit_rows(built)
+
+    result = cli("import", write(tmp_path, document([], [service, redirect])))
+    assert result.exit_code != 0
+    assert REFUSED in result.output
+    assert built.service_declarations.list_all() == []
+    assert audit_rows(built) == audited
+    assert audited[1] == 0
