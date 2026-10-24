@@ -5,6 +5,7 @@ import { useState } from "react";
 
 import { useConnections } from "@/lib/api/connections";
 import {
+  IDENTITY_OPTIONS,
   LANGUAGE_OPTIONS,
   NO_FILTERS,
   pendingCount,
@@ -17,6 +18,7 @@ import type { RepositoryModel } from "@/lib/model/repositories";
 import classes from "./Connections.module.css";
 import { Declarations, History } from "./Declarations";
 import { GroupCard } from "./GroupCard";
+import { ServiceDeclarations, ServiceHistory } from "./ServiceDeclarations";
 
 /**
  * HTTP connections: every request the workspace join could not link, grouped by what it targets,
@@ -128,6 +130,14 @@ export function ConnectionsPanel({
                       value={filters.declarationState || null}
                       onChange={(value) => set("declarationState", value ?? "")}
                     />
+                    <Select
+                      label="Identity"
+                      placeholder="Any"
+                      clearable
+                      data={IDENTITY_OPTIONS}
+                      value={filters.identity || null}
+                      onChange={(value) => set("identity", value ?? "")}
+                    />
                     <TextInput
                       label="Origin contains"
                       value={filters.text}
@@ -165,9 +175,11 @@ export function ConnectionsPanel({
               </Tabs.Panel>
               <Tabs.Panel value="declarations" pt="md">
                 <Declarations declarations={data.declarations ?? []} synced={data.synced ?? false} />
+                <ServiceDeclarations declarations={data.service_declarations ?? []} repositories={repositories} />
               </Tabs.Panel>
               <Tabs.Panel value="history" pt="md">
                 <History />
+                <ServiceHistory />
               </Tabs.Panel>
             </Tabs>
           </>
