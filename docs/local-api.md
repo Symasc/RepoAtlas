@@ -172,6 +172,7 @@ Content-Length: <n>
 | `dependencies`, `http_operations` | declared packages; HTTP operations made and served |
 | `deployment_targets` | where one repository says it is deployed, resolved per release, link and branch context |
 | `deployment_links/create`, `deployment_links/update`, `deployment_links/delete` | record, change or remove a user's deployment link |
+| `service_declarations/preview`, `service_declarations/create`, `service_declarations/update`, `service_declarations/delete`, `service_declarations/history` | classify an origin as an external service: what a declaration would do; record, change or remove one; the declaration history |
 | `http_connections`, `http_connections/preview`, `http_connections/history` | the workspace's unresolved HTTP requests grouped by origin with the user's declarations; what mapping an origin to a service would do, request by request; the declaration history |
 | `topology/overview` | which repositories are linked to which, by kind: `observed`, `http`, `dependency` |
 | `topology/children` | one page of a directory's or file's children, and how every child links |
@@ -180,9 +181,14 @@ Content-Length: <n>
 | `topology/names` | declared names (variables, functions, classes, methods, environment variables) that hold every term of a query, best-named first |
 | `topology/references` | what each line of one file declares and refers to, in source order |
 
-The `deployment_links/*` names are the only writes served here (a declaration from the HTTP connections worklist is
-one of them, with its origin recorded in the history). They change only the user's own links, never
-an indexed fact, and pass the same Host, token and Origin checks as every other request.
+The `deployment_links/*` and `service_declarations/*` names are the only writes served here (a declaration from the
+HTTP connections worklist is one of the first, with its origin recorded in the history). They change only the user's
+own declarations, never an indexed fact, and pass the same Host, token and Origin checks as every other request.
+
+The five `service_declarations/*` names (`preview`, `create`, `update`, `delete`, `history`) are global in scope. A
+declaration classifies an origin as an external service. It never links a request to a handler and never changes a
+request's status or chain. It is refused where the source already says something about the origin, where a
+deployment link names it, on a loopback origin, and for an authentication target that is not an indexed repository.
 
 **Not served:** `sync`, the index's write, and `verify_grounding`, which checks an agent's answer. Both remain
 agent tools over MCP. The topology capabilities are served here only; they are not MCP tools.
