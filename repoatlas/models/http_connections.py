@@ -47,6 +47,11 @@ PreviewOutcome = Literal[
     "caller-excluded",
     "source-established",
     "not-declarable",
+    # A scoped declaration (Phase A2): the sync's own verdicts on a request in the group.
+    "scope-too-broad",
+    "scope-unidentified",
+    "injected-root-unselected",
+    "out-of-scope",
 ]
 #: Why a declaration is ``ineffective`` or ``invalidated``.
 DeclarationReason = Literal[
@@ -294,8 +299,46 @@ class PreviewRow(BaseModel):
     handler: str | None = None
 
 
+def _route_prefix(value: str) -> str:
+    """A base path: empty, or ``/`` and literal segments (no query, no holes); a trailing ``/``
+    is dropped. Kept in step with ``DeclarationScope._base_path``, which cannot import this."""
+    if value and (
+        not value.startswith("/")
+        or any(c in value for c in "?#{}")
+        or any(c.isspace() for c in value)
+    ):
+        raise ValueError("a base path is empty or starts with `/`, with no query or holes")
+    return value.rstrip("/")
+
+
+class PreviewScope(BaseModel):
+    """The scope a preview asks about: one file (and symbol) of one caller, and the base its code
+    does not state. The base is named by its key (``hbk1-...``, a hash), never by its text; the
+    shown form, when given, must be the one the group has (:attr:`base_shown` is optional because
+    the preview derives it)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    caller: str = Field(min_length=1, max_length=MAX_LINK_TEXT)
+    path: str = Field(min_length=1, max_length=MAX_LINK_TEXT)
+    symbol: str | None = Field(default=None, min_length=1, max_length=MAX_LINK_TEXT)
+    base_key: str = Field(pattern=r"^hbk1-[0-9a-f]{20}$")
+    base_shown: str | None = Field(default=None, max_length=MAX_LINK_TEXT)
+    #: The route prefix the declared service mounts its routes under: never added to or removed
+    #: from a request.
+    base_path: str = Field(default="", max_length=MAX_LINK_TEXT)
+
+    @field_validator("base_path")
+    @classmethod
+    def _base_path(cls, value: str) -> str:
+        return _route_prefix(value)
+
+
 class HttpConnectionPreviewRequest(BaseModel):
-    """What declaring that an origin is served by one repository would do, before it is stored."""
+    """What declaring that an origin is served by one repository would do, before it is stored.
+
+    With ``scope`` it is about a base the source does not state: the group is that base's, the
+    scope names the caller's file (and symbol), and the base path is the scope's own."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -306,17 +349,22 @@ class HttpConnectionPreviewRequest(BaseModel):
     callers: tuple[str, ...] = Field(default=(), max_length=MAX_LINK_CALLERS)
     environment: str | None = Field(default=None, min_length=1, max_length=MAX_LINK_TEXT)
     limit: int = Field(default=50, ge=1, le=MAX_GROUP_PAGE)
+    scope: PreviewScope | None = None
 
     @field_validator("base_path")
     @classmethod
     def _base_path(cls, value: str) -> str:
-        if value and (
-            not value.startswith("/")
-            or any(c in value for c in "?#{}")
-            or any(c.isspace() for c in value)
-        ):
-            raise ValueError("a base path is empty or starts with `/`, with no query or holes")
-        return value.rstrip("/")
+        return _route_prefix(value)
+
+    @model_validator(mode="after")
+    def _scope_names_its_caller(self) -> HttpConnectionPreviewRequest:
+        if self.scope is None:
+            return self
+        if self.callers and tuple(self.callers) != (self.scope.caller,):
+            raise ValueError("a scoped preview names its one caller in the scope")
+        if self.base_path:
+            raise ValueError("a scoped preview states its base path in the scope")
+        return self
 
 
 class HttpConnectionPreviewResponse(BaseModel):
@@ -324,10 +372,14 @@ class HttpConnectionPreviewResponse(BaseModel):
 
     context: CapabilityContext
     group: str
-    origin: str
-    #: The URL the declaration would state.
-    url: str
+    #: ``None`` for a scoped preview: a base the source does not state has no origin.
+    origin: str | None = None
+    #: The URL the declaration would state; ``None`` for a scoped preview, which states none.
+    url: str | None = None
     repository: str
+    #: For a scoped preview: the declaration it would store (the base shown masked, never its
+    #: text), as the sync will read it.
+    scope: DeclarationScope | None = None
     routes_served: int
     counts: dict[str, int]
     rows: tuple[PreviewRow, ...] = ()
@@ -407,5 +459,6 @@ __all__ = [
     "HttpDeclarationHistoryRequest",
     "HttpDeclarationHistoryResponse",
     "PreviewRow",
+    "PreviewScope",
     "ScopeChoice",
 ]
