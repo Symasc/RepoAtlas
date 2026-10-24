@@ -387,6 +387,40 @@ class ServiceDeclaration(BaseModel):
         return self.fields.identity_key
 
 
+#: Where a declaration stands against the stored decisions, derived at read time and never stored.
+ServiceDeclarationState = Literal["applied", "ineffective", "invalidated"]
+#: Why a declaration is ``ineffective`` or ``invalidated``; ``""`` when it is applied.
+ServiceDeclarationReason = Literal[
+    "",
+    "index-not-built",
+    "origin-no-longer-requested",
+    "source-identifies-origin",
+    "origin-declared-as-deployment",
+    "repository-not-indexed",
+    "route-no-longer-served",
+    "provider-not-classified",
+    "authenticated-service-not-indexed",
+]
+
+
+class ServiceDeclarationView(BaseModel):
+    """A stored declaration and what became of it against the join's stored decisions.
+
+    Nothing is pending: a classification takes effect when it is stored, because it is read, not
+    joined. ``state`` and ``reason`` are derived on every read."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    fields: ServiceDeclarationFields
+    created_at: datetime
+    updated_at: datetime
+    state: ServiceDeclarationState
+    reason: ServiceDeclarationReason = ""
+    #: For an applied classification: the requests it shows as a known external dependency.
+    requests: int = 0
+
+
 class ServiceDeclarationLimitError(ValueError):
     """The store already keeps as many service declarations as it allows."""
 
@@ -425,4 +459,7 @@ __all__ = [
     "ServiceDeclarationIdentityError",
     "ServiceDeclarationKind",
     "ServiceDeclarationLimitError",
+    "ServiceDeclarationReason",
+    "ServiceDeclarationState",
+    "ServiceDeclarationView",
 ]
