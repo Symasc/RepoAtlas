@@ -2396,6 +2396,15 @@ overrides a proven relationship, and its hops stay `declared`: impact labels suc
 and otherwise walks it as before. The MCP surface is read-only: `repoatlas_http_operations` can list the unresolved
 requests of the workspace by decision, and no tool writes a declaration.
 
+**External services.** An origin the operator knows to be a service outside the indexed repositories can be declared
+an external service. These declarations live in their own tables (migration `007_service_declarations.sql`), kept
+apart from deployment links so they never become deployment hostnames. The authentication relation is declared by
+the operator and must name an indexed repository. Export writes external services only when there are some, and
+reports how many redirect or permitted-callback declarations it leaves out. Import judges the whole file before it
+stores anything, and in this version refuses redirect and callback items. Redirects and OAuth browser callbacks are
+not supported in this version. A token request followed by an API request is two independent dependencies, not a
+redirect.
+
 **Security.** HTTP extraction reads only files the sync already admitted, so an excluded `.env` holding `API_URL`
 declares nothing and is not cross-resolved. Nothing resolves DNS, fetches a specification or `$ref`, probes an
 endpoint, starts a server, or imports repository code.
