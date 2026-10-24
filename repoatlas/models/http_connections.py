@@ -31,6 +31,7 @@ from repoatlas.models.deployment_targets import (
     Verification,
 )
 from repoatlas.models.http_inventory import DECISION_REF_PATTERN, CrossingStatus
+from repoatlas.models.service_declarations import ServiceDeclarationView
 
 #: A worklist group's key: opaque, deterministic, the same origin has the same key after any sync.
 GROUP_KEY_PATTERN = r"^hcg1-[0-9a-f]{20}$"
@@ -38,6 +39,10 @@ GROUP_KEY_PATTERN = r"^hcg1-[0-9a-f]{20}$"
 MAX_GROUP_PAGE = 100
 
 GroupKind = Literal["stated-origin", "base-not-stated"]
+#: What the index knows of who answers a request: ``identified`` (the join linked it),
+#: ``known-external`` (an applied classification says its origin is a service outside the index;
+#: the decision stays unmatched) or ``unresolved`` (neither).
+RequestIdentity = Literal["unresolved", "known-external", "identified"]
 DeclarationState = Literal["pending", "applied", "ineffective", "invalidated"]
 #: What a declaration would do to one request, as the sync will decide it.
 PreviewOutcome = Literal[
@@ -127,6 +132,11 @@ class ConnectionRequest(BaseModel):
     #: Why it cannot be scoped: ``base-text-truncated``, ``base-text-unreadable``,
     #: ``host-expression``, ``injected-transport`` or ``not-base-unknown``; ``None`` when it can.
     scope_refusal: str | None = None
+    #: Who answers it, as the index and the operators' classifications say. A classification never
+    #: changes ``status``, ``reason`` or the chain: it only says the origin is known to be outside.
+    identity: RequestIdentity = "unresolved"
+    #: The external-service declaration behind ``known-external``; ``None`` otherwise.
+    external_service_id: int | None = None
 
 
 class DeclarationView(BaseModel):
@@ -210,6 +220,8 @@ class ConnectionGroup(BaseModel):
     #: For an expanded group whose base the source does not state: the scopes a declaration may
     #: name, each with how many of the group's requests it covers. Empty otherwise.
     scope_choices: tuple[ScopeChoice, ...] = ()
+    #: The classification of this origin as an external service, in any state; ``None`` when none.
+    external_service: ServiceDeclarationView | None = None
 
 
 class ConnectionsSummary(BaseModel):
@@ -227,6 +239,10 @@ class ConnectionsSummary(BaseModel):
     scopable: int = 0
     declarations: dict[str, int] = Field(default_factory=dict)
     by_status: dict[str, int] = Field(default_factory=dict)
+    #: Of the unresolved requests, those an applied classification shows as a known external
+    #: dependency, and those whose service identity is still unresolved.
+    known_external: int = 0
+    unresolved_identity: int = 0
 
 
 class HttpConnectionsRequest(BaseModel):
@@ -258,6 +274,10 @@ class HttpConnectionsRequest(BaseModel):
     )
     limit: int = Field(default=50, ge=1, le=MAX_GROUP_PAGE)
     cursor: str | None = None
+    identity: RequestIdentity | None = Field(
+        default=None,
+        description="Only requests with this identity: unresolved, known-external or identified.",
+    )
 
     @field_validator("language")
     @classmethod
@@ -285,6 +305,8 @@ class HttpConnectionsResponse(BaseModel):
     has_more: bool = False
     next_cursor: str | None = None
     basis: str = BASIS
+    #: The external-service classifications, newest first, whatever the filters.
+    service_declarations: tuple[ServiceDeclarationView, ...] = ()
 
 
 class PreviewRow(BaseModel):
@@ -460,5 +482,6 @@ __all__ = [
     "HttpDeclarationHistoryResponse",
     "PreviewRow",
     "PreviewScope",
+    "RequestIdentity",
     "ScopeChoice",
 ]
