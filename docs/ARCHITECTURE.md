@@ -519,7 +519,8 @@ edges(
 
 unresolved_refs(
   id, repo_id, file_id → files ON DELETE CASCADE,
-  src_id, edge_type, target_kind, target_key, line_start, line_end, confidence, meta_json
+  src_id → entities ON DELETE CASCADE,
+  edge_type, target_kind, target_key, line_start, line_end, confidence, meta_json
 )
 
 dependencies(
@@ -568,6 +569,8 @@ ordinary_accounting(               -- derived, only after `sync -v`: the figures
   key PRIMARY KEY, value
 ) WITHOUT ROWID
 ```
+
+Every foreign-key child column has an index whose leading columns are that column (migration 008), except `edges.repo_id` and `unresolved_refs.repo_id`, whose parent is deleted only with a repository. Enforced by `tests/test_schema_foreign_key_indexes.py`. With foreign keys on, deleting a parent row looks up each child table; without the index that lookup is a full scan per deleted row.
 
 ### Repository identity, path and display name are three things
 
