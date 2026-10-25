@@ -22,7 +22,7 @@ from repoatlas.sync.planner import PARSER_FACTS_VERSION, facts_version
 from tests.impact_corpus import build
 
 #: The newest schema version whose migration was reviewed for a change to what a parse stores.
-REVIEWED_SCHEMA_VERSION = 7
+REVIEWED_SCHEMA_VERSION = 8
 
 
 def test_a_schema_only_bump_does_not_move_the_facts_version(

@@ -664,19 +664,21 @@ def test_the_tables_hold_only_the_kinds_actions_and_origins_they_allow(
 def test_migration_007_leaves_the_v6_tables_unchanged(workspace: Workspace) -> None:
     """Migration 007 only creates: applied to a version-6 schema holding rows it leaves every
     existing object, and every existing row, as it was, and adds exactly the two tables, their
-    indexes and the audit triggers. A fresh index is at user version 7."""
+    indexes and the audit triggers. A fresh index is at the current user version."""
     migrations = load_migrations()
-    newest = migrations[-1]
-    assert newest.version == SCHEMA_VERSION == 7
-    assert [migration.version for migration in migrations] == list(range(1, 8))
-    for statement in newest.statements:
+    m7 = next(migration for migration in migrations if migration.version == 7)
+    assert [migration.version for migration in migrations] == list(range(1, SCHEMA_VERSION + 1))
+    assert SCHEMA_VERSION >= 7
+    for statement in m7.statements:
         code = "\n".join(
             line for line in statement.splitlines() if not line.lstrip().startswith("--")
         )
         assert code.lstrip().upper().startswith("CREATE "), statement
 
     old = sqlite3.connect(":memory:")
-    for migration in migrations[:-1]:
+    for migration in migrations:
+        if migration.version > 6:
+            continue
         for statement in migration.statements:
             old.execute(statement)
     old.execute(
@@ -699,7 +701,7 @@ def test_migration_007_leaves_the_v6_tables_unchanged(workspace: Workspace) -> N
         }
 
     before_objects, before_rows = objects(), contents()
-    for statement in newest.statements:
+    for statement in m7.statements:
         old.execute(statement)
     after_objects = objects()
 
@@ -717,7 +719,7 @@ def test_migration_007_leaves_the_v6_tables_unchanged(workspace: Workspace) -> N
     }
     old.close()
 
-    assert user_version(workspace.database.connection) == SCHEMA_VERSION == 7
+    assert user_version(workspace.database.connection) == SCHEMA_VERSION
     tables = workspace.database.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     assert {"service_declarations", "service_declaration_audit"} <= {r["name"] for r in tables}
     info = workspace.database.execute("PRAGMA table_info(service_declarations)")
@@ -763,12 +765,12 @@ def test_a_sync_writes_nothing_to_either_audit_table(built: Workspace, tmp_path:
     assert (audit_rows(built), link_audit_rows(built), declaration_rows(built)) == snapshot
 
 
-def test_a_fresh_index_is_at_version_7_and_two_syncs_change_nothing(
+def test_a_fresh_index_is_at_the_current_version_and_two_syncs_change_nothing(
     built: Workspace, tmp_path: Path
 ) -> None:
     """The schema bump moves no facts version: with declarations of every kind stored, two syncs
     of the unchanged tree report 0 changed files."""
-    assert user_version(built.database.connection) == SCHEMA_VERSION == 7
+    assert user_version(built.database.connection) == SCHEMA_VERSION
     for item in one_of_each():
         built.service_declarations.create(item)
 
