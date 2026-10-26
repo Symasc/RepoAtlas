@@ -93,15 +93,14 @@ def parse_target(url: str) -> Target:
         return Target(origin, None, _segments(path) if origin else ())
     held = _BASE_EXPRESSION.match(url)
     if held is not None:
-        return Target(None, held.group(1), _segments(held.group(2) or "/"))
+        # A bare base reads no path (``()``); ``{base}/`` asks for the root, as the parsers do.
+        return Target(None, held.group(1), _segments(held.group(2)) if held.group(2) else ())
     return Target(None, None, _segments(url) if url.startswith("/") else ())
 
 
 def _segments(path: str) -> tuple[str | None, ...]:
-    parts = path.split("/")[1:]
-    if parts == [""]:
-        return ()
-    return tuple(None if "{" in part else part for part in parts)
+    """The path by segment as the parsers record it: the root is ``("",)``."""
+    return tuple(None if "{" in part else part for part in path.split("/")[1:])
 
 
 def _hole(text: str) -> str:
