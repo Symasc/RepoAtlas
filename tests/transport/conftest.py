@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -90,6 +91,10 @@ def indexed(tmp_path: Path) -> Iterator[tuple[Workspace, Path, Path]]:
         yield workspace, root, state
     finally:
         workspace.close()
+        # Every test copies the ecosystem and indexes it; pytest keeps each test's temporary
+        # directory for the whole run, which exhausts a small CI disk quota. Nothing reads
+        # the copy after the test, so it goes now.
+        shutil.rmtree(state, ignore_errors=True)
 
 
 @pytest.fixture
