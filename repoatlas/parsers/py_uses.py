@@ -24,7 +24,10 @@ syntax tree alone -- the source is parsed, never run (V1_SPEC §17):
 * no star import could have rebound it. ``from x import *`` rebinds whatever names ``x``
   has, which is not knowable from this file, so a binding a star import follows -- or a
   conditional one a star import precedes -- is refused. Every other binding stands; a
-  star import never costs the file its other facts.
+  star import never costs the file its other facts. A name no binding of the module
+  supplies, read in a module with a star import, is only a **star claim**: it names the
+  module's stars (line, specifier, whether conditional) and the line of its first read, and
+  the global pass decides whether exactly one of them provides it, in time.
 
 A **declaring statement** is an assignment whose every target is a name (``X = …``,
 ``A = B = …``), an annotated name (``X: T = …``, and ``X: T`` alone, which is how a
@@ -55,7 +58,10 @@ not the function an import binds.
 The file's **export table** is one more fact: every name the module binds -- in Python,
 every module-level binding is an attribute another module may import -- with what it is
 bound to, the modules it star-imports, and whether it defines a module ``__getattr__``.
-Only :mod:`repoatlas.graph.py_uses` reads it.
+It also records what a star import of this module would take: the literal ``__all__``
+(``all``: its sorted names) or, when ``__all__`` is anything but one unconditional list or
+tuple of string literals nothing reads, ``"dynamic"``; and the names with a conditional
+binding (``conditional``). Only :mod:`repoatlas.graph.py_uses` reads it.
 """
 
 from __future__ import annotations
@@ -92,13 +98,14 @@ _MAX_FORWARD_DEPTH = 4
 class Binding:
     """What one name is bound to where a use finds it."""
 
-    #: ``local`` (declared in this file), ``import``, ``namespace``, or ``none``.
+    #: ``local`` (declared in this file), ``import``, ``namespace``, ``star`` (only a star
+    #: import could bind it) or ``none``.
     kind: str
     #: ``local``: the first line of the declaration.
     line: int | None = None
     #: ``import``: the module named, dots kept; ``namespace``: the module bound.
     module: str | None = None
-    #: ``import``: the name the module is asked for.
+    #: ``import``: the name the module is asked for; ``star``: the name read.
     imported: str | None = None
     #: ``namespace``: the submodules this file imports beneath it (``import a.b.c``).
     loaded: tuple[str, ...] = ()
@@ -382,6 +389,9 @@ class PythonUseAnalysis:
     def __init__(self, tree: ast.Module, *, record: bool = False) -> None:
         self.bindings: dict[str, Binding] = {}
         self.stars: list[tuple[int, str]] = []
+        #: (line, specifier, conditional) of each star import, in source order: what a star
+        #: claim names.
+        self.star_sites: list[tuple[int, str, bool]] = []
         self.getattr = False
         #: (owner, use): the declaration each use belongs to, ``None`` for the file.
         self.uses: list[tuple[str | None, UseSite]] = []
@@ -399,15 +409,17 @@ class PythonUseAnalysis:
         #: typed parameter or a construction (DF3b).
         self.fields: list[FieldDeclaration] = []
         self.members: list[FieldMember] = []
-        self._guards, rebinds = _survey(tree)
+        #: Every place the module binds each name, once its bindings are gathered.
+        self._by_name: dict[str, list[_Site]] = {}
+        self._guards, rebinds, global_all = _survey(tree)
         self._module_bindings(tree, rebinds=rebinds)
-        self.exports = self._export_table()
+        self.exports = self._export_table(tree, global_all=global_all)
         self._body(tree.body, [_Scope("module")], None)
 
     # -- module scope ----------------------------------------------------------
 
     def _module_bindings(self, tree: ast.Module, *, rebinds: bool) -> None:
-        sites: dict[str, list[_Site]] = {}
+        sites = self._by_name
         declared: list[tuple[str, ast.stmt]] = []
         self._sites(tree.body, sites, conditional=False, type_only=False)
         for line, name in _global_rebinds(tree) if rebinds else ():
@@ -542,6 +554,7 @@ class PythonUseAnalysis:
                 for alias in statement.names:
                     if alias.name == "*":
                         self.stars.append((statement.lineno, spec))
+                        self.star_sites.append((statement.lineno, spec, conditional))
                         continue
                     sites.setdefault(alias.asname or alias.name, []).append(
                         _Site(
@@ -625,7 +638,7 @@ class PythonUseAnalysis:
             and test.value.id in modules
         )
 
-    def _export_table(self) -> dict[str, object]:
+    def _export_table(self, tree: ast.Module, *, global_all: bool) -> dict[str, object]:
         names: dict[str, list[str]] = {}
         for name, binding in sorted(self.bindings.items()):
             if binding.kind == "local":
@@ -642,7 +655,32 @@ class PythonUseAnalysis:
         }
         if self.getattr:
             table["getattr"] = True
+        # Only a module that says `__all__` pays for the walk that proves nothing else reads it.
+        listed = self._dunder_all(tree, global_all)
+        if listed is not None:
+            table["all"] = listed
+        conditional = sorted(
+            name for name, found in self._by_name.items() if any(s.conditional for s in found)
+        )
+        if conditional:
+            table["conditional"] = conditional
         return table
+
+    def _dunder_all(self, tree: ast.Module, global_all: bool) -> list[str] | str | None:
+        """The module's ``__all__`` as a sorted list of names, ``"dynamic"`` or ``None``.
+
+        A list only when ``__all__`` is bound exactly once, unconditionally, to a list or
+        tuple of string literals that are identifiers, and nothing reads it (``__all__ +=``,
+        ``.append`` and ``print(__all__)`` all do) or rebinds it from a function. Any other
+        way of saying ``__all__`` is ``"dynamic"``; not saying it at all is ``None``.
+        """
+        found = self._by_name.get("__all__", [])
+        if not found and not global_all:
+            return None
+        listed = _all_literal(found)
+        if listed is None or global_all or _reads_all(tree):
+            return "dynamic"
+        return sorted(set(listed))
 
     # -- scopes and uses -------------------------------------------------------
 
@@ -995,6 +1033,15 @@ class PythonUseAnalysis:
         if found is None:
             if self.stars:
                 self.rejected["star-import"] += 1
+                # Nothing in this module binds it, so only a star could: a claim, not a fact.
+                use, form = ("type", ctx.form) if ctx.type else ("value", ctx.form)
+                if called and not ctx.type:
+                    use = "call"
+                elif member and not ctx.type and form == "read":
+                    form = "member"
+                star = Binding("star", imported=name)
+                site = UseSite(name, star, use, form, node.lineno, member or None)
+                self.uses.append((owner, site))
             return
         if isinstance(found, str):
             self.rejected[found] += 1
@@ -1343,9 +1390,51 @@ def _global_rebinds(tree: ast.Module) -> Iterator[tuple[int, str]]:
                 yield node.lineno, name
 
 
-def _survey(tree: ast.Module) -> tuple[tuple[frozenset[str], frozenset[str]], bool]:
-    """One walk of the file's statements: its ``TYPE_CHECKING`` guards, and whether it says
-    ``global``.
+def _all_literal(sites: list[_Site]) -> list[str] | None:
+    """The names ``__all__`` lists when its one site is an unconditional assignment of a list
+    or tuple of string literals that are identifiers; ``None`` for anything else."""
+    if len(sites) != 1:
+        return None
+    [site] = sites
+    statement = site.statement
+    if site.kind != "value" or site.conditional:
+        return None
+    if isinstance(statement, ast.Assign):
+        [target, *others] = statement.targets
+        if others or not isinstance(target, ast.Name) or target.id != "__all__":
+            return None
+        value: ast.expr | None = statement.value
+    elif isinstance(statement, ast.AnnAssign):
+        if not isinstance(statement.target, ast.Name) or statement.target.id != "__all__":
+            return None
+        value = statement.value
+    else:
+        return None
+    if not isinstance(value, ast.List | ast.Tuple):
+        return None
+    listed: list[str] = []
+    for element in value.elts:
+        if not (
+            isinstance(element, ast.Constant)
+            and isinstance(element.value, str)
+            and element.value.isidentifier()
+        ):
+            return None
+        listed.append(element.value)
+    return listed
+
+
+def _reads_all(tree: ast.Module) -> bool:
+    """Whether any name ``__all__`` is read anywhere in the module, in any scope."""
+    return any(
+        isinstance(node, ast.Name) and node.id == "__all__" and isinstance(node.ctx, ast.Load)
+        for node in ast.walk(tree)
+    )
+
+
+def _survey(tree: ast.Module) -> tuple[tuple[frozenset[str], frozenset[str]], bool, bool]:
+    """One walk of the file's statements: its ``TYPE_CHECKING`` guards, whether it says
+    ``global``, and whether it says ``global __all__``.
 
     The guards are the names it binds to ``TYPE_CHECKING`` and to the ``typing`` module
     itself. Without a ``global`` statement no function rebinds a module name, and the walk
@@ -1356,6 +1445,7 @@ def _survey(tree: ast.Module) -> tuple[tuple[frozenset[str], frozenset[str]], bo
     names: set[str] = set()
     modules: set[str] = set()
     rebinds = False
+    global_all = False
     pending: list[ast.AST] = list(tree.body)
     while pending:
         node = pending.pop()
@@ -1370,7 +1460,8 @@ def _survey(tree: ast.Module) -> tuple[tuple[frozenset[str], frozenset[str]], bo
             modules.update(a.asname or a.name for a in node.names if a.name in _TYPING)
         elif isinstance(node, ast.Global):
             rebinds = True
-    return (frozenset(names), frozenset(modules)), rebinds
+            global_all = global_all or "__all__" in node.names
+    return (frozenset(names), frozenset(modules)), rebinds, global_all
 
 
 def python_use_references(
@@ -1382,11 +1473,13 @@ def python_use_references(
     apart from the others, so its uses are the file's. A use of a name by the declaration
     that is that name, or by one of its own members, is containment and is dropped.
     Repeats of one (declaration, target, use) are one reference at the first occurrence,
-    with the count kept.
+    with the count kept. A star claim also keeps the earliest line it is read on, since the
+    star must precede that read, and names every star import of the module.
     """
     counted = Counter(s.qualified_name for s in symbols if s.kind is not EntityType.MODULE)
     ambiguous = {name for name, count in counted.items() if count > 1}
     merged: dict[tuple[str | None, str, str], tuple[UseSite, int]] = {}
+    first_read: dict[tuple[str | None, str, str], int] = {}
     for source, site in analysis.uses:
         owner = None if source in ambiguous else source
         if (
@@ -1399,7 +1492,13 @@ def python_use_references(
         key = (owner, site.target_key, site.use)
         first, count = merged.get(key, (site, 0))
         merged[key] = (first, count + 1)
+        if site.binding.kind == "star":
+            first_read[key] = min(site.line, first_read.get(key, site.line))
 
+    stars = json.dumps(
+        [[line, spec, int(conditional)] for line, spec, conditional in analysis.star_sites],
+        separators=(",", ":"),
+    )
     fields = field_lists(analysis.members, ambiguous)
     references: list[ParsedReference] = []
     for (owner, target, use), (site, count) in merged.items():
@@ -1428,6 +1527,9 @@ def python_use_references(
                 meta["type_only"] = "true"
             if binding.bound_at is not None:
                 meta["bound_at"] = str(binding.bound_at)
+        if binding.kind == "star":
+            meta["stars"] = stars
+            meta["first_line"] = str(first_read[(owner, target, use)])
         references.append(
             ParsedReference(
                 edge_type=EdgeType.USES,
@@ -1443,7 +1545,13 @@ def python_use_references(
     # to the submodule only when the package is known to bind nothing, and a package
     # with no table at all is one that failed to parse.
     exports = analysis.exports
-    if not (package or exports.get("names") or exports.get("star") or exports.get("getattr")):
+    if not (
+        package
+        or exports.get("names")
+        or exports.get("star")
+        or exports.get("getattr")
+        or exports.get("all") is not None
+    ):
         return references
     references.append(
         ParsedReference(
