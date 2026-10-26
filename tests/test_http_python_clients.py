@@ -668,8 +668,17 @@ def test_a_relative_request_on_an_unconfigured_client_invents_no_destination(
     assert _claims(source) == []
 
 
-def test_a_star_import_makes_every_binding_unknowable() -> None:
-    assert _http("from helpers import *\n" + _IMPORT + _CLIENT + _USE) == []
+def test_a_star_import_before_every_binding_rebinds_nothing_the_module_proves() -> None:
+    source = "from helpers import *\n" + _IMPORT + _CLIENT + _USE
+    assert _facts(source) == []
+    [claim] = _claims(source)
+    assert claim.meta["origin"] == "https://api.example.com"
+    assert claim.meta["segments"] == '["users"]'
+    assert (claim.meta["client"], claim.meta["client_at"]) == ("client", "3")
+
+
+def test_a_star_import_after_the_client_makes_it_unknowable() -> None:
+    assert _http(_IMPORT + _CLIENT + "from helpers import *\n" + _USE) == []
 
 
 def test_a_rebound_library_name_is_no_library() -> None:
