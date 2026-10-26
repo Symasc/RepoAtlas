@@ -1945,6 +1945,17 @@ Until the pass proves one, it stays a pending claim that records the declaration
     no other: a name stays proven when its one binding follows the star, certainly runs, and is not read before it.
     A name bound before the star, bound conditionally after it, or read before its binding is unproven and yields
     nothing, and the module's other facts stand; a star in a function or class body leaves the module unproven.
+  - Declaration uses (`USES`) read the same star differently: a name no binding of the module supplies, read in a
+    module with a star import, is a claim naming the module's stars, and the global pass resolves it to the
+    declaration in the star's module only when that module's exports prove it. A module exports its literal
+    `__all__`, or without one every public name; a dynamic `__all__` (anything but one unconditional list or tuple of
+    string literals that nothing reads), a module `__getattr__` or a star of its own that could bind the name, a
+    conditional or repeated binding, and a module that does not resolve each refuse with their own reason. Two stars
+    providing different declarations (`ambiguous-wildcard`), none providing it (`wildcard-not-exported`), a
+    conditional star, and a star not strictly above the first read of the name (`wildcard-after-use`) refuse as well.
+    Stars leading to one declaration are one edge. Only names read produce edges, and every star's module is a
+    recorded read, so a change to a module that did not provide the name re-resolves the importer. HTTP resolution is
+    untouched: this feeds `USES` edges, change impact and field relationships alone.
   - `APIRouter` and `Blueprint` routes are served only under a literal mount. A mount in the same file is decided
     there. A mount made from another module, or inside an application factory, is decided by the global pass from
     claims each module records: its receivers and their own prefixes, its routes, its mounts of imported routers,
@@ -2601,7 +2612,7 @@ records at most 256 members (`MAX_FIELD_MEMBERS`), the first by line; past that 
 (`fields_omitted`), the parser warns, and each field use it resolves records `members_omitted`. Aliases,
 unions of two types, generics, attribute-qualified annotations and locals typed by assignment carry nothing.
 
-**Resolution** (`repoatlas/graph/fields.py`; `USES_RESOLUTION_VERSION` 12). When the use resolves -- in `link_file`
+**Resolution** (`repoatlas/graph/fields.py`; `USES_RESOLUTION_VERSION` 13). When the use resolves -- in `link_file`
 for a name the file declares, in the global `USES` stage for an import -- each member that is one of the resolved
 declaration's own fields (declared inside it, named `Model.field`) is one more `USES` edge from the same declaration,
 recording `field_use` (`field`, `model`, `access`) beside the use's own resolution, a package crossing included. The
