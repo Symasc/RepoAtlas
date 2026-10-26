@@ -438,7 +438,10 @@ class PythonParser:
     # 21: a name only a star import binds is a use claim naming the module's stars, and the
     #    export table records a literal or dynamic __all__ and conditional bindings
     #    (repoatlas.parsers.py_uses).
-    version = f"21+{interpreter_tag()}"
+    # 22: a list or set comprehension statement mounting each element of a literal list is read
+    #    as the equivalent for loop, and a literal list read other than as a loop's iterable is
+    #    no longer unrolled (repoatlas.parsers.http_python).
+    version = f"22+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:

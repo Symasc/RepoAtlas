@@ -186,6 +186,22 @@ _MOUNT_CALLS = {
 }
 #: Applications, which serve their routes at the root of their paths.
 _APPLICATIONS = frozenset({_FASTAPI_APP, _FLASK_APP})
+#: A comprehension statement is looked at only when it calls one of these: a mount.
+_COMPREHENSION_MOUNTS = frozenset({"include_router", "register_blueprint", "mount"})
+#: What became of a comprehension statement that mounts: internal, for tests and measurement.
+_COMPREHENSION_UNROLLED = "unrolled"
+_COMPREHENSION_GENERATOR = "generator-not-eager"
+_COMPREHENSION_DICT = "dict-comprehension"
+_COMPREHENSION_MULTIPLE = "multi-generator"
+_COMPREHENSION_ASYNC = "async-comprehension"
+_COMPREHENSION_FILTERED = "conditional-comprehension"
+_COMPREHENSION_TARGET = "unsupported-target"
+_COMPREHENSION_REBOUND = "loop-variable-rebound"
+_COMPREHENSION_IMPORTED = "collection-imported"
+_COMPREHENSION_DYNAMIC = "dynamic-collection"
+_COMPREHENSION_NOT_A_CALL = "not-a-registration"
+_LOOP_VARIABLE_NOT_FIRST = "loop-variable-not-first"
+_LOOP_VARIABLE_REUSED = "loop-variable-reused"
 #: A constant other modules may read only when it could be a piece of a path or a URL:
 #: short, and without whitespace -- prose, messages and format strings are left out.
 _MAX_CONSTANT = 256
@@ -866,8 +882,16 @@ def _main_guard(statement: ast.stmt) -> bool:
     )
 
 
-def _literal_lists(statements: list[ast.stmt], counts: Counter[str]) -> dict[str, list[ast.expr]]:
-    """Names the statements bind, once, to a list or tuple display: ``routers = [a, b]``."""
+def _literal_lists(
+    statements: list[ast.stmt], counts: Counter[str], scope: ast.AST
+) -> dict[str, list[ast.expr]]:
+    """Names the statements bind, once, to a list or tuple display: ``routers = [a, b]``.
+
+    A list the ``scope`` (the module, or the function holding the statements) reads other
+    than as what a loop or a comprehension iterates is not kept: ``routers.pop()``,
+    ``routers[0] = x``, ``alias = routers`` and ``register(routers)`` may all change what
+    the loop would see, so what it would mount is not the display's elements.
+    """
     found: dict[str, list[ast.expr]] = {}
     for statement in statements:
         if (
@@ -878,23 +902,144 @@ def _literal_lists(statements: list[ast.stmt], counts: Counter[str]) -> dict[str
             and counts[statement.targets[0].id] == 1
         ):
             found[statement.targets[0].id] = list(statement.value.elts)
+    if not found:
+        return found
+    iterated: set[int] = set()
+    loads: list[ast.Name] = []
+    for node in ast.walk(scope):
+        if isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Load) and node.id in found:
+                loads.append(node)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            iterated.add(id(node.iter))
+    for name in loads:
+        if id(name) not in iterated:
+            found.pop(name.id, None)
     return found
 
 
+def _loop_elements(iterated: ast.expr, lists: dict[str, list[ast.expr]]) -> list[ast.expr] | None:
+    """What a loop over ``iterated`` visits, when that is a literal list; else ``None``.
+
+    A list or tuple display, or a name bound once to one, with no ``*`` element.
+    """
+    if isinstance(iterated, (ast.List, ast.Tuple)):
+        elements: list[ast.expr] | None = list(iterated.elts)
+    elif isinstance(iterated, ast.Name):
+        elements = lists.get(iterated.id)
+    else:
+        elements = None
+    if elements is None or any(isinstance(element, ast.Starred) for element in elements):
+        return None
+    return elements
+
+
+def _loop_call_refusal(call: ast.Call, variable: str) -> str | None:
+    """Why ``call`` is not one the loop variable stands in for, or ``None``.
+
+    The variable must be the first positional argument and appear nowhere else in the call.
+    """
+    first = call.args[0] if call.args else None
+    if not isinstance(first, ast.Name) or first.id != variable:
+        return _LOOP_VARIABLE_NOT_FIRST
+    if sum(isinstance(node, ast.Name) and node.id == variable for node in ast.walk(call)) != 1:
+        return _LOOP_VARIABLE_REUSED
+    return None
+
+
+def _unrolled(call: ast.Call, elements: list[ast.expr]) -> Iterator[ast.Call]:
+    """``call`` once per element, each in its first argument's place."""
+    for element in elements:
+        unrolled = ast.Call(func=call.func, args=[element, *call.args[1:]], keywords=call.keywords)
+        yield ast.copy_location(unrolled, call)
+
+
+def _comprehension_loop(
+    statement: ast.stmt,
+    counts: Counter[str],
+    lists: dict[str, list[ast.expr]],
+    imported: dict[str, _Imported],
+) -> tuple[str, ast.Call | None, list[ast.expr] | None] | None:
+    """A comprehension statement that mounts, and what became of it; ``None`` for any other.
+
+    ``[app.include_router(r, prefix="/api") for r in routers]`` is the one-line loop
+    ``for r in routers: app.include_router(r, prefix="/api")``, and is read as it. The
+    outcome is ``"unrolled"`` -- the call and the elements it stands for -- or the first
+    reason it is refused. A refusal reads nothing and says nothing else about the module.
+    """
+    comprehension = statement.value if isinstance(statement, ast.Expr) else None
+    if not isinstance(comprehension, _COMPREHENSIONS):
+        return None
+    if not any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in _COMPREHENSION_MOUNTS
+        for node in ast.walk(comprehension)
+    ):
+        return None
+    if isinstance(comprehension, ast.GeneratorExp):
+        return _COMPREHENSION_GENERATOR, None, None
+    if isinstance(comprehension, ast.DictComp):
+        return _COMPREHENSION_DICT, None, None
+    if len(comprehension.generators) != 1:
+        return _COMPREHENSION_MULTIPLE, None, None
+    generator = comprehension.generators[0]
+    if generator.is_async:
+        return _COMPREHENSION_ASYNC, None, None
+    if generator.ifs:
+        return _COMPREHENSION_FILTERED, None, None
+    target = generator.target
+    if not isinstance(target, ast.Name):
+        return _COMPREHENSION_TARGET, None, None
+    if counts[target.id] != 1:
+        return _COMPREHENSION_REBOUND, None, None
+    iterated = generator.iter
+    if isinstance(iterated, ast.Name) and iterated.id in imported and iterated.id not in lists:
+        return _COMPREHENSION_IMPORTED, None, None
+    elements = _loop_elements(iterated, lists)
+    if elements is None:
+        return _COMPREHENSION_DYNAMIC, None, None
+    call = comprehension.elt
+    if not (
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+    ):
+        return _COMPREHENSION_NOT_A_CALL, None, None
+    refusal = _loop_call_refusal(call, target.id)
+    if refusal is not None:
+        return refusal, None, None
+    return _COMPREHENSION_UNROLLED, call, elements
+
+
 def _statement_calls(
-    statements: list[ast.stmt], counts: Counter[str], lists: dict[str, list[ast.expr]]
+    statements: list[ast.stmt],
+    counts: Counter[str],
+    lists: dict[str, list[ast.expr]],
+    imported: dict[str, _Imported],
+    outcomes: list[tuple[int, str]] | None = None,
 ) -> Iterator[ast.Call]:
     """``name.method(...)`` statements, with a loop over a literal list unrolled.
 
     ``for router in routers: app.include_router(router)`` is read as one call per
     element, each element in the loop variable's place, when the list is a display or
     a name bound once to one, the loop variable is bound by nothing else, and it is the
-    call's first argument and appears nowhere else in it.
+    call's first argument and appears nowhere else in it. A list or set comprehension
+    statement of one such call is read as that loop, by :func:`_comprehension_loop`;
+    what became of each is appended to ``outcomes`` as (line, outcome).
     """
     for statement in statements:
         call = _expression_call(statement)
         if call is not None:
             yield call
+            continue
+        found = _comprehension_loop(statement, counts, lists, imported)
+        if found is not None:
+            outcome, mounted, elements = found
+            if outcomes is not None:
+                outcomes.append((statement.lineno, outcome))
+            if mounted is not None and elements is not None:
+                yield from _unrolled(mounted, elements)
             continue
         if not (
             isinstance(statement, ast.For)
@@ -904,33 +1049,14 @@ def _statement_calls(
         ):
             continue
         variable = statement.target.id
-        iterated = statement.iter
-        if isinstance(iterated, (ast.List, ast.Tuple)):
-            elements: list[ast.expr] | None = list(iterated.elts)
-        elif isinstance(iterated, ast.Name):
-            elements = lists.get(iterated.id)
-        else:
-            elements = None
-        if elements is None or any(isinstance(element, ast.Starred) for element in elements):
+        elements = _loop_elements(statement.iter, lists)
+        if elements is None:
             continue
         for inner in statement.body:
             call = _expression_call(inner)
-            first = call.args[0] if call is not None and call.args else None
-            if (
-                call is None
-                or not isinstance(first, ast.Name)
-                or first.id != variable
-                or sum(
-                    isinstance(node, ast.Name) and node.id == variable for node in ast.walk(call)
-                )
-                != 1
-            ):
+            if call is None or _loop_call_refusal(call, variable) is not None:
                 continue
-            for element in elements:
-                unrolled = ast.Call(
-                    func=call.func, args=[element, *call.args[1:]], keywords=call.keywords
-                )
-                yield ast.copy_location(unrolled, call)
+            yield from _unrolled(call, elements)
 
 
 def _mount_target(kind: str, call: ast.Call) -> ast.expr | None:
@@ -1043,6 +1169,10 @@ class PythonHttp:
         #: Name → why a star import left it unproven. ``None``: a star stands outside module
         #: scope and nothing is proven. For tests and measurement; never emitted.
         self.star_unproven: dict[str, str] | None = {}
+        #: Each comprehension statement that calls a mount, as (its line, what became of it):
+        #: ``"unrolled"`` -- read as the equivalent loop -- or the reason it was refused. For
+        #: tests and measurement; never emitted.
+        self.comprehension_outcomes: list[tuple[int, str]] = []
         counts, stars = _binding_counts(tree)
         unproven = _star_unproven(tree, stars) if stars else {}
         if unproven is None:
@@ -1078,7 +1208,7 @@ class PythonHttp:
                     if counts[local] == 1:
                         self._names[local] = f"{statement.module}.{alias.name}"
         self._imported = _import_table(tree.body, counts)
-        self._lists = _literal_lists(tree.body, counts)
+        self._lists = _literal_lists(tree.body, counts, tree)
 
     def _optional_imports(self, tree: ast.Module, counts: Counter[str]) -> None:
         """``try: from flasgger import Swagger`` / ``except ImportError: Swagger = None``.
@@ -1174,7 +1304,9 @@ class PythonHttp:
         return _Receiver(kind)
 
     def _mounts(self, tree: ast.Module, counts: Counter[str]) -> None:
-        for call in _statement_calls(tree.body, counts, _literal_lists(tree.body, counts)):
+        for call in _statement_calls(
+            tree.body, counts, self._lists, self._imported, self.comprehension_outcomes
+        ):
             func = call.func
             if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)):
                 continue
@@ -1301,8 +1433,10 @@ class PythonHttp:
                     if kind in _APPLICATIONS:
                         applications[statement.targets[0].id] = kind
             lists = {name: found for name, found in self._lists.items() if not counts[name]}
-            lists.update(_literal_lists(function.body, counts))
-            for call in _statement_calls(function.body, counts, lists):
+            lists.update(_literal_lists(function.body, counts, function))
+            for call in _statement_calls(
+                function.body, counts, lists, imported, self.comprehension_outcomes
+            ):
                 if not isinstance(call.func, ast.Attribute):
                     continue
                 name = call.func.value.id if isinstance(call.func.value, ast.Name) else ""
