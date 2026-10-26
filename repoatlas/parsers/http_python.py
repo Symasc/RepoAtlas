@@ -12,8 +12,11 @@ anywhere in the module::
     app = FastAPI()              # `app` is a FastAPI application...
     @app.get("/hello/me")        # ...so this is a route
 
-A parameter, a reassignment, a ``global`` or a ``from x import *`` that could
-rebind the name makes it unproven, and an unproven name yields nothing.
+A parameter, a reassignment or a ``global`` makes a name unproven. A ``from x import *``
+may rebind only names this module binds: a name it precedes stays proven when its binding
+certainly runs and nothing reads the name before it; one bound before it, bound conditionally
+after it, or read before its binding is unproven. A name only a star import could bind is never
+read. An unproven name yields nothing; the module's other facts stand.
 
 **Values are literal or they are nothing.** A route path or URL is read by
 :func:`static_string`, which accepts a string literal, a concatenation of
@@ -216,12 +219,14 @@ def static_string(node: ast.expr | None, depth: int = 0) -> str | None:
     return None
 
 
-def _binding_counts(tree: ast.AST) -> Counter[str] | None:
-    """How many times each name is bound anywhere in the module (or function).
+def _binding_counts(tree: ast.AST) -> tuple[Counter[str], list[ast.ImportFrom]]:
+    """How many times each name is bound anywhere in the module (or function), and its stars.
 
-    ``None`` when a star import makes the answer unknowable for every name.
+    A star import binds no name it states: which names it could rebind is
+    :func:`_star_unproven`'s to say.
     """
     counts: Counter[str] = Counter()
+    stars: list[ast.ImportFrom] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             counts[node.id] += 1
@@ -229,10 +234,12 @@ def _binding_counts(tree: ast.AST) -> Counter[str] | None:
             counts[node.name] += 1
         elif isinstance(node, ast.arg):
             counts[node.arg] += 1
+        elif isinstance(node, ast.ImportFrom):
+            if any(alias.name == "*" for alias in node.names):
+                stars.append(node)
         elif isinstance(node, ast.alias):
-            if node.name == "*":
-                return None
-            counts[(node.asname or node.name).split(".")[0]] += 1
+            if node.name != "*":
+                counts[(node.asname or node.name).split(".")[0]] += 1
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             counts.update(node.names)
         elif (isinstance(node, ast.ExceptHandler) and node.name) or (
@@ -247,7 +254,237 @@ def _binding_counts(tree: ast.AST) -> Counter[str] | None:
             "TypeVarTuple",
         }:
             counts[name] += 1
-    return counts
+    return counts, stars
+
+
+#: Why a name a star import could have rebound is unproven: internal, for tests and measurement.
+_STAR_AFTER_BINDING = "star-after-binding"
+_STAR_BEFORE_CONDITIONAL = "star-before-conditional-binding"
+_STAR_READ_BEFORE_BINDING = "star-read-before-binding"
+
+_Position = tuple[int, int]
+_DEFINITIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_WITHS = (ast.With, ast.AsyncWith)
+#: ``except*`` needs Python 3.11; 3.10 is supported.
+_TRY_STAR = getattr(ast, "TryStar", None)
+_TRIES: tuple[type[ast.Try], ...] = (ast.Try,) if _TRY_STAR is None else (ast.Try, _TRY_STAR)
+
+
+def _position(statement: ast.stmt) -> _Position:
+    """Where a statement begins: a decorated definition, at its first decorator."""
+    found = (statement.lineno, statement.col_offset)
+    for decorator in getattr(statement, "decorator_list", ()):
+        found = min(found, (decorator.lineno, decorator.col_offset))
+    return found
+
+
+def _nested_bodies(statement: ast.stmt) -> list[list[ast.stmt]]:
+    """The statement lists a compound statement runs in its own scope; none for a simple one."""
+    if isinstance(statement, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+        return [statement.body, statement.orelse]
+    if isinstance(statement, _WITHS):
+        return [statement.body]
+    if isinstance(statement, _TRIES):
+        bodies = [statement.body, *(handler.body for handler in statement.handlers)]
+        return [*bodies, statement.orelse, statement.finalbody]
+    if isinstance(statement, ast.Match):
+        return [case.body for case in statement.cases]
+    return []
+
+
+def _scope_statements(tree: ast.Module) -> list[ast.stmt]:
+    """Every statement that runs in module scope; a definition's body does not.
+
+    Loops, ``with``, ``try`` and ``match`` bodies are module scope. An explicit stack: the
+    constructor is not covered by the ``RecursionError`` guard.
+    """
+    found: list[ast.stmt] = []
+    pending = list(tree.body)
+    while pending:
+        statement = pending.pop()
+        found.append(statement)
+        for body in _nested_bodies(statement):
+            pending.extend(body)
+    return found
+
+
+def _defaults(arguments: ast.arguments) -> list[ast.expr]:
+    return [*arguments.defaults, *(value for value in arguments.kw_defaults if value is not None)]
+
+
+def _headers(definition: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> list[ast.expr]:
+    """What a definition evaluates where it stands, besides its body."""
+    if isinstance(definition, ast.ClassDef):
+        return [
+            *definition.decorator_list,
+            *definition.bases,
+            *(keyword.value for keyword in definition.keywords),
+        ]
+    return [*definition.decorator_list, *_defaults(definition.args)]
+
+
+def _bound_names(statement: ast.stmt) -> set[str]:
+    """Every name ``statement`` binds in the scope holding it, without entering an inner scope.
+
+    Mirrors ``py_uses._stored``. A definition binds its name and evaluates its decorators,
+    defaults, bases and keywords here; a comprehension binds only its ``:=`` targets.
+    """
+    names: set[str] = set()
+    pending: list[ast.AST] = [statement]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, ast.Name):
+            if isinstance(current.ctx, (ast.Store, ast.Del)):
+                names.add(current.id)
+        elif isinstance(current, _DEFINITIONS):
+            names.add(current.name)
+            pending.extend(_headers(current))
+        elif isinstance(current, ast.Lambda):
+            pending.extend(_defaults(current.args))
+        elif isinstance(current, _COMPREHENSIONS):
+            names.update(
+                inner.target.id
+                for inner in ast.walk(current)
+                if isinstance(inner, ast.NamedExpr) and isinstance(inner.target, ast.Name)
+            )
+        else:
+            if isinstance(current, ast.alias):
+                if current.name != "*":
+                    names.add((current.asname or current.name).split(".")[0])
+            elif (isinstance(current, ast.ExceptHandler) and current.name) or (
+                isinstance(current, (ast.MatchAs, ast.MatchStar)) and current.name
+            ):
+                names.add(current.name)
+            elif isinstance(current, ast.MatchMapping) and current.rest:
+                names.add(current.rest)
+            pending.extend(ast.iter_child_nodes(current))
+    return names
+
+
+def _is_name(node: ast.AST | None, name: str) -> bool:
+    return isinstance(node, ast.Name) and node.id == name
+
+
+def _binds_directly(statement: ast.stmt, name: str) -> bool:
+    """Whether running ``statement`` itself binds ``name`` (its nested statements aside)."""
+    if isinstance(statement, (ast.Import, ast.ImportFrom)):
+        return name in _bound_names(statement)
+    if isinstance(statement, _DEFINITIONS):
+        return statement.name == name
+    if isinstance(statement, ast.Assign):
+        return any(_is_name(target, name) for target in statement.targets)
+    if isinstance(statement, ast.AnnAssign):
+        return statement.value is not None and _is_name(statement.target, name)
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        return _is_name(statement.target, name)
+    if isinstance(statement, _WITHS):
+        return any(_is_name(item.optional_vars, name) for item in statement.items)
+    return False
+
+
+def _required_bodies(statement: ast.stmt) -> list[list[ast.stmt]] | None:
+    """The bodies that must each bind a name for ``statement`` to, or ``None`` for a leaf.
+
+    An ``if`` chain with no final ``else`` has a branch that runs nothing: an empty body.
+    """
+    if isinstance(statement, ast.If):
+        bodies: list[list[ast.stmt]] = []
+        branch = statement
+        while True:
+            bodies.append(branch.body)
+            if not branch.orelse:
+                return [[]]
+            if len(branch.orelse) == 1 and isinstance(branch.orelse[0], ast.If):
+                branch = branch.orelse[0]
+                continue
+            bodies.append(branch.orelse)
+            return bodies
+    if isinstance(statement, _TRIES):
+        return [statement.body, *(handler.body for handler in statement.handlers)]
+    return None
+
+
+def _certainly_binds(statement: ast.stmt, name: str) -> bool:
+    """Whether running ``statement`` certainly binds ``name``.
+
+    Iterative, post-order: a compound statement binds it when every body it may run has a
+    statement that does.
+    """
+    certain: dict[int, bool] = {}
+    pending: list[tuple[ast.stmt, bool]] = [(statement, False)]
+    while pending:
+        current, expanded = pending.pop()
+        bodies = _required_bodies(current)
+        if bodies is None:
+            certain[id(current)] = _binds_directly(current, name)
+        elif expanded:
+            certain[id(current)] = all(
+                any(certain.get(id(child), False) for child in body) for body in bodies
+            )
+        else:
+            pending.append((current, True))
+            pending.extend((child, False) for body in bodies for child in body)
+    return certain[id(statement)]
+
+
+def _evaluated_first(statement: ast.stmt) -> list[ast.AST]:
+    """The parts of a statement that run before its binding takes effect.
+
+    A compound statement binds somewhere inside, so all of it counts.
+    """
+    if isinstance(statement, ast.Assign):
+        return [statement.value]
+    if isinstance(statement, ast.AnnAssign):
+        return [statement.annotation, *([statement.value] if statement.value else [])]
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        return [statement.iter]
+    if isinstance(statement, _WITHS):
+        return [item.context_expr for item in statement.items]
+    if isinstance(statement, _DEFINITIONS):
+        return list(_headers(statement))
+    if isinstance(statement, (ast.If, *_TRIES)):
+        return [statement]
+    return []
+
+
+def _star_unproven(tree: ast.Module, stars: list[ast.ImportFrom]) -> dict[str, str] | None:
+    """The module-level names a star import could have rebound, each with the reason.
+
+    A star can rebind only a name this module binds in module scope. It cannot rebind one
+    bound after it by a statement that certainly runs and that nothing reads first: that
+    binding is the last word. ``None`` when a star stands in a function or class body
+    (CPython refuses it): nothing in such a module is proven.
+    """
+    in_module = {id(statement) for statement in _scope_statements(tree)}
+    if any(id(star) not in in_module for star in stars):
+        return None
+    last_star = max(_position(star) for star in stars)
+    sites: dict[str, list[int]] = {}
+    for index, statement in enumerate(tree.body):
+        for name in _bound_names(statement):
+            sites.setdefault(name, []).append(index)
+    first_read: dict[str, _Position] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            at = (node.lineno, node.col_offset)
+            if node.id not in first_read or at < first_read[node.id]:
+                first_read[node.id] = at
+    unproven: dict[str, str] = {}
+    for name, indexes in sites.items():
+        statement = tree.body[indexes[0]]
+        begins = _position(statement)
+        if len(indexes) != 1 or not last_star < begins:
+            unproven[name] = _STAR_AFTER_BINDING
+        elif not _certainly_binds(statement, name):
+            unproven[name] = _STAR_BEFORE_CONDITIONAL
+        elif (name in first_read and first_read[name] < begins) or any(
+            isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load)
+            for part in _evaluated_first(statement)
+            for node in ast.walk(part)
+        ):
+            unproven[name] = _STAR_READ_BEFORE_BINDING
+    return unproven
 
 
 @dataclass(frozen=True, slots=True)
@@ -803,9 +1040,17 @@ class PythonHttp:
         self._script = next(
             (statement.lineno for statement in tree.body if _main_guard(statement)), None
         )
-        counts = _binding_counts(tree)
-        if counts is None:
+        #: Name → why a star import left it unproven. ``None``: a star stands outside module
+        #: scope and nothing is proven. For tests and measurement; never emitted.
+        self.star_unproven: dict[str, str] | None = {}
+        counts, stars = _binding_counts(tree)
+        unproven = _star_unproven(tree, stars) if stars else {}
+        if unproven is None:
+            self.star_unproven = None
             return
+        for name in unproven:
+            counts[name] += 1
+        self.star_unproven = unproven
         self._imports(tree, counts)
         self._optional_imports(tree, counts)
         self._read_constants(tree, counts)
@@ -1039,9 +1284,7 @@ class PythonHttp:
         for function in tree.body:
             if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            counts = _binding_counts(function)
-            if counts is None:
-                continue
+            counts, _ = _binding_counts(function)
             imported = {name: found for name, found in self._imported.items() if not counts[name]}
             imported.update(_import_table(function.body, counts))
             applications: dict[str, str] = {}
