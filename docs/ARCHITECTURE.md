@@ -1941,6 +1941,10 @@ Until the pass proves one, it stays a pending claim that records the declaration
   or `schemes` there is no deployment.
 - **FastAPI and Flask.** Routes count only on an application or router whose identity the module proves: imported
   from `fastapi`/`flask`, constructed at module level, and bound exactly once in the module.
+  - A module-level `from x import *` is one more possible binding of each module-level name it could rebind, and of
+    no other: a name stays proven when its one binding follows the star, certainly runs, and is not read before it.
+    A name bound before the star, bound conditionally after it, or read before its binding is unproven and yields
+    nothing, and the module's other facts stand; a star in a function or class body leaves the module unproven.
   - `APIRouter` and `Blueprint` routes are served only under a literal mount. A mount in the same file is decided
     there. A mount made from another module, or inside an application factory, is decided by the global pass from
     claims each module records: its receivers and their own prefixes, its routes, its mounts of imported routers,
@@ -2016,7 +2020,8 @@ Until the pass proves one, it stays a pending claim that records the declaration
   `if`/`elif`/`else` binds to a literal in every branch, and nothing else binds, is read once per literal: each
   becomes its own join claim (`base_at` its branch's line, `alternatives` their count), decided on its own, so no
   alternative's decision overwrites another's. The condition is never read; a branch without a literal, a missing
-  `else` or a second binding leaves the request read as before.
+  `else` or a second binding leaves the request read as before. The star-import rule above applies the same way to
+  the library imports, constants and clients a request is read through.
   - A client object (`requests.Session()`, `httpx.Client(...)`, `httpx.AsyncClient(...)`) is followed only where its
     binding is lexical: the name's one binding in the module, `name = C(...)` or `with C(...) as name`, constructed
     with no positional or starred argument and no `transport`, `mounts`, `app` or `event_hooks`, and read from the
