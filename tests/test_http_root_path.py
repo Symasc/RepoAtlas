@@ -195,3 +195,65 @@ def test_shortlist_never_offers_an_empty_base_segment(
     for _, _, base in found:
         assert base != "//"
         assert base == "" or "" not in base[1:].split("/"), base
+
+
+TS_ROOT_SERVICE = dedent("""\
+    import Fastify from 'fastify';
+
+    const server = Fastify();
+
+    server.get('/', async () => ({}));
+
+    export default server;
+""")
+TS_ROOT_CALLER = dedent("""\
+    export async function fetchRoot(): Promise<unknown> {
+      const response = await fetch('https://root.example.test/');
+      return response.json();
+    }
+""")
+
+
+def test_a_typescript_root_request_previews_as_the_sync_decides(
+    tmp_path: Path, workspace: Workspace
+) -> None:
+    """R1 for TypeScript: fetch of the stated origin's root against a Fastify ``GET /``. The
+    preview and the sync must agree on the same row, as they do for Python."""
+    built = build(
+        workspace,
+        tmp_path,
+        {
+            "tsroot": {"package.json": '{"name": "tsroot"}\n', "src/server.ts": TS_ROOT_SERVICE},
+            "tscaller": {
+                "package.json": '{"name": "tscaller"}\n',
+                "src/client.ts": TS_ROOT_CALLER,
+            },
+        },
+    )
+    service = _service(built)
+    worklist = service.http_connections(HttpConnectionsRequest(context=GLOBAL))
+    group = next(g for g in worklist.groups if g.origin == ROOT_URL)
+    preview = service.http_connection_preview(
+        HttpConnectionPreviewRequest(
+            context=GLOBAL, group=group.key, repository=_slug(built, "tsroot")
+        )
+    )
+    service.deployment_link_create(
+        DeploymentLinkCreateRequest(
+            context=CapabilityContext(
+                scope=CapabilityScope.REPOSITORY, repository=_slug(built, "tsroot")
+            ),
+            link=DeploymentLinkFields(label="mapped", url=ROOT_URL, callers=[]),
+            provenance=DeclarationProvenance(via="ui"),
+        )
+    )
+    sync_all(built, tmp_path / "repos")
+    decided = {
+        row[0]: row[1]
+        for row in built.database.execute(
+            "SELECT decision_ref, decision FROM http_call_decisions"
+        ).fetchall()
+    }
+    assert preview.rows, "the TypeScript root request must reach the preview"
+    for row in preview.rows:
+        assert (decided[row.decision_ref] == "linked") == (row.outcome == "would-link"), row
