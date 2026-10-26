@@ -506,7 +506,7 @@ def _shortlist(
     for member in wanted:
         literal: list[str] = []
         for segment in member.target.segments[:MAX_BASE_DEPTH]:
-            if segment is None:
+            if not segment:  # a value fills it, or it is the root's empty one: no literal base
                 break
             literal.append(segment)
             prefixes.append(tuple(literal))
