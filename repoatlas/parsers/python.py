@@ -433,7 +433,12 @@ class PythonParser:
     #    (lexically) is a join claim: a literal absolute URL as before, a rooted URL appended to
     #    a base the source states, and one on a base it does not state a claim with no origin
     #    (D2); each carries the client's name and line (repoatlas.parsers.http_python).
-    version = f"19+{interpreter_tag()}"
+    # 20: a star import makes unproven only the names it could rebind, never the whole module
+    #    (repoatlas.parsers.http_python).
+    # 21: a name only a star import binds is a use claim naming the module's stars, and the
+    #    export table records a literal or dynamic __all__ and conditional bindings
+    #    (repoatlas.parsers.py_uses).
+    version = f"21+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
