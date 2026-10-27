@@ -60,7 +60,20 @@ the same claim.
 (:data:`~repoatlas.parsers.http_facts.HTTP_CLIENT_CALL`) is read a little further
 than a literal: a module constant that holds a URL, or an f-string whose origin is
 literal or such a constant, with each placeholder filling one whole path segment.
-Only the per-file facts above stay literal-only.
+Only the per-file facts above stay literal-only. The URL (and an ``httpx`` client's
+``base_url``) may also be built from module constants by an f-string or ``+``, within this
+file, on the evaluator the route paths use: a literal constant anywhere in the host, the port
+or the head, and a constant composed from earlier ones (``BASE = f"{HOST}/api"``), which must be
+bound before the line that reads it. The text is joined exactly as written -- nothing is
+inserted or trimmed, so ``BASE`` ending in ``/`` plus ``"/users"`` is ``//users`` -- and read
+as scheme, host, port and path: every boundary where a value meets other text must be a place
+a URL separates (``://``, ``.``, ``:``, ``/``), or the read is refused. A name filling the
+path is spliced only when its own text starts with ``/``; any other stays a placeholder, as a
+token must never become a path. A host that is a value (``f"https://{host}.example.com/x"``)
+keeps the path after it, with no origin: counted, never joined. A read that is refused for any
+reason, or that does not improve on the older one, leaves the older output exactly as it was;
+the reason is recorded in ``client_reads`` and never emitted. The composed text is never
+written to ``_constants`` or ``_values``, and an imported or cross-file name stays a placeholder.
 
 **A client object** -- ``requests.Session()``, ``httpx.Client(...)``, ``httpx.AsyncClient(...)`` --
 is followed only where its identity is lexical: bound by one ``name = C(...)`` or
@@ -239,11 +252,38 @@ _INVALID_PREFIX = "invalid-prefix"
 
 #: What an expression is read for. A composed constant's definition and a prefix are read in
 #: execution order; a route path is read as it always was (a name needs no earlier binding)
-#: except for a composed constant; a mount inside a factory is read with no order at all.
+#: except for a composed constant; a mount inside a factory is read with no order at all. A
+#: client's request URL and ``base_url`` are read like a route path, for the same reason.
 _DEFINITION = "definition"
 _PREFIX = "prefix"
 _ROUTE = "route"
 _FACTORY = "factory"
+_CLIENT = "client"
+
+#: What a composed request URL or base is made of: text written at the call, a name proven to
+#: hold text, and everything else (kept as the expression it was written as).
+_LITERAL = "L"
+_PROVEN = "N"
+_OPEN = "S"
+#: Why a composed read of a request URL or a base gave nothing: internal, for tests and
+#: measurement; never stored. ``composed`` is a read that stands; ``unchanged`` one that
+#: improved on nothing.
+_COMPOSED = "composed"
+_UNCHANGED = "unchanged"
+_CLIENT_IMPORTED = "client-imported"
+_GLUED_AUTHORITY = "glued-authority"
+_GLUED_PATH = "glued-path"
+_CREDENTIALS = "credentials"
+_NOT_AN_ORIGIN = "not-an-origin"
+_RELATIVE_URL = "relative-url"
+_NO_PATH = "no-path"
+_DOTTED_SEGMENT = "dotted-segment"
+#: Characters of text one composed request URL is read from.
+_MAX_CLIENT_TEXT = 2048
+#: ``http://`` or ``https://`` at the start of a URL, in any case.
+_HTTP_SCHEME = re.compile(r"https?://", re.IGNORECASE)
+#: What the text of a host that is partly a value may be made of: a name, a port, a bracket.
+_AUTHORITY_TEXT = re.compile(r"[A-Za-z0-9._:\[\]-]*")
 
 
 def static_string(node: ast.expr | None, depth: int = 0) -> str | None:
@@ -666,6 +706,75 @@ class _ClientUrl:
 
 
 @dataclass(frozen=True, slots=True)
+class _ClientPiece:
+    """One piece of a request URL or a client's base, as it is composed (:data:`_LITERAL`,
+    :data:`_PROVEN` or :data:`_OPEN`)."""
+
+    kind: str
+    #: Literal and proven: the text. Open: the expression, shortened for display.
+    text: str
+    #: Proven only: the text as the pieces a composed constant is stored in (one for a literal
+    #: constant), each boundary between them held to the same rules as a boundary of the URL.
+    parts: tuple[str, ...] = ()
+    #: Proven only: the line of the module constant, and how many constants it stands on.
+    line: int = 0
+    depth: int = 0
+    #: Proven only: the name as written, which it stays when the path may not take its text.
+    expr: str = ""
+    #: Open only: why the name is no proven text, when it was a name at all.
+    reason: str = ""
+
+
+@dataclass(slots=True)
+class _ClientRead:
+    """One attempted composed read of a request URL or a client's base. Never emitted."""
+
+    line: int
+    outcome: str
+    scheme: str | None = None
+    host: str | None = None
+    port: str | None = None
+    #: The path the first proven piece brings (a base), and the rest of the path.
+    base_segments: tuple[str | None, ...] = ()
+    endpoint_segments: tuple[str | None, ...] = ()
+    #: Whether a name was left open because another module binds it.
+    imported: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _Composition:
+    """A composed read that stands: an absolute URL, or the parts of a rooted one."""
+
+    read: _ClientRead
+    url: _ClientUrl | None = None
+    rooted: list[list[str]] | None = None
+
+
+@dataclass(slots=True)
+class _Walked:
+    """A composed URL read as scheme, authority and path."""
+
+    #: ``absolute`` (a scheme), ``open`` (a host that is a value, then a path) or ``rooted``.
+    form: str
+    #: The scheme as written, with its ``://``.
+    scheme: str = ""
+    #: The authority's pieces, as (kind, text): text, or an expression left open.
+    authority: list[tuple[str, str]] = field(default_factory=list)
+    #: Whether the authority ended at a ``/`` rather than at the end, a ``?`` or a ``#``.
+    slashed: bool = False
+    #: The path, as the parts :func:`~repoatlas.models.http.route_template` reads.
+    parts: list[list[str]] = field(default_factory=list)
+    #: The line of the first proven piece at the start of the URL, when there is one.
+    base_at: int | None = None
+    #: The path the first piece brings with it.
+    head_path: str = ""
+    #: The expression of a host that is a value, for ``open``.
+    host: str = ""
+    #: Whether any piece was left open, a proven one that may not fill the path included.
+    has_open: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class _ClientInstance:
     """A client object whose binding is lexical, and what the source states of its base."""
 
@@ -829,6 +938,156 @@ def _display(template: http.RouteTemplate) -> str:
         segment if segment is not None else "{" + next(expressions, "")[:_MAX_EXPRESSION] + "}"
         for segment in template.segments
     )
+
+
+def _first_of(text: str, characters: str) -> int | None:
+    """The index of the first of ``characters`` in ``text``, or ``None``."""
+    found = [index for index in (text.find(char) for char in characters) if index >= 0]
+    return min(found) if found else None
+
+
+def _append_literal(parts: list[list[str]], text: str) -> None:
+    """Add literal text to a template's parts, joined to the literal before it."""
+    if not text:
+        return
+    if parts and parts[-1][0] == http.TEMPLATE_LITERAL:
+        parts[-1][1] += text
+    else:
+        parts.append([http.TEMPLATE_LITERAL, text])
+
+
+def _glued(state: str, left: tuple[str, str], right: tuple[str, str]) -> str | None:
+    """Why two pieces may not meet where they do, or ``None``: the rule of a junction.
+
+    Each side is (kind, text); an open piece has no known text. Inside the authority a value
+    may meet text only at ``://``, ``.`` or ``:``; in the path only at a ``/``, a ``?`` or a
+    ``#``. The boundary that ends the authority, and any boundary in the scheme or the query,
+    is not a junction of this kind.
+    """
+    left_kind, left_text = left
+    right_kind, right_text = right
+    if state == "authority":
+        if right_kind != _OPEN and right_text.startswith(("/", "?", "#")):
+            return None
+        if left_kind != _OPEN and left_text.endswith(("://", ".", ":")):
+            return None
+        if right_kind != _OPEN and right_text.startswith((".", ":")):
+            return None
+        return _GLUED_AUTHORITY
+    if state == "path":
+        if left_kind != _OPEN and left_text.endswith("/"):
+            return None
+        if right_kind != _OPEN and right_text.startswith(("/", "?", "#")):
+            return None
+        return _GLUED_PATH
+    return None
+
+
+def _origin_parts(origin: str) -> tuple[str, str, str | None]:
+    """The scheme, the host and the port (if written) of a canonical origin."""
+    scheme, _, authority = origin.partition("://")
+    if authority.startswith("["):
+        close = authority.find("]")
+        return scheme, authority[: close + 1], authority[close + 2 :] or None
+    host, _, port = authority.partition(":")
+    return scheme, host, port or None
+
+
+def _walk_client(pieces: list[_ClientPiece]) -> _Walked | str:
+    """A composed URL's pieces read as scheme, authority and path; or why they are not one.
+
+    Iterative, left to right, over the characters of the text: the scheme (``http://`` or
+    ``https://``, entirely in text before any open piece), the authority up to the first
+    ``/``, ``?`` or ``#``, then the path up to a ``?`` or ``#``, after which nothing is read.
+    Every boundary where a proven or open piece meets another piece -- the pieces of a composed
+    constant included -- is held to :func:`_glued`. A proven piece that begins in the path
+    is spliced only if its own text starts with ``/``; otherwise it is left open.
+    """
+    pieces = [piece for piece in pieces if piece.kind == _OPEN or piece.text]
+    if not pieces:
+        return _NOT_AN_ORIGIN
+    first = pieces[0]
+    state = "path"
+    left = 0
+    previous: tuple[str, str] | None = None
+    start = 0
+    if first.kind == _OPEN:
+        walked = _Walked("open", host=first.text, has_open=True)
+        state, previous, start = "after-host", (_OPEN, first.text), 1
+        if len(pieces) == 1:
+            return _NO_PATH
+    else:
+        lead = ""
+        for piece in pieces:
+            if piece.kind == _OPEN:
+                break
+            lead += piece.text
+        found = _HTTP_SCHEME.match(lead)
+        if found is not None:
+            walked, state, left = _Walked("absolute", scheme=found.group(0)), "scheme", found.end()
+        elif lead.startswith("/") and not lead.startswith("//"):
+            walked = _Walked("rooted")
+        else:
+            return _NOT_AN_ORIGIN
+    for index in range(start, len(pieces)):
+        piece = pieces[index]
+        if state == "query":
+            break
+        if state == "after-host":
+            if piece.kind == _OPEN or not piece.text.startswith("/"):
+                return _GLUED_PATH
+            state = "path"
+        if piece.kind == _PROVEN and state == "path" and not piece.text.startswith("/"):
+            piece = _ClientPiece(_OPEN, piece.expr)
+        if piece.kind == _PROVEN and walked.base_at is None and state in {"scheme", "authority"}:
+            walked.base_at = piece.line
+        head = index == 0 and piece.kind == _PROVEN
+        for text in piece.parts if piece.kind == _PROVEN else (piece.text,):
+            if state == "query":
+                break
+            if piece.kind != _OPEN and not text:
+                continue
+            atom = (piece.kind, text)
+            if previous is not None and (previous[0] != _LITERAL or piece.kind != _LITERAL):
+                glued = _glued(state, previous, atom)
+                if glued is not None:
+                    return glued
+            previous = atom
+            if piece.kind == _OPEN:
+                walked.has_open = True
+                if state == "authority":
+                    walked.authority.append((_OPEN, text))
+                else:
+                    walked.parts.append([http.TEMPLATE_SUBSTITUTION, text])
+                continue
+            offset = 0
+            if state == "scheme":
+                offset = min(len(text), left)
+                left -= offset
+                if left == 0:
+                    state = "authority"
+            tail = ""
+            if state == "authority" and offset < len(text):
+                rest = text[offset:]
+                cut = _first_of(rest, "/?#")
+                if cut is None:
+                    walked.authority.append((piece.kind, rest))
+                    continue
+                if cut:
+                    walked.authority.append((piece.kind, rest[:cut]))
+                walked.slashed = rest[cut] == "/"
+                tail = rest[cut:] if walked.slashed else "/" + rest[cut:]
+                state = "path"
+            elif state == "path":
+                tail = text[offset:]
+            if tail:
+                query = _first_of(tail, "?#")
+                _append_literal(walked.parts, tail)
+                if head:
+                    walked.head_path += tail if query is None else tail[:query]
+                if query is not None:
+                    state = "query"
+    return walked
 
 
 def _module_statements(tree: ast.Module) -> Iterator[ast.stmt]:
@@ -1251,7 +1510,8 @@ class PythonHttp:
         #: Module constant → (its literal value, its line), each bound exactly once.
         self._constants: dict[str, tuple[str, int]] = {}
         #: Module constant composed from literals and other names, each bound exactly once:
-        #: ``USERS = f"{BASE}/users"``. Never in ``_constants``: a request's URL does not read it.
+        #: ``USERS = f"{BASE}/users"``. Never in ``_constants``, and nothing that reads one
+        #: (a route path, a prefix, a request's URL, a client's base) ever writes it there.
         self._values: dict[str, _Value] = {}
         #: Where the statement binding a literal constant, a top-level import or a value begins.
         self._positions: dict[str, _Position] = {}
@@ -1295,6 +1555,9 @@ class PythonHttp:
         #: The module constants a proven prefix stands on, as (line, ``"receiver"`` or
         #: ``"mount"``, sources). Never emitted.
         self.prefix_sources: list[tuple[int, str, tuple[tuple[str, int], ...]]] = []
+        #: Each attempt to read a request's URL or a client's base by composing module
+        #: constants, with what became of it. For tests and measurement; never emitted.
+        self.client_reads: list[_ClientRead] = []
         counts, stars = _binding_counts(tree)
         unproven = _star_unproven(tree, stars) if stars else {}
         if unproven is None:
@@ -2186,9 +2449,10 @@ class PythonHttp:
         """Whether ``name`` is bound before a read at ``at``, where the mode asks it.
 
         A composed constant is held to it wherever it is read, except by a factory's mount. A
-        route path reads a literal constant or an import with no such check, as it always has.
+        route path and a client's request URL or base read a literal constant or an import with
+        no such check, as a route path always has.
         """
-        if at is None or mode == _FACTORY or (mode == _ROUTE and not composed):
+        if at is None or mode == _FACTORY or (mode in {_ROUTE, _CLIENT} and not composed):
             return True
         bound = self._positions.get(name)
         return bound is not None and bound < at
@@ -2444,12 +2708,28 @@ class PythonHttp:
                 )
                 for read in alternatives
             ]
-        read = self._client_url(url_node)
-        if read is None and unread_host:
-            read = self._unknown_base(url_node)
+        today = self._client_url(url_node)
+        if today is None and unread_host:
+            today = self._unknown_base(url_node)
+        # What composing module constants reads, kept only where it improves on the above.
+        composition = self._compose_client(url_node, unread_host=unread_host, client=client)
+        candidate: _ClientUrl | None = None
+        if composition is not None:
+            if composition.rooted is not None and client is not None:
+                candidate = self._rooted_url(client, composition.rooted)
+            else:
+                candidate = composition.url
+        read = self._prefer(today, candidate)
+        self._settle(composition, candidate is not None and read is candidate)
         if read is None:
             return []
-        claim = self._client_claim(read, method, start, end, library, source_symbol, client=client)
+        base_expr: str | None = None
+        if read is candidate and composition is not None and composition.rooted is not None:
+            # Appended to the client's base, as a rooted request is: the base's note goes with it.
+            base_expr = client.base_expr if client is not None else None
+        claim = self._client_claim(
+            read, method, start, end, library, source_symbol, client=client, base_expr=base_expr
+        )
         return [claim]
 
     @staticmethod
@@ -2569,7 +2849,7 @@ class PythonHttp:
             return None
         base: _ClientBase | None = (_NO_BASE, None, None, None)
         if "base_url" in keywords:
-            base = self._client_base(keywords["base_url"])
+            base = self._client_base(keywords["base_url"], (value.lineno, value.col_offset))
         if base is None:
             return None
         kind, text, base_at, expression = base
@@ -2577,14 +2857,15 @@ class PythonHttp:
             _HTTPX, kind, text, base_at, expression, value.lineno, name, bound_at, reach
         )
 
-    def _client_base(self, node: ast.expr) -> _ClientBase | None:
+    def _client_base(self, node: ast.expr, at: _Position) -> _ClientBase | None:
         """What the source states of a client's ``base_url``: its kind, the base, its line and
         (for an unstated one) its expression; ``None`` for a base that makes the client unreadable.
 
         A literal, a module constant bound once, or an environment default is stated -- as
         a request's own URL is -- and must be an absolute URL with no query, fragment or
         credentials. An empty one is no base at all, unless the environment may set it. Any
-        other expression is a base the source does not state.
+        other expression is a base the source does not state -- unless it is composed of
+        module constants alone (:meth:`_composed_base`), read at ``at``.
         """
         from_environment = False
         text = static_string(node)
@@ -2595,6 +2876,9 @@ class PythonHttp:
             stated = self._stated(node)
             from_environment = True
         if stated is None:
+            composed = self._composed_base(node, at)
+            if composed is not None:
+                return composed
             return _UNSTATED_BASE, None, node.lineno, _base_expression(node)
         text, line = stated
         if text == "":
@@ -2653,7 +2937,14 @@ class PythonHttp:
                 )
         parts = self._rooted_parts(url_node)
         if parts is not None:
-            return self._composed(client, parts, method, call.lineno, end, source_symbol)
+            composition = None
+            if url is None and not self._alternative_urls(url_node):
+                composition = self._compose_client(
+                    url_node, unread_host=client.base_kind == _NO_BASE, client=client
+                )
+            return self._composed(
+                client, parts, method, call.lineno, end, source_symbol, composition
+            )
         if url is not None:
             return []
         # A host the source does not state is read only where a relative URL could not be
@@ -2701,29 +2992,24 @@ class PythonHttp:
         start: int,
         end: int,
         source_symbol: str | None,
+        composition: _Composition | None = None,
     ) -> list[ParsedReference]:
         """A rooted request on a client that has a base.
 
         Appended to a base the source states, as ``httpx`` does (its trailing ``/`` is not a
         second one): a claim with the origin and the base's line, never a per-file fact.
         On a base it does not state, the host part is the synthetic ``{name.base_url}``: a
-        claim with no origin, which the join counts and never links.
+        claim with no origin, which the join counts and never links. ``composition`` is what
+        composing module constants made of the same URL, kept only where it improves on this.
         """
-        origin: str | None = None
-        host = "{" + f"{client.name}.base_url" + "}"
-        if client.base_kind == _STATED_BASE and client.base_text is not None:
-            base = http.client_target(client.base_text)
-            if base is None or base.origin is None:
-                return []
-            origin = host = base.origin
-            parts = [[http.TEMPLATE_LITERAL, base.path.rstrip("/") + parts[0][1]], *parts[1:]]
-        elif client.base_kind != _UNSTATED_BASE:
+        today = self._rooted_url(client, parts)
+        candidate: _ClientUrl | None = None
+        if composition is not None and composition.rooted is not None:
+            candidate = self._rooted_url(client, composition.rooted)
+        read = self._prefer(today, candidate)
+        self._settle(composition, candidate is not None and read is candidate)
+        if read is None:
             return []
-        template = http.route_template(parts)
-        if isinstance(template, str) or _dotted(template.segments):
-            return []
-        display = f"{host}/{_display(template)}"
-        read = _ClientUrl(origin, template.segments, display, client.base_at)
         claim = self._client_claim(
             read,
             method,
@@ -2735,6 +3021,55 @@ class PythonHttp:
             base_expr=client.base_expr,
         )
         return [claim]
+
+    @staticmethod
+    def _rooted_url(client: _ClientInstance, parts: list[list[str]]) -> _ClientUrl | None:
+        """A rooted URL's parts read on a client's base, or ``None`` when no destination follows.
+
+        On a base the source states: appended to it, with the origin and the base's line. On
+        one it does not: the host part is the synthetic ``{name.base_url}``, with no origin.
+        """
+        origin: str | None = None
+        host = "{" + f"{client.name}.base_url" + "}"
+        if client.base_kind == _STATED_BASE and client.base_text is not None:
+            base = http.client_target(client.base_text)
+            if base is None or base.origin is None:
+                return None
+            origin = host = base.origin
+            parts = [[http.TEMPLATE_LITERAL, base.path.rstrip("/") + parts[0][1]], *parts[1:]]
+        elif client.base_kind != _UNSTATED_BASE:
+            return None
+        template = http.route_template(parts)
+        if isinstance(template, str) or _dotted(template.segments):
+            return None
+        display = f"{host}/{_display(template)}"
+        return _ClientUrl(origin, template.segments, display, client.base_at)
+
+    @staticmethod
+    def _prefer(today: _ClientUrl | None, candidate: _ClientUrl | None) -> _ClientUrl | None:
+        """The read to keep: the older one unless composing constants reads strictly more.
+
+        Nothing composed is taken where the older read already says the same (same origin and
+        segments: the older object stays, display and line included), or where it has an origin
+        and the candidate has none. A candidate with an origin replaces an older read that has
+        none; either one stands alone when the other is ``None``.
+        """
+        if candidate is None:
+            return today
+        if today is None:
+            return candidate
+        if (today.origin, today.segments) == (candidate.origin, candidate.segments):
+            return today
+        if candidate.origin is not None or today.origin is None:
+            return candidate
+        return today
+
+    @staticmethod
+    def _settle(composition: _Composition | None, kept: bool) -> None:
+        """Record that a composed read changed nothing, when the older read was kept."""
+        if composition is not None and not kept:
+            read = composition.read
+            read.outcome = _CLIENT_IMPORTED if read.imported else _UNCHANGED
 
     def _client_url(self, node: ast.expr) -> _ClientUrl | None:
         """A URL named by a module constant or an environment default, or an f-string on
@@ -2901,3 +3236,208 @@ class PythonHttp:
             return None
         display = _display(template)
         return _ClientUrl(origin.origin, template.segments, f"{origin.origin}/{display}", base_at)
+
+    # -- composing a request's URL or a client's base from module constants ------------------
+
+    def _client_pieces(self, node: ast.expr, at: _Position) -> list[_ClientPiece] | str | None:
+        """The pieces of a URL or base written as an f-string, a ``+`` chain or one name.
+
+        ``None`` for an expression this does not try to compose (a call, a conditional, a
+        subscript...); a reason when the attempt gives up (more than :data:`_MAX_VALUE_PARTS`
+        pieces, counting the parts of a composed constant; more than :data:`_MAX_CLIENT_TEXT`
+        characters; a conversion or format spec; an operand that is no string). A name is read by
+        :meth:`_named_part` at ``at`` and is a proven piece only for a literal constant, a
+        composed constant bound before ``at`` standing on no imported name, or -- first only --
+        an environment default; every other name, call or expression stays open, as written.
+        """
+        operands: list[ast.expr]
+        if isinstance(node, ast.JoinedStr | ast.Name):
+            operands = [node]
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            added = _added(node)
+            if added is None:
+                return _TOO_MANY_PARTS
+            operands = added
+        else:
+            return None
+        pieces: list[_ClientPiece] = []
+        weight = length = 0
+        for operand in operands:
+            inside = isinstance(operand, ast.JoinedStr)
+            for value in operand.values if isinstance(operand, ast.JoinedStr) else [operand]:
+                piece = self._client_piece(value, inside=inside, first=not pieces, at=at)
+                if isinstance(piece, str):
+                    return piece
+                weight += len(piece.parts) if piece.kind == _PROVEN else 1
+                length += len(piece.text) if piece.kind != _OPEN else 0
+                if weight > _MAX_VALUE_PARTS:
+                    return _TOO_MANY_PARTS
+                if length > _MAX_CLIENT_TEXT:
+                    return _TOO_LONG
+                pieces.append(piece)
+        return pieces
+
+    def _client_piece(
+        self, value: ast.expr, *, inside: bool, first: bool, at: _Position
+    ) -> _ClientPiece | str:
+        """One operand of a ``+`` chain, or one value of an f-string (``inside``)."""
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return _ClientPiece(_LITERAL, value.value)
+        if inside:
+            # A conversion or a format spec is not read: whatever it makes is not the name's text.
+            if (
+                not isinstance(value, ast.FormattedValue)
+                or value.conversion != -1
+                or value.format_spec is not None
+            ):
+                return _UNCHANGED
+            inner = value.value
+            if isinstance(inner, ast.Name | ast.Attribute):
+                return self._client_name(inner, first, at)
+            return _ClientPiece(_OPEN, ast.unparse(inner)[:_MAX_EXPRESSION])
+        if isinstance(value, ast.Name | ast.Attribute):
+            return self._client_name(value, first, at)
+        if isinstance(value, ast.Subscript | ast.Call):
+            return _ClientPiece(_OPEN, ast.unparse(value)[:_MAX_EXPRESSION])
+        return _UNCHANGED
+
+    def _client_name(
+        self, node: ast.Name | ast.Attribute, first: bool, at: _Position
+    ) -> _ClientPiece | str:
+        shown = ast.unparse(node)[:_MAX_EXPRESSION]
+        found = self._named_part(node, _CLIENT, at, None)
+        if isinstance(found, _Proven):
+            if any(part[0] == "r" for part in found.parts):
+                return _ClientPiece(_OPEN, shown, reason=_CLIENT_IMPORTED)
+            if 1 + found.depth > _MAX_VALUE_DEPTH:
+                return _TOO_DEEP
+            parts = tuple(part[1] for part in found.parts)
+            line = found.sources[0][1]
+            return _ClientPiece(_PROVEN, "".join(parts), parts, line, found.depth, shown)
+        # An environment default is a stated base only as the first piece, as a request's own
+        # URL reads it; an empty one is no host at all.
+        default = self._env_defaults.get(node.id) if first and isinstance(node, ast.Name) else None
+        if default is not None and default[0] and found.reason == _UNKNOWN_NAME:
+            return _ClientPiece(_PROVEN, default[0], (default[0],), default[1], 0, shown)
+        return _ClientPiece(_OPEN, shown, reason=found.reason)
+
+    def _compose_client(
+        self, node: ast.expr, *, unread_host: bool, client: _ClientInstance | None
+    ) -> _Composition | None:
+        """What a request's URL says when its module constants are composed, or ``None``.
+
+        Four forms, all within this file. An absolute URL whose authority is text and proven
+        names has an origin, as a literal would. One whose authority has a value in it (a host
+        or a port) is a request with no origin that keeps its path after it, and so is one
+        that starts with a value and then ``/`` -- both only where ``unread_host`` (the older
+        D2 read applies). A URL starting with ``/`` is rooted: a client's base is appended
+        to it, and a module-level call has no destination. Every refusal is recorded in
+        :attr:`client_reads` with its reason and leaves the older read alone.
+        """
+        pieces = self._client_pieces(node, (node.lineno, node.col_offset))
+        if pieces is None:
+            return None
+        read = _ClientRead(node.lineno, _COMPOSED)
+        self.client_reads.append(read)
+        if isinstance(pieces, str):
+            read.outcome = pieces
+            return None
+        read.imported = any(piece.reason == _CLIENT_IMPORTED for piece in pieces)
+        walked = _walk_client(pieces)
+        if isinstance(walked, str):
+            read.outcome = walked
+            return None
+        if walked.form == "rooted":
+            if client is None:
+                read.outcome = _RELATIVE_URL
+                return None
+            shaped = http.route_template(walked.parts)
+            if not isinstance(shaped, str):
+                read.endpoint_segments = shaped.segments
+            return _Composition(read, rooted=walked.parts)
+        opened = walked.form == "open" or any(kind == _OPEN for kind, _ in walked.authority)
+        if opened and not unread_host:
+            read.outcome = _UNCHANGED
+            return None
+        if walked.form == "absolute" and not walked.slashed and opened:
+            read.outcome = _NO_PATH
+            return None
+        texts = [text for kind, text in walked.authority if kind != _OPEN]
+        if "@" in "".join(texts):
+            read.outcome = _CREDENTIALS
+            return None
+        if opened and not all(_AUTHORITY_TEXT.fullmatch(text) for text in texts):
+            read.outcome = _NOT_AN_ORIGIN
+            return None
+        template = http.route_template(walked.parts or [[http.TEMPLATE_LITERAL, "/"]])
+        if isinstance(template, str):
+            read.outcome = template
+            return None
+        if _dotted(template.segments):
+            read.outcome = _DOTTED_SEGMENT
+            return None
+        if walked.form == "open":
+            read.endpoint_segments = template.segments
+            shown = "{" + walked.host + "}"
+            return _Composition(
+                read, url=_ClientUrl(None, template.segments, f"{shown}/{_display(template)}")
+            )
+        if opened:
+            read.scheme = walked.scheme[:-3].lower()
+            read.endpoint_segments = template.segments
+            shown = "".join(
+                text if kind != _OPEN else "{" + text + "}" for kind, text in walked.authority
+            )
+            display = f"{walked.scheme}{shown}/{_display(template)}"
+            return _Composition(read, url=_ClientUrl(None, template.segments, display))
+        target = http.client_target(f"{walked.scheme}{''.join(texts)}/")
+        if target is None or target.origin is None:
+            read.outcome = _NOT_AN_ORIGIN
+            return None
+        read.scheme, read.host, read.port = _origin_parts(target.origin)
+        head = tuple(segment for segment in walked.head_path.split("/") if segment)
+        read.base_segments = head
+        read.endpoint_segments = template.segments[len(head) :]
+        display = f"{target.origin}/{_display(template)}"
+        return _Composition(
+            read, url=_ClientUrl(target.origin, template.segments, display, walked.base_at)
+        )
+
+    def _composed_base(self, node: ast.expr, at: _Position) -> _ClientBase | None:
+        """A ``base_url`` the source composes entirely from module constants: it is then stated.
+
+        Only text and proven names, an absolute URL that is a base as written
+        (:meth:`_base_url`). Anything with an open piece, or a base that is no base, is
+        not read, and the client keeps the base it had: unstated, never dropped. The line is the
+        constant's when the base is one name, and the expression's when it is written inline.
+        """
+        pieces = self._client_pieces(node, at)
+        if pieces is None:
+            return None
+        read = _ClientRead(node.lineno, _COMPOSED)
+        self.client_reads.append(read)
+        if isinstance(pieces, str):
+            read.outcome = pieces
+            return None
+        read.imported = any(piece.reason == _CLIENT_IMPORTED for piece in pieces)
+        walked = _walk_client(pieces)
+        if isinstance(walked, str):
+            read.outcome = walked
+            return None
+        if walked.has_open:
+            read.outcome = _CLIENT_IMPORTED if read.imported else _UNCHANGED
+            return None
+        if walked.form != "absolute":
+            read.outcome = _RELATIVE_URL
+            return None
+        authority = "".join(text for _, text in walked.authority)
+        text = f"{walked.scheme}{authority}{walked.parts[0][1] if walked.parts else ''}"
+        if not self._base_url(text):
+            read.outcome = _NOT_AN_ORIGIN
+            return None
+        target = http.client_target(text)
+        if target is not None and target.origin is not None:
+            read.scheme, read.host, read.port = _origin_parts(target.origin)
+            read.base_segments = tuple(segment for segment in target.path.split("/") if segment)
+        line = walked.base_at if isinstance(node, ast.Name) and walked.base_at else node.lineno
+        return _STATED_BASE, text, line, None
