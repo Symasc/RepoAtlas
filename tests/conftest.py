@@ -92,6 +92,19 @@ def init_git_repository(path: Path) -> None:
     git(path, "commit", "--quiet", "-m", "initial")
 
 
+@pytest.fixture(autouse=True)
+def release_test_directory(tmp_path: Path) -> Iterator[None]:
+    """Remove each test's temporary directory when the test ends.
+
+    Many tests copy the fixture repositories and index them, a few megabytes each. pytest
+    keeps every test's directory until the whole run ends, so a full run on a CI runner with
+    a small disk quota runs out of space partway through. Nothing reads a test's directory
+    after the test, and fixtures that use it tear down before this one, so it goes now.
+    """
+    yield
+    shutil.rmtree(tmp_path, ignore_errors=True)
+
+
 @pytest.fixture
 def workspace_root(tmp_path: Path) -> Path:
     """A managed root containing copies of the fixture repositories."""
