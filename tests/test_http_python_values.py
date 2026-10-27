@@ -719,7 +719,7 @@ def test_a_class_attribute_and_a_function_local_are_refused() -> None:
     assert _reasons(http.prefix_refusals) == ["shadowed-in-function"]
 
 
-def test_a_composed_constant_never_changes_a_client_url() -> None:
+def test_a_composed_constant_base_resolves_a_client_url() -> None:
     source = d("""
         import requests
         HOST = "https://h.example"
@@ -728,13 +728,20 @@ def test_a_composed_constant_never_changes_a_client_url() -> None:
             return requests.get(f"{BASE}/users")
     """)
     [claim] = _client_claims(source)
-    assert claim.target_key == "GET {BASE}/users"
-    assert claim.meta["base"] == BASE_UNKNOWN
-    assert "origin" not in claim.meta
+    assert claim.target_key == "GET https://h.example/api/users"
+    assert claim.meta["origin"] == "https://h.example"
+    assert json.loads(claim.meta["segments"]) == ["api", "users"]
+    assert claim.meta["base_at"] == "3"
+    assert "base" not in claim.meta
     assert _client_facts(source) == []
-    # Exactly the claim of a module whose BASE is something no reader can know.
+    # The control: a module whose BASE is something no reader can know is still counted, with
+    # no origin, as before.
     control = source.replace('f"{HOST}/api"', "join(HOST)")
-    assert [c.model_dump_json() for c in _client_claims(control)] == [claim.model_dump_json()]
+    [counted] = _client_claims(control)
+    assert counted.target_key == "GET {BASE}/users"
+    assert counted.meta["base"] == BASE_UNKNOWN
+    assert "origin" not in counted.meta
+    # Reading the composed constant offers and stores nothing new.
     offered = _claim(source, PYTHON_CONSTANTS)
     assert json.loads(offered.meta["constants"]) == {"HOST": ["https://h.example", 2]}
     assert set(json.loads(offered.meta["composed"])) == {"BASE"}
@@ -873,8 +880,8 @@ def test_the_reader_executes_and_imports_nothing() -> None:
     )
 
 
-def test_the_parser_version_is_23() -> None:
-    assert PythonParser.version == f"23+{interpreter_tag()}"
+def test_the_parser_version_is_24() -> None:
+    assert PythonParser.version == f"24+{interpreter_tag()}"
 
 
 # -- the global pass --------------------------------------------------------------------------
