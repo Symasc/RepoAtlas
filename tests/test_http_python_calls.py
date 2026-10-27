@@ -196,7 +196,6 @@ def test_a_request_on_a_base_the_source_does_not_state_is_counted_with_no_origin
         ("", "f'https://a.example/users/{uid!r}'"),
         ("", "f'https://a.example/users/{uid:>8}'"),
         # Not a URL this reads at all.
-        ("URL = 'https://a.example/users'\n", "URL + '/' + uid"),
         ("", "'https://a.example/users/{}'.format(uid)"),
         ("", "urls[0]"),
         ("", "build_url(uid)"),
@@ -210,6 +209,20 @@ def test_a_url_whose_origin_or_shape_is_not_stated_is_refused(prelude: str, url:
         f"    return requests.get({url})\n"
     )
     assert _claims(source) == []
+
+
+def test_a_constant_url_joined_to_a_placeholder_by_plus_is_a_claim() -> None:
+    source = (
+        "import os\nimport requests\n"
+        "URL = 'https://a.example/users'\n"
+        "def load(uid):\n"
+        "    return requests.get(URL + '/' + uid)\n"
+    )
+    [claim] = _claims(source)
+    assert _shape(claim) == ("GET", "https://a.example", ["users", None])
+    assert claim.meta["base_at"] == "3"
+    assert claim.target_key == "GET https://a.example/users/{uid}"
+    assert _facts(source) == []
 
 
 def test_an_unreadable_method_is_refused_whatever_the_url() -> None:

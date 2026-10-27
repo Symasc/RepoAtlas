@@ -445,7 +445,10 @@ class PythonParser:
     #    f-string or `+` from literals, earlier module constants and (for paths) imported
     #    constants; composed constants are offered for the global pass
     #    (repoatlas.parsers.http_python, repoatlas.graph.py_routes).
-    version = f"23+{interpreter_tag()}"
+    # 24: a request's URL and an httpx client's base_url may use module constants composed by an
+    #    f-string or + (and literal constants in the host, the port or the head); a host that is a
+    #    value keeps the path after it (repoatlas.parsers.http_python).
+    version = f"24+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
