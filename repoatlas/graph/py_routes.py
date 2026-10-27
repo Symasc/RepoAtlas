@@ -11,7 +11,8 @@ side as a claim (:mod:`repoatlas.parsers.http_python`):
   imports, or with a path naming an imported constant;
 * ``python-mount`` -- an imported router mounted on an application or router, or any
   router mounted from inside an application factory;
-* ``python-constants`` -- a module's path-like string constants;
+* ``python-constants`` -- a module's path-like string constants, and those it composes from
+  literals and other names by an f-string or ``+``;
 * ``python-script`` -- a module that runs as a script.
 
 This stage serves a route only when every step is proven:
@@ -26,7 +27,9 @@ This stage serves a route only when every step is proven:
   from that package's parent, the only place a module importing it so is loaded from;
 * the receiver it names is declared there, by that name, and is of a kind the
   decorator or the mount applies to;
-* every constant in the path is a string constant the named module binds once;
+* every constant in the path is a string constant, literal or composed, the named module binds
+  once, resolved within :data:`MAX_CONSTANT_HOPS` modules (a composed constant naming another
+  module's constant is followed; a cycle is refused);
 * a chain of readable mounts, at most :data:`MAX_DEPTH` deep, reaches an application.
   A FastAPI route is served at each chain's prefixes, the router's own prefix and its
   path; a blueprint at the mount's ``url_prefix`` -- else its own -- joined to its rule,
@@ -62,11 +65,13 @@ from repoatlas.parsers.http_facts import (
     PYTHON_ROUTE,
     PYTHON_SCRIPT,
 )
-from repoatlas.parsers.http_python import flask_join
+from repoatlas.parsers.http_python import _path_like, flask_join
 from repoatlas.storage.protocols import EntityRecord, FileRow, UnresolvedRefRecord
 
 #: Routers nested in routers, counted from the application: deeper than anyone writes.
 MAX_DEPTH = 4
+#: Modules one imported constant is followed through: a composed constant may name another's.
+MAX_CONSTANT_HOPS = 4
 
 PROMOTED = "promoted"
 MODULE_UNRESOLVED = "the module it names does not resolve"
@@ -298,9 +303,13 @@ def plan_python_routes(
             mounts=tuple(json.loads(meta.get("mounts", "[]"))),
         )
     constants: dict[int, dict[str, str]] = {}
+    composed: dict[int, dict[str, list[list[str]]]] = {}
     for claim in grouped.get(PYTHON_CONSTANTS, ()):
-        table = json.loads(_meta(claim).get("constants", "{}"))
+        meta = _meta(claim)
+        table = json.loads(meta.get("constants", "{}"))
         constants[claim.file_id] = {name: value for name, (value, _) in table.items()}
+        offered = json.loads(meta.get("composed", "{}"))
+        composed[claim.file_id] = {name: entry[0] for name, entry in offered.items()}
 
     mounts: dict[Key, list[_Mount]] = defaultdict(list)
     blocked: set[Key] = set()
@@ -326,7 +335,9 @@ def plan_python_routes(
 
     chains = _Chains(receivers, mounts, blocked)
     for claim in claims:
-        outcome, bodies, exact = _route(claim, imports, receivers, constants, chains, by_id)
+        outcome, bodies, exact = _route(
+            claim, imports, receivers, constants, composed, chains, by_id
+        )
         if claim.id is not None:
             plan.outcomes[claim.id] = outcome
         if outcome == PROMOTED:
@@ -436,11 +447,55 @@ class _Chains:
         ]
 
 
+def _constant_value(
+    imports: _Imports,
+    constants: Mapping[int, Mapping[str, str]],
+    composed: Mapping[int, Mapping[str, list[list[str]]]],
+    origin: FileRow,
+    module: str,
+    name: str,
+    hops_left: int = MAX_CONSTANT_HOPS,
+    seen: frozenset[Key] = frozenset(),
+) -> str | None:
+    """The text of the string constant ``name`` of ``module``, as ``origin`` imports it.
+
+    A literal constant is its text. A composed one is rebuilt from its pieces: an imported
+    name in it is followed in turn, relative to the module that states it, through at most
+    :data:`MAX_CONSTANT_HOPS` modules and never twice through the same constant. The text must
+    be one a path could be made of, as the literal constants offered are.
+    """
+    target = imports.resolve(origin, module)
+    if target is None:
+        return None
+    key = (target.file_id, name)
+    if key in seen or hops_left == 0:
+        return None
+    literal = constants.get(target.file_id, {}).get(name)
+    if literal is not None:
+        return literal
+    parts = composed.get(target.file_id, {}).get(name)
+    if parts is None:
+        return None
+    text = ""
+    for part in parts:
+        if part[0] == "t":
+            text += part[1]
+            continue
+        found = _constant_value(
+            imports, constants, composed, target, part[1], part[2], hops_left - 1, seen | {key}
+        )
+        if found is None:
+            return None
+        text += found
+    return text if _path_like(text) else None
+
+
 def _route(
     claim: UnresolvedRefRecord,
     imports: _Imports,
     receivers: Mapping[Key, _Receiver],
     constants: Mapping[int, Mapping[str, str]],
+    composed: Mapping[int, Mapping[str, list[list[str]]]],
     chains: _Chains,
     by_id: Mapping[int, FileRow],
 ) -> tuple[str, list[str], dict[str, tuple[bool, frozenset[int]]]]:
@@ -463,8 +518,7 @@ def _route(
         if part[0] == "t":
             path += part[1]
             continue
-        target = imports.resolve(origin, part[1])
-        value = constants.get(target.file_id, {}).get(part[2]) if target is not None else None
+        value = _constant_value(imports, constants, composed, origin, part[1], part[2])
         if value is None:
             return CONSTANT_UNRESOLVED, [], {}
         path += value
