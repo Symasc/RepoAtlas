@@ -18,12 +18,18 @@ certainly runs and nothing reads the name before it; one bound before it, bound 
 after it, or read before its binding is unproven. A name only a star import could bind is never
 read. An unproven name yields nothing; the module's other facts stand.
 
-**Values are literal or they are nothing.** A route path or URL is read by
-:func:`static_string`, which accepts a string literal, a concatenation of
-literals, and an f-string with no placeholders. ``f"{base}/hello/me"`` is not
-accepted — not even its suffix: whatever ``base`` holds decides the final path
-(``https://x`` gives ``/hello/me``, ``https://x/api`` gives ``/api/hello/me``),
-so a known tail proves no route at all.
+**Values are proven or they are nothing.** The per-file fact of a route is read from
+:func:`static_string`, which accepts a string literal, a concatenation of literals, and an
+f-string with no placeholders. A route path, a router's or blueprint's prefix and a mount's
+prefix are also read where a module constant composes them -- ``USERS = f"{BASE}/users"``,
+``P = BASE + "/v1"`` -- from literals, earlier module constants and, in a path, imported
+constants. The name must be this module's only binding of it, bound before the line that reads
+it; a call, an environment variable, ``.format``, ``%`` and a conversion or format spec are not
+read, and neither is a prefix naming an imported constant. Every refusal has an internal
+reason, never stored. ``f"{base}/hello/me"`` with an unproven ``base`` is not accepted -- not
+even its suffix: whatever ``base`` holds decides the final path (``https://x`` gives
+``/hello/me``, ``https://x/api`` gives ``/api/hello/me``), so a known tail proves no route at
+all. A composed path is a claim for the global pass; only a literal one is served here.
 
 **Routers are relative to their mount.** An ``APIRouter`` or ``Blueprint`` route
 is served here only for mounts this file proves — the router constructed and
@@ -78,7 +84,7 @@ import ast
 import json
 import re
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 
 from repoatlas.models import http
@@ -207,6 +213,37 @@ _LOOP_VARIABLE_REUSED = "loop-variable-reused"
 _MAX_CONSTANT = 256
 #: Constants one module offers, in line order; past this, the rest are not offered.
 _MAX_CONSTANTS = 64
+#: How many module constants one composed constant may stand on: a literal is 0, a composed
+#: constant is 1 + the deepest local name it reads. Imported names count 0.
+_MAX_VALUE_DEPTH = 8
+#: Pieces (``["t", text]``, ``["r", module, name]``) one evaluated value may have.
+_MAX_VALUE_PARTS = 64
+#: Serialized characters of one composed constant offered to the global pass.
+_MAX_OFFERED_ENTRY = 1024
+
+#: Why an expression is not a proven string: internal, for tests and measurement; never stored.
+_NOT_A_STRING = "not-a-string"
+_UNSUPPORTED = "unsupported-expression"
+_CONVERSION = "conversion-or-format-spec"
+_UNKNOWN_NAME = "unknown-name"
+_REBOUND = "rebound"
+_STAR_MAY_REBIND = "star-may-rebind"
+_UNORDERED = "used-before-binding"
+_TOO_DEEP = "depth-exceeded"
+_TOO_MANY_PARTS = "too-many-parts"
+_TOO_LONG = "too-long"
+_TOO_NESTED = "nesting-too-deep"
+_SHADOWED = "shadowed-in-function"
+_PREFIX_IMPORTED = "prefix-imported"
+_INVALID_PREFIX = "invalid-prefix"
+
+#: What an expression is read for. A composed constant's definition and a prefix are read in
+#: execution order; a route path is read as it always was (a name needs no earlier binding)
+#: except for a composed constant; a mount inside a factory is read with no order at all.
+_DEFINITION = "definition"
+_PREFIX = "prefix"
+_ROUTE = "route"
+_FACTORY = "factory"
 
 
 def static_string(node: ast.expr | None, depth: int = 0) -> str | None:
@@ -533,6 +570,8 @@ class _Receiver:
     deployments: tuple[_Deployment, ...] = ()
     #: The line that constructs it.
     line: int = 0
+    #: The module constants (name, line) its own prefix was composed from.
+    prefix_from: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,6 +591,64 @@ def _submodule(module: str, name: str) -> str:
 
 def _path_like(value: str) -> bool:
     return len(value) <= _MAX_CONSTANT and not any(char.isspace() for char in value)
+
+
+@dataclass(frozen=True, slots=True)
+class _Value:
+    """A module constant composed from literals and other names, as its pieces."""
+
+    #: ``("t", text)`` or ``("r", module, name)``, in order, adjacent texts not merged.
+    parts: tuple[tuple[str, ...], ...]
+    line: int
+    #: Where its statement begins: what a read must come after.
+    position: _Position
+    #: 1 + the deepest module constant it reads; an imported name counts 0.
+    depth: int
+    #: The module constants (name, line) it stands on, directly or through other values.
+    sources: tuple[tuple[str, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Proven:
+    """An expression proven to be a string: its pieces and what it was read from."""
+
+    parts: list[list[str]]
+    #: The module constants (name, line) substituted, directly or through a value.
+    sources: tuple[tuple[str, int], ...]
+    #: The deepest module constant it reads: a literal is 0.
+    depth: int
+    #: Whether a composed constant (a :class:`_Value`) contributed.
+    composed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _Unknown:
+    """An expression that is not a proven string, and why."""
+
+    reason: str
+
+
+def _by_line(sources: Iterable[tuple[str, int]]) -> tuple[tuple[str, int], ...]:
+    """Each (name, line) once, ordered by line and then name."""
+    return tuple(sorted(set(sources), key=lambda found: (found[1], found[0])))
+
+
+def _joined(first: _Proven, second: _Proven) -> _Proven | _Unknown:
+    """``first`` followed by ``second``, unless that is more pieces than a value may have."""
+    parts = first.parts + second.parts
+    if len(parts) > _MAX_VALUE_PARTS:
+        return _Unknown(_TOO_MANY_PARTS)
+    return _Proven(
+        parts,
+        tuple(dict.fromkeys((*first.sources, *second.sources))),
+        max(first.depth, second.depth),
+        first.composed or second.composed,
+    )
+
+
+def _literal_length(parts: Sequence[Sequence[str]]) -> int:
+    """The characters of text in a value's pieces; an imported name has none known here."""
+    return sum(len(part[1]) for part in parts if part[0] == "t")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1099,10 +1196,17 @@ def _route_claim(
     parts: list[list[str]],
     span: tuple[int, int],
     qualified: str,
+    values: tuple[tuple[str, int], ...] = (),
+    composed: bool = False,
 ) -> list[ParsedReference]:
-    """One :data:`PYTHON_ROUTE` claim per method; ``receiver`` names who declares it."""
-    literal = all(part[0] == "t" for part in parts)
+    """One :data:`PYTHON_ROUTE` claim per method; ``receiver`` names who declares it.
+
+    ``values`` are the module constants (name, line) the path was read from, shown when there
+    are any; ``composed`` is whether one of them was itself composed, which makes the path so.
+    """
+    literal = all(part[0] == "t" for part in parts) and not composed
     shown = "".join(part[1] if part[0] == "t" else "{" + ".".join(part[1:]) + "}" for part in parts)
+    read_from = {"values": json.dumps(values)} if values else {}
     return [
         pending_reference(
             EdgeType.SERVES_HTTP_ROUTE,
@@ -1115,6 +1219,7 @@ def _route_claim(
             method=method,
             path=json.dumps(parts),
             provenance=EXACT if literal else COMPOSED,
+            **read_from,
             **receiver,
         )
         for method in methods
@@ -1145,6 +1250,13 @@ class PythonHttp:
         self._receivers: dict[str, _Receiver] = {}
         #: Module constant → (its literal value, its line), each bound exactly once.
         self._constants: dict[str, tuple[str, int]] = {}
+        #: Module constant composed from literals and other names, each bound exactly once:
+        #: ``USERS = f"{BASE}/users"``. Never in ``_constants``: a request's URL does not read it.
+        self._values: dict[str, _Value] = {}
+        #: Where the statement binding a literal constant, a top-level import or a value begins.
+        self._positions: dict[str, _Position] = {}
+        #: How many times each name is bound in the module, a star's possible rebinding included.
+        self._counts: Counter[str] = Counter()
         #: Module constant → (its environment default, its line), each bound exactly once:
         #: ``X = os.environ.get("NAME", "<url>")``. Read for request URLs only, never for
         #: routes, whose paths a deployment's environment does not set.
@@ -1173,6 +1285,16 @@ class PythonHttp:
         #: ``"unrolled"`` -- read as the equivalent loop -- or the reason it was refused. For
         #: tests and measurement; never emitted.
         self.comprehension_outcomes: list[tuple[int, str]] = []
+        #: Module-level name → why its assignment is no proven string. For tests and
+        #: measurement; never emitted.
+        self.value_refusals: dict[str, str] = {}
+        #: A route path no evaluation proves, as (decorator line, reason). Never emitted.
+        self.path_refusals: list[tuple[int, str]] = []
+        #: A prefix no evaluation proves, as (line, reason). Never emitted.
+        self.prefix_refusals: list[tuple[int, str]] = []
+        #: The module constants a proven prefix stands on, as (line, ``"receiver"`` or
+        #: ``"mount"``, sources). Never emitted.
+        self.prefix_sources: list[tuple[int, str, tuple[tuple[str, int], ...]]] = []
         counts, stars = _binding_counts(tree)
         unproven = _star_unproven(tree, stars) if stars else {}
         if unproven is None:
@@ -1181,9 +1303,11 @@ class PythonHttp:
         for name in unproven:
             counts[name] += 1
         self.star_unproven = unproven
+        self._counts = counts
         self._imports(tree, counts)
         self._optional_imports(tree, counts)
         self._read_constants(tree, counts)
+        self._read_values(tree, counts)
         self._read_alternatives(tree, counts)
         self._read_clients(tree, counts)
         self._constructors(tree, counts)
@@ -1208,6 +1332,11 @@ class PythonHttp:
                     if counts[local] == 1:
                         self._names[local] = f"{statement.module}.{alias.name}"
         self._imported = _import_table(tree.body, counts)
+        for statement in tree.body:
+            if isinstance(statement, (ast.Import, ast.ImportFrom)):
+                for local in _bound_names(statement):
+                    if local in self._imported:
+                        self._positions[local] = _position(statement)
         self._lists = _literal_lists(tree.body, counts, tree)
 
     def _optional_imports(self, tree: ast.Module, counts: Counter[str]) -> None:
@@ -1276,22 +1405,29 @@ class PythonHttp:
             kind = _CONSTRUCTORS.get(self._resolve(value.func) or "")
             if kind is None:
                 continue
-            receiver = self._receiver(kind, value)
+            receiver = self._receiver(kind, value, _position(statement))
             if receiver is not None:
                 receiver.line = statement.lineno
                 self._receivers[name] = receiver
 
-    @staticmethod
-    def _receiver(kind: str, call: ast.Call) -> _Receiver | None:
+    def _receiver(self, kind: str, call: ast.Call, at: _Position) -> _Receiver | None:
         keywords = _keywords(call)
         if kind == _FASTAPI_ROUTER:
             # `APIRouter`'s parameters are keyword-only.
             if call.args:
                 return None
-            prefix = static_string(keywords["prefix"]) if "prefix" in keywords else ""
-            if prefix is None or not _fastapi_prefix(prefix):
+            if "prefix" not in keywords:
+                return _Receiver(kind, "")
+            node = keywords["prefix"]
+            found = self._prefix_value(node, at)
+            if found is None:
                 return None
-            return _Receiver(kind, prefix)
+            if not _fastapi_prefix(found[0]):
+                self.prefix_refusals.append((node.lineno, _INVALID_PREFIX))
+                return None
+            if found[1]:
+                self.prefix_sources.append((node.lineno, "receiver", found[1]))
+            return _Receiver(kind, found[0], prefix_from=found[1])
         if kind == _FLASK_BLUEPRINT:
             # `url_prefix` is the sixth positional parameter; past five, it may
             # have been passed without a name.
@@ -1299,8 +1435,13 @@ class PythonHttp:
                 return None
             if "url_prefix" not in keywords:
                 return _Receiver(kind, None)
-            prefix = static_string(keywords["url_prefix"])
-            return _Receiver(kind, prefix) if prefix is not None else None
+            node = keywords["url_prefix"]
+            found = self._prefix_value(node, at)
+            if found is None:
+                return None
+            if found[1]:
+                self.prefix_sources.append((node.lineno, "receiver", found[1]))
+            return _Receiver(kind, found[0], prefix_from=found[1])
         return _Receiver(kind)
 
     def _mounts(self, tree: ast.Module, counts: Counter[str]) -> None:
@@ -1356,35 +1497,59 @@ class PythonHttp:
         if prefix_name not in keywords:
             child.mounts.append(("" if child_kind == _FASTAPI_ROUTER else None, owner_name))
             return
-        prefix = static_string(keywords[prefix_name])
-        if prefix is None or (child_kind == _FASTAPI_ROUTER and not _fastapi_prefix(prefix)):
+        node = keywords[prefix_name]
+        found = self._prefix_value(node, (call.lineno, call.col_offset))
+        if found is not None and child_kind == _FASTAPI_ROUTER and not _fastapi_prefix(found[0]):
+            self.prefix_refusals.append((node.lineno, _INVALID_PREFIX))
+            found = None
+        if found is None:
             child.usable = False
             return
-        child.mounts.append((prefix, owner_name))
+        if found[1]:
+            self.prefix_sources.append((node.lineno, "mount", found[1]))
+        child.mounts.append((found[0], owner_name))
 
     def _claim_mount(
-        self, owner_name: str, owner: _Receiver, call: ast.Call, child: dict[str, str]
+        self,
+        owner_name: str,
+        owner: _Receiver,
+        call: ast.Call,
+        child: dict[str, str],
+        shadow: Counter[str] | None = None,
     ) -> None:
         """A mount only the global pass can decide: of an imported router, or a factory's.
 
         Recorded unreadable -- which keeps the router from being served at all, as a
         mount this module cannot read does to one of its own -- when its arguments may
         carry a prefix this cannot read, when it is a sub-application ``mount``, or when
-        a blueprint is nested in a blueprint, whose composition Flask decides.
+        a blueprint is nested in a blueprint, whose composition Flask decides. ``shadow``
+        is the factory's own bindings, which a prefix's names must not be among.
         """
         attribute = call.func.attr if isinstance(call.func, ast.Attribute) else ""
         readable = attribute in _MOUNT_CALLS and not _dynamic(call)
         prefix: str | None = None
+        prefix_from: tuple[tuple[str, int], ...] = ()
         if readable:
             _, prefix_name, child_kind = _MOUNT_CALLS[attribute]
             keywords = _keywords(call)
             if prefix_name in keywords:
-                prefix = static_string(keywords[prefix_name])
-                readable = prefix is not None and (
-                    child_kind != _FASTAPI_ROUTER or _fastapi_prefix(prefix)
-                )
+                node = keywords[prefix_name]
+                found = self._prefix_value(node, (call.lineno, call.col_offset), shadow)
+                if found is not None:
+                    prefix, prefix_from = found
+                readable = prefix is not None
+                if (
+                    prefix is not None
+                    and child_kind == _FASTAPI_ROUTER
+                    and not _fastapi_prefix(prefix)
+                ):
+                    self.prefix_refusals.append((node.lineno, _INVALID_PREFIX))
+                    readable = False
+                if prefix_from:
+                    self.prefix_sources.append((node.lineno, "mount", prefix_from))
             elif child_kind == _FASTAPI_ROUTER:
                 prefix = ""
+        read_from = {"prefix_from": json.dumps(prefix_from)} if prefix_from else {}
         if owner.kind == _FLASK_BLUEPRINT:
             readable = False
         self._mount_claims.append(
@@ -1400,6 +1565,7 @@ class PythonHttp:
                 call=attribute,
                 readable="true" if readable else "false",
                 prefix=json.dumps(prefix),
+                **read_from,
                 **child,
             )
         )
@@ -1455,7 +1621,7 @@ class PythonHttp:
                     if ref is None:
                         continue
                     child = {"module": ref[0], "name": ref[1]}
-                self._claim_mount(f"{function.name}.{name}", _Receiver(kind), call, child)
+                self._claim_mount(f"{function.name}.{name}", _Receiver(kind), call, child, counts)
 
     # -- where an application is published -------------------------------------------
 
@@ -1593,9 +1759,61 @@ class PythonHttp:
             text = static_string(value)
             if text is not None and counts[name] == 1:
                 self._constants[name] = (text, statement.lineno)
+                self._positions[name] = _position(statement)
             default = self._env_default(value) if value is not None else None
             if default is not None and counts[name] == 1:
                 self._env_defaults[name] = (default, statement.lineno)
+
+    def _read_values(self, tree: ast.Module, counts: Counter[str]) -> None:
+        """Module constants composed from literals and other names, in execution order.
+
+        ``USERS = f"{BASE}/users"`` and ``P = BASE + "/v1"`` stand for the text they would
+        build when everything they read is proven: this module's literal constants and earlier
+        values (bound once, before the statement), and imported names, kept as names for the
+        global pass. Each assignment is read where it stands, so a read of a name bound
+        later is refused. What is not accepted is recorded in ``value_refusals``.
+        """
+        for statement in tree.body:
+            if (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+            ):
+                name, value = statement.targets[0].id, statement.value
+            elif (
+                isinstance(statement, ast.AnnAssign)
+                and isinstance(statement.target, ast.Name)
+                and statement.value is not None
+            ):
+                name, value = statement.target.id, statement.value
+            else:
+                continue
+            if name in self._constants:
+                continue
+            if counts[name] != 1:
+                self.value_refusals[name] = (
+                    _STAR_MAY_REBIND if name in (self.star_unproven or ()) else _REBOUND
+                )
+                continue
+            at = _position(statement)
+            found = self._evaluate(value, _DEFINITION, at, None)
+            if isinstance(found, _Proven):
+                # A value always reads a name: a text with none is a literal constant.
+                if 1 + found.depth > _MAX_VALUE_DEPTH:
+                    found = _Unknown(_TOO_DEEP)
+                elif _literal_length(found.parts) > _MAX_CONSTANT:
+                    found = _Unknown(_TOO_LONG)
+            if isinstance(found, _Unknown):
+                self.value_refusals[name] = found.reason
+                continue
+            self._values[name] = _Value(
+                tuple(tuple(part) for part in found.parts),
+                statement.lineno,
+                at,
+                1 + found.depth,
+                found.sources,
+            )
+            self._positions[name] = at
 
     def _read_alternatives(self, tree: ast.Module, counts: Counter[str]) -> None:
         """Names one module-level ``if``/``elif``/``else`` binds to a literal in every branch.
@@ -1695,15 +1913,21 @@ class PythonHttp:
             source = "fastapi" if receiver.kind in {_FASTAPI_APP, _FASTAPI_ROUTER} else "flask"
             path = static_string(path_node)
             if path is None or receiver.kind not in _APPLICATIONS:
-                parts = [["t", path]] if path is not None else self._path_parts(path_node)
-                if parts is not None:
+                proven = (
+                    _Proven([["t", path]], (), 0, False)
+                    if path is not None
+                    else self._path_parts(path_node, decorator)
+                )
+                if proven is not None:
                     found.extend(
                         _route_claim(
                             {"router": func.value.id, "family": source},
                             methods,
-                            parts,
+                            proven.parts,
                             (start, end),
                             qualified,
+                            _by_line(proven.sources),
+                            proven.composed,
                         )
                     )
             if path is None:
@@ -1791,62 +2015,191 @@ class PythonHttp:
         if ref is None or family is None:
             return []
         named = "path" if family[0] == "fastapi" else "rule"
-        parts = self._path_parts(_argument(decorator, 0, named))
-        if parts is None and family[0] == "either":
+        proven = self._path_parts(_argument(decorator, 0, named), decorator)
+        if proven is None and family[0] == "either":
             # A verb shortcut names its path `path` in FastAPI and `rule` in Flask.
-            parts = self._path_parts(_argument(decorator, 0, "path"))
-        if parts is None:
+            proven = self._path_parts(_argument(decorator, 0, "path"), decorator)
+        if proven is None:
             return []
         span = (decorator.lineno, decorator.end_lineno or decorator.lineno)
         meta = {"module": ref[0], "router": ref[1], "family": family[0]}
-        return _route_claim(meta, family[1], parts, span, qualified)
+        return _route_claim(
+            meta,
+            family[1],
+            proven.parts,
+            span,
+            qualified,
+            _by_line(proven.sources),
+            proven.composed,
+        )
 
-    def _path_parts(self, node: ast.expr | None, depth: int = 0) -> list[list[str]] | None:
-        """A path as literal text and imported names: ``f"/{PREFIX}/{API_VERSION}" + "/x"``.
+    def _path_parts(self, node: ast.expr | None, decorator: ast.Call) -> _Proven | None:
+        """A path as literal text and names: ``f"/{PREFIX}/{API_VERSION}" + "/x"``.
 
         Each part is ``["t", text]`` or ``["r", module, name]`` for a name some module this
-        one imports must bind to a string constant. This module's own constants are read
-        here; anything else -- a call, an attribute of an object, ``%``, ``.format``, a
-        conversion or format spec -- is not a path this can read.
+        one imports must bind to a string constant. This module's own constants and composed
+        constants are read here; anything else -- a call, an attribute of an object, ``%``,
+        ``.format``, a conversion or format spec -- is not a path this can read, and why is
+        recorded in ``path_refusals``.
         """
-        if node is None or depth > _MAX_STRING_DEPTH:
+        if node is None:
             return None
-        if isinstance(node, ast.Constant):
-            return [["t", node.value]] if isinstance(node.value, str) else None
-        if isinstance(node, ast.JoinedStr):
-            parts: list[list[str]] = []
-            for value in node.values:
-                if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                    parts.append(["t", value.value])
-                elif (
-                    isinstance(value, ast.FormattedValue)
-                    and value.conversion == -1
-                    and value.format_spec is None
-                ):
-                    named = self._named_part(value.value)
-                    if named is None:
-                        return None
-                    parts.append(named)
-                else:
-                    return None
-            return parts
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            left = self._path_parts(node.left, depth + 1)
-            right = self._path_parts(node.right, depth + 1) if left is not None else None
-            return None if left is None or right is None else left + right
-        named = self._named_part(node)
-        return [named] if named is not None else None
+        found = self._evaluate(node, _ROUTE, (decorator.lineno, decorator.col_offset), None)
+        if isinstance(found, _Unknown):
+            self.path_refusals.append((decorator.lineno, found.reason))
+            return None
+        return found
 
-    def _named_part(self, node: ast.expr) -> list[str] | None:
-        if isinstance(node, ast.Name) and node.id in self._constants:
-            return ["t", self._constants[node.id][0]]
+    def _prefix_value(
+        self, node: ast.expr, at: _Position, shadow: Counter[str] | None = None
+    ) -> tuple[str, tuple[tuple[str, int], ...]] | None:
+        """A router's, blueprint's or mount's prefix, and the module constants it stands on.
+
+        A literal is read as :func:`static_string` reads it. Otherwise the expression is
+        evaluated in execution order from ``at``, or -- in a factory, whose ``shadow`` is
+        its own bindings -- with no order. A prefix naming an imported constant is not read
+        here (the module's own constants cannot be told from them): the site stays
+        unreadable, as it was.
+        """
+        text = static_string(node)
+        if text is not None:
+            return text, ()
+        found = self._evaluate(node, _PREFIX if shadow is None else _FACTORY, at, shadow)
+        if isinstance(found, _Proven):
+            if any(part[0] == "r" for part in found.parts):
+                found = _Unknown(_PREFIX_IMPORTED)
+            elif _literal_length(found.parts) > _MAX_CONSTANT:
+                found = _Unknown(_TOO_LONG)
+        if isinstance(found, _Unknown):
+            self.prefix_refusals.append((node.lineno, found.reason))
+            return None
+        return "".join(part[1] for part in found.parts), _by_line(found.sources)
+
+    # -- evaluating a string ---------------------------------------------------------
+
+    def _evaluate(
+        self,
+        node: ast.expr | None,
+        mode: str,
+        at: _Position | None,
+        shadow: Counter[str] | None,
+        depth: int = 0,
+    ) -> _Proven | _Unknown:
+        """The string ``node`` provably is, from literals and names, or why it is not one.
+
+        Accepted: a string literal; an f-string whose substitutions are names, with no
+        conversion and no format spec; ``+`` of two accepted operands, at most
+        :data:`_MAX_STRING_DEPTH` deep; and a name or ``module.NAME``, by
+        :meth:`_named_part`. Anything else -- a call, ``os.environ[...]``, ``.format``,
+        ``%``, a conditional expression -- depends on a program that is never run.
+        """
+        if node is None:
+            return _Unknown(_UNSUPPORTED)
+        if depth > _MAX_STRING_DEPTH:
+            return _Unknown(_TOO_NESTED)
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, str):
+                return _Proven([["t", node.value]], (), 0, False)
+            return _Unknown(_NOT_A_STRING)
+        if isinstance(node, ast.JoinedStr):
+            return self._interpolated(node, mode, at, shadow)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = self._evaluate(node.left, mode, at, shadow, depth + 1)
+            if isinstance(left, _Unknown):
+                return left
+            right = self._evaluate(node.right, mode, at, shadow, depth + 1)
+            return right if isinstance(right, _Unknown) else _joined(left, right)
+        if isinstance(node, (ast.Name, ast.Attribute)):
+            return self._named_part(node, mode, at, shadow)
+        return _Unknown(_UNSUPPORTED)
+
+    def _interpolated(
+        self, node: ast.JoinedStr, mode: str, at: _Position | None, shadow: Counter[str] | None
+    ) -> _Proven | _Unknown:
+        found = _Proven([], (), 0, False)
+        for piece in node.values:
+            if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
+                addition: _Proven | _Unknown = _Proven([["t", piece.value]], (), 0, False)
+            elif isinstance(piece, ast.FormattedValue):
+                # `f"{A=}"` is a literal "A=" and a repr conversion: it lands here too.
+                if piece.conversion != -1 or piece.format_spec is not None:
+                    return _Unknown(_CONVERSION)
+                if not isinstance(piece.value, (ast.Name, ast.Attribute)):
+                    return _Unknown(_UNSUPPORTED)
+                addition = self._named_part(piece.value, mode, at, shadow)
+            else:
+                return _Unknown(_UNSUPPORTED)
+            if isinstance(addition, _Unknown):
+                return addition
+            joined = _joined(found, addition)
+            if isinstance(joined, _Unknown):
+                return joined
+            found = joined
+        return found
+
+    def _named_part(
+        self,
+        node: ast.Name | ast.Attribute,
+        mode: str,
+        at: _Position | None,
+        shadow: Counter[str] | None,
+    ) -> _Proven | _Unknown:
+        """A name this module binds once to a string, or an imported one, as pieces.
+
+        A literal constant is its text; a composed constant (:class:`_Value`) is its pieces,
+        spliced as stored; an imported name, or ``module.NAME``, stays a name for the global
+        pass. Anything else is refused with the reason it is not a binding to rely on.
+        """
+        root: ast.expr = node
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        if not isinstance(root, ast.Name):
+            return _Unknown(_UNSUPPORTED)
+        name = root.id
+        if shadow is not None and shadow[name]:
+            return _Unknown(_SHADOWED)
+        if isinstance(node, ast.Name) and name in self._constants:
+            text, line = self._constants[name]
+            if not self._read_in_order(name, mode, at, composed=False):
+                return _Unknown(_UNORDERED)
+            return _Proven([["t", text]], ((name, line),), 0, False)
+        value = self._values.get(name) if isinstance(node, ast.Name) else None
+        if value is not None:
+            if not self._read_in_order(name, mode, at, composed=True):
+                return _Unknown(_UNORDERED)
+            return _Proven(
+                [list(part) for part in value.parts],
+                tuple(dict.fromkeys(((name, value.line), *value.sources))),
+                value.depth,
+                True,
+            )
         ref = _module_ref(node, self._imported)
-        return ["r", ref[0], ref[1]] if ref is not None else None
+        if ref is not None:
+            if not self._read_in_order(name, mode, at, composed=False):
+                return _Unknown(_UNORDERED)
+            return _Proven([["r", ref[0], ref[1]]], (), 0, False)
+        if name in (self.star_unproven or ()):
+            return _Unknown(_STAR_MAY_REBIND)
+        return _Unknown(_REBOUND if self._counts[name] > 1 else _UNKNOWN_NAME)
+
+    def _read_in_order(self, name: str, mode: str, at: _Position | None, *, composed: bool) -> bool:
+        """Whether ``name`` is bound before a read at ``at``, where the mode asks it.
+
+        A composed constant is held to it wherever it is read, except by a factory's mount. A
+        route path reads a literal constant or an import with no such check, as it always has.
+        """
+        if at is None or mode == _FACTORY or (mode == _ROUTE and not composed):
+            return True
+        bound = self._positions.get(name)
+        return bound is not None and bound < at
 
     def claim_references(self) -> list[ParsedReference]:
         """What only the global pass can decide: receivers, mounts, offered constants."""
         found: list[ParsedReference] = []
         for name, receiver in self._receivers.items():
+            read_from = (
+                {"prefix_from": json.dumps(receiver.prefix_from)} if receiver.prefix_from else {}
+            )
             found.append(
                 pending_reference(
                     EdgeType.REFERENCES,
@@ -1859,6 +2212,7 @@ class PythonHttp:
                     prefix=json.dumps(receiver.prefix),
                     usable="true" if receiver.usable else "false",
                     mounts=json.dumps([mount for mount, _ in receiver.mounts]),
+                    **read_from,
                 )
             )
         found.extend(self._mount_claims)
@@ -1878,21 +2232,47 @@ class PythonHttp:
             for name, (value, line) in self._constants.items()
             if _path_like(value)
         )[:_MAX_CONSTANTS]
-        if offered:
+        composed = self._offered_values()
+        if offered or composed:
+            lines = [line for line, _, _ in offered] + [line for line, _, _ in composed]
+            offered_composed: dict[str, str] = {}
+            if composed:
+                table = {name: entry for _, name, entry in composed}
+                offered_composed["composed"] = json.dumps(table, sort_keys=True)
             found.append(
                 pending_reference(
                     EdgeType.REFERENCES,
                     EntityType.CONFIG,
                     PYTHON_CONSTANTS,
-                    offered[0][0],
-                    offered[-1][0],
+                    min(lines),
+                    max(lines),
                     role=PYTHON_CONSTANTS,
                     constants=json.dumps(
                         {name: [value, line] for line, name, value in offered}, sort_keys=True
                     ),
+                    **offered_composed,
                 )
             )
         return found
+
+    def _offered_values(self) -> list[tuple[int, str, list[object]]]:
+        """The composed constants another module may read, as (line, name, entry), by line.
+
+        Each entry is ``[parts, line, sources]``. Offered only when it could be a piece of a
+        path, as a literal constant is (some text, no whitespace, short), and small enough to
+        store; the first :data:`_MAX_CONSTANTS` in line order.
+        """
+        found: list[tuple[int, str, list[object]]] = []
+        for name, value in self._values.items():
+            texts = [part[1] for part in value.parts if part[0] == "t"]
+            if not any(texts) or _literal_length(value.parts) > _MAX_CONSTANT:
+                continue
+            if any(char.isspace() for text in texts for char in text):
+                continue
+            entry: list[object] = [value.parts, value.line, _by_line(value.sources)]
+            if len(json.dumps(entry)) <= _MAX_OFFERED_ENTRY:
+                found.append((value.line, name, entry))
+        return sorted(found, key=lambda item: (item[0], item[1]))[:_MAX_CONSTANTS]
 
     @staticmethod
     def _declared(
