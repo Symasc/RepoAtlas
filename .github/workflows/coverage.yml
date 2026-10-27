@@ -1,8 +1,14 @@
 # Test coverage gate.
 #
-# The threshold itself lives in `pyproject.toml` under `[tool.coverage.report]`,
-# not here, so `uv run pytest --cov` locally enforces exactly what CI enforces.
-# A gate you can only evaluate by pushing is a gate people learn to ignore.
+# The suite runs as four shards in parallel, each on its own runner, so no single job
+# runs out of time or disk. Every shard writes its coverage data; the `combine` job merges
+# them, enforces the threshold and publishes the report. The threshold itself lives in
+# `pyproject.toml` under `[tool.coverage.report]`, not here, so `uv run pytest --cov`
+# locally enforces exactly what CI enforces. A gate you can only evaluate by pushing is a
+# gate people learn to ignore.
+#
+# A test belongs to exactly one shard (tests/conftest.py, REPOATLAS_TEST_SHARD), so the
+# shards together run every test once.
 name: coverage
 
 on:
@@ -24,6 +30,16 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      # One shard failing must not hide the others' results.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+
+    env:
+      # Which quarter of the suite this job runs, and where its coverage data goes.
+      REPOATLAS_TEST_SHARD: ${{ matrix.shard }}/4
+      COVERAGE_FILE: .coverage.${{ matrix.shard }}
 
     steps:
       - uses: actions/checkout@v7
@@ -43,14 +59,56 @@ jobs:
         # `uv.lock`. CI must test the dependency set the lockfile describes.
         run: uv sync --locked
 
-      - name: Run tests with coverage
+      - name: Run this shard of the tests with coverage
         # `slow` (network / model download) and `scale` are deselected by the
-        # `addopts` in pyproject.toml. Coverage is measured over the suite that
-        # actually runs on every change, so the number means what it says.
-        run: uv run pytest --cov --cov-report=term-missing --cov-report=xml
+        # `addopts` in pyproject.toml. The report is written by the `combine` job,
+        # from every shard's data together, so this step only collects data.
+        run: uv run pytest --cov --cov-report=
+
+      - name: Upload this shard's coverage data
+        # Every coverage data file the shard left, whatever pytest-cov named it: the
+        # combined file and any per-process ones, which are hidden (dot) files.
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-data-${{ matrix.shard }}
+          path: .coverage*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  combine:
+    # Runs only when every shard passed: a failing shard already fails the workflow.
+    needs: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: "3.10"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Fetch every shard's coverage data
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-data-*
+          path: shards
+
+      - name: Combine the shards and enforce the gate
+        # `coverage report` exits non-zero below `fail_under` in pyproject.toml; that is
+        # the gate. The combined data is what the one-run suite would have produced.
+        run: |
+          uv run coverage combine --keep shards/*/.coverage*
+          uv run coverage report --skip-covered
 
       - name: Write coverage summary
-        # Runs even when the gate failed — that is precisely when the table is
+        # Runs even when the gate failed, which is precisely when the table is
         # worth reading.
         if: always()
         run: |
@@ -61,6 +119,9 @@ jobs:
             uv run coverage report --skip-covered || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write coverage XML
+        run: uv run coverage xml -o coverage.xml
 
       - name: Upload coverage report
         if: always()
