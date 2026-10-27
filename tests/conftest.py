@@ -11,12 +11,30 @@ import os
 import shutil
 import subprocess
 import sys
+import zlib
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from repoatlas.config.settings import Settings
 from repoatlas.services.workspace import Workspace, open_workspace
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Run one shard of the suite when ``REPOATLAS_TEST_SHARD`` is ``"<index>/<total>"``.
+
+    A test belongs to the shard its node id hashes to. ``zlib.crc32`` is stable across runs
+    and machines (``hash`` is not), so the shards partition the suite the same way on every
+    runner, and together they cover every test exactly once. Unset, the whole suite runs.
+    """
+    spec = os.environ.get("REPOATLAS_TEST_SHARD")
+    if not spec:
+        return
+    index, total = (int(part) for part in spec.split("/"))
+    kept = [item for item in items if zlib.crc32(item.nodeid.encode()) % total == index - 1]
+    dropped = [item for item in items if zlib.crc32(item.nodeid.encode()) % total != index - 1]
+    config.hook.pytest_deselected(items=dropped)
+    items[:] = kept
 
 
 def _isolate_worker_state() -> None:
@@ -90,6 +108,19 @@ def init_git_repository(path: Path) -> None:
     git(path, "init", "--quiet", "--initial-branch=main")
     git(path, "add", "-A")
     git(path, "commit", "--quiet", "-m", "initial")
+
+
+@pytest.fixture(autouse=True)
+def release_test_directory(tmp_path: Path) -> Iterator[None]:
+    """Remove each test's temporary directory when the test ends.
+
+    Many tests copy the fixture repositories and index them, a few megabytes each. pytest
+    keeps every test's directory until the whole run ends, so a full run on a CI runner with
+    a small disk quota runs out of space partway through. Nothing reads a test's directory
+    after the test, and fixtures that use it tear down before this one, so it goes now.
+    """
+    yield
+    shutil.rmtree(tmp_path, ignore_errors=True)
 
 
 @pytest.fixture
