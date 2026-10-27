@@ -66,10 +66,13 @@ jobs:
         run: uv run pytest --cov --cov-report=
 
       - name: Upload this shard's coverage data
+        # Every coverage data file the shard left, whatever pytest-cov named it: the
+        # combined file and any per-process ones, which are hidden (dot) files.
         uses: actions/upload-artifact@v7
         with:
           name: coverage-data-${{ matrix.shard }}
-          path: .coverage.${{ matrix.shard }}
+          path: .coverage*
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
 
@@ -96,13 +99,12 @@ jobs:
         with:
           pattern: coverage-data-*
           path: shards
-          merge-multiple: true
 
       - name: Combine the shards and enforce the gate
         # `coverage report` exits non-zero below `fail_under` in pyproject.toml; that is
         # the gate. The combined data is what the one-run suite would have produced.
         run: |
-          uv run coverage combine --keep shards/.coverage.*
+          uv run coverage combine --keep shards/*/.coverage*
           uv run coverage report --skip-covered
 
       - name: Write coverage summary
