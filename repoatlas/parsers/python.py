@@ -448,7 +448,11 @@ class PythonParser:
     # 24: a request's URL and an httpx client's base_url may use module constants composed by an
     #    f-string or + (and literal constants in the host, the port or the head); a host that is a
     #    value keeps the path after it (repoatlas.parsers.http_python).
-    version = f"24+{interpreter_tag()}"
+    # 25: a module-level class whose one base is FastAPI's or Flask's application, router or
+    #    blueprint, directly or through at most three such classes in the same module, constructs a
+    #    receiver of that kind when nothing in the class can change what it registers or serves
+    #    (repoatlas.parsers.http_python).
+    version = f"25+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:

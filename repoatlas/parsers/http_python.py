@@ -75,6 +75,22 @@ reason, or that does not improve on the older one, leaves the older output exact
 the reason is recorded in ``client_reads`` and never emitted. The composed text is never
 written to ``_constants`` or ``_values``, and an imported or cross-file name stays a placeholder.
 
+**A subclass of the framework's application, router or blueprint** constructs a receiver of its
+base's kind, where nothing in the class can change what it registers or serves. The class stands
+at module level and has one base: ``fastapi.FastAPI``, ``fastapi.APIRouter``, ``flask.Flask`` or
+``flask.Blueprint`` as this module's own import names it (``from fastapi import APIRouter [as R]``
+or ``fastapi.APIRouter`` on ``import fastapi [as m]``), or a class of this kind defined earlier in
+the same module, at most three deep. An alias (``Base = APIRouter``), another module's class,
+``fastapi.routing.APIRouter`` and a relative import are not followed, and a familiar name is never
+enough. No metaclass, keyword, type parameter or decorator; the class name bound once; a body of
+``pass``, a docstring and plain methods, none of which is a special method or one of the
+framework's registration members; and an ``__init__`` only when it is exactly
+``super().__init__(*args, **kwargs)``, in a module with no star import. The class name may only be
+called, be a base or stand in an annotation: any other read (``C.get = f``, ``alias = C``) could
+change it. Every refusal has an internal reason in ``class_refusals``, never stored. A subclass
+defined in one module and constructed in another serves nothing yet: only the same module's
+classes are followed.
+
 **A client object** -- ``requests.Session()``, ``httpx.Client(...)``, ``httpx.AsyncClient(...)`` --
 is followed only where its identity is lexical: bound by one ``name = C(...)`` or
 ``with C(...) as name`` that is the name's only binding in the module, constructed with no
@@ -177,6 +193,75 @@ _CONSTRUCTORS = {
     "flask.Flask": _FLASK_APP,
     "flask.Blueprint": _FLASK_BLUEPRINT,
 }
+#: How many classes of this module a subclass of a constructor may stand behind.
+_MAX_CLASS_DEPTH = 3
+#: What a subclass may not define: a member the framework itself reads to register or serve.
+_ROUTING_MEMBERS = frozenset(
+    {
+        "get",
+        "put",
+        "post",
+        "delete",
+        "options",
+        "head",
+        "patch",
+        "trace",
+        "api_route",
+        "add_api_route",
+        "api_websocket_route",
+        "add_api_websocket_route",
+        "websocket",
+        "websocket_route",
+        "add_websocket_route",
+        "route",
+        "add_route",
+        "include_router",
+        "mount",
+        "host",
+        "url_path_for",
+        "add_url_rule",
+        "register_blueprint",
+        "register",
+        "record",
+        "record_once",
+        "make_setup_state",
+        "endpoint",
+        "app",
+        "wsgi_app",
+        "dispatch_request",
+        "full_dispatch_request",
+        "create_url_adapter",
+        "build_middleware_stack",
+        "setup",
+        "url_rule_class",
+        "url_map_class",
+        "url_map",
+        "route_class",
+        "routes",
+        "prefix",
+        "url_prefix",
+        "router",
+    }
+)
+#: Why a module-level class derived from a constructor builds no receiver: internal, for tests
+#: and measurement.
+_MULTIPLE_BASES = "multiple-bases"
+_DYNAMIC_BASE = "dynamic-base"
+_METACLASS = "metaclass"
+_CLASS_KEYWORDS = "class-keywords"
+_TYPE_PARAMS = "type-params"
+_CLASS_DECORATED = "class-decorated"
+_CLASS_REBOUND = "class-rebound"
+_BASE_REFUSED = "base-refused"
+_DEPTH_EXCEEDED = "depth-exceeded"
+_CLASS_BODY_STATEMENT = "class-body-statement"
+_DECORATED_MEMBER = "decorated-member"
+_INIT_WITH_EFFECT = "overridden-init-with-effect"
+_SPECIAL_METHOD = "overridden-special-method"
+_ROUTE_METHOD = "overridden-route-method"
+_CLASS_ESCAPES = "class-escapes"
+#: What a base resolves to: its kind, its depth and (for a class of this module) its name.
+_Origin = tuple[str, int, str | None]
 
 #: The one callable that binds a published identity to a Flask application.
 _SWAGGER = "flasgger.Swagger"
@@ -612,6 +697,21 @@ class _Receiver:
     line: int = 0
     #: The module constants (name, line) its own prefix was composed from.
     prefix_from: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _Subclass:
+    """A module-level class proven to construct a receiver of its base's kind."""
+
+    #: The kind of the framework class it stands on, however many classes of this module away.
+    kind: str
+    #: Classes between it and the framework's: ``1`` for a direct subclass.
+    depth: int
+    #: Where the class statement begins; a construction counts only after it.
+    position: _Position
+    line: int
+    #: The class of this module it extends; ``None`` for a framework class.
+    base: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1135,6 +1235,37 @@ def _argument(call: ast.Call, index: int, name: str) -> ast.expr | None:
     return positional if positional is not None else keywords.get(name)
 
 
+def _escaping(tree: ast.Module, names: set[str]) -> set[str]:
+    """The classes among ``names`` that something reads other than to build, extend or annotate.
+
+    A class may be called, extended by a class, or stand in an annotation that calls nothing;
+    any other read -- ``C.get = f``, ``alias = C``, ``register(C)``, ``isinstance(x, C)`` --
+    could hand the class to code that changes what it registers or serves. One walk,
+    parents before children, so the read a name is allowed by is known when it is reached.
+    """
+    allowed: set[int] = set()
+    escaping: set[str] = set()
+    for node in ast.walk(tree):
+        annotation: ast.expr | None = None
+        if isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Load) and node.id in names and id(node) not in allowed:
+                escaping.add(node.id)
+            continue
+        if isinstance(node, ast.Call):
+            allowed.add(id(node.func))
+        elif isinstance(node, ast.ClassDef):
+            allowed.update(id(base) for base in node.bases)
+        elif isinstance(node, (ast.AnnAssign, ast.arg)):
+            annotation = node.annotation
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            annotation = node.returns
+        if annotation is not None:
+            inside = list(ast.walk(annotation))
+            if not any(isinstance(inner, ast.Call) for inner in inside):
+                allowed.update(id(inner) for inner in inside)
+    return escaping
+
+
 def _fastapi_prefix(prefix: str) -> bool:
     """FastAPI's own rule: empty, or leading ``/`` and no trailing ``/``."""
     return prefix == "" or (
@@ -1558,7 +1689,15 @@ class PythonHttp:
         #: Each attempt to read a request's URL or a client's base by composing module
         #: constants, with what became of it. For tests and measurement; never emitted.
         self.client_reads: list[_ClientRead] = []
+        #: Module-level class → the receiver kind it constructs, for each class derived from a
+        #: framework application, router or blueprint with nothing in it that could change what
+        #: it registers or serves. For tests and measurement; never emitted.
+        self.subclasses: dict[str, _Subclass] = {}
+        #: Module-level class derived from one → why it builds no receiver. Never emitted.
+        self.class_refusals: dict[str, str] = {}
         counts, stars = _binding_counts(tree)
+        #: Whether the module has a star import, which could rebind ``super``.
+        self._stars = bool(stars)
         unproven = _star_unproven(tree, stars) if stars else {}
         if unproven is None:
             self.star_unproven = None
@@ -1573,6 +1712,7 @@ class PythonHttp:
         self._read_values(tree, counts)
         self._read_alternatives(tree, counts)
         self._read_clients(tree, counts)
+        self._classes(tree, counts)
         self._constructors(tree, counts)
         self._mounts(tree, counts)
         self._factories(tree)
@@ -1647,6 +1787,200 @@ class PythonHttp:
             return f"{module}.{node.attr}" if module is not None else None
         return None
 
+    def _class_origin(self, base: ast.expr) -> _Origin | str | None:
+        """What a base stands on: a constructor, a subclass of this module, or a refused class.
+
+        ``(kind, depth, name)`` -- the name is the module's own class, ``None`` for a
+        constructor -- :data:`_BASE_REFUSED` for a class of this module that builds no receiver,
+        and ``None`` for anything else.
+        """
+        kind = _CONSTRUCTORS.get(self._resolve(base) or "")
+        if kind is not None:
+            return kind, 0, None
+        if isinstance(base, ast.Name):
+            found = self.subclasses.get(base.id)
+            if found is not None:
+                return found.kind, found.depth, base.id
+            if base.id in self.class_refusals:
+                return _BASE_REFUSED
+        return None
+
+    def _classes(self, tree: ast.Module, counts: Counter[str]) -> None:
+        """Subclasses of a constructor, defined at module level, that build a receiver.
+
+        Only a statement of the module's own body is read, in source order, so a base is a
+        class defined above. A class none of whose bases stands on a constructor, a subclass
+        or a refused class is not this reader's, and nothing is recorded for it. The first
+        rule a derived class fails is its reason, in ``class_refusals``.
+        """
+        accepted: list[str] = []
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef) or not self._derived(node):
+                continue
+            reason = self._class_refusal(node, counts)
+            if reason is not None:
+                self.class_refusals[node.name] = reason
+                continue
+            origin = self._class_origin(node.bases[0])
+            if not isinstance(origin, tuple):
+                continue
+            base = origin[2]
+            self.subclasses[node.name] = _Subclass(
+                origin[0], origin[1] + 1, _position(node), node.lineno, base
+            )
+            accepted.append(node.name)
+        if not accepted:
+            return
+        escaping = _escaping(tree, set(accepted))
+        for name in accepted:
+            base = self.subclasses[name].base
+            if base is not None and base in self.class_refusals:
+                reason = _BASE_REFUSED
+            elif name in escaping:
+                reason = _CLASS_ESCAPES
+            else:
+                continue
+            del self.subclasses[name]
+            self.class_refusals[name] = reason
+
+    def _derived(self, node: ast.ClassDef) -> bool:
+        """Whether a base, or anything inside one, stands on a constructor or a module class."""
+        return any(
+            isinstance(part, (ast.Name, ast.Attribute)) and self._class_origin(part) is not None
+            for base in node.bases
+            for part in ast.walk(base)
+        )
+
+    def _class_refusal(self, node: ast.ClassDef, counts: Counter[str]) -> str | None:
+        """Why a derived class builds no receiver, by the first rule it fails; else ``None``."""
+        if len(node.bases) != 1:
+            return _MULTIPLE_BASES
+        base = node.bases[0]
+        origin = self._class_origin(base)
+        named = isinstance(base, ast.Name) or (
+            isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
+        )
+        if not named or origin is None:
+            return _DYNAMIC_BASE
+        if any(keyword.arg == "metaclass" for keyword in node.keywords):
+            return _METACLASS
+        if node.keywords:
+            return _CLASS_KEYWORDS
+        if getattr(node, "type_params", None):
+            return _TYPE_PARAMS
+        if node.decorator_list:
+            return _CLASS_DECORATED
+        if counts[node.name] != 1:
+            return _CLASS_REBOUND
+        if not isinstance(origin, tuple):
+            return _BASE_REFUSED
+        if origin[1] + 1 > _MAX_CLASS_DEPTH:
+            return _DEPTH_EXCEEDED
+        return self._body_refusal(node)
+
+    def _body_refusal(self, node: ast.ClassDef) -> str | None:
+        """Why a class body could change what the class registers or serves, else ``None``.
+
+        Only ``pass``, a docstring, ``...`` and plain methods are read. A method may not be
+        decorated, be a special method or a member the framework registers or serves through,
+        and ``__init__`` only passes its arguments on.
+        """
+        for statement in node.body:
+            if isinstance(statement, ast.Pass):
+                continue
+            if (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Constant)
+                and (isinstance(statement.value.value, str) or statement.value.value is Ellipsis)
+            ):
+                continue
+            if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return _CLASS_BODY_STATEMENT
+            if statement.decorator_list:
+                return _DECORATED_MEMBER
+            if statement.name == "__init__":
+                if not self._passes_through(statement):
+                    return _INIT_WITH_EFFECT
+            elif statement.name.startswith("_"):
+                return _SPECIAL_METHOD
+            elif statement.name in _ROUTING_MEMBERS:
+                return _ROUTE_METHOD
+        return None
+
+    def _passes_through(self, function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+        """Whether ``function`` only hands its arguments to the base's ``__init__``.
+
+        Exactly ``def __init__(self, *args, **kwargs)`` and ``super().__init__(*args, **kwargs)``,
+        after an optional docstring. Refused when ``super`` is bound anywhere in the module or a
+        star import could bind it.
+        """
+        if self._counts["super"] or self._stars or not isinstance(function, ast.FunctionDef):
+            return False
+        arguments = function.args
+        if (
+            arguments.posonlyargs
+            or len(arguments.args) != 1
+            or arguments.vararg is None
+            or arguments.kwarg is None
+            or arguments.kwonlyargs
+            or arguments.defaults
+        ):
+            return False
+        body = function.body
+        first = body[0] if body else None
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            body = body[1:]
+        if len(body) != 1:
+            return False
+        only = body[0]
+        if not (isinstance(only, ast.Expr) and isinstance(only.value, ast.Call)):
+            return False
+        call = only.value
+        func = call.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and func.attr == "__init__"
+            and isinstance(func.value, ast.Call)
+            and _is_name(func.value.func, "super")
+            and not func.value.args
+            and not func.value.keywords
+        ):
+            return False
+        if len(call.args) != 1 or len(call.keywords) != 1:
+            return False
+        star, keyword = call.args[0], call.keywords[0]
+        return (
+            isinstance(star, ast.Starred)
+            and _is_name(star.value, arguments.vararg.arg)
+            and keyword.arg is None
+            and _is_name(keyword.value, arguments.kwarg.arg)
+        )
+
+    def _constructed_kind(
+        self, func: ast.expr, at: _Position | None, shadow: Counter[str] | None = None
+    ) -> str | None:
+        """The kind of receiver calling ``func`` constructs: a constructor, or a subclass.
+
+        A subclass counts when nothing shadows its name (``shadow``: a factory's own bindings)
+        and the class statement comes before the construction, where ``at`` says where that is.
+        """
+        kind = _CONSTRUCTORS.get(self._resolve(func) or "")
+        if kind is not None:
+            return kind
+        if isinstance(func, ast.Name):
+            found = self.subclasses.get(func.id)
+            if (
+                found is not None
+                and (shadow is None or shadow[func.id] == 0)
+                and (at is None or found.position < at)
+            ):
+                return found.kind
+        return None
+
     def _constructors(self, tree: ast.Module, counts: Counter[str]) -> None:
         for statement in tree.body:
             if (
@@ -1665,10 +1999,11 @@ class PythonHttp:
                 continue
             if counts[name] != 1 or not isinstance(value, ast.Call) or _dynamic(value):
                 continue
-            kind = _CONSTRUCTORS.get(self._resolve(value.func) or "")
+            at = _position(statement)
+            kind = self._constructed_kind(value.func, at)
             if kind is None:
                 continue
-            receiver = self._receiver(kind, value, _position(statement))
+            receiver = self._receiver(kind, value, at)
             if receiver is not None:
                 receiver.line = statement.lineno
                 self._receivers[name] = receiver
@@ -1858,7 +2193,7 @@ class PythonHttp:
                     and not _dynamic(statement.value)
                     and counts[statement.targets[0].id] == 1
                 ):
-                    kind = _CONSTRUCTORS.get(self._resolve(statement.value.func) or "")
+                    kind = self._constructed_kind(statement.value.func, None, counts)
                     if kind in _APPLICATIONS:
                         applications[statement.targets[0].id] = kind
             lists = {name: found for name, found in self._lists.items() if not counts[name]}
