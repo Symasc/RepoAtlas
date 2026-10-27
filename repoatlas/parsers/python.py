@@ -441,7 +441,11 @@ class PythonParser:
     # 22: a list or set comprehension statement mounting each element of a literal list is read
     #    as the equivalent for loop, and a literal list read other than as a loop's iterable is
     #    no longer unrolled (repoatlas.parsers.http_python).
-    version = f"22+{interpreter_tag()}"
+    # 23: a route path, router prefix or mount prefix may use a module constant composed by an
+    #    f-string or `+` from literals, earlier module constants and (for paths) imported
+    #    constants; composed constants are offered for the global pass
+    #    (repoatlas.parsers.http_python, repoatlas.graph.py_routes).
+    version = f"23+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
