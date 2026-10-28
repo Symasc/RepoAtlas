@@ -8,7 +8,9 @@ side as a claim (:mod:`repoatlas.parsers.http_python`):
 * ``python-receiver`` -- an application, router or blueprint a module constructs: its
   kind, its own prefix, and the mounts the same module makes of it;
 * ``python-route`` -- a route on a router or blueprint, on a receiver the module
-  imports, or with a path naming an imported constant;
+  imports, or with a path naming an imported constant; and a literal route on a FastAPI
+  application, marked ``served_here`` (its module's edge states it, the claim adds the
+  paths of the applications that mount it);
 * ``python-mount`` -- an imported router mounted on an application or router, or any
   router mounted from inside an application factory;
 * ``python-constants`` -- a module's path-like string constants, and those it composes from
@@ -35,11 +37,24 @@ This stage serves a route only when every step is proven:
   path; a blueprint at the mount's ``url_prefix`` -- else its own -- joined to its rule,
   and only directly on an application, never nested in a blueprint.
 
-An unreadable mount of a router -- dynamic arguments or prefix, a sub-application
-``mount``, a blueprint in a blueprint -- leaves that router unserved everywhere, as an
-unreadable mount in its own module does. A route whose prefixes are all empty and whose
-path is literal is exact: its decorator alone states it, and keeps its lines. Anything
-else is composed.
+An unreadable mount of a router -- dynamic arguments or prefix, an include on a
+sub-application (unserved), a blueprint in a blueprint -- leaves that router unserved
+everywhere, as an unreadable mount in its own module does.
+So does an include or registration made on an application that a ``mount`` in any module
+names: the mount's child key equals the owner's, so the owner is a sub-application (R1).
+A ``mount`` whose child is not proven -- its module unresolved or ambiguous, a re-export, a
+name no receiver declares -- counts as a mount of every application of that name in the
+same repository (R5): identity not proven fails closed.
+A ``mount`` of an application is *proven* when it carries ``mount_prefix`` (a literal FastAPI
+prefix), its child is a FastAPI application and its owner is a FastAPI application. The child
+is a sub-application still (R1) and keeps its own view, the routes at the paths its file
+states; the parent's view adds ``mount_prefix`` + path, with the parent's module as the
+application serving it. A chain continues through an owner that is a usable receiver -- a
+sub-application mounted in turn -- ends at a factory's application, and never enters an
+application twice. Any other ``mount`` blocks its child, as before: the child serves what its
+own file states and nothing under a parent.
+A route whose prefixes are all empty and whose path is literal is exact: its decorator
+alone states it, and keeps its lines. Anything else is composed.
 
 Everything is repository-local: modules resolve inside the importer's own project or
 script directory, so a repository's share of the plan is the plan of its claims alone.
@@ -159,6 +174,18 @@ class _Mount:
 def _meta(claim: UnresolvedRefRecord) -> dict[str, str]:
     loaded = json.loads(claim.meta_json) if claim.meta_json else {}
     return {str(k): str(v) for k, v in loaded.items()}
+
+
+def _mount_path(meta: Mapping[str, str]) -> str | None:
+    """The literal path an application ``mount`` claim states, when it states one."""
+    raw = meta.get("mount_prefix")
+    if raw is None:
+        return None
+    try:
+        loaded = json.loads(raw)
+    except ValueError:
+        return None
+    return loaded if isinstance(loaded, str) and loaded else None
 
 
 def _parent(path: str) -> str:
@@ -311,29 +338,62 @@ def plan_python_routes(
         offered = json.loads(meta.get("composed", "{}"))
         composed[claim.file_id] = {name: entry[0] for name, entry in offered.items()}
 
+    applications: dict[tuple[int, str], list[Key]] = defaultdict(list)
+    for key, receiver in receivers.items():
+        declared_in = by_id.get(key[0])
+        if receiver.kind in _APPLICATIONS and declared_in is not None:
+            applications[(declared_in.repo_id, key[1])].append(key)
+
     mounts: dict[Key, list[_Mount]] = defaultdict(list)
+    #: Application → the (owner, prefix) of every proven mount of it on another application.
+    app_mounts: dict[Key, list[tuple[Key, str]]] = defaultdict(list)
+    mounted_apps: set[Key] = set()
     blocked: set[Key] = set()
+    readable: list[tuple[Key, _Mount]] = []
     for claim in grouped.get(PYTHON_MOUNT, ()):
         meta = _meta(claim)
         origin = by_id.get(claim.file_id)
         if origin is None:
             continue
         child = _key(imports, origin, meta.get("module"), claim.target_key)
+        if meta.get("call") == "mount" and (child is None or child not in receivers):
+            # Identity not proven: any application of that name in this repository may be it.
+            blocked.update(applications.get((origin.repo_id, claim.target_key), ()))
         if child is None:
+            continue
+        mounted_at = _mount_path(meta)
+        if (
+            meta.get("call") == "mount"
+            and mounted_at is not None
+            and meta.get("owner_kind") == _FASTAPI_APP
+            and child in receivers
+            and receivers[child].kind == _FASTAPI_APP
+        ):
+            # Proven: a sub-application still (R1), served under the mount besides its own paths.
+            app_mounts[child].append(((claim.file_id, meta.get("owner", "")), mounted_at))
+            mounted_apps.add(child)
             continue
         if meta.get("readable") != "true":
             blocked.add(child)
             continue
-        mounts[child].append(
-            _Mount(
-                owner=(claim.file_id, meta.get("owner", "")),
-                owner_kind=meta.get("owner_kind", ""),
-                call=meta.get("call", ""),
-                prefix=json.loads(meta.get("prefix", "null")),
-            )
+        mount = _Mount(
+            owner=(claim.file_id, meta.get("owner", "")),
+            owner_kind=meta.get("owner_kind", ""),
+            call=meta.get("call", ""),
+            prefix=json.loads(meta.get("prefix", "null")),
         )
+        readable.append((child, mount))
+    # An include or registration on a sub-application is unreadable, whatever module mounts it.
+    # Decided against the sub-applications as every mount claim leaves them, so the claims'
+    # order does not matter; the children it adds are routers, never applications.
+    sub_applications = frozenset(blocked | mounted_apps)
+    for child, mount in readable:
+        if mount.owner_kind in _APPLICATIONS and mount.owner in sub_applications:
+            blocked.add(child)
+            continue
+        mounts[child].append(mount)
 
-    chains = _Chains(receivers, mounts, blocked)
+    chains = _Chains(receivers, mounts, blocked, app_mounts)
     for claim in claims:
         outcome, bodies, exact = _route(
             claim, imports, receivers, constants, composed, chains, by_id
@@ -393,14 +453,44 @@ class _Chains:
         receivers: Mapping[Key, _Receiver],
         mounts: Mapping[Key, Sequence[_Mount]],
         blocked: set[Key],
+        app_mounts: Mapping[Key, Sequence[tuple[Key, str]]] | None = None,
     ) -> None:
         self._receivers = receivers
         self._mounts = mounts
         self._blocked = blocked
+        self._app_mounts = app_mounts or {}
 
     def usable(self, key: Key) -> bool:
         receiver = self._receivers.get(key)
         return receiver is not None and receiver.usable and key not in self._blocked
+
+    def mounted(
+        self, key: Key, depth: int = 0, seen: frozenset[Key] | None = None
+    ) -> list[tuple[str, int]]:
+        """``(prefix, root)`` such that a route path ``p`` on application ``key`` is also
+        served at ``prefix + p`` by the application module ``root``: each proven mount of it on
+        another application, then that application's own mounts in turn, for as long as the
+        owner is a usable receiver. A parent that is a receiver but blocked contributes nothing;
+        a factory's application, which is no receiver, ends the chain with its own file as
+        root. An application already on the chain is never entered again."""
+        if depth > MAX_DEPTH:
+            return []
+        visited = seen if seen is not None else frozenset({key})
+        found: list[tuple[str, int]] = []
+        for owner, prefix in self._app_mounts.get(key, ()):
+            if owner in visited:
+                continue
+            if owner not in self._receivers:
+                found.append((prefix, owner[0]))
+                continue
+            if not self.usable(owner):
+                continue
+            found.append((prefix, owner[0]))
+            found.extend(
+                (f"{base}{prefix}", root)
+                for base, root in self.mounted(owner, depth + 1, visited | {owner})
+            )
+        return found
 
     def fastapi(self, key: Key, *, own_module: bool, depth: int = 0) -> list[tuple[str, bool, int]]:
         """``(prefix, exact, root)`` such that a route path ``p`` on router ``key`` is served
@@ -522,13 +612,17 @@ def _route(
         if value is None:
             return CONSTANT_UNRESOLVED, [], {}
         path += value
+    # A literal route on a FastAPI application, whose own module's edge states it as written.
+    served_here = meta.get("served_here") == "true"
     if not chains.usable(key):
-        return UNREADABLE_MOUNT, [], {}
+        return (SERVED_HERE if served_here else UNREADABLE_MOUNT), [], {}
     literal = meta.get("provenance") == EXACT
     own_module = module is None
     served: list[tuple[str | None, bool, int]]
     if receiver.kind in _APPLICATIONS:
-        served = [(path, True, key[0])]
+        served = [] if served_here else [(path, True, key[0])]
+        if receiver.kind == _FASTAPI_APP and path.startswith("/"):
+            served.extend((f"{prefix}{path}", False, root) for prefix, root in chains.mounted(key))
     elif receiver.kind == _FASTAPI_ROUTER:
         if path and not path.startswith("/"):
             return NOT_MOUNTED, [], {}
@@ -551,6 +645,8 @@ def _route(
         bodies[body] = (was_exact or (exact and literal), roots | {root})
     if bodies:
         return PROMOTED, sorted(bodies), bodies
+    if served_here:
+        return SERVED_HERE, [], {}
     if own_module and receiver.mounts:
         return SERVED_HERE, [], {}
     return NOT_MOUNTED, [], {}
