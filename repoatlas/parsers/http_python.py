@@ -41,8 +41,14 @@ module records: its receivers, its routes, its mounts of imported routers and it
 path constants. An application passed to ``.mount()`` here is itself a
 sub-application and yields nothing.
 Application-level routes are taken as served at the root, which is what the file
-states; an application mounted under a prefix from *another* file is a known
-limitation.
+states, and that view stays. An application another file mounts at a literal FastAPI
+prefix (``parent.mount("/sub", child)``, the child imported, or one name away from an
+import: ``alias = child``) is also served under it: each route of the child with a
+literal path is recorded again as a claim (``served_here``) and the mount claim carries
+``mount_prefix``, so that the global pass adds the parent's view -- the prefix and the
+path, the parent as the application that serves it -- beside the child's own. An empty
+prefix, one without its leading ``/`` or with a trailing one, or one built from an
+imported constant or a call, proves no mount path.
 
 **Where an application is published** is read from one source only: a flasgger
 Swagger 2 template bound to that exact Flask application in its own module, stating
@@ -1528,8 +1534,17 @@ class PythonHttp:
         self._choice: dict[str, tuple[str, int]] = {}
         #: Local name → where it is imported from, for every import bound exactly once.
         self._imported: dict[str, _Imported] = {}
+        #: Alias → (the imported name it is one hop from, where the alias statement begins):
+        #: ``s = sub`` or ``s = m.sub`` at module level, after the import, `s` bound only so.
+        self._aliases: dict[str, tuple[tuple[str, str], _Position]] = {}
+        #: Alias → (the name it is one hop from, where the alias statement begins), for any
+        #: module-level ``s = name`` whose ``s`` is bound only so: read for a local receiver.
+        self._local_aliases: dict[str, tuple[str, _Position]] = {}
         #: Mounts only the global pass can decide: an imported router, or a factory's.
         self._mount_claims: list[ParsedReference] = []
+        #: Factory-local applications that another application in the same factory mounts,
+        #: as ``"<function>.<name>"``: the owner a claim for their includes carries.
+        self._sub_owners: set[str] = set()
         #: Module-level names bound once to a list or tuple display.
         self._lists: dict[str, list[ast.expr]] = {}
         #: Client objects whose binding is lexical, by their one name.
@@ -1568,6 +1583,7 @@ class PythonHttp:
         self.star_unproven = unproven
         self._counts = counts
         self._imports(tree, counts)
+        self._read_aliases(tree, counts)
         self._optional_imports(tree, counts)
         self._read_constants(tree, counts)
         self._read_values(tree, counts)
@@ -1576,6 +1592,7 @@ class PythonHttp:
         self._constructors(tree, counts)
         self._mounts(tree, counts)
         self._factories(tree)
+        self._unserve_sub_applications()
         self._identities(tree, counts)
 
     # -- what the module proves ---------------------------------------------------
@@ -1601,6 +1618,39 @@ class PythonHttp:
                     if local in self._imported:
                         self._positions[local] = _position(statement)
         self._lists = _literal_lists(tree.body, counts, tree)
+
+    def _read_aliases(self, tree: ast.Module, counts: Counter[str]) -> None:
+        """``s = sub``, one hop from an imported application, read for ``mount`` only.
+
+        The alias is a module-level plain assignment of one name that nothing else binds
+        anywhere in the module, to an exact imported name or ``module.attr`` -- never to
+        another alias -- and it comes after the import that makes the name an import. A
+        conditional, nested, annotated or repeated binding is no alias. The same
+        assignment of a bare name is also kept for a local receiver: mounting its alias
+        makes the receiver a sub-application as mounting the receiver itself does.
+        """
+        for statement in tree.body:
+            if not (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+            ):
+                continue
+            name, value = statement.targets[0].id, statement.value
+            if counts[name] != 1:
+                continue
+            at = _position(statement)
+            if isinstance(value, ast.Name):
+                head = value.id
+                self._local_aliases[name] = (head, at)
+            elif isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name):
+                head = value.value.id
+            else:
+                continue
+            ref = _module_ref(value, self._imported)
+            imported_at = self._positions.get(head)
+            if ref is not None and imported_at is not None and imported_at < at:
+                self._aliases[name] = (ref, at)
 
     def _optional_imports(self, tree: ast.Module, counts: Counter[str]) -> None:
         """``try: from flasgger import Swagger`` / ``except ImportError: Swagger = None``.
@@ -1726,12 +1776,31 @@ class PythonHttp:
                 self._mount(func.value.id, owner, call, "blueprint", _FLASK_BLUEPRINT, "url_prefix")
             elif func.attr == "mount" and owner.kind == _FASTAPI_APP:
                 for argument in (*call.args, *(keyword.value for keyword in call.keywords)):
-                    if isinstance(argument, ast.Name) and argument.id in self._receivers:
-                        self._receivers[argument.id].usable = False
-                ref = _module_ref(_mount_target(owner.kind, call), self._imported)
+                    if isinstance(argument, ast.Name):
+                        mounted = self._receivers.get(argument.id) or self._aliased_receiver(
+                            argument.id, call
+                        )
+                        if mounted is not None:
+                            mounted.usable = False
+                target = _mount_target(owner.kind, call)
+                ref = _module_ref(target, self._imported) or self._aliased_ref(target, call)
                 if ref is not None:
                     child = {"module": ref[0], "name": ref[1]}
                     self._claim_mount(func.value.id, owner, call, child)
+
+    def _aliased_receiver(self, name: str, call: ast.Call) -> _Receiver | None:
+        """The local receiver ``name`` is a one-hop alias of, when the alias precedes ``call``."""
+        found = self._local_aliases.get(name)
+        if found is None or found[1] >= (call.lineno, call.col_offset):
+            return None
+        return self._receivers.get(found[0])
+
+    def _aliased_ref(self, node: ast.expr | None, call: ast.Call) -> tuple[str, str] | None:
+        """``(module, name)`` the imported name ``node`` is a one-hop alias of, before ``call``."""
+        found = self._aliases.get(node.id) if isinstance(node, ast.Name) else None
+        if found is None or found[1] >= (call.lineno, call.col_offset):
+            return None
+        return found[0]
 
     def _mount(
         self,
@@ -1784,9 +1853,14 @@ class PythonHttp:
 
         Recorded unreadable -- which keeps the router from being served at all, as a
         mount this module cannot read does to one of its own -- when its arguments may
-        carry a prefix this cannot read, when it is a sub-application ``mount``, or when
-        a blueprint is nested in a blueprint, whose composition Flask decides. ``shadow``
+        carry a prefix this cannot read, when it is a sub-application ``mount``, when its
+        owner is a sub-application, or when a blueprint is nested in a blueprint, whose
+        composition Flask decides. ``shadow``
         is the factory's own bindings, which a prefix's names must not be among.
+
+        A ``mount`` of an application by a FastAPI application also carries ``mount_prefix``
+        -- its path, when that is a non-empty prefix FastAPI itself accepts -- for the global
+        pass, which serves the child's routes under it only if it proves the child.
         """
         attribute = call.func.attr if isinstance(call.func, ast.Attribute) else ""
         readable = attribute in _MOUNT_CALLS and not _dynamic(call)
@@ -1815,6 +1889,19 @@ class PythonHttp:
         read_from = {"prefix_from": json.dumps(prefix_from)} if prefix_from else {}
         if owner.kind == _FLASK_BLUEPRINT:
             readable = False
+        # What the mount of an application says of where the parent serves it, apart from
+        # `readable` and `prefix`, which stay as they are: a literal FastAPI prefix.
+        mount_path = ""
+        if attribute == "mount" and owner.kind == _FASTAPI_APP and not _dynamic(call):
+            path_node = _argument(call, 0, "path")
+            found = (
+                self._prefix_value(path_node, (call.lineno, call.col_offset), shadow)
+                if path_node is not None
+                else None
+            )
+            if found is not None and found[0] and _fastapi_prefix(found[0]):
+                mount_path = found[0]
+        mounted_at = {"mount_prefix": json.dumps(mount_path)} if mount_path else {}
         self._mount_claims.append(
             pending_reference(
                 EdgeType.REFERENCES,
@@ -1829,6 +1916,7 @@ class PythonHttp:
                 readable="true" if readable else "false",
                 prefix=json.dumps(prefix),
                 **read_from,
+                **mounted_at,
                 **child,
             )
         )
@@ -1873,6 +1961,12 @@ class PythonHttp:
                 if kind is None:
                     continue
                 argument = _mount_target(kind, call)
+                mounts_application = kind == _FASTAPI_APP and call.func.attr == "mount"
+                if mounts_application and isinstance(argument, ast.Name):
+                    if argument.id in applications:
+                        self._sub_owners.add(f"{function.name}.{argument.id}")
+                    elif argument.id in self._receivers and not counts[argument.id]:
+                        self._receivers[argument.id].usable = False
                 if (
                     isinstance(argument, ast.Name)
                     and argument.id in self._receivers
@@ -1885,6 +1979,40 @@ class PythonHttp:
                         continue
                     child = {"module": ref[0], "name": ref[1]}
                 self._claim_mount(f"{function.name}.{name}", _Receiver(kind), call, child, counts)
+
+    def _unserve_sub_applications(self) -> None:
+        """Nothing is served from a router included on a sub-application.
+
+        A sub-application is one that this module, or one of its factories, mounts on
+        another application: the parent serves it under the mount's path, which is not the
+        include's, and the parent's route is not the include's either. A router included on
+        one -- in this module, or by a claim only the global pass can read -- is served
+        nowhere, as one whose mount this module cannot read is.
+        """
+        owners = {
+            name
+            for name, receiver in self._receivers.items()
+            if receiver.kind in _APPLICATIONS and not receiver.usable
+        } | self._sub_owners
+        if not owners:
+            return
+        for receiver in self._receivers.values():
+            if any(owner in owners for _, owner in receiver.mounts):
+                receiver.usable = False
+        self._mount_claims = [self._unserved(claim, owners) for claim in self._mount_claims]
+
+    @staticmethod
+    def _unserved(claim: ParsedReference, owners: set[str]) -> ParsedReference:
+        """A mount made on a sub-application is unreadable, and its application mount path
+        is dropped: the parent that serves its owner under another path is not this owner's."""
+        if claim.meta.get("owner") not in owners:
+            return claim
+        meta = {key: value for key, value in claim.meta.items() if key != "mount_prefix"}
+        if meta.get("readable") == "true":
+            meta["readable"] = "false"
+        if meta == claim.meta:
+            return claim
+        return claim.model_copy(update={"meta": meta})
 
     # -- where an application is published -------------------------------------------
 
@@ -2153,7 +2281,9 @@ class PythonHttp:
         A route on an application with a literal path is served here. One on a router or
         blueprint, on a receiver this module imports, or with a path naming an imported
         constant, is also recorded as a :data:`PYTHON_ROUTE` claim, which the global pass
-        serves wherever it proves a mount and the values.
+        serves wherever it proves a mount and the values. So is a literal route on a FastAPI
+        application, marked ``served_here``: the global pass adds the paths of the parents
+        that mount the application, and nothing else.
         """
         found: list[ParsedReference] = []
         for decorator in function.decorator_list:
@@ -2193,6 +2323,18 @@ class PythonHttp:
                             proven.composed,
                         )
                     )
+            elif receiver.kind == _FASTAPI_APP:
+                # Served here, as stated; and, where another file mounts this application
+                # under a prefix, at the parent's paths too: a claim for the global pass.
+                found.extend(
+                    _route_claim(
+                        {"router": func.value.id, "family": source, "served_here": "true"},
+                        methods,
+                        [["t", path]],
+                        (start, end),
+                        qualified,
+                    )
+                )
             if path is None:
                 continue
             for served, composed, owners in self._served(func.value.id, receiver, path):
