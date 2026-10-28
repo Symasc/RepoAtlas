@@ -1209,3 +1209,26 @@ def test_applications_mounting_each_other_are_not_walked_round(
     files = {"svc": {"src/__init__.py": "", "src/a.py": first, "src/b.py": second}}
     indexed = build(workspace, tmp_path, files)
     assert _routes(indexed) == {"GET /p", "GET /a/p"}
+
+
+def test_an_alias_bound_after_the_mount_does_not_mark_the_local_application() -> None:
+    # The alias is bound after the mount, so the mount does not name the application: its
+    # routes stay served, and no mount of it is read.
+    source = _source(
+        d("""
+            sub = FastAPI()
+
+
+            @sub.get("/deep")
+            def deep(): ...
+
+
+            @app.get("/outer")
+            def outer(): ...
+
+
+        """)
+        + 'app.mount("/s", s)\ns = sub\n'
+    )
+    assert _receiver(source, "sub").meta["usable"] == "true"
+    assert "GET /deep" in _served(source)
