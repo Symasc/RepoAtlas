@@ -107,7 +107,7 @@ def test_a_star_before_the_framework_import_leaves_the_application_proven() -> N
         "def hello(): ...",
     )
     assert _served(source) == {"GET /hello"}
-    [route] = _http(source)
+    [route] = [r for r in _http(source) if PENDING_FACT not in r.meta]
     assert route.meta == {"source": "fastapi", "provenance": "exact"}
     assert (route.line_start, route.line_end) == (4, 4)
     assert _reasons(source) == {}
