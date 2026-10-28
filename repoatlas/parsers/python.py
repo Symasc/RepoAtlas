@@ -448,7 +448,14 @@ class PythonParser:
     # 24: a request's URL and an httpx client's base_url may use module constants composed by an
     #    f-string or + (and literal constants in the host, the port or the head); a host that is a
     #    value keeps the path after it (repoatlas.parsers.http_python).
-    version = f"24+{interpreter_tag()}"
+    # 25: a router or blueprint mounted on a sub-application -- an application this module, or
+    #    one of its factories, mounts on another -- is served nowhere, and a mount of an imported
+    #    router on one is recorded unreadable (repoatlas.parsers.http_python).
+    # 26: an application another module mounts at a literal FastAPI prefix is also served under
+    #    it: a literal route on a FastAPI application is a `served_here` claim, an application
+    #    `mount` carries `mount_prefix`, and the mounted name may be one assignment away from an
+    #    import (repoatlas.parsers.http_python, repoatlas.graph.py_routes).
+    version = f"26+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:

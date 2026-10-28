@@ -43,7 +43,7 @@ def _served(source: str) -> set[str]:
 
 
 def test_a_fastapi_route_is_served_by_its_handler_at_the_decorator() -> None:
-    [reference] = _http(
+    references = _http(
         """\
         from fastapi import FastAPI
 
@@ -55,6 +55,7 @@ def test_a_fastapi_route_is_served_by_its_handler_at_the_decorator() -> None:
             return {"hello": "me"}
         """
     )
+    [reference] = [r for r in references if PENDING_FACT not in r.meta]
     assert reference.edge_type is EdgeType.SERVES_HTTP_ROUTE
     assert reference.target_kind is EntityType.HTTP_ROUTE
     assert reference.target_key == "GET /hello/me"
