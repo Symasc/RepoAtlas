@@ -2449,6 +2449,9 @@ class PythonHttp:
                 continue
             if func.attr == "mount" and self._class_receivers:
                 self._class_mounts(func.value.id, call)
+                built = self._class_owner(func.value.id, call)
+                if built is not None:
+                    self._class_mount_claim(built, call)
             owner = self._receivers.get(func.value.id)
             if owner is None:
                 continue
@@ -2487,21 +2490,50 @@ class PythonHttp:
             return None
         return found[0]
 
+    def _class_owner(self, name: str, call: ast.Call) -> str | None:
+        """The name an application built from an imported class is bound to, when ``name``
+        is that name or a one-hop alias of it bound before ``call``."""
+        if name in self._class_receivers:
+            return name
+        found = self._local_aliases.get(name)
+        if found is not None and found[0] in self._class_receivers:
+            if found[1] < (call.lineno, call.col_offset):
+                return found[0]
+        return None
+
     def _class_mounts(self, owner: str, call: ast.Call) -> None:
         """``owner.mount(path, name)`` where an application built from an imported class is
         involved: a sub-application serves its routes under the mount's path, not at its root.
 
         A receiver passed to it is no longer served at the root, and a receiver of this module
         mounted on such an application is not either: the owner's kind is unknown here, and
-        ``mount`` is the only way a mounted application is served elsewhere.
+        ``mount`` is the only way a mounted application is served elsewhere. Names are followed
+        through the one-hop aliases the module states before the call.
         """
+        owned = self._class_owner(owner, call) is not None
         for argument in (*call.args, *(keyword.value for keyword in call.keywords)):
             if not isinstance(argument, ast.Name):
                 continue
-            if argument.id in self._class_receivers:
-                self._class_receivers[argument.id].usable = False
-            if owner in self._class_receivers and argument.id in self._receivers:
-                self._receivers[argument.id].usable = False
+            built = self._class_owner(argument.id, call)
+            if built is not None:
+                self._class_receivers[built].usable = False
+            if owned:
+                mounted = self._receivers.get(argument.id) or self._aliased_receiver(
+                    argument.id, call
+                )
+                if mounted is not None:
+                    mounted.usable = False
+
+    def _class_mount_claim(self, owner: str, call: ast.Call) -> None:
+        """A ``mount`` of an imported application by an application built from an imported
+        class, recorded as a mount claim of a FastAPI application: the global pass serves the
+        child's own routes under the mount, and the parent's paths at the parent's root.
+        """
+        target = _mount_target(_FASTAPI_APP, call)
+        ref = _module_ref(target, self._imported) or self._aliased_ref(target, call)
+        if ref is not None:
+            child = {"module": ref[0], "name": ref[1]}
+            self._claim_mount(owner, _Receiver(_FASTAPI_APP), call, child)
 
     def _mount(
         self,
