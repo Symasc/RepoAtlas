@@ -93,9 +93,15 @@ enough. No metaclass, keyword, type parameter or decorator; the class name bound
 framework's registration members; and an ``__init__`` only when it is exactly
 ``super().__init__(*args, **kwargs)``, in a module with no star import. The class name may only be
 called, be a base or stand in an annotation: any other read (``C.get = f``, ``alias = C``) could
-change it. Every refusal has an internal reason in ``class_refusals``, never stored. A subclass
-defined in one module and constructed in another serves nothing yet: only the same module's
-classes are followed.
+change it. Every refusal has an internal reason in ``class_refusals``, never stored. Only the same
+module's classes are followed here. An application subclass is offered to the global pass as a
+:data:`PYTHON_CLASS` claim; a module that builds an application from a class it imports --
+``app = CustomApp()`` on ``from base import CustomApp``, or ``app = App()`` for a class ``App``
+that extends it, the import above the class or the construction, the imported name read only to
+extend or construct -- records the routes on that application as :data:`PYTHON_CLASS_ROUTE`
+claims, which the global pass serves when the defining module offers the class, total depth
+included. Such a class is kept in ``imported_subclasses`` and ``imported_class_refusals``, never
+in ``subclasses`` and ``class_refusals``.
 
 **A client object** -- ``requests.Session()``, ``httpx.Client(...)``, ``httpx.AsyncClient(...)`` --
 is followed only where its identity is lexical: bound by one ``name = C(...)`` or
@@ -119,7 +125,7 @@ import ast
 import json
 import re
 from collections import Counter
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 
 from repoatlas.models import http
@@ -130,6 +136,8 @@ from repoatlas.parsers.http_facts import (
     EXACT,
     HTTP_CLIENT_CALL,
     HTTP_EXPOSED_ENDPOINT,
+    PYTHON_CLASS,
+    PYTHON_CLASS_ROUTE,
     PYTHON_CONSTANTS,
     PYTHON_MOUNT,
     PYTHON_RECEIVER,
@@ -266,6 +274,11 @@ _INIT_WITH_EFFECT = "overridden-init-with-effect"
 _SPECIAL_METHOD = "overridden-special-method"
 _ROUTE_METHOD = "overridden-route-method"
 _CLASS_ESCAPES = "class-escapes"
+#: A class of another module is no receiver's base unless it is imported before the statement.
+_IMPORTED_LATE = "imported-after-class"
+#: The kind in an ``_Origin`` whose base is a class another module defines: its kind is not
+#: known here.
+_IMPORTED = "imported"
 #: What a base resolves to: its kind, its depth and (for a class of this module) its name.
 _Origin = tuple[str, int, str | None]
 
@@ -718,6 +731,54 @@ class _Subclass:
     line: int
     #: The class of this module it extends; ``None`` for a framework class.
     base: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ClassRef:
+    """A class another module defines, as this module's import names it."""
+
+    #: The module as written, relative dots included: ``base``, ``.base``.
+    module: str
+    #: The class's name in that module.
+    name: str
+    #: The imported name, or the imported module's alias, it is read through.
+    local: str
+    #: ``Name`` in ``alias.Name``; ``None`` when ``local`` is the class itself.
+    attribute: str | None
+
+    @property
+    def spelled(self) -> str:
+        return self.local if self.attribute is None else f"{self.local}.{self.attribute}"
+
+
+@dataclass(frozen=True, slots=True)
+class _ImportedSubclass:
+    """A module-level class proven to extend a class another module defines."""
+
+    ref: _ClassRef
+    #: Classes of this module between it and the imported class: ``1`` for a direct subclass.
+    depth: int
+    #: Where the class statement begins; a construction counts only after it.
+    position: _Position
+    line: int
+    #: The class of this module it extends; ``None`` for the imported class itself.
+    base: str | None
+
+
+@dataclass(slots=True)
+class _ClassReceiver:
+    """A name proven to hold an application built from a class another module defines."""
+
+    ref: _ClassRef
+    #: Classes of this module between the class constructed and the imported one: ``0`` when the
+    #: imported class itself is constructed.
+    depth: int
+    #: The line that constructs it.
+    line: int
+    #: The subclass of this module it is constructed from; ``None`` for the imported class.
+    via: str | None
+    #: Cleared when it is mounted as a sub-application, which serves it somewhere else.
+    usable: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -1241,26 +1302,73 @@ def _argument(call: ast.Call, index: int, name: str) -> ast.expr | None:
     return positional if positional is not None else keywords.get(name)
 
 
-def _escaping(tree: ast.Module, names: set[str]) -> set[str]:
+def _escaping(
+    tree: ast.Module,
+    names: set[str],
+    attributes: frozenset[tuple[str, str]] = frozenset(),
+    modules: frozenset[str] = frozenset(),
+    held: frozenset[str] = frozenset(),
+) -> set[str]:
     """The classes among ``names`` that something reads other than to build, extend or annotate.
 
     A class may be called, extended by a class, or stand in an annotation that calls nothing;
     any other read -- ``C.get = f``, ``alias = C``, ``register(C)``, ``isinstance(x, C)`` --
     could hand the class to code that changes what it registers or serves. One walk,
     parents before children, so the read a name is allowed by is known when it is reached.
+
+    A class read through an imported module (``attributes``, as ``(alias, attribute)``, on the
+    module aliases in ``modules``) is held to the same rule, stricter in one way: ``alias.C`` may
+    only be called or extended, in any context, so ``alias.C.get = f``, ``alias.C = x`` and an
+    annotation escape too; the result names it ``"alias.C"``. Reading the alias itself other than
+    as the value of an attribute (``register(alias)``) could hand the whole module over, and
+    escapes as the alias name. So does reading one of its special attributes (``alias.__dict__``,
+    ``alias.__setattr__``; ``alias.__name__`` is only a name), and with it every ``"alias.C"``.
+
+    A module may also be reached by a path or a string this walk cannot follow to an alias
+    (``a.b.C.get = f``, ``getattr(b, "C")``, ``vars(b)["C"]``), so the classes in play are also
+    named: ``held`` are their names, and an attribute read of one that does not build or extend,
+    or a string that is one, escapes that name wherever it appears.
     """
     allowed: set[int] = set()
+    #: The attribute reads that build or extend: a call's callee and a class's base.
+    sanctioned: set[int] = set()
     escaping: set[str] = set()
     for node in ast.walk(tree):
         annotation: ast.expr | None = None
         if isinstance(node, ast.Name):
-            if isinstance(node.ctx, ast.Load) and node.id in names and id(node) not in allowed:
+            if (
+                isinstance(node.ctx, ast.Load)
+                and id(node) not in allowed
+                and (node.id in names or node.id in modules)
+            ):
                 escaping.add(node.id)
+            continue
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, str) and node.value in held:
+                escaping.add(node.value)
+            continue
+        if isinstance(node, ast.Attribute) and node.attr in held and id(node) not in sanctioned:
+            escaping.add(node.attr)
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id in modules:
+                allowed.add(id(node.value))
+                if (node.value.id, node.attr) in attributes and id(node) not in sanctioned:
+                    escaping.add(f"{node.value.id}.{node.attr}")
+                if node.attr.startswith("__") and node.attr != "__name__":
+                    # ``alias.__dict__[...]``, ``alias.__setattr__(...)``: the module's own
+                    # table, through which any class it holds can be changed.
+                    alias = node.value.id
+                    escaping.add(alias)
+                    escaping.update(
+                        f"{alias}.{held}" for owner, held in attributes if owner == alias
+                    )
             continue
         if isinstance(node, ast.Call):
             allowed.add(id(node.func))
+            sanctioned.add(id(node.func))
         elif isinstance(node, ast.ClassDef):
             allowed.update(id(base) for base in node.bases)
+            sanctioned.update(id(base) for base in node.bases)
         elif isinstance(node, (ast.AnnAssign, ast.arg)):
             annotation = node.annotation
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -1622,6 +1730,43 @@ def _route_claim(
     ]
 
 
+def _class_route_claim(
+    receiver: str,
+    built_from: dict[str, str],
+    methods: tuple[str, ...],
+    parts: list[list[str]],
+    span: tuple[int, int],
+    qualified: str,
+    values: tuple[tuple[str, int], ...] = (),
+    composed: bool = False,
+) -> list[ParsedReference]:
+    """One :data:`PYTHON_CLASS_ROUTE` claim per method, on the application ``receiver``.
+
+    ``built_from`` says which class the application is built from and how many classes of this
+    module stand above it. The claim names a symbol, not a route: it is a route only once the
+    global pass proves the class, and it never becomes an edge by itself.
+    """
+    literal = all(part[0] == "t" for part in parts) and not composed
+    read_from = {"values": json.dumps(values)} if values else {}
+    return [
+        pending_reference(
+            EdgeType.REFERENCES,
+            EntityType.SYMBOL,
+            receiver,
+            span[0],
+            span[1],
+            role=PYTHON_CLASS_ROUTE,
+            source_symbol=qualified,
+            method=method,
+            path=json.dumps(parts),
+            provenance=EXACT if literal else COMPOSED,
+            **read_from,
+            **built_from,
+        )
+        for method in methods
+    ]
+
+
 def _added(node: ast.BinOp) -> list[ast.expr] | None:
     """The operands of a ``+`` chain, left to right, or ``None`` past :data:`_MAX_ADDED`."""
     operands: list[ast.expr] = []
@@ -1710,6 +1855,16 @@ class PythonHttp:
         self.subclasses: dict[str, _Subclass] = {}
         #: Module-level class derived from one → why it builds no receiver. Never emitted.
         self.class_refusals: dict[str, str] = {}
+        #: Module-level class derived from a class another module defines (a name imported here,
+        #: or ``alias.Name`` on an imported module), or from such a class of this module, with
+        #: nothing in it that could change what it registers or serves. Never in ``subclasses``:
+        #: what the imported class is, only the global pass can say. For tests and measurement;
+        #: never emitted.
+        self.imported_subclasses: dict[str, _ImportedSubclass] = {}
+        #: Module-level class derived from one → why it builds no receiver. Never emitted.
+        self.imported_class_refusals: dict[str, str] = {}
+        #: Receiver name → the imported class (or subclass of one) it is constructed from.
+        self._class_receivers: dict[str, _ClassReceiver] = {}
         counts, stars = _binding_counts(tree)
         #: Whether the module has a star import, which could rebind ``super``.
         self._stars = bool(stars)
@@ -1729,8 +1884,11 @@ class PythonHttp:
         self._read_alternatives(tree, counts)
         self._read_clients(tree, counts)
         self._classes(tree, counts)
+        self._imported_classes(tree, counts)
         self._constructors(tree, counts)
+        self._imported_constructors(tree, counts)
         self._mounts(tree, counts)
+        self._imported_escapes(tree)
         self._factories(tree)
         self._unserve_sub_applications()
         self._identities(tree, counts)
@@ -1901,12 +2059,202 @@ class PythonHttp:
             for part in ast.walk(base)
         )
 
+    # -- classes another module defines ------------------------------------------------
+
+    def _imported_class(self, node: ast.expr) -> _ClassRef | None:
+        """The class a name imported from another module, or ``alias.Name``, may be.
+
+        Only an import this module's table proves (bound once, at module level) and not one of
+        the libraries read here: the framework's own classes are :meth:`_class_origin`'s. What
+        the name is in that module -- a class, a function, a constant -- only the global pass
+        can say.
+        """
+        found = _module_ref(node, self._imported)
+        if found is None or found[0].split(".")[0] in _LIBRARIES:
+            return None
+        if isinstance(node, ast.Name):
+            return _ClassRef(found[0], found[1], node.id, None)
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            return _ClassRef(found[0], found[1], node.value.id, node.attr)
+        return None
+
+    def _imported_before(self, ref: _ClassRef, at: _Position) -> bool:
+        """Whether the import ``ref`` is read through comes before the statement at ``at``."""
+        bound = self._positions.get(ref.local)
+        return bound is not None and bound < at
+
+    def _imported_origin(self, base: ast.expr) -> _Origin | str | None:
+        """What a base stands on: a class another module defines, or one of this module's.
+
+        ``(imported, depth, name)`` -- the name is this module's own class on it, ``None`` for the
+        imported class itself -- :data:`_BASE_REFUSED` for a class of this module that builds
+        no receiver, and ``None`` for anything else.
+        """
+        if isinstance(base, ast.Name):
+            found = self.imported_subclasses.get(base.id)
+            if found is not None:
+                return _IMPORTED, found.depth, base.id
+            if base.id in self.imported_class_refusals:
+                return _BASE_REFUSED
+        if self._imported_class(base) is not None:
+            return _IMPORTED, 0, None
+        return None
+
+    def _imported_classes(self, tree: ast.Module, counts: Counter[str]) -> None:
+        """Subclasses, defined at module level, of a class another module defines.
+
+        Read like :meth:`_classes`, by the same rules, but kept apart from its results: a
+        class whose base is imported is a receiver's class only if the module it comes from
+        offers it, which only the global pass can prove. The import must come before the class
+        statement. Whether the imported name or the class is read other than to build or extend
+        is decided afterwards, by :meth:`_imported_escapes`.
+        """
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef) or not self._derived_from_import(node):
+                continue
+            reason = self._refusal(node, counts, self._imported_origin)
+            if reason is not None:
+                self.imported_class_refusals[node.name] = reason
+                continue
+            base = node.bases[0]
+            origin = self._imported_origin(base)
+            if not isinstance(origin, tuple):
+                continue
+            if origin[2] is None:
+                ref = self._imported_class(base)
+                if ref is None or not self._imported_before(ref, _position(node)):
+                    self.imported_class_refusals[node.name] = _IMPORTED_LATE
+                    continue
+            else:
+                ref = self.imported_subclasses[origin[2]].ref
+            self.imported_subclasses[node.name] = _ImportedSubclass(
+                ref, origin[1] + 1, _position(node), node.lineno, origin[2]
+            )
+
+    def _derived_from_import(self, node: ast.ClassDef) -> bool:
+        """Whether a base, or anything inside one, stands on an imported class or a class of it."""
+        return any(
+            isinstance(part, (ast.Name, ast.Attribute)) and self._imported_origin(part) is not None
+            for base in node.bases
+            for part in ast.walk(base)
+        )
+
+    @staticmethod
+    def _binding(statement: ast.stmt) -> tuple[str, ast.expr] | None:
+        """``name = value`` or ``name: T = value`` as a module-level statement."""
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+        ):
+            return statement.targets[0].id, statement.value
+        if (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.value is not None
+        ):
+            return statement.target.id, statement.value
+        return None
+
+    def _imported_constructors(self, tree: ast.Module, counts: Counter[str]) -> None:
+        """Names bound once, at module level, to a call of an imported class or of a subclass.
+
+        ``app = CustomApp()`` on ``from base import CustomApp`` (or ``base.CustomApp()``), the
+        import above the statement, or ``app = App()`` on a class of this module that extends one
+        and stands above it. What the receiver is only the global pass can say.
+        """
+        for statement in tree.body:
+            bound = self._binding(statement)
+            if bound is None:
+                continue
+            name, value = bound
+            if counts[name] != 1 or not isinstance(value, ast.Call) or _dynamic(value):
+                continue
+            at = _position(statement)
+            func = value.func
+            if isinstance(func, ast.Name) and func.id in self.imported_subclasses:
+                subclass = self.imported_subclasses[func.id]
+                if not subclass.position < at:
+                    continue
+                receiver = _ClassReceiver(subclass.ref, subclass.depth, statement.lineno, func.id)
+            else:
+                found = self._imported_class(func)
+                if found is None or not self._imported_before(found, at):
+                    continue
+                receiver = _ClassReceiver(found, 0, statement.lineno, None)
+            self._class_receivers[name] = receiver
+
+    def _imported_escapes(self, tree: ast.Module) -> None:
+        """Drop what an imported class, or a class that extends one, could be changed through.
+
+        An imported class (or ``alias.Name``) may only be called or extended, as a class of this
+        module may (:func:`_escaping`): ``Base.get = f`` here changes the class every module
+        sees. A class of this module that is read otherwise, or stands on one that is refused or
+        escapes, is refused; a receiver built from one is no receiver.
+        """
+        if not self.imported_subclasses and not self._class_receivers:
+            return
+        refs = {found.ref for found in self.imported_subclasses.values()}
+        refs.update(found.ref for found in self._class_receivers.values())
+        names = set(self.imported_subclasses) | {ref.local for ref in refs if ref.attribute is None}
+        attributes = {(ref.local, ref.attribute) for ref in refs if ref.attribute is not None}
+        modules = {ref.local for ref in refs if ref.attribute is not None}
+        # Any other local an import binds may be the module that holds such a class, spelled
+        # another way (``import base`` beside ``from base import C``): `base.C.get = f` changes
+        # it too. Held to the same rule for every class in play, by name.
+        others = set(self._imported) - names - modules
+        modules |= others
+        attributes |= {(alias, ref.name) for alias in others for ref in refs}
+        # A module reached by a dotted path, ``getattr`` or ``vars`` is not an alias this walk
+        # follows; the class is named instead, by attribute or by string, wherever it is read.
+        held = set(self.imported_subclasses) | {ref.name for ref in refs}
+        escaping = _escaping(
+            tree, names, frozenset(attributes), frozenset(modules), frozenset(held)
+        )
+
+        def escaped(ref: _ClassRef) -> bool:
+            return (
+                ref.spelled in escaping
+                or ref.local in escaping
+                or ref.name in escaping
+                or any(f"{alias}.{ref.name}" in escaping for alias in modules)
+            )
+
+        for name in list(self.imported_subclasses):
+            found = self.imported_subclasses[name]
+            if found.base is not None and found.base in self.imported_class_refusals:
+                reason = _BASE_REFUSED
+            elif name in escaping or escaped(found.ref):
+                reason = _CLASS_ESCAPES
+            else:
+                continue
+            del self.imported_subclasses[name]
+            self.imported_class_refusals[name] = reason
+        for name in list(self._class_receivers):
+            receiver = self._class_receivers[name]
+            gone = receiver.via is not None and receiver.via not in self.imported_subclasses
+            if gone or escaped(receiver.ref):
+                del self._class_receivers[name]
+
     def _class_refusal(self, node: ast.ClassDef, counts: Counter[str]) -> str | None:
         """Why a derived class builds no receiver, by the first rule it fails; else ``None``."""
+        return self._refusal(node, counts, self._class_origin)
+
+    def _refusal(
+        self,
+        node: ast.ClassDef,
+        counts: Counter[str],
+        origin_of: Callable[[ast.expr], _Origin | str | None],
+    ) -> str | None:
+        """The rules a derived class is held to, in order; ``origin_of`` says what a base is.
+
+        The same rules for a class on a framework class or a class of this module and for one on
+        a class another module defines: only what a base stands on differs.
+        """
         if len(node.bases) != 1:
             return _MULTIPLE_BASES
         base = node.bases[0]
-        origin = self._class_origin(base)
+        origin = origin_of(base)
         named = isinstance(base, ast.Name) or (
             isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
         )
@@ -2099,6 +2447,8 @@ class PythonHttp:
             func = call.func
             if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)):
                 continue
+            if func.attr == "mount" and self._class_receivers:
+                self._class_mounts(func.value.id, call)
             owner = self._receivers.get(func.value.id)
             if owner is None:
                 continue
@@ -2136,6 +2486,22 @@ class PythonHttp:
         if found is None or found[1] >= (call.lineno, call.col_offset):
             return None
         return found[0]
+
+    def _class_mounts(self, owner: str, call: ast.Call) -> None:
+        """``owner.mount(path, name)`` where an application built from an imported class is
+        involved: a sub-application serves its routes under the mount's path, not at its root.
+
+        A receiver passed to it is no longer served at the root, and a receiver of this module
+        mounted on such an application is not either: the owner's kind is unknown here, and
+        ``mount`` is the only way a mounted application is served elsewhere.
+        """
+        for argument in (*call.args, *(keyword.value for keyword in call.keywords)):
+            if not isinstance(argument, ast.Name):
+                continue
+            if argument.id in self._class_receivers:
+                self._class_receivers[argument.id].usable = False
+            if owner in self._class_receivers and argument.id in self._receivers:
+                self._receivers[argument.id].usable = False
 
     def _mount(
         self,
@@ -2619,6 +2985,8 @@ class PythonHttp:
         serves wherever it proves a mount and the values. So is a literal route on a FastAPI
         application, marked ``served_here``: the global pass adds the paths of the parents
         that mount the application, and nothing else.
+        serves wherever it proves a mount and the values. One on an application built from a
+        class another module defines is only a :data:`PYTHON_CLASS_ROUTE` claim.
         """
         found: list[ParsedReference] = []
         for decorator in function.decorator_list:
@@ -2630,6 +2998,13 @@ class PythonHttp:
             start, end = decorator.lineno, decorator.end_lineno or decorator.lineno
             receiver = self._receivers.get(func.value.id)
             if receiver is None:
+                built = self._class_receivers.get(func.value.id)
+                if built is not None:
+                    if built.usable:
+                        found.extend(
+                            self._class_route(func.value.id, built, func.attr, decorator, qualified)
+                        )
+                    continue
                 found.extend(self._imported_route(func.value, func.attr, decorator, qualified))
                 continue
             if not receiver.usable:
@@ -2764,6 +3139,47 @@ class PythonHttp:
         span = (decorator.lineno, decorator.end_lineno or decorator.lineno)
         meta = {"module": ref[0], "router": ref[1], "family": family[0]}
         return _route_claim(
+            meta,
+            family[1],
+            proven.parts,
+            span,
+            qualified,
+            _by_line(proven.sources),
+            proven.composed,
+        )
+
+    def _class_route(
+        self,
+        name: str,
+        built: _ClassReceiver,
+        attribute: str,
+        decorator: ast.Call,
+        qualified: str,
+    ) -> list[ParsedReference]:
+        """A route on an application built from a class another module defines.
+
+        Read under whatever both frameworks agree on, as a route on an imported receiver is:
+        the application's kind is the class's, which the global pass checks.
+        """
+        family = _family(attribute, decorator)
+        if family is None:
+            return []
+        named = "path" if family[0] == "fastapi" else "rule"
+        proven = self._path_parts(_argument(decorator, 0, named), decorator)
+        if proven is None and family[0] == "either":
+            # A verb shortcut names its path `path` in FastAPI and `rule` in Flask.
+            proven = self._path_parts(_argument(decorator, 0, "path"), decorator)
+        if proven is None:
+            return []
+        span = (decorator.lineno, decorator.end_lineno or decorator.lineno)
+        meta = {
+            "module": built.ref.module,
+            "class": built.ref.name,
+            "depth": str(built.depth),
+            "family": family[0],
+        }
+        return _class_route_claim(
+            name,
             meta,
             family[1],
             proven.parts,
@@ -2935,7 +3351,8 @@ class PythonHttp:
         return bound is not None and bound < at
 
     def claim_references(self) -> list[ParsedReference]:
-        """What only the global pass can decide: receivers, mounts, offered constants."""
+        """What only the global pass can decide: receivers, mounts, offered constants, and the
+        application classes this module offers (:data:`PYTHON_CLASS`)."""
         found: list[ParsedReference] = []
         for name, receiver in self._receivers.items():
             read_from = (
@@ -2957,6 +3374,20 @@ class PythonHttp:
                 )
             )
         found.extend(self._mount_claims)
+        for name, subclass in self.subclasses.items():
+            if subclass.kind in _APPLICATIONS:
+                found.append(
+                    pending_reference(
+                        EdgeType.REFERENCES,
+                        EntityType.SYMBOL,
+                        name,
+                        subclass.line,
+                        subclass.line,
+                        role=PYTHON_CLASS,
+                        kind=subclass.kind,
+                        depth=str(subclass.depth),
+                    )
+                )
         if self._script is not None:
             found.append(
                 pending_reference(

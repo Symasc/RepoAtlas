@@ -63,6 +63,7 @@ from repoatlas.parsers.http_facts import (
     EXACT,
     FASTIFY_ROUTE,
     PENDING_FACT,
+    PYTHON_CLASS_ROUTE,
     PYTHON_ROUTE,
     TS_HANDLER_OBJECT,
 )
@@ -75,7 +76,15 @@ from repoatlas.storage.protocols import (
 )
 
 #: Claims whose routes the global pass serves, or lists as declared.
-_ROUTE_ROLES = frozenset({http_claims.NESTJS_ROUTE, PYTHON_ROUTE, FASTIFY_ROUTE, TS_HANDLER_OBJECT})
+_ROUTE_ROLES = frozenset(
+    {
+        http_claims.NESTJS_ROUTE,
+        PYTHON_ROUTE,
+        PYTHON_CLASS_ROUTE,
+        FASTIFY_ROUTE,
+        TS_HANDLER_OBJECT,
+    }
+)
 
 #: Version of the cursor payload. A token from another shape is refused.
 CURSOR_VERSION = 1
@@ -335,8 +344,14 @@ def build_inventory(
             continue
         if role == TS_HANDLER_OBJECT and claim.id not in plan.promoted:
             continue  # an object of functions no oas3-tools application routes to
-        if role == PYTHON_ROUTE and claim.id not in plan.promoted and claim.id not in plan.declared:
-            continue  # served by its own module, whose edges are listed with the per-file ones
+        if (
+            role in {PYTHON_ROUTE, PYTHON_CLASS_ROUTE}
+            and claim.id not in plan.promoted
+            and claim.id not in plan.declared
+        ):
+            # served by its own module, whose edges are listed with the per-file ones -- or,
+            # for a class route, on a class nothing proves an application (never declared)
+            continue
         origin = by_file.get(claim.file_id)
         entity = entities.get(claim.src_id)
         meta = _meta(claim)
