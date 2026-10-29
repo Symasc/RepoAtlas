@@ -2496,10 +2496,9 @@ class PythonHttp:
         if name in self._class_receivers:
             return name
         found = self._local_aliases.get(name)
-        if found is not None and found[0] in self._class_receivers:
-            if found[1] < (call.lineno, call.col_offset):
-                return found[0]
-        return None
+        if found is None or found[0] not in self._class_receivers:
+            return None
+        return found[0] if found[1] < (call.lineno, call.col_offset) else None
 
     def _class_mounts(self, owner: str, call: ast.Call) -> None:
         """``owner.mount(path, name)`` where an application built from an imported class is

@@ -11,9 +11,9 @@ from pathlib import Path
 from repoatlas.services.workspace import Workspace
 from tests.impact_corpus import build
 from tests.test_http_python import _served
-from tests.test_http_python_subclasses_cross import USERS, module
 from tests.test_http_python_routers import served
 from tests.test_http_python_subapps import _views
+from tests.test_http_python_subclasses_cross import USERS, module
 
 BASE = module("from fastapi import FastAPI", "class CustomApp(FastAPI):", "    pass")
 SUB = "\n".join(
@@ -59,7 +59,8 @@ def test_a_sub_application_mounted_by_an_imported_class_application_serves_under
             "",
         ]
     )
-    indexed = build(workspace, tmp_path, {"svc": {"src/base.py": BASE, "src/sub.py": SUB, "src/app.py": app}})
+    files = {"src/base.py": BASE, "src/sub.py": SUB, "src/app.py": app}
+    indexed = build(workspace, tmp_path, {"svc": files})
     # The sub-application's own path is served under the mount. A router included in the same
     # file as the mounted sub-application keeps the per-file view at its own root (a residual of
     # defect 9.1, pre-existing on master 0a7c376): GET /x is rooted at sub.py only, never at the
@@ -120,7 +121,8 @@ def test_a_sub_application_mounted_through_an_alias_is_served_under_the_mount(
             "",
         ]
     )
-    indexed = build(workspace, tmp_path, {"svc": {"src/base.py": BASE, "src/sub.py": SUB, "src/app.py": app}})
+    files = {"src/base.py": BASE, "src/sub.py": SUB, "src/app.py": app}
+    indexed = build(workspace, tmp_path, {"svc": files})
     assert routes(indexed) == {"GET /deep", "GET /sub/deep", "GET /x"}
     assert roots(indexed, "GET /sub/deep") == {"src/app.py"}
 
@@ -139,6 +141,7 @@ def test_an_unproven_sub_application_mounted_by_an_imported_class_application_se
             "",
         ]
     )
-    indexed = build(workspace, tmp_path, {"svc": {"src/base.py": BASE, "src/sub.py": SUB, "src/app.py": app}})
+    files = {"src/base.py": BASE, "src/sub.py": SUB, "src/app.py": app}
+    indexed = build(workspace, tmp_path, {"svc": files})
     assert "GET /sub/deep" not in routes(indexed)
     assert "GET /sub/x" not in routes(indexed)
