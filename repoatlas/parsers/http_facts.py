@@ -99,6 +99,16 @@ PYTHON_RECEIVER = "python-receiver"
 #: A route on a Python router or blueprint, or one whose path names an imported constant:
 #: served only where the global pass proves a mount, and the constant's value.
 PYTHON_ROUTE = "python-route"
+#: A module-level class that subclasses FastAPI's or Flask's application, under rules that leave
+#: nothing in it able to change what it registers or serves: its name, kind and depth. Another
+#: module that builds an application from the class is served only if its defining module
+#: states this claim.
+PYTHON_CLASS = "python-class"
+#: A route on an application a module builds from a class (or a subclass of a class) it imports
+#: from another module. The target key is the receiver's local name; the global pass serves it
+#: only if the class is an application subclass its defining module offers
+#: (:data:`PYTHON_CLASS`). Never a fact about a route until then.
+PYTHON_CLASS_ROUTE = "python-class-route"
 #: A router or blueprint mounted on an application or router -- imported, or mounted from
 #: inside an application factory -- with the prefix it is mounted at.
 PYTHON_MOUNT = "python-mount"

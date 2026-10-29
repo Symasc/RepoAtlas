@@ -13,6 +13,14 @@ side as a claim (:mod:`repoatlas.parsers.http_python`):
   paths of the applications that mount it);
 * ``python-mount`` -- an imported router mounted on an application or router, or any
   router mounted from inside an application factory;
+* ``python-class`` -- a module-level subclass of FastAPI's or Flask's application, offered
+  to the modules that build an application from it;
+* ``python-class-route`` -- a route on an application a module builds from a class it
+  imports (or from a class of its own extending one): served at the application's root only
+  if the module the class comes from offers it, the classes between it and the framework's
+  and those above it in the importer at most :data:`_MAX_CLASS_DEPTH` in all. Whatever
+  else it comes to is a reason in ``PythonRoutePlan.class_unproven``, never an outcome, never
+  counted, never declared;
 * ``python-constants`` -- a module's path-like string constants, and those it composes from
   literals and other names by an f-string or ``+``;
 * ``python-script`` -- a module that runs as a script.
@@ -74,13 +82,15 @@ from repoatlas.models import http
 from repoatlas.models.parsing import EntityType
 from repoatlas.parsers.http_facts import (
     EXACT,
+    PYTHON_CLASS,
+    PYTHON_CLASS_ROUTE,
     PYTHON_CONSTANTS,
     PYTHON_MOUNT,
     PYTHON_RECEIVER,
     PYTHON_ROUTE,
     PYTHON_SCRIPT,
 )
-from repoatlas.parsers.http_python import _path_like, flask_join
+from repoatlas.parsers.http_python import _MAX_CLASS_DEPTH, _path_like, flask_join
 from repoatlas.storage.protocols import EntityRecord, FileRow, UnresolvedRefRecord
 
 #: Routers nested in routers, counted from the application: deeper than anyone writes.
@@ -97,6 +107,12 @@ UNREADABLE_MOUNT = "a mount of its router cannot be read"
 NOT_MOUNTED = "not mounted by a proven application"
 #: A route its own module already serves, on a router no other module mounts.
 SERVED_HERE = "served by its own module's mount"
+#: Why a class route is not served: diagnostics in ``PythonRoutePlan.class_unproven``, never
+#: outcomes.
+CLASS_NOT_OFFERED = "no application subclass of that name is offered there"
+CLASS_NOT_AN_APPLICATION = "the class it names does not build an application"
+CLASS_TOO_DEEP = "the class stands too many classes above the framework's"
+CLASS_NO_ROUTE = "the application's route is no route"
 
 _FASTAPI_APP = "fastapi-app"
 _FASTAPI_ROUTER = "fastapi-router"
@@ -152,6 +168,10 @@ class PythonRoutePlan:
     declared: dict[int, str] = field(default_factory=dict)
     resolved: int = 0
     unresolved: int = 0
+    #: Class-route claim id → why its class is no proven application (diagnostic only). Never
+    #: merged into ``outcomes``, never counted in ``unresolved``, never in ``declared``: a route
+    #: on a receiver whose class only another module could vouch for is not a declared route.
+    class_unproven: dict[int, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,7 +336,8 @@ def plan_python_routes(
     """Serve every Python route claim a proven mount chain reaches. Writes nothing."""
     plan = PythonRoutePlan()
     claims = grouped.get(PYTHON_ROUTE, ())
-    if not claims:
+    class_claims = grouped.get(PYTHON_CLASS_ROUTE, ())
+    if not claims and not class_claims:
         return plan
     imports = _Imports(modules(), index, grouped.get(PYTHON_SCRIPT, ()), by_id)
 
@@ -425,7 +446,44 @@ def plan_python_routes(
         relative = _relative(claim)
         if claim.id is not None and relative is not None:
             plan.declared[claim.id] = relative
+
+    classes = _offered_classes(grouped.get(PYTHON_CLASS, ()))
+    for claim in class_claims:
+        outcome, bodies, exact = _class_route(claim, imports, classes, constants, composed, by_id)
+        if outcome != PROMOTED:
+            if claim.id is not None:
+                plan.class_unproven[claim.id] = outcome
+            continue
+        plan.resolved += 1
+        origin = by_id[claim.file_id]
+        for body in bodies:
+            plan.routes.append(
+                PendingRoute(
+                    src_id=claim.src_id,
+                    body=body,
+                    repo_id=origin.repo_id,
+                    file_id=origin.file_id,
+                    line_start=claim.line_start if exact[body][0] else None,
+                    line_end=claim.line_end if exact[body][0] else None,
+                    roots=exact[body][1],
+                    declared_at=claim.line_start,
+                )
+            )
+        if claim.id is not None:
+            plan.outcomes[claim.id] = outcome
+            plan.promoted[claim.id] = tuple(bodies)
     return plan
+
+
+def _offered_classes(claims: Sequence[UnresolvedRefRecord]) -> dict[Key, tuple[str, int]]:
+    """Each application subclass a module offers, by (its file, its name): kind and depth."""
+    offered: dict[Key, tuple[str, int]] = {}
+    for claim in claims:
+        meta = _meta(claim)
+        depth = meta.get("depth", "")
+        if depth.isdigit():
+            offered[(claim.file_id, claim.target_key)] = (meta.get("kind", ""), int(depth))
+    return offered
 
 
 def _key(imports: _Imports, origin: FileRow, module: str | None, name: str) -> Key | None:
@@ -578,6 +636,56 @@ def _constant_value(
             return None
         text += found
     return text if _path_like(text) else None
+
+
+def _class_route(
+    claim: UnresolvedRefRecord,
+    imports: _Imports,
+    offered: Mapping[Key, tuple[str, int]],
+    constants: Mapping[int, Mapping[str, str]],
+    composed: Mapping[int, Mapping[str, list[list[str]]]],
+    by_id: Mapping[int, FileRow],
+) -> tuple[str, list[str], dict[str, tuple[bool, frozenset[int]]]]:
+    """A route on an application built from a class another module defines.
+
+    Served at the application's root, by the module that builds it, when the module the
+    class comes from resolves to one indexed file that offers it as an application subclass
+    and the classes above the framework's, there and here, are at most :data:`_MAX_CLASS_DEPTH`.
+    Anything else leaves the route unserved, with the reason a diagnostic only.
+    """
+    meta = _meta(claim)
+    origin = by_id.get(claim.file_id)
+    if origin is None:
+        return MODULE_UNRESOLVED, [], {}
+    target = imports.resolve(origin, meta.get("module", ""))
+    if target is None:
+        return MODULE_UNRESOLVED, [], {}
+    found = offered.get((target.file_id, meta.get("class", "")))
+    if found is None:
+        return CLASS_NOT_OFFERED, [], {}
+    kind, depth = found
+    if kind not in _APPLICATIONS:
+        return CLASS_NOT_AN_APPLICATION, [], {}
+    here = meta.get("depth", "")
+    if not here.isdigit() or depth + int(here) > _MAX_CLASS_DEPTH:
+        return CLASS_TOO_DEEP, [], {}
+    if meta.get("family", "") not in {"either", _FAMILY.get(kind)}:
+        return WRONG_KIND, [], {}
+    path = ""
+    for part in json.loads(meta.get("path", "[]")):
+        if part[0] == "t":
+            path += part[1]
+            continue
+        value = _constant_value(imports, constants, composed, origin, part[1], part[2])
+        if value is None:
+            return CONSTANT_UNRESOLVED, [], {}
+        path += value
+    route = http.route_path(path) if path else None
+    body = http.route_body(meta.get("method", ""), route) if route is not None else ""
+    if not body or http.canonical_route(body) is None:
+        return CLASS_NO_ROUTE, [], {}
+    exact = meta.get("provenance") == EXACT
+    return PROMOTED, [body], {body: (exact, frozenset({claim.file_id}))}
 
 
 def _route(
