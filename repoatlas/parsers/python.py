@@ -455,7 +455,17 @@ class PythonParser:
     #    it: a literal route on a FastAPI application is a `served_here` claim, an application
     #    `mount` carries `mount_prefix`, and the mounted name may be one assignment away from an
     #    import (repoatlas.parsers.http_python, repoatlas.graph.py_routes).
-    version = f"26+{interpreter_tag()}"
+    # 27: a module-level class whose one base is FastAPI's or Flask's application, router or
+    #    blueprint, directly or through at most three such classes in the same module, constructs a
+    #    receiver of that kind when nothing in the class can change what it registers or serves
+    #    (repoatlas.parsers.http_python).
+    # 28: a module-level class whose one base is FastAPI's or Flask's application is offered as a
+    #    claim; a module that builds an application from a class it imports -- or from a class of
+    #    its own that extends one -- records the routes on it as claims the global pass serves
+    #    when the defining module offers the class (repoatlas.parsers.http_python,
+    #    repoatlas.graph.py_routes).
+    version = f"28+{interpreter_tag()}"
+    version = f"28+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
