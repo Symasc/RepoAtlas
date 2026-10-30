@@ -75,14 +75,14 @@ def resolve_pillar_reads(
             repo_id = repo_ids.get(root.repository)
             if repo_id is None:
                 continue
-            root_claim = next(
-                (
-                    claim
-                    for claim in master_facts
-                    if _matches_master_root(claim, root)
-                ),
-                None,
-            ) if master_file is not None else None
+            root_claim = (
+                next(
+                    (claim for claim in master_facts if _matches_master_root(claim, root)),
+                    None,
+                )
+                if master_file is not None
+                else None
+            )
             if master_file is not None and root_claim is None:
                 continue
             root_evidence = (
@@ -100,11 +100,11 @@ def resolve_pillar_reads(
             roots_by_key[
                 (root.repository, root.path, root.role, root.environment, root.salt_path)
             ] = (
-                    root,
-                    repo_id,
-                    _top_path(root.path),
-                    root_evidence,
-                )
+                root,
+                repo_id,
+                _top_path(root.path),
+                root_evidence,
+            )
         roots = list(roots_by_key.values())
         roots_by_installation.append((installation, roots))
 
@@ -340,9 +340,7 @@ def _sls_files(
     root_prefix = "" if root.path == "." else f"{root.path}/"
     candidates = (f"{root_prefix}{base}.sls", f"{root_prefix}{base}/init.sls")
     return [
-        found
-        for candidate in candidates
-        if (found := index.file(repo_id, candidate)) is not None
+        found for candidate in candidates if (found := index.file(repo_id, candidate)) is not None
     ]
 
 
