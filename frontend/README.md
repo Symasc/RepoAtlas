@@ -1,9 +1,7 @@
 # RepoAtlas explorer
 
-A local web app that draws the repositories RepoAtlas has indexed on this
-machine. It reads the live index through `repoatlas serve` (see
-[docs/local-api.md](../docs/local-api.md)); it never opens the database and
-ships no data of its own.
+A local web app that draws the repositories RepoAtlas has indexed. It reads the live index through
+`repoatlas serve` (see [docs/local-api.md](../docs/local-api.md)) and never opens the database.
 
 ```mermaid
 flowchart LR
@@ -18,241 +16,129 @@ flowchart LR
 repoatlas ui
 ```
 
-That is all. An installed release serves the explorer it ships with, and needs
-nothing else (see [As shipped](#as-shipped-a-static-export)). From a checkout, it
-starts the local API and this app together, opens <http://127.0.0.1:7318> in your
-browser, and stops both on Ctrl-C. The first run installs the packages and makes
-a production build (into `.next-ui/`); later runs rebuild only when a source has
-changed. A checkout needs Node.js 20.19 or later and pnpm 10 (or Node's corepack).
+An installed release serves the explorer it ships with and needs nothing else. From a checkout, this starts the
+local API and the app together, opens <http://127.0.0.1:7318>, and stops both on Ctrl-C. The first run installs
+packages and builds into `.next-ui/`; later runs rebuild only when a source has changed. A checkout needs Node.js
+20.19 or later and pnpm 10 (or Node's corepack).
 
 | Option | Effect |
 |---|---|
-| `--port 7320` | serve the explorer on another port |
+| `--port 7320` | serve on another port |
 | `--no-open` | do not open a browser |
-| `--dev` | run `next dev` instead, with hot reload: for working on the explorer |
+| `--dev` | run `next dev` with hot reload, for working on the explorer |
 | `--rebuild` | rebuild even if the build looks current |
 | `--prepare` | install and build, then exit (what `install.sh` runs) |
-| `--frontend DIR` | run the explorer from another directory, or serve an export (`out/`) |
+| `--frontend DIR` | run from another directory, or serve an export (`out/`) |
 
 How the launcher works is in [docs/local-api.md](../docs/local-api.md#the-usual-way-repoatlas-ui).
 
+### By hand, in two terminals
+
+1. Start the local API. It prints where it wrote its connection file: `repoatlas serve`
+2. In `frontend/`, point the explorer at that file and start it:
+
+   ```sh
+   pnpm install
+   REPOATLAS_API_CONNECTION_FILE=~/.local/share/repoatlas/api.json pnpm dev
+   ```
+
+   You can also put `REPOATLAS_API_CONNECTION_FILE=...` in `frontend/.env.local`.
+
+3. Open <http://localhost:7318>.
+
+The connection file is read on every request, so restarting `repoatlas serve` needs no restart here. If the API is
+not running, the explorer says so and shows the command to start it.
+
 ### As shipped: a static export
 
-A released RepoAtlas does not run this app's server. The release build exports
-the app as plain files and puts them in the Python package:
+A released RepoAtlas does not run this app's server. The release build exports the app as plain files, which go into
+the Python package:
 
 ```sh
 pnpm build:static        # RA_EXPORT=1 next build: writes out/
 ```
 
-The export leaves out the one server route, `app/api/ra/[...path]/route.ts`
-(`pageExtensions` keeps `.tsx` only). The local API sends the files and answers
-`/api/ra/<name>` itself, with this route's checks (`lib/server/proxy.ts`), so
-the browser code is the same in both. To try an export from a checkout:
-`repoatlas ui --frontend frontend/out`. Keep anything that needs a server out of
-the pages: an export has no server, and `pnpm build:static` fails on a page
-that would need one.
-
-### By hand, in two terminals
-
-1. Start the local API. It prints where it wrote its connection file:
-
-   ```sh
-   repoatlas serve
-   ```
-
-2. Point the explorer at that file and start it:
-
-   ```sh
-   cd frontend
-   pnpm install
-   REPOATLAS_API_CONNECTION_FILE=~/.local/share/repoatlas/api.json pnpm dev
-   ```
-
-   Or put `REPOATLAS_API_CONNECTION_FILE=...` in `frontend/.env.local`.
-
-3. Open <http://localhost:7318>.
-
-The connection file is read on every request, so restarting `repoatlas serve`
-needs no restart here. If the API is not running, the explorer says so and
-shows the command to start it.
+The export leaves out the one server route, `app/api/ra/[...path]/route.ts`. The local API serves the files and
+answers `/api/ra/<name>` itself, with the same checks, so the browser code is identical in both. To try an export
+from a checkout: `repoatlas ui --frontend frontend/out`. Keep anything that needs a server out of the pages, or
+`pnpm build:static` fails.
 
 ## What it shows
 
-The explorer is built to be read, not to show every edge at once. It shows the
-summary first and the detail when you ask for it.
+The explorer shows the summary first and the detail when you ask for it.
 
-- **All repositories.** A constellation. The selected repository, or else the
-  one with the most partners, sits at the centre. Its partners ring it, and
-  theirs ring them. Repositories linked only among themselves form their own
-  small constellations beside it. Repositories with no links sit in their own
-  group. When nothing links at all, the repositories ring the workspace hub,
-  which says so.
-- **A repository, opened.** The directory you are in is a frame around its
-  cards: one per directory, listing what is in it, and one for its files.
-  Each card counts its links per family instead of drawing them. At rest, only
-  the level's totals are drawn: lanes from the frame to other repositories and
-  elsewhere in this one (left), and to modules, packages, environment
-  variables, commands and endpoints shared across the index (right).
-- **A file.** It opens on its code, highlighted, with line numbers. Every name
-  the file declares or refers to can be pressed: the first press selects it,
-  and a second press, or **Trace**, follows it. **Links** switches to the
-  file's neighbourhood: what links to it on the left, what it links to on the
-  right, the strongest few on each side and "+N more" for the rest.
-- **A trace.** What a change to one name, file or directory reaches, and by
-  which indexed steps. It opens close on the thing that changes, then pulls
-  back over the whole chain: each column one step further, each card a file the
-  chain lands in, framed by repository when the chain leaves the one it
-  started in. Choosing a row reads that step's lines.
+- **All repositories:** the selected repository, or the one with the most partners, sits at the centre, with its
+  partners around it.
+- **A repository:** the directory you are in, as cards: one per directory, plus its files. Each card counts its links
+  per family rather than drawing them.
+- **A file:** opens on its highlighted code. Press a name to select it; press again, or **Trace**, to follow it.
+  **Links** shows what links to the file on the left and what it links to on the right.
+- **A trace:** what a change to one name, file or directory reaches, and by which indexed steps. Choosing a row reads
+  that step's lines.
 
-```mermaid
-flowchart LR
-    overview["All repositories"] -->|"open a repository"| repo["A repository<br/>(directories)"]
-    repo -->|"open a directory"| repo
-    repo -->|"open a file"| file["A file<br/>Code or Links"]
-    file -->|"Trace a name"| trace["A trace"]
-    repo -->|"Trace a directory"| trace
-    trace -->|"open a step's file"| file
-```
+**Search** (Ctrl+K, ⌘K or `/`) finds repositories and files from two letters. With **Include variables** on, it also
+finds declared names and environment variables.
 
-**Search** (Ctrl+K or ⌘K, or `/`) finds repositories and files from two
-letters; Enter takes the first result. With **Include variables** on, it also
-finds the names code declares: functions, classes, methods, variables and the
-environment variables code reads. The switch is remembered, and off at first.
+### Reading the lines
 
-Lines are drawn as a transit map draws them: straight runs joined by 45°
-bends, in bold saturated colours, at full strength. A line's pattern is its
-family and its colour is its relationship. Families are never merged into one
-line, and a code link is drawn as one line per relationship it carries, side by
-side, keeping one gap through every bend:
+A line's pattern is its family and its colour is its relationship. Families are never merged.
 
 | Family | Relationship | Line |
 |---|---|---|
-| code | imports (imports, exports, requires, includes, sources) | solid, blue |
-| code | calls (calls, executes) | solid, green |
-| code | uses (uses, references) | solid, violet |
+| code | imports | solid, blue |
+| code | calls | solid, green |
+| code | uses | solid, violet |
 | code | other (defines, contains…) | solid, grey |
 | HTTP | serves or calls a route or endpoint | dashed, teal |
 | package dependency | depends on | double, magenta |
 | configuration and environment variables | reads, configures | dotted, amber |
-| the connection being explained | any | thick, in the accent (vermilion) |
+| the connection being explained | any | thick, vermilion |
 
-A dot marks where a line leaves and an arrowhead where it arrives. It has one
-of three weights by its count (a few, hundreds, thousands), a band of canvas
-beneath it so crossings stay legible. At rest it runs under the cards; when it
-is lit or selected it comes in front of them. One line of each link carries the link's total, on a tag filled in its
-colour. The legend lists what the
-level draws. Where code is summed (a card's tally, a family's heading in the
-inspector) its mark shows blue, green and violet together. Each connection in
-the inspector lists its relationships with their colours.
+A dot marks where a line leaves and an arrowhead where it arrives. One line of each link carries the link's total.
+The legend lists what each level draws, and the status bar's ⓘ button names the marks.
 
-Everything a line joins is one quiet card, as a transit map draws one station
-for every stop: a solid fill a step lighter than the canvas, with a clear
-outline. Kinds are told apart by their icon and title, not by fill; a shared
-thing's icon is drawn in the colour of the line that reaches it (modules blue,
-commands green, packages magenta, configuration and environment variables
-amber, HTTP teal). An opened directory is a district: a plain region a half
-step above the canvas, its name set large like a place on a map. Each
-repository has its own colour, shown as a solid square beside its name wherever
-it appears. A faint grid squares the canvas and moves with it.
+### HTTP
 
-Each view has a toolbar above the canvas, saying where you are and what the
-level holds. Below the canvas, a status bar holds the zoom and the key to the
-lines; its ⓘ button names the marks.
+HTTP has three kinds of shared node: **HTTP routes** (a method and path some code serves or calls), **HTTP
+endpoints** (a route at a known address), and **Deployments** (addresses an API is published at, such as an OpenAPI
+document's `servers`). The inspector's **Symbols** tab lists them.
 
-The chrome is deliberately plain, so the colour on the canvas carries meaning.
-It uses IBM Plex Sans and Plex Mono, served from the app itself, and warm
-neutrals in both themes. The type steps are wide on purpose (11, 12, 13, 15 and
-18 px, with 16, 20 and 28 for headings): where you are, a card's title and the
-inspector's title are plainly headings, not body text. The accent marks only what is selected, focused or
-pressed next, and there are three corner radii (2, 4 and 6 px). The colour
-tokens are in `lib/theme/tokens.ts`; every text tone keeps 4.5:1 contrast on
-the backgrounds it sits on.
+A line between two repositories means a proven relationship. For HTTP, that is a handler link: every hop from a
+request to one handler was proven from the source. A request the join refused is never drawn; it is listed under
+**Requests**, with its exact status (such as `http-route-unmatched` or `http-base-unknown`). Requests the join only
+reads are hidden until **Show join-only requests** is on.
 
-HTTP has three kinds of shared node, each in its own group: **HTTP routes**
-(a method and path some code serves or calls), **HTTP endpoints** (a route at a
-known address) and **Deployments**, drawn with a cloud: the addresses an API is
-published at, such as an OpenAPI document's `servers`. In a file's code, the URL
-that declares a deployment is marked, so it can be selected and traced like a
-name, and the inspector's **Symbols** tab lists routes, endpoints and
-deployments in sections of their own.
+A decision's chain reads as seven hops: caller, origin, service identity, deployment binding, source binding, route,
+handler. Each hop shows its state (`proven`, `unresolved`, `ambiguous`, `not_reached`) and, when it is not proven, the
+reason.
 
-### HTTP decisions
-
-A line between two repositories means a proven relationship. For HTTP that is a
-handler link: the workspace join proved, from the source, every hop from a
-request to one handler. A request the join refused is never drawn; it is
-listed.
-
-- **Requests** (on a repository, a directory, or a file) lists the requests made
-  there, each with the join's stored decisions under their exact statuses
-  (`linked`, `http-route-unmatched`, `http-service-unmatched`,
-  `http-base-unknown`, `http-deployment-binding-unresolved`,
-  `http-deployment-source-unresolved`, …), never one generic failure. The
-  header counts every decision in scope. Requests only the join reads (an
-  absolute or deployment-addressed URL, or a host the source does not state,
-  status `join_only`) are counted but not listed until **Show join-only
-  requests** asks for them.
-- **A decision's chain** reads as a stepper of its seven hops: caller, origin,
-  service identity, deployment binding, source binding, route, handler. Each hop
-  shows its state as the API wrote it (`proven`, `unresolved`, `ambiguous`,
-  `not_reached`) and, when it is not proven, its reason. Emphasis stops at the
-  first hop that is not proven, and the hops never reached are subdued and cite
-  nothing. A proven or unresolved hop opens out to its places, each of which
-  opens that file at its line.
-- **Evidence** reads one decision whole: chosen from a request, or shown for a
-  handler link's own decision, found by the `decision_ref` the link records.
-  Only then is it read in global scope, with every repository's part of the
-  chain and the lines of each proven hop. Listing reads one repository, with
-  other repositories' places shown and no evidence recorded.
-
-### Pointing, selecting, opening
+### Navigating
 
 | Action | Result |
 |---|---|
-| Point at a node (or focus it) | Previews its links; everything else fades. |
-| First press | Selects it: its links stay lit with counts, and the inspector opens. |
-| Second press, "Open", or Enter on the selected node | Goes in, zooming into it. |
-| Location trail, or Back | Climbs out, zooming out onto where you came from. That node arrives selected. |
+| Point at a node | Previews its links; everything else fades. |
+| First press | Selects it and opens the inspector. |
+| Second press, "Open", or Enter | Goes in, zooming into it. |
+| Location trail, or Back | Climbs out to where you came from. |
 | Escape, or a press on empty canvas | Clears the selection. |
 
-The inspector, docked beside the canvas (below it on a narrow window), holds
-the detail:
+The inspector holds the detail: **Connections**, **Contents** or **Files**, **Code**, **Details** (size, language,
+declarations), and **Evidence** for a chosen connection. Where you are is in the URL
+(`?repo=<slug>&path=<dir or file>&trace=<seed>&sel=<node>`), so a view can be shared.
 
-- **Connections:** every link, by direction and family, strongest first.
-- **Contents** or **Files:** what a directory holds.
-- **Code:** a file's indexed source, with line numbers.
-- **Details:** the facts the index has: size and lines from `inspect`, language,
-  declarations.
-- **Evidence:** for a chosen connection, the exact stored relationships behind
-  it (`topology/edge`) and the lines that assert them. Evidence and source for
-  one inspected thing share one investigation.
-
-Where you are is in the URL
-(`?repo=<slug>&path=<dir or file>&trace=<seed>&sel=<node>`), so a view can be
-shared. Selecting replaces the history entry and going somewhere adds one, so
-Back climbs out. Every step of the path a level shows is a button that climbs
-straight to it.
-
-Motion is limited to viewport transforms and opacity, from about 250ms to
-560ms, with no animated backgrounds. The header's **Turn animations off**
-switch stops it; until you choose, your system's reduced-motion setting
-decides, and once you have chosen, your choice wins. The theme follows your
-system, light or dark, until you switch it with the header's theme button.
+Motion is limited to transforms and opacity. The header's **Turn animations off** switch stops it; until you choose,
+your system's reduced-motion setting decides. The theme follows your system until you change it with the header's
+theme button.
 
 ## The `/api/ra` route
 
-The browser only ever talks to its own origin. The route adds the API's bearer
-token on the server, which makes it the one thing that must refuse other
-callers: it answers only a loopback `Host` (a DNS-rebinding page arrives with
-its own name), no cross-site request, JSON bodies up to 1 MiB, and only the
-endpoints the contract lists (`sync` and `verify_grounding` are not among
-them). It forwards only to a loopback `http://host:port` named by the
-connection file. The token and the file's path never reach the browser.
+The browser only talks to its own origin. The route adds the API's bearer token on the server, so it must refuse
+other callers: it answers only a loopback `Host`, rejects cross-site requests, caps JSON bodies at 1 MiB, and forwards
+only the endpoints the contract lists (`sync` and `verify_grounding` are not among them). It forwards only to the
+loopback address in the connection file. The token and the file's path never reach the browser.
 
-An exported build has no route: the local API answers `/api/ra/<name>` itself,
-with these checks and these refusals (`repoatlas/api/server.py`,
-[docs/local-api.md](../docs/local-api.md#an-installed-release-one-server)).
+An exported build has no route; the local API applies the same checks itself
+(`repoatlas/api/server.py`, [docs/local-api.md](../docs/local-api.md#an-installed-release-one-server)).
 
 ## Checks
 
@@ -260,23 +146,19 @@ with these checks and these refusals (`repoatlas/api/server.py`,
 |---|---|
 | `pnpm dto:check` | `lib/api/generated.ts` matches `python -m repoatlas.api.schema` |
 | `pnpm typecheck` | strict TypeScript |
-| `pnpm lint` | ESLint (Next's rules), no warnings allowed |
+| `pnpm lint` | ESLint, no warnings allowed |
 | `pnpm test` | unit tests: the route's refusals, the connection file, the models |
 | `pnpm e2e` | Playwright against a production build and a real `repoatlas serve` |
 | `pnpm check` | the first four together |
 
-`pnpm dto` regenerates the types after the contract changes. It runs the
-repository's `.venv/bin/python`, or `REPOATLAS_PYTHON`.
+`pnpm dto` regenerates the types after the contract changes. It runs the repository's `.venv/bin/python`, or
+`REPOATLAS_PYTHON`.
 
-`pnpm e2e` runs two pipelines from one production build, each with its own
-`repoatlas serve`:
+`pnpm e2e` runs two pipelines from one production build, each with its own `repoatlas serve`:
 
-- `live` (ports 7337/7338): the index your environment configures. In CI, set
-  `REPOATLAS_CONFIG` and `REPOATLAS_DB` to a scratch workspace first.
-- `linked` (ports 7347/7348): the linked test corpus, built fresh by
-  `python -m tests.topology_corpus` into the system temp directory, never into
-  the checkout (RepoAtlas would discover its repositories on the next sync).
-  Its repositories link to each other, so the lines between repositories are
-  tested even when a live index has none.
+- `live` (ports 7337/7338): the index your environment configures. In CI, set `REPOATLAS_CONFIG` and `REPOATLAS_DB`
+  to a scratch workspace first.
+- `linked` (ports 7347/7348): the test corpus built by `python -m tests.topology_corpus` into the system temp
+  directory, never the checkout. Its repositories link to each other, so the lines between them are always tested.
 
 It needs Playwright's Chromium (`pnpm exec playwright install chromium`).
