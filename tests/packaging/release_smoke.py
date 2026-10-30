@@ -23,10 +23,12 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 from importlib import metadata, resources
 from pathlib import Path
+from typing import Any
 
 import repoatlas
 from repoatlas import DISTRIBUTION
@@ -107,28 +109,24 @@ def main(expected: str) -> None:
         located = repoatlas_cli("locate", "greet", cwd=repository)
         assert "app.py" in located, located
 
-        handshake = (
-            "\n".join(
-                json.dumps(message)
-                for message in (
-                    {
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "initialize",
-                        "params": {
-                            "protocolVersion": "2025-06-18",
-                            "capabilities": {},
-                            "clientInfo": {"name": "release-smoke", "version": "0"},
-                        },
+        replies = mcp_replies(
+            env,
+            cwd=root,
+            messages=[
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": {"name": "release-smoke", "version": "0"},
                     },
-                    {"jsonrpc": "2.0", "method": "notifications/initialized"},
-                    {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
-                )
-            )
-            + "\n"
+                },
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            ],
         )
-        answered = repoatlas_cli("mcp", cwd=root, stdin=handshake)
-        replies = {reply.get("id"): reply for reply in map(json.loads, answered.splitlines())}
         server = replies[1]["result"]["serverInfo"]
         assert server["version"] == expected, server
         tools = replies[2]["result"]["tools"]
@@ -141,6 +139,64 @@ def main(expected: str) -> None:
         f"init and locate, MCP {server['name']} with {len(tools)} tools, "
         f"explorer served with {asset} and its API door"
     )
+
+
+def mcp_replies(
+    env: dict[str, str], *, cwd: Path, messages: list[dict[str, object]]
+) -> dict[object, dict[str, Any]]:
+    """Speak to `repoatlas mcp` the way an MCP client does.
+
+    Every request is written, stdin stays open until each one has its reply, and only
+    then is stdin closed: that is the stdio shutdown. Closing stdin with a request still
+    in flight ends the session, the SDK cancels the handler, and the reply is dropped
+    with exit 0 -- correct for the server, a race for a driver (see raw_exchange in
+    tests/transport/conftest.py).
+    """
+    awaiting: set[object] = {message["id"] for message in messages if "id" in message}
+    replies: dict[object, dict[str, Any]] = {}
+    log = cwd / "mcp.stderr"
+    # stderr goes to a file, so a chatty server never blocks on a full pipe
+    with log.open("w", encoding="utf-8") as stderr:
+        server = subprocess.Popen(
+            [sys.executable, "-m", "repoatlas.cli.main", "mcp"],
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=stderr,
+            text=True,
+            encoding="utf-8",
+        )
+        # a hang becomes EOF, then a failed assertion
+        watchdog = threading.Timer(600, server.kill)
+        watchdog.start()
+        try:
+            assert server.stdin is not None and server.stdout is not None
+            server.stdin.write("".join(json.dumps(message) + "\n" for message in messages))
+            server.stdin.flush()
+            while awaiting:
+                line = server.stdout.readline()
+                if not line:
+                    break
+                reply = json.loads(line)
+                replies[reply.get("id")] = reply
+                awaiting.discard(reply.get("id"))
+            server.stdin.close()  # the client's shutdown: end of input, then wait for exit
+            rest = server.stdout.read()
+            code = server.wait(timeout=60)
+        finally:
+            watchdog.cancel()
+            if server.poll() is None:
+                server.kill()
+                server.wait()
+    errors = log.read_text(encoding="utf-8")
+    assert not awaiting, f"repoatlas mcp never answered {sorted(map(str, awaiting))}: {errors}"
+    assert code == 0, f"repoatlas mcp exited {code}: {errors}"
+    for line in rest.splitlines():
+        if line.strip():
+            reply = json.loads(line)
+            replies.setdefault(reply.get("id"), reply)
+    return replies
 
 
 def explorer_answers(env: dict[str, str], *, cwd: Path) -> str:
