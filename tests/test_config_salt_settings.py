@@ -66,7 +66,6 @@ def test_salt_file_mapping_paths_must_stay_repository_relative(path: str) -> Non
         )
 
 
-
 def test_salt_master_roots_must_be_static_absolute_paths() -> None:
     with pytest.raises(ValidationError):
         Settings.model_validate(

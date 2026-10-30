@@ -40,11 +40,7 @@ REPOSITORIES = {
     },
     "provider": {
         "pillar/top.sls": (
-            "prod:\n"
-            "  web01:\n"
-            "    - service.common\n"
-            "  web02:\n"
-            "    - service.other\n"
+            "prod:\n  web01:\n    - service.common\n  web02:\n    - service.other\n"
         ),
         "pillar/service/common.sls": "service:\n  host: prod-provider\n",
         "pillar/service/other.sls": "service:\n  host: other-minion\n",
@@ -206,9 +202,7 @@ def test_cross_repository_pillar_mapping_creates_provider_to_consumer_edge(
         )
     )
     [link] = [
-        item
-        for item in overview.links
-        if item.source == "provider" and item.target == "consumer"
+        item for item in overview.links if item.source == "provider" and item.target == "consumer"
     ]
     assert link.kind is LinkKind.OBSERVED
     assert [(str(edge.type), edge.count) for edge in link.types] == [("GENERATES", 1)]
@@ -232,8 +226,7 @@ def test_unresolved_pillar_read_does_not_create_a_cross_repository_edge(
     reads = [
         edge
         for edge in _edges(indexed, "READS")
-        if edge["source_repo"] == "consumer"
-        and edge["target_name"] == "pillar:missing:value"
+        if edge["source_repo"] == "consumer" and edge["target_name"] == "pillar:missing:value"
     ]
     assert len(reads) == 1
     assert reads[0]["target_repo"] is None
@@ -278,8 +271,7 @@ def test_indexed_master_roots_inside_managed_repositories_need_no_root_overrides
                 "consumer": {
                     "states/top.sls": "prod:\n  web01:\n    - consumer\n",
                     "states/consumer.sls": (
-                        "consume:\n  cmd.run:\n"
-                        "    - name: {{ pillar['service']['host'] }}\n"
+                        "consume:\n  cmd.run:\n    - name: {{ pillar['service']['host'] }}\n"
                     ),
                 },
                 "provider": {

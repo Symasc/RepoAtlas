@@ -170,9 +170,7 @@ class _Walker:
             kind = current.type
 
             if kind in USE_NODES and self._uses is not None:
-                site = self._uses.sites.get(
-                    (current.start_byte, current.end_byte, kind)
-                )
+                site = self._uses.sites.get((current.start_byte, current.end_byte, kind))
                 if site is not None:
                     self._use(site)
             if kind == "import_statement":

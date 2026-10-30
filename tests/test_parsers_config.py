@@ -174,8 +174,7 @@ def test_salt_top_file_records_environment_target_and_sls_mapping() -> None:
 def test_salt_master_records_state_and_pillar_roots_by_environment() -> None:
     parsed = SaltMasterParser().parse(
         Path("master"),
-        "file_roots:\n  prod:\n    - /srv/salt\n"
-        "pillar_roots:\n  prod:\n    - /srv/pillar\n",
+        "file_roots:\n  prod:\n    - /srv/salt\npillar_roots:\n  prod:\n    - /srv/pillar\n",
     )
 
     roots = [reference for reference in parsed.references if reference.meta.get("salt_fact")]
