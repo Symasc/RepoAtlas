@@ -81,9 +81,11 @@ def test_parser_failure_logs_repository_and_file(
         raise RecursionError("maximum recursion depth exceeded")
 
     monkeypatch.setattr(TypeScriptParser, "parse", fail_parse)
-    with caplog.at_level(logging.ERROR, logger="repoatlas.sync.engine"):
-        with pytest.raises(RecursionError):
-            _sync_one(initialized, workspace_root, "python-service")
+    with (
+        caplog.at_level(logging.ERROR, logger="repoatlas.sync.engine"),
+        pytest.raises(RecursionError),
+    ):
+        _sync_one(initialized, workspace_root, "python-service")
 
     assert "python-service" in caplog.text
     assert rel_path in caplog.text
