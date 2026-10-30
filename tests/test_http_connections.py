@@ -475,7 +475,9 @@ def test_an_update_that_names_a_worklist_group_is_checked_like_a_declaration(
                 provenance=DeclarationProvenance(via="ui", request_group=group.key),
             )
         )
-    assert built.deployment_links.get(link_id).url == SHOP_URL
+    stored = built.deployment_links.get(link_id)
+    assert stored is not None
+    assert stored.url == SHOP_URL
     assert [row[0] for row in audit_rows(built)] == ["create"]
 
 

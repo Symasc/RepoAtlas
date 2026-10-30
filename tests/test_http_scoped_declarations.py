@@ -1992,7 +1992,7 @@ def test_a_scoped_preview_request_names_its_caller_once_and_never_the_base_text(
             PreviewScope(caller="web", path="a.py", base_key=refused)
     with_text: dict[str, Any] = {"caller": "web", "path": "a.py", "base_key": base_key("BASE")}
     with pytest.raises(ValidationError):
-        PreviewScope(**with_text, base_text="BASE")
+        PreviewScope.model_validate({**with_text, "base_text": "BASE"})
     plain = HttpConnectionPreviewRequest(**asked, callers=("a", "b"), base_path="/v1")
     assert plain.scope is None and plain.callers == ("a", "b") and plain.base_path == "/v1"
 

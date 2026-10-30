@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from repoatlas.graph.http_scopes import (
     FileScope,
     ScopeDeclaration,
@@ -30,8 +32,10 @@ def _declaration(text: str, symbol: str | None = None) -> ScopeDeclaration:
     return ScopeDeclaration(CALLER, PATH, base_key(text), symbol)
 
 
-def _request(text: str, qualified_name: str = "", src_id: int = 9, **meta: object) -> ScopeRequest:
-    return ScopeRequest(CALLER, PATH, "{" + text + "}/items", qualified_name, src_id, meta)
+def _request(
+    text: str, qualified_name: str = "", src_id: int = 9, meta: Mapping[str, object] | None = None
+) -> ScopeRequest:
+    return ScopeRequest(CALLER, PATH, "{" + text + "}/items", qualified_name, src_id, meta or {})
 
 
 def test_symbol_prefix_needs_a_dot_boundary():
@@ -123,7 +127,7 @@ def test_an_injected_request_is_never_covered():
     injected = {"injected_at": "src/app.ts:3"}
     assert scope_refusal("{BASE}/x", injected) == "injected-transport"
     for symbol in (None, "f"):
-        request = _request("BASE", "f", **injected)
+        request = _request("BASE", "f", meta=injected)
         assert covers(_declaration("BASE", symbol), request, scope) == "injected-root-unselected"
     # The same request without the injection root is covered, so the refusal is its own.
     assert covers(_declaration("BASE", "f"), _request("BASE", "f"), scope) == "covered"
