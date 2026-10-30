@@ -11,12 +11,11 @@ service that contradicts one already classified. Neutral, invented origins only.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Literal
 
 import pytest
-from click.testing import Result
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from repoatlas.capabilities.service import CapabilityService
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
@@ -36,6 +35,7 @@ from repoatlas.models.service_declarations import (
 from repoatlas.services.workspace import Workspace
 from tests.impact_corpus import build
 from tests.service_declarations_corpus import repos
+from typer.testing import Result
 
 AUTH = "https://auth.example.test"
 LOGIN = "https://login.example.test"
@@ -107,7 +107,7 @@ def audit_rows(workspace: Workspace) -> tuple[int, int]:
 
 
 def document(
-    links: list[dict[str, object]], declarations: list[dict[str, object]]
+    links: Sequence[Mapping[str, object]], declarations: Sequence[Mapping[str, object]]
 ) -> dict[str, object]:
     return {
         "format": "repoatlas/deployment-links/v1",
