@@ -1,6 +1,6 @@
 # RepoAtlas
 
-[![PyPI](https://img.shields.io/pypi/v/symasc-repoatlas)](https://pypi.org/project/symasc-repoatlas/)
+[![PyPI](https://img.shields.io/pypi/v/symasc-repoatlas?label=pypi)](https://pypi.org/project/symasc-repoatlas/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
 [![Tests](https://github.com/Symasc/RepoAtlas/actions/workflows/coverage.yml/badge.svg?branch=master)](https://github.com/Symasc/RepoAtlas/actions/workflows/coverage.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/Symasc/RepoAtlas/blob/master/LICENSE)
