@@ -14,8 +14,8 @@ A release is a version tag. Pushing `v0.1.0` runs [`.github/workflows/release.ym
    `init`, `locate`, an MCP handshake, and `repoatlas ui` serving the explorer and answering its pages while
    refusing a cross-site call.
 3. **publish**: uploads both files to PyPI with attestations, by Trusted Publishing. No token is stored anywhere.
-4. **release**: creates the GitHub release for the tag, with the files attached and generated notes. Tags such as
-   `v0.2.0rc1` are marked as pre-releases.
+
+The workflow creates no GitHub release; make one by hand from the tag if you want it.
 
 If any step fails, nothing after it runs: a tag whose tests fail publishes nothing.
 
