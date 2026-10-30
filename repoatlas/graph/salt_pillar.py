@@ -8,6 +8,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Literal, cast
 
 from repoatlas.config.settings import SaltInstallationSettings, SaltRootSettings, SaltSettings
 from repoatlas.graph.resolution import ResolutionIndex
@@ -47,6 +48,7 @@ def resolve_pillar_reads(
     ] = []
     for installation in settings.installations:
         master_file = _master_file(installation, repo_ids, index)
+        master_facts: list[UnresolvedRefRecord] = []
         if master_file is None:
             configured = installation.roots
         else:
@@ -85,7 +87,7 @@ def resolve_pillar_reads(
             )
             if master_file is not None and root_claim is None:
                 continue
-            root_evidence = (
+            root_evidence: dict[str, object] = (
                 _master_root_evidence(root_claim, master_file)
                 if root_claim is not None and master_file is not None
                 else {
@@ -265,7 +267,7 @@ def _roots_under_managed_paths(
             root = SaltRootSettings(
                 repository=repository,
                 path=relative,
-                role=role,
+                role=cast(Literal["state", "pillar"], role),
                 environment=environment,
                 salt_path=salt_path,
             )
