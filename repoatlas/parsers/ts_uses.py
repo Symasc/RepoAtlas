@@ -79,6 +79,7 @@ def member_meta(listed: list[list[object]]) -> dict[str, str]:
         meta[FIELDS_OMITTED] = str(len(listed) - MAX_FIELD_MEMBERS)
     return meta
 
+
 #: Node kinds a use can be read from.
 USE_NODES = frozenset({"identifier", "type_identifier", "shorthand_property_identifier"})
 
@@ -476,9 +477,7 @@ class UseAnalysis:
             if kind in _SKIP:
                 continue
             if kind in USE_NODES:
-                self._use(
-                    current, current, current_field, current_parent, typeof=current_typeof
-                )
+                self._use(current, current, current_field, current_parent, typeof=current_typeof)
                 continue
             if kind == "nested_identifier":
                 # `A.B`: one use of A reaching member B, read in the nested name's own context.
@@ -490,8 +489,12 @@ class UseAnalysis:
                 if parts and parts[0].type == "identifier":
                     member = self._text(parts[1]) if len(parts) > 1 else None
                     self._use(
-                        parts[0], current, current_field, current_parent,
-                        typeof=current_typeof, member=member,
+                        parts[0],
+                        current,
+                        current_field,
+                        current_parent,
+                        typeof=current_typeof,
+                        member=member,
                     )
                 continue
 
@@ -519,9 +522,7 @@ class UseAnalysis:
                 pending.append((current, current_field, current_parent, inner, bound))
             for index in range(len(current.children) - 1, -1, -1):
                 child = current.children[index]
-                pending.append(
-                    (child, current.field_name_for_child(index), current, inner, None)
-                )
+                pending.append((child, current.field_name_for_child(index), current, inner, None))
 
     def _use(
         self,
@@ -1151,10 +1152,7 @@ def _rebinds(source: bytes, scope: Node, parameter: Node, name: str) -> bool:
             and parent.child_by_field_name("name") == node
         ):
             return True
-        if (
-            above in _ASSIGNING
-            and parent.child_by_field_name("left") == node
-        ):
+        if above in _ASSIGNING and parent.child_by_field_name("left") == node:
             return True
         if above == "arrow_function" and parent.child_by_field_name("parameter") == node:
             return True
