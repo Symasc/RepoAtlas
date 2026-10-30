@@ -41,8 +41,8 @@ Why sync and verify_grounding are not served
 --------------------------------------------
 A page has no business starting a sync. Verification checks an agent's answer
 against its investigation, and no answer is written here. Both stay agent tools.
-The writes served are ``deployment_links/*`` and ``service_declarations/*``: the user's own notes of where a
-repository is deployed, kept apart from the index, which no sync replaces and
+The writes served are ``deployment_links/*`` and ``service_declarations/*``: the user's own
+notes of where a repository is deployed, kept apart from the index, which no sync replaces and
 no read of the index depends on.
 """
 

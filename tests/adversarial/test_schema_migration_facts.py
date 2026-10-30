@@ -6,9 +6,9 @@ and reparsed on the next sync. The probe migration (:mod:`tests.adversarial.migr
 exactly that kind: a column on ``repositories``, an index, a data-only tail.
 
 Two things are pinned here, and the second is what makes the first safe. After the upgrade a sync
-changes no file and ``status`` reports nothing stale. And the facts that sync leaves in place are the
-facts a fresh reindex of the same tree writes: not reparsing is only correct if what was kept is
-what reparsing would have produced.
+changes no file and ``status`` reports nothing stale. And the facts that sync leaves in place are
+the facts a fresh reindex of the same tree writes: not reparsing is only correct if what was kept
+is what reparsing would have produced.
 """
 
 from __future__ import annotations
