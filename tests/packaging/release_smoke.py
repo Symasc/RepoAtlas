@@ -32,7 +32,7 @@ import repoatlas
 from repoatlas import DISTRIBUTION
 
 SKILLS = 5
-TOOLS = 10
+TOOLS = 11
 
 
 def main(expected: str) -> None:
