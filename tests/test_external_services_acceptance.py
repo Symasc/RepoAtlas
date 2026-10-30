@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from click.testing import Result
 from repoatlas.capabilities.service import CapabilityService
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.deployment_targets import (
@@ -56,6 +55,7 @@ from repoatlas.models.service_declarations import (
 from repoatlas.services.workspace import Workspace
 from tests.impact_corpus import build
 from tests.service_declarations_corpus import repos
+from typer.testing import Result
 
 GLOBAL = CapabilityContext(scope=CapabilityScope.GLOBAL)
 AUTH = "https://auth.example.test"

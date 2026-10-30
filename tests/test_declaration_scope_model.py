@@ -80,13 +80,13 @@ def test_a_base_key_has_the_hashed_form_only() -> None:
     ["", "/", "/api", "/api/", "/v1/items", "api", "/a?x=1", "/a#f", "/{x}", "/a b", "/a\tb"],
 )
 def test_a_base_path_is_validated_like_the_preview(value: str) -> None:
-    preview = dict(
-        context=CapabilityContext(scope=CapabilityScope.GLOBAL),
-        group="hcg1-" + "0" * 20,
-        repository="shop",
-    )
     try:
-        expected: str | None = HttpConnectionPreviewRequest(**preview, base_path=value).base_path
+        expected: str | None = HttpConnectionPreviewRequest(
+            context=CapabilityContext(scope=CapabilityScope.GLOBAL),
+            group="hcg1-" + "0" * 20,
+            repository="shop",
+            base_path=value,
+        ).base_path
     except ValidationError:
         expected = None
     if expected is None:
