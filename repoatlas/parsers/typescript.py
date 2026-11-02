@@ -885,7 +885,11 @@ class TypeScriptParser:
     # 20: a model's own fields are symbols (``Model.field``, kind ``field``), and a use of a type
     #    carries the fields read through a parameter it annotates or set in an object literal
     #    it types (DF3b, repoatlas.parsers.ts_uses).
-    version = "20"
+    # 21: how an oas3-tools application's specification is read (its parts, an imported path,
+    #    a factory's parameter, or why it is refused), the calls of the functions that hold
+    #    one, and the exported paths of documents (M7, repoatlas.parsers.http_oas3 and
+    #    repoatlas.parsers.ts_spec_paths).
+    version = "21"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
