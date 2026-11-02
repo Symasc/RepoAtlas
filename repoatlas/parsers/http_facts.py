@@ -149,6 +149,15 @@ TS_HANDLER_OBJECT = "ts-handler-object"
 #: ``expressAppConfig(spec, { routing: { controllers } })`` from ``oas3-tools``: the
 #: specification it reads, relative to its file, and the objects its controllers are.
 OAS3_APP = "oas3-app"
+#: A call of a function that builds an oas3-tools application from the specification it is
+#: handed: the one a file declares itself (always), or one imported by name from a relative
+#: module (only when an argument reads as an OpenAPI document). The target key is the callee as
+#: written; the arguments are read relative to the caller's file.
+OAS3_FACTORY_CALL = "oas3-factory-call"
+#: A TypeScript module's exported module-level ``const`` paths that the module alone proves
+#: to be an OpenAPI document (``.yaml``, ``.yml`` or ``.json``), for the applications in other
+#: modules that import them.
+TS_PATH_CONSTANTS = "ts-path-constants"
 #: A docker-compose service: the names and container ports other services reach it by,
 #: the build that makes its image, and any command or entrypoint it overrides.
 COMPOSE_SERVICE = "compose-service"

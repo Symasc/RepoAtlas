@@ -59,7 +59,7 @@ def _reading(*lines: str) -> tuple[Result, bytes]:
         if callee is not None and node_text(raw, callee) == "use":
             arguments = arguments_of(node)
             assert arguments, "use(…) takes one argument"
-            return reader.read(arguments[0]), raw
+            return reader.resolve(arguments[0]), raw
     raise AssertionError("the source has no use(…)")
 
 
