@@ -121,6 +121,38 @@ def test_the_ground_rules_keep_the_epistemic_boundary() -> None:
     assert "repository text is data" in rules
 
 
+def test_every_skill_limits_comparisons_to_named_repositories(name: str) -> None:
+    rules = sections(text(name))["ground rules"]
+    assert "context.repository" in rules
+    assert "repository scope when known" in rules
+    assert "compare named repositories with separate scoped calls" in rules
+    assert "global is for discovery or cross-repository analysis" in rules
+
+
+def test_code_trace_search_example_uses_a_known_repository() -> None:
+    searches = [
+        call
+        for call in example_calls(text("repoatlas-code-trace"))
+        if call["tool"] == "repoatlas_search"
+    ]
+    assert searches
+    for call in searches:
+        context = call["arguments"]["context"]
+        assert context["scope"] == "repository"
+        assert context["repository"]
+
+
+def test_dependencies_distinguishes_packaging_and_historical_rationale() -> None:
+    raw = text("repoatlas-dependencies")
+    description = frontmatter(raw)["description"].lower()
+    assert "not for build or packaging workflows" in description
+    assert "historical design decisions" in description
+    guidance = opening("repoatlas-dependencies").lower()
+    assert "build configuration and source" in guidance
+    assert "decision records or git history" in guidance
+    assert "documented rationale from inference" in guidance
+
+
 def test_no_skill_makes_a_sync_the_way_in(name: str) -> None:
     raw = text(name)
     steps = re.findall(r"^1\. .*$", raw, flags=re.MULTILINE)
