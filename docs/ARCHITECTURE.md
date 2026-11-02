@@ -1982,9 +1982,23 @@ Until the pass proves one, it stays a pending claim that records the declaration
   express-openapi-validator 4.13.9's). `expressAppConfig(spec, { routing: { controllers } })` serves every operation
   of an OpenAPI 3 document by the controllers member its `operationId` names: dashes camel-cased as the library does,
   prefixed `<x-swagger-router-controller>_` when the operation names one.
-  - The specification is read only as `path.join(__dirname, '<literal>', …)` (or `resolve`) on `path`, from the
-    file that states it; the library opens a bare relative path from the process's working directory. It must name
-    exactly one indexed OpenAPI 3 document in the same repository.
+  - The specification is read from the path the file states, relative to that file; the library opens a bare
+    relative path from the process's working directory, so one is refused. It must name exactly one indexed
+    OpenAPI 3 document in the same repository.
+    - Anchors: `__dirname`; the ESM `dirname(fileURLToPath(import.meta.url))`; `dirname(__filename)`; a `const`
+      built from one of those.
+    - Forms: `join`/`resolve`, a template, `+`, `fileURLToPath(new URL(literal, import.meta.url))`.
+    - Segments: literals; `const` values declared earlier in the file; read-only `const` object properties; named
+      imports from a relative module, read from that module's `ts-constants`.
+    - A whole imported path is read from that module's `ts-path-constants`, anchored at the declaring file.
+    - A one-level factory parameter: the factory is called in the same file or through one relative named import,
+      and each call is anchored at the caller's file.
+    - Roots stay the module of the `expressAppConfig` call.
+    - A refusal has a stable `spec-...` code under the unchanged `SPEC_UNREAD` / `SPEC_NOT_FOUND` headlines.
+    - A document is never served because it exists or because something loads it: `swagger-ui-express`,
+      `readFileSync`, `YAML.load` and `express.static` are not read.
+    - A limit: an operation's provider is listed at the handler object's file; the application module that
+      exposes it and the call site that instantiates it are not shown.
   - The controllers are a handler object, or an object literal of spreads of handler objects, each declared in the
     file or imported by name from a relative module; a later spread's key wins. A handler object is a module-level
     `const`, bound once, whose every member is a function. A directory of controllers is not read.
