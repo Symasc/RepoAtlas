@@ -23,6 +23,30 @@
 #   notes       why this is the required policy
 
 cases:
+  - id: known-repository-scope
+    situation: [repository, known]
+    must_do: [repository scope, context.repository]
+    must_not: [global, symbol]
+    section: search, then inspect
+
+  - id: named-repository-comparison
+    situation: [comparing, named repositories]
+    must_do: [separate, repository-scoped]
+    must_not: [global keyword search]
+    section: search, then inspect
+
+  - id: uncertain-repository-identity
+    situation: [repository identity, uncertain]
+    must_do: [repoatlas_repositories]
+    must_not: [search all source]
+    section: search, then inspect
+
+  - id: historical-packaging-rationale
+    situation: [historical, packaging decision]
+    must_do: [decision records, git history, inference]
+    must_not: [current source]
+    section: search, then inspect
+
   - id: stale-evidence-after-sync
     situation: [stale, sync]
     must_do: [reacquire]
