@@ -241,7 +241,7 @@ class SpecPathReader:
         #: Local name → ``(module, imported name or _MODULE)``, built on first use.
         self._table: dict[str, tuple[str, str]] | None = None
 
-    def read(self, node: Node) -> Result:
+    def resolve(self, node: Node) -> Result:
         """The path ``node`` states, relative to this file, or why it states none."""
         whole = self._whole(node, 0)
         if whole is not None:
