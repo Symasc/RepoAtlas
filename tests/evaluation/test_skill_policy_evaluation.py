@@ -113,6 +113,10 @@ def test_every_required_scenario_has_a_case() -> None:
         "partially-grounded",
         "stale-cursor",
         "dirty-workspace-valid-evidence",
+        "known-repository-scope",
+        "named-repository-comparison",
+        "uncertain-repository-identity",
+        "historical-packaging-rationale",
     }
     assert {case.id for case in CASES} >= required, required - {case.id for case in CASES}
 
