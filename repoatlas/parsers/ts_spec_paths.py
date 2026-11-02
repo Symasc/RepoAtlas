@@ -1,9 +1,9 @@
 """Where a TypeScript file says its OpenAPI document is (M7).
 
-:class:`~repoatlas.parsers.http_oas3.SpecRoutedApps` reads ``path.join(__dirname,
-'<literal>', …)`` and nothing else. :class:`SpecPathReader` reads the path expressions
-a source states in more forms, each relative to the file that states it, and answers
-with one of:
+:class:`~repoatlas.parsers.http_oas3.SpecRoutedApps` asks :class:`SpecPathReader` for the
+path of each ``expressAppConfig`` call. The reader takes the path expressions a source
+states (the forms below; the oas3-tools bullet of ``docs/ARCHITECTURE.md`` lists them
+with what is refused), each relative to the file that states it, and answers with one of:
 
 * :class:`Spec` -- the literal segments joined by ``/``, not normalized, as the
   ``spec`` meta of an application has always been: ``../api/openapi.yaml``;
