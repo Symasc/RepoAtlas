@@ -75,10 +75,10 @@ Steps 1 and 8 are usually skipped. Skipping a step you do not need is correct.
 
 ## Search, then inspect
 
-For an unknown entry point, start with `repoatlas_search`. It finds evidence, records it so you can cite it, and hands back exact entity handles for the graph.
+For an unknown entry point, start with `repoatlas_search` inside the known repository. It finds evidence, records it so you can cite it, and hands back exact entity handles for the graph.
 
 ```json
-{"tool": "repoatlas_search", "arguments": {"context": {"scope": "global"}, "question": "Where does SERVICE_HOST come from?"}}
+{"tool": "repoatlas_search", "arguments": {"context": {"scope": "repository", "repository": "python-service"}, "question": "Where does SERVICE_HOST come from?"}}
 ```
 
 Do not open with `repoatlas_inspect` on a guessed path or `repoatlas_relationships` on a guessed key. Do not use `repoatlas_dependencies` as a search.
@@ -88,6 +88,12 @@ Do not open with `repoatlas_inspect` on a guessed path or `repoatlas_relationshi
 A path you were given is not a guess. When the task names a file, such as a design document at `docs/ARCHITECTURE.md`, search for that path — an indexed file named by its full path ranks first — or inspect it directly under a repository scope. A document is evidence of what the document says, not of what the code does.
 
 **Scope is a boundary, so choose it for the question you are asking.** A `repository` scope answers out of that repository and out of things that belong to no repository at all — an environment variable, a command, an HTTP operation. It will not quietly return a file from somewhere else, which is what makes "nothing here" a usable scoped answer. When the question is "where does this live?" and you do not already know, ask it with `{"scope": "global"}`.
+
+For a known repository, pass `{"scope": "repository", "repository": "<slug>"}` in `context`. Naming a repository in `question` is search text, not a scope filter, and the server does not infer the caller's open workspace. If its indexed identity is uncertain, resolve the name with `repoatlas_repositories`; do not search all source merely to resolve a repository name.
+
+Compare named repositories with separate repository-scoped calls. For example, comparing control-system packaging with ev-service packaging needs one search in each, not a global search for packaging keywords. Global scope is appropriate for discovering an unknown provider or location, finding consumers across repositories, or answering an explicitly system-wide question. Multiple named repositories alone do not justify it. Broaden only when the question or an evidence-backed relationship requires it.
+
+For build and packaging questions, inspect build configuration and source rather than treating dependency observations as a build explanation. For historical "why did we decide?" questions, consult decision records, commit messages or PR discussions. Current source establishes what exists, not why it was chosen; label inferred rationale and say when historical evidence is unavailable.
 
 A scoped search may return a repository-less shared handle such as `env:SERVICE_HOST` or an HTTP endpoint. The handle itself remains visible, but the repository-scope boundary still applies to graph traversal: under `scope: repository` and `cross_repository: false`, a walk rooted at that shared node stays on the repository side named by the context. Use `cross_repository: true` when the question deliberately follows that relationship into another repository, or use `scope: global` when the question itself is global.
 
@@ -468,6 +474,10 @@ Keep your planning to yourself; what the reader needs is the finding, the citati
 | `STALE_CURSOR` on a dependency page | restart the query from the beginning | continue with the same cursor |
 | workspace is dirty but the evidence id is `valid` | cite it; validity and freshness are separate | assume the evidence is stale |
 | search returned nothing useful | say the index does not establish it | answer from guesswork |
+| the repository is known | use repository scope and set `context.repository` | use global scope merely because the symbol is unknown |
+| comparing named repositories | make separate repository-scoped calls | use a global keyword search for the comparison |
+| the repository identity is uncertain | resolve it with `repoatlas_repositories` | search all source to resolve a repository name |
+| asked why a historical packaging decision was made | consult decision records or Git history and label inference | infer documented rationale from current source alone |
 | search is `truncated` / `has_more` | inspect strong candidates and narrow the next query | treat the first result set as exhaustive |
 | a compound question has several independently provable parts | track and investigate each part separately | let evidence for one part stand in for the rest |
 | you are about to make a repository-wide absence claim | establish adequate category/handle coverage or report the gap | infer absence from one search or one inspected file |
