@@ -30,6 +30,25 @@ readable when absent, or when they are an object literal with no spread whose
 ``prefix``, if any, is a literal Fastify accepts. A ``fastify-plugin`` plugin ignores
 ``prefix``, so it is unreadable with one.
 
+**A factory** (M8) is a module-level function bound once that hands back an application it
+builds: its body's top level holds exactly one ``const app = Fastify(...)`` bound once in
+its own scope and every ``return`` in its own body returns ``app`` (there is at least one);
+or its body is ``return Fastify(...)``, or its expression is ``Fastify(...)``. Returning
+``{ app }``, returning something else on a branch, or building two applications is no
+factory. Each is a :data:`~repoatlas.parsers.http_facts.FASTIFY_SCOPE` claim of kind
+:data:`FACTORY`, with the scope id ``F()``.
+
+**An instance** is ``const x = F()`` (or ``await F()``), bound once, at the module's level
+or at the top level of an entry function, where ``F`` is a factory of this file, a name
+imported from a relative module, or ``ns.F`` of a relative namespace import. **An entry
+application** is ``const x = Fastify()`` at the top level of a module-level function ``G``
+that is no factory, proven only where the file calls ``G`` unconditionally at its top level
+(``G();``, ``void G();``, ``await G();``, ``G().catch(...)``). Each is a
+:data:`~repoatlas.parsers.http_facts.FASTIFY_INSTANCE` claim, rooted at its own file; the
+claim names the factory (the global pass decides an imported one) or the refusal code that
+says why this parser would not trust it. ``const y = x`` in the same scope, after ``x``,
+makes ``y`` a receiver as well, for at most :data:`_MAX_ALIAS_HOPS` hops.
+
 Parsed, never executed (V1_SPEC §17).
 """
 
@@ -45,6 +64,7 @@ from repoatlas.models.parsing import EdgeType, EntityType, ParsedReference
 from repoatlas.parsers.http_facts import (
     COMPOSED,
     EXACT,
+    FASTIFY_INSTANCE,
     FASTIFY_REGISTER,
     FASTIFY_ROUTE,
     FASTIFY_SCOPE,
@@ -61,6 +81,8 @@ from repoatlas.parsers.http_typescript import (
 from repoatlas.parsers.treesitter import line_range, node_text, string_literal, walk
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from collections.abc import Iterator
+
     from tree_sitter import Node
 
 SOURCE = "fastify"
@@ -79,6 +101,25 @@ _METHODS = frozenset(_VERBS.values())
 #: The kinds of scope a route or a registration belongs to.
 APP = "app"
 PLUGIN = "plugin"
+#: A function that returns an application it builds (scope id ``F()``).
+FACTORY = "factory"
+
+#: What a ``fastify-instance`` claim is: ``const x = F()``, or ``const x = Fastify()`` at the
+#: top of an entry function.
+INSTANCE = "instance"
+ENTRY = "entry"
+#: Whether the parser proved the factory or the entry (``proven``), leaves an imported
+#: factory to the global pass (``pending``), or refused (``refused``, with a code).
+PROVEN = "proven"
+PENDING = "pending"
+REFUSED = "refused"
+
+#: Why an instance is not trusted. Stable codes: the global pass and the tests spell them.
+FACTORY_UNPROVEN = "fastify-factory-unproven"
+FACTORY_NOT_AWAITED = "fastify-factory-not-awaited"
+RECEIVER_BEFORE_BINDING = "fastify-receiver-before-binding"
+CALLEE_BEFORE_BINDING = "fastify-callee-before-binding"
+ENTRY_NOT_CALLED = "fastify-entry-not-called"
 
 _FUNCTIONS = FUNCTION_NODES
 _DECLARATIONS = frozenset({"function_declaration", "generator_function_declaration"})
@@ -96,6 +137,13 @@ DEFAULT_SCOPE = "*default"
 _MAX_CONSTANT = 256
 #: How many constants one module offers other modules.
 _MAX_CONSTANTS = 64
+#: How many instances one file states, in the order the source declares them.
+_MAX_INSTANCES = 64
+#: How many arguments of one call are read; the rest are not looked at.
+MAX_ARGUMENTS = 8
+#: How many ``const y = x`` hops lead from an instance to a receiver.
+_MAX_ALIAS_HOPS = 4
+_IDENTIFIERS = frozenset({"identifier", "shorthand_property_identifier"})
 
 _Key = tuple[int, int, str]
 
@@ -120,6 +168,11 @@ def _arguments(node: Node) -> list[Node] | None:
     return [child for child in arguments.children if child.is_named and child.type != "comment"]
 
 
+def _scanned(node: Node) -> list[Node]:
+    """The arguments of a call that are looked at: the first :data:`MAX_ARGUMENTS`."""
+    return (_arguments(node) or [])[:MAX_ARGUMENTS]
+
+
 def _path_like(value: str) -> bool:
     return len(value) <= _MAX_CONSTANT and not any(char.isspace() for char in value)
 
@@ -141,6 +194,62 @@ class _Scope:
     wrapped: bool = False
     #: ``(exported name, wrapped in fastify-plugin there)``.
     exports: list[tuple[str, bool]] = field(default_factory=list)
+    #: A factory that is ``async``: its caller must ``await`` it.
+    is_async: bool = False
+
+
+@dataclass(slots=True)
+class _Function:
+    """A module-level function bound once: what a factory or an entry is made of."""
+
+    node: Node
+    line: int
+    #: Where its binding ends. A declaration is hoisted, so it is ready from the start (0).
+    ready: int
+    is_async: bool
+    factory: bool = False
+
+
+def _module_statements(root: Node) -> Iterator[Node]:
+    """The module's statements, an ``export`` replaced by what it declares."""
+    for statement in root.named_children:
+        if statement.type == "export_statement":
+            declaration = statement.child_by_field_name("declaration")
+            if declaration is None:
+                continue
+            statement = declaration
+        yield statement
+
+
+def _unwrapped(node: Node) -> tuple[Node, bool]:
+    """``node`` without its parentheses, casts and ``await``, and whether it held an ``await``."""
+    awaited = False
+    while node.type in _TRANSPARENT:
+        inner = [child for child in node.named_children if child.type != "comment"]
+        if not inner:
+            break
+        awaited = awaited or node.type == "await_expression"
+        node = inner[0]
+    return node, awaited
+
+
+def _returned(statement: Node) -> Node | None:
+    inner = [child for child in statement.named_children if child.type != "comment"]
+    return _operand(inner[0]) if inner else None
+
+
+def _own_returns(body: Node) -> list[Node]:
+    """The ``return`` statements of a function's own body, never of a nested function."""
+    found: list[Node] = []
+    stack = [body]
+    while stack:
+        node = stack.pop()
+        if node.type in _FUNCTIONS:
+            continue
+        if node.type == "return_statement":
+            found.append(node)
+        stack.extend(node.children)
+    return found
 
 
 class FastifyDeclarations:
@@ -148,11 +257,22 @@ class FastifyDeclarations:
 
     def __init__(self, source: bytes, root: Node, counts: Counter[str]) -> None:
         self._source = source
+        self._program = root
         self._counts = counts
         self._factories: set[str] = set()
         self._wrappers: set[str] = set()
         #: Local name → ``(relative specifier, imported name)``, each bound once.
         self._imported: dict[str, tuple[str, str]] = {}
+        #: Local name → relative specifier of a namespace import, each bound once.
+        self._namespaces: dict[str, str] = {}
+        #: Module-level functions bound once, and the factory scopes among them, by name.
+        self._functions: dict[str, _Function] = {}
+        self._factory_scopes: dict[str, _Scope] = {}
+        #: Where the module's top level calls each function unconditionally: start bytes.
+        self._called: dict[str, list[int]] = {}
+        #: Identifier uses by name and start byte, within one scope, never a nested function.
+        self._uses: dict[_Key, dict[str, list[int]]] = {}
+        self._instances: list[ParsedReference] = []
         #: Module-level ``const`` strings bound once: value and line.
         self._constants: dict[str, tuple[str, int]] = {}
         #: Exported name → local constant name.
@@ -167,6 +287,8 @@ class FastifyDeclarations:
         self._top_level(root)
         if self._reads:
             self._register_calls(root)
+            self._called = self._top_level_calls(root)
+            self._instances = self._instance_claims(root)
 
     # -- the module ------------------------------------------------------------------
 
@@ -181,12 +303,17 @@ class FastifyDeclarations:
                 self._function(statement, exported=None)
             elif statement.type == "export_statement":
                 aliases.extend(self._export(statement))
+        if self._reads:
+            self._find_factories(root)
         for local, exported, wrapped in aliases:
             scope = self._named.get(local)
             if scope is not None:
                 scope.exports.append((exported, wrapped))
             elif local in self._constants and not wrapped:
                 self._exported_constants[exported] = local
+            factory = self._factory_scopes.get(local)
+            if factory is not None and not wrapped:
+                factory.exports.append((exported, False))
 
     def _import(self, statement: Node) -> None:
         source_node = statement.child_by_field_name("source")
@@ -225,6 +352,10 @@ class FastifyDeclarations:
                         self._factories.add(local)
                     elif module.startswith("."):
                         self._imported[local] = (module, name)
+            elif child.type == "namespace_import" and module.startswith("."):
+                bound = next((c for c in child.named_children if c.type == "identifier"), None)
+                if bound is not None and self._counts[node_text(self._source, bound)] == 1:
+                    self._namespaces[node_text(self._source, bound)] = module
 
     def _declaration(self, statement: Node, *, exported: bool) -> list[tuple[str, str, bool]]:
         kind = statement.child_by_field_name("kind")
@@ -501,6 +632,357 @@ class FastifyDeclarations:
             return {"module": module, "name": imported}, wrapped
         return None
 
+    # -- factories and instances -------------------------------------------------------
+
+    def _fastify_call(self, node: Node) -> bool:
+        """Whether ``node`` is ``Fastify(...)``: the factory this file imported from fastify."""
+        if node.type != "call_expression":
+            return False
+        callee = node.child_by_field_name("function")
+        if callee is None:
+            return False
+        if callee.type == "identifier":
+            return node_text(self._source, callee) in self._factories
+        if callee.type == "call_expression":
+            inner = callee.child_by_field_name("function")
+            return (
+                inner is not None
+                and inner.type == "identifier"
+                and node_text(self._source, inner) == "require"
+                and self._required(_scanned(callee)) == "fastify"
+            )
+        return False
+
+    def _const_declarators(self, statement: Node) -> list[tuple[Node, Node, Node]]:
+        """``(declarator, name, value)`` of each ``const name = value`` of a statement."""
+        if statement.type != "lexical_declaration":
+            return []
+        kind = statement.child_by_field_name("kind")
+        if kind is None or node_text(self._source, kind) != "const":
+            return []
+        found: list[tuple[Node, Node, Node]] = []
+        for declarator in statement.named_children:
+            if declarator.type != "variable_declarator":
+                continue
+            name_node = declarator.child_by_field_name("name")
+            value = declarator.child_by_field_name("value")
+            if name_node is not None and name_node.type == "identifier" and value is not None:
+                found.append((declarator, name_node, value))
+        return found
+
+    def _find_factories(self, root: Node) -> None:
+        """The module-level functions bound once, and which of them are factories."""
+        for statement in _module_statements(root):
+            if statement.type == "function_declaration":
+                name_node = statement.child_by_field_name("name")
+                if name_node is not None:
+                    name = node_text(self._source, name_node)
+                    self._remember(name, statement, 0, line_range(statement)[0])
+                continue
+            for declarator, name_node, value in self._const_declarators(statement):
+                function = _operand(value)
+                if function.type in _FUNCTION_VALUES:
+                    name = node_text(self._source, name_node)
+                    self._remember(name, function, declarator.end_byte, line_range(declarator)[0])
+
+    def _remember(self, name: str, node: Node, ready: int, line: int) -> None:
+        if self._counts[name] != 1:
+            return
+        function = _Function(
+            node, line, ready, is_async=any(child.type == "async" for child in node.children)
+        )
+        function.factory = self._is_factory(node)
+        self._functions[name] = function
+        if function.factory:
+            self._factory_scopes[name] = _Scope(
+                f"{name}()", FACTORY, line, is_async=function.is_async
+            )
+
+    def _is_factory(self, function: Node) -> bool:
+        """Whether every call of ``function`` hands back the one application it builds."""
+        body = function.child_by_field_name("body")
+        if body is None:
+            return False
+        calls = [node for node in walk(body) if self._fastify_call(node)]
+        if len(calls) != 1:
+            return False
+        built = _key(calls[0])
+        if body.type != "statement_block":
+            return _key(_operand(body)) == built
+        statements = [child for child in body.named_children if child.type != "comment"]
+        if len(statements) == 1 and statements[0].type == "return_statement":
+            value = _returned(statements[0])
+            return value is not None and _key(value) == built
+        app = self._built_application(function, statements, built)
+        if app is None:
+            return False
+        # every return hands back the application, and the body ends in one: no path falls
+        # off the end and returns nothing
+        last = statements[-1]
+        if last.type != "return_statement":
+            return False
+        returns = _own_returns(body)
+        for statement in returns:
+            value = _returned(statement)
+            if value is None or value.type != "identifier":
+                return False
+            if node_text(self._source, value) != app:
+                return False
+        return bool(returns)
+
+    def _built_application(self, function: Node, statements: list[Node], built: _Key) -> str | None:
+        """The name a top-level ``const`` of the body binds the one ``Fastify(...)`` to."""
+        for statement in statements:
+            for _declarator, name_node, value in self._const_declarators(statement):
+                if _key(_operand(value)) == built:
+                    name = node_text(self._source, name_node)
+                    return name if self._own_counts(function)[name] == 1 else None
+        return None
+
+    def _top_level_calls(self, root: Node) -> dict[str, list[int]]:
+        """Where the module's top level calls a function whatever happens: ``G();``,
+        ``void G();``, ``await G();`` or ``G().catch(...)``. A call under a condition, a loop,
+        a callback or a block is none of these."""
+        found: dict[str, list[int]] = {}
+        for statement in root.named_children:
+            if statement.type != "expression_statement":
+                continue
+            inner = [child for child in statement.named_children if child.type != "comment"]
+            if len(inner) != 1:
+                continue
+            node = _operand(inner[0])
+            if node.type == "unary_expression":
+                operator = node.child_by_field_name("operator")
+                argument = node.child_by_field_name("argument")
+                if (
+                    operator is None
+                    or argument is None
+                    or node_text(self._source, operator) != "void"
+                ):
+                    continue
+                node = _operand(argument)
+            name = self._called_name(node)
+            if name is not None:
+                found.setdefault(name, []).append(statement.start_byte)
+        return found
+
+    def _called_name(self, node: Node) -> str | None:
+        """``G`` of ``G(...)``, or of ``G(...).catch(...)``."""
+        if node.type != "call_expression":
+            return None
+        callee = node.child_by_field_name("function")
+        if callee is not None and callee.type == "member_expression":
+            owner = callee.child_by_field_name("object")
+            prop = callee.child_by_field_name("property")
+            if owner is None or prop is None or node_text(self._source, prop) != "catch":
+                return None
+            node = _operand(owner)
+            if node.type != "call_expression":
+                return None
+            callee = node.child_by_field_name("function")
+        if callee is None or callee.type != "identifier":
+            return None
+        return node_text(self._source, callee)
+
+    def _instance_claims(self, root: Node) -> list[ParsedReference]:
+        """A ``fastify-instance`` claim per ``const x = F()`` and per entry application, in
+        the order the source declares them, at most :data:`_MAX_INSTANCES`."""
+        found: list[ParsedReference] = []
+        for statement in _module_statements(root):
+            if statement.type == "function_declaration":
+                name_node = statement.child_by_field_name("name")
+                if name_node is not None:
+                    self._entry(node_text(self._source, name_node), statement, found)
+                continue
+            for declarator, name_node, value in self._const_declarators(statement):
+                function = _operand(value)
+                name = node_text(self._source, name_node)
+                if function.type in _FUNCTION_VALUES:
+                    self._entry(name, function, found)
+                else:
+                    self._claim(declarator, name_node, value, None, found)
+        return found
+
+    def _entry(self, name: str, node: Node, found: list[ParsedReference]) -> None:
+        """The instances at the top level of the module-level function ``name``."""
+        function = self._functions.get(name)
+        if function is None or function.factory or _key(function.node) != _key(node):
+            return
+        body = node.child_by_field_name("body")
+        if body is None or body.type != "statement_block":
+            return
+        for statement in body.named_children:
+            for declarator, name_node, value in self._const_declarators(statement):
+                self._claim(declarator, name_node, value, (name, function), found)
+
+    def _claim(
+        self,
+        declarator: Node,
+        name_node: Node,
+        value: Node,
+        owner: tuple[str, _Function] | None,
+        found: list[ParsedReference],
+    ) -> None:
+        if len(found) >= _MAX_INSTANCES:
+            return
+        receiver = node_text(self._source, name_node)
+        call, awaited = _unwrapped(value)
+        if call.type != "call_expression" or not self._bound_once(owner, receiver):
+            return
+        function: _Function | None = None
+        refusal: str | None = None
+        reference: dict[str, str] = {}
+        if self._fastify_call(call):
+            if owner is None:
+                return  # the module's own application: a receiver already
+            kind = ENTRY
+        else:
+            named = self._factory_callee(call)
+            if named is None:
+                return
+            kind = INSTANCE
+            reference, function = named
+            reference["awaited"] = "true" if awaited else "false"
+            if function is not None:
+                if not function.factory:
+                    refusal = FACTORY_UNPROVEN
+                elif owner is None and function.ready > call.start_byte:
+                    refusal = CALLEE_BEFORE_BINDING
+                elif function.is_async and not awaited:
+                    refusal = FACTORY_NOT_AWAITED
+        if refusal is None and owner is not None:
+            refusal = self._entry_refusal(owner[0], owner[1])
+        scope = self._program if owner is None else owner[1].node
+        if refusal is None and self._used_before(scope, name_node, declarator):
+            refusal = RECEIVER_BEFORE_BINDING
+        aliases = [] if refusal else self._aliases(owner, scope, declarator, receiver)
+        status = PROVEN
+        if refusal is not None:
+            status = REFUSED
+        elif kind == INSTANCE and function is None:
+            status = PENDING  # an imported factory: the global pass reads that module
+        meta = {
+            "kind": kind,
+            "receiver": receiver,
+            "entry": owner[0] if owner is not None else "",
+            **reference,
+            "status": status,
+            "aliases": json.dumps(aliases),
+        }
+        if refusal is not None:
+            meta["refusal"] = refusal
+        start, end = line_range(declarator)
+        found.append(
+            pending_reference(
+                EdgeType.REFERENCES,
+                EntityType.SYMBOL,
+                receiver if owner is None else f"{owner[0]}>{receiver}",
+                start,
+                end,
+                role=FASTIFY_INSTANCE,
+                **meta,
+            )
+        )
+
+    def _factory_callee(self, call: Node) -> tuple[dict[str, str], _Function | None] | None:
+        """What ``F(...)`` names: a function of this file, or a relative module's export."""
+        callee = call.child_by_field_name("function")
+        if callee is None:
+            return None
+        if callee.type == "identifier":
+            name = node_text(self._source, callee)
+            if name in self._functions:
+                return {"local": f"{name}()"}, self._functions[name]
+            if name in self._imported:
+                module, imported = self._imported[name]
+                return {"module": module, "name": imported}, None
+        elif callee.type == "member_expression":
+            owner = callee.child_by_field_name("object")
+            prop = callee.child_by_field_name("property")
+            if (
+                owner is not None
+                and prop is not None
+                and owner.type == "identifier"
+                and prop.type == "property_identifier"
+                and node_text(self._source, owner) in self._namespaces
+            ):
+                module = self._namespaces[node_text(self._source, owner)]
+                return {"module": module, "name": node_text(self._source, prop)}, None
+        return None
+
+    def _entry_refusal(self, name: str, function: _Function) -> str | None:
+        """Why the file does not provably run the entry function ``name``, if it does not."""
+        calls = self._called.get(name, [])
+        if any(at >= function.ready for at in calls):
+            return None
+        return CALLEE_BEFORE_BINDING if calls else ENTRY_NOT_CALLED
+
+    def _bound_once(self, owner: tuple[str, _Function] | None, name: str) -> bool:
+        """Whether ``name`` is bound once where the declaration is: the file, or the entry."""
+        counts = self._counts if owner is None else self._own_counts(owner[1].node)
+        return counts[name] == 1
+
+    def _identifiers(self, scope: Node) -> dict[str, list[int]]:
+        """Where each name is written in ``scope``'s own code, never in a nested function."""
+        key = _key(scope)
+        found = self._uses.get(key)
+        if found is None:
+            found = {}
+            stack = [scope]
+            while stack:
+                node = stack.pop()
+                if node.type in _FUNCTIONS and _key(node) != key:
+                    continue
+                if node.type in _IDENTIFIERS:
+                    found.setdefault(node_text(self._source, node), []).append(node.start_byte)
+                stack.extend(node.children)
+            self._uses[key] = found
+        return found
+
+    def _used_before(self, scope: Node, name_node: Node, declarator: Node) -> bool:
+        """Whether ``scope`` reads the name before its ``const`` has run. A use inside a
+        nested function is a later one: it runs when that function is called."""
+        name = node_text(self._source, name_node)
+        return any(
+            at < declarator.end_byte and at != name_node.start_byte
+            for at in self._identifiers(scope).get(name, ())
+        )
+
+    def _aliases(
+        self,
+        owner: tuple[str, _Function] | None,
+        scope: Node,
+        declarator: Node,
+        receiver: str,
+    ) -> list[tuple[str, int]]:
+        """``(name, hops)`` of each ``const y = x`` that makes ``y`` the receiver ``x`` is: in
+        the same scope, bound once, declared after what it names, at most
+        :data:`_MAX_ALIAS_HOPS` hops from the instance."""
+        if owner is None:
+            statements = list(_module_statements(self._program))
+        else:
+            body = owner[1].node.child_by_field_name("body")
+            statements = list(body.named_children) if body is not None else []
+        #: Name → hops from the instance, and where its binding ends.
+        known = {receiver: (0, declarator.end_byte)}
+        found: list[tuple[str, int]] = []
+        for statement in statements:
+            for later, name_node, value in self._const_declarators(statement):
+                origin, awaited = _unwrapped(value)
+                if awaited or origin.type != "identifier":
+                    continue
+                hops, ready = known.get(node_text(self._source, origin), (_MAX_ALIAS_HOPS, 0))
+                if hops >= _MAX_ALIAS_HOPS or later.start_byte < ready:
+                    continue
+                alias = node_text(self._source, name_node)
+                if not self._bound_once(owner, alias):
+                    continue
+                if self._used_before(scope, name_node, later):
+                    continue
+                known[alias] = (hops + 1, later.end_byte)
+                found.append((alias, hops + 1))
+        return found
+
     # -- routes ------------------------------------------------------------------------
 
     def call_references(self, node: Node, source_symbol: str | None) -> list[ParsedReference]:
@@ -696,6 +1178,23 @@ class FastifyDeclarations:
                     ),
                 )
             )
+        if self._reads:
+            for scope in self._factory_scopes.values():
+                found.append(
+                    pending_reference(
+                        EdgeType.REFERENCES,
+                        EntityType.SYMBOL,
+                        scope.id,
+                        scope.line,
+                        scope.line,
+                        role=FASTIFY_SCOPE,
+                        kind=scope.kind,
+                        wrapped="false",
+                        exports=json.dumps(scope.exports),
+                        is_async="true" if scope.is_async else "false",
+                    )
+                )
+            found.extend(self._instances)
         return found
 
 
