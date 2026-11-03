@@ -62,6 +62,7 @@ from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.parsers.http_facts import (
     EXACT,
     FASTIFY_ROUTE,
+    FASTIFY_TRACED_ROUTE,
     PENDING_FACT,
     PYTHON_CLASS_ROUTE,
     PYTHON_ROUTE,
@@ -82,6 +83,7 @@ _ROUTE_ROLES = frozenset(
         PYTHON_ROUTE,
         PYTHON_CLASS_ROUTE,
         FASTIFY_ROUTE,
+        FASTIFY_TRACED_ROUTE,
         TS_HANDLER_OBJECT,
     }
 )
@@ -344,6 +346,8 @@ def build_inventory(
             continue
         if role == TS_HANDLER_OBJECT and claim.id not in plan.promoted:
             continue  # an object of functions no oas3-tools application routes to
+        if role == FASTIFY_TRACED_ROUTE and claim.id not in plan.promoted:
+            continue  # a route on a receiver no proven chain reaches: a diagnostic, no row
         if (
             role in {PYTHON_ROUTE, PYTHON_CLASS_ROUTE}
             and claim.id not in plan.promoted
