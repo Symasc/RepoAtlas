@@ -889,7 +889,10 @@ class TypeScriptParser:
     #    a factory's parameter, or why it is refused), the calls of the functions that hold
     #    one, and the exported paths of documents (M7, repoatlas.parsers.http_oas3 and
     #    repoatlas.parsers.ts_spec_paths).
-    version = "21"
+    # 22: Fastify factories (functions that return an application), the instances and entry
+    #    applications built from them, and the aliases of each (M8,
+    #    repoatlas.parsers.http_fastify).
+    version = "22"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
