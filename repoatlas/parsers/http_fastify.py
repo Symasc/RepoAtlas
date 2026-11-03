@@ -47,7 +47,45 @@ that is no factory, proven only where the file calls ``G`` unconditionally at it
 :data:`~repoatlas.parsers.http_facts.FASTIFY_INSTANCE` claim, rooted at its own file; the
 claim names the factory (the global pass decides an imported one) or the refusal code that
 says why this parser would not trust it. ``const y = x`` in the same scope, after ``x``,
-makes ``y`` a receiver as well, for at most :data:`_MAX_ALIAS_HOPS` hops.
+makes ``y`` a receiver as well, for at most :data:`_MAX_ALIAS_HOPS` hops. A claim is recorded
+only for a receiver (or an alias of it) that the file uses: as the receiver of a route verb,
+``route``, ``register``, ``listen`` or ``ready``, or as an argument of a call of a function of
+this file or of a relative module (``f(x)``, ``ns.f(x)`` on a relative namespace import).
+
+**Tracing** (M8). An instance, an entry application and a factory's own application are
+receivers on a straight line only: a route, a registration or a helper call on one counts
+when its statement sits directly in that receiver's own body (the module's, the entry
+function's or the factory's) as ``call;``, ``await call;``, ``void call;``, ``return call;`` or
+``const r = [await] call;``. The same use in a nested function, a callback, a condition, a
+loop or a ``try`` is no route and no registration, and a helper call there is recorded
+with the refusal :data:`HELPER_CONTROL_FLOW`. A plugin's first parameter keeps its rule for
+routes and registrations (anywhere in its body); its helper calls need the straight line. The
+module's own application (``const app = Fastify()``) keeps its routes and registrations as
+they were; a helper call that hands it on is recorded on the same straight line of the
+program, from the end of its declarator.
+
+A route on such a receiver is a :data:`~repoatlas.parsers.http_facts.FASTIFY_TRACED_ROUTE`
+claim -- never served here: the same ``method``, ``path`` and ``provenance`` as a
+:data:`~repoatlas.parsers.http_facts.FASTIFY_ROUTE`, the receiver's scope id in ``scope``
+and its kind in ``owner_kind``, and the declaration that holds the call as its source. A
+call that hands a receiver to a function is a
+:data:`~repoatlas.parsers.http_facts.FASTIFY_HELPER_CALL` claim per receiver argument (at
+most :data:`MAX_ARGUMENTS` are looked at): the target key is the callee as written, ``owner``
+and ``owner_kind`` the receiver's scope, ``receiver`` its name there, ``arg`` the index of the
+argument, ``local`` (a function of this file) or ``module`` and ``name`` (a relative import,
+``default`` for a default import, the member of a relative namespace import) the target when
+there is one, and ``refusal`` the first code that applies: :data:`HELPER_CONTROL_FLOW`,
+:data:`HELPER_DYNAMIC`, :data:`HELPER_CALLEE_UNSUPPORTED`, :data:`HELPER_SHADOWED`,
+:data:`HELPER_ARGUMENT_UNSUPPORTED`, :data:`RECEIVER_BEFORE_BINDING`,
+:data:`CALLEE_BEFORE_BINDING`, :data:`AFTER_LISTEN`. Which parameter of the target is the
+receiver, and how deep a chain goes, are for the global pass.
+
+A file that imports neither ``fastify`` nor ``fastify-plugin`` is read only when it has an
+instance claim, and then records only claims of the roles M8 adds -- instances, helper
+calls, traced routes and, for each module-level function they name,
+a :data:`~repoatlas.parsers.http_facts.FASTIFY_TRACED_SCOPE` claim (``kind``, ``exports``, and
+``receiver``, the name of the function's first parameter) -- besides the registrations an
+instance makes. In a file that imports fastify nothing it recorded before changes.
 
 Parsed, never executed (V1_SPEC §17).
 """
@@ -64,10 +102,13 @@ from repoatlas.models.parsing import EdgeType, EntityType, ParsedReference
 from repoatlas.parsers.http_facts import (
     COMPOSED,
     EXACT,
+    FASTIFY_HELPER_CALL,
     FASTIFY_INSTANCE,
     FASTIFY_REGISTER,
     FASTIFY_ROUTE,
     FASTIFY_SCOPE,
+    FASTIFY_TRACED_ROUTE,
+    FASTIFY_TRACED_SCOPE,
     TS_CONSTANTS,
     http_reference,
     pending_reference,
@@ -121,6 +162,16 @@ RECEIVER_BEFORE_BINDING = "fastify-receiver-before-binding"
 CALLEE_BEFORE_BINDING = "fastify-callee-before-binding"
 ENTRY_NOT_CALLED = "fastify-entry-not-called"
 
+#: Why a helper call is not trusted. The first that applies is recorded, in this order:
+#: control flow, dynamic, callee unsupported, shadowed, argument unsupported, then
+#: :data:`RECEIVER_BEFORE_BINDING`, :data:`CALLEE_BEFORE_BINDING` and after listen.
+HELPER_CONTROL_FLOW = "fastify-helper-control-flow"
+HELPER_DYNAMIC = "fastify-helper-dynamic"
+HELPER_CALLEE_UNSUPPORTED = "fastify-helper-callee-unsupported"
+HELPER_SHADOWED = "fastify-helper-shadowed"
+HELPER_ARGUMENT_UNSUPPORTED = "fastify-helper-argument-unsupported"
+AFTER_LISTEN = "fastify-after-listen"
+
 _FUNCTIONS = FUNCTION_NODES
 _DECLARATIONS = frozenset({"function_declaration", "generator_function_declaration"})
 _FUNCTION_VALUES = frozenset({"arrow_function", "function_expression", "function"})
@@ -144,6 +195,22 @@ MAX_ARGUMENTS = 8
 #: How many ``const y = x`` hops lead from an instance to a receiver.
 _MAX_ALIAS_HOPS = 4
 _IDENTIFIERS = frozenset({"identifier", "shorthand_property_identifier"})
+#: How many helper calls, and how many traced routes, one file states.
+_MAX_HELPER_CALLS = 256
+_MAX_TRACED_ROUTES = 256
+
+#: The receivers whose routes are traced ones: never an application or a plugin of this file.
+_TRACED_KINDS = frozenset({INSTANCE, ENTRY, FACTORY})
+#: What makes a use of an instance: ``x.<one of these>(...)`` is a route, a registration, or
+#: the application starting up.
+_USES = frozenset({*_VERBS, "route", "register", "listen", "ready"})
+#: ``f.call(...)``, ``f.apply(...)`` and ``f.bind(...)`` hand a receiver on through another call.
+_REBINDING = frozenset({"call", "apply", "bind"})
+#: What can hold a receiver inside an argument.
+_HOLDERS = frozenset({"object", "array", "spread_element"})
+_MAX_HOLDING_DEPTH = 4
+#: What a use of a receiver may sit in on its way up to the argument it is part of.
+_CARRIERS = _TRANSPARENT | _HOLDERS | {"pair"}
 
 _Key = tuple[int, int, str]
 
@@ -196,6 +263,22 @@ class _Scope:
     exports: list[tuple[str, bool]] = field(default_factory=list)
     #: A factory that is ``async``: its caller must ``await`` it.
     is_async: bool = False
+    #: The function a plugin scope is, when this file declares it.
+    node: Node | None = None
+
+
+@dataclass(slots=True)
+class _Held:
+    """A receiver of a kind M8 adds -- an instance, an entry application, or the application a
+    factory builds -- with the body that runs it and the names that are it."""
+
+    scope: _Scope
+    #: The program, or the body of the function that holds the receiver.
+    body: Node
+    #: The entry function that runs ``body``; empty at the module's level and in a factory.
+    entry: str
+    #: Each name that is the receiver, and where its binding ends.
+    ready: dict[str, int]
 
 
 @dataclass(slots=True)
@@ -283,12 +366,29 @@ class FastifyDeclarations:
         self._apps: dict[str, _Scope] = {}
         self._own: dict[_Key, Counter[str]] = {}
         self._registrations: list[ParsedReference] = []
+        #: Receivers M8 adds, by the function that binds the name (``None``: the module).
+        self._held: dict[tuple[_Key | None, str], _Held] = {}
+        #: Every identifier of the file by name, built once when a candidate needs it.
+        self._names: dict[str, list[Node]] | None = None
+        #: The ``const y = x`` declarations of a scope's top level, by scope.
+        self._alias_sites: dict[_Key | None, list[tuple[Node, Node, str]]] = {}
+        self._alias_names: set[str] | None = None
+        self._module_bound: Counter[str] | None = None
+        #: Where a body awaits ``x.listen(...)`` or ``x.ready(...)``: end byte and receiver name.
+        self._listens: dict[_Key, list[tuple[int, str]]] = {}
+        #: The plugin scopes the claims of a traced file name, by the order they are named.
+        self._touched: dict[_Key, _Scope] = {}
+        self._helper_total = 0
+        self._traced_total = 0
         self._reads = False
         self._top_level(root)
-        if self._reads:
+        self._called = self._top_level_calls(root)
+        self._instances = self._instance_claims(root)
+        self._names = None
+        #: A file without fastify is read, for the M8 roles only, when it uses an instance.
+        self._traced = not self._reads and bool(self._instances)
+        if self._reads or self._traced:
             self._register_calls(root)
-            self._called = self._top_level_calls(root)
-            self._instances = self._instance_claims(root)
 
     # -- the module ------------------------------------------------------------------
 
@@ -303,8 +403,7 @@ class FastifyDeclarations:
                 self._function(statement, exported=None)
             elif statement.type == "export_statement":
                 aliases.extend(self._export(statement))
-        if self._reads:
-            self._find_factories(root)
+        self._find_factories(root)
         for local, exported, wrapped in aliases:
             scope = self._named.get(local)
             if scope is not None:
@@ -492,9 +591,14 @@ class FastifyDeclarations:
         return found
 
     def _scope(self, node: Node, scope_id: str, kind: str, line: int) -> _Scope:
-        scope = _Scope(scope_id, kind, line)
+        scope = _Scope(scope_id, kind, line, node=node)
         self._scopes[_key(node)] = scope
         return scope
+
+    def _touch(self, scope: _Scope) -> None:
+        """Remember that a traced file's claims name this plugin scope: it is then stated."""
+        if self._traced and scope.node is not None:
+            self._touched.setdefault(_key(scope.node), scope)
 
     def _plugin(self, node: Node, name: str, line: int, *, wrapped: bool) -> _Scope:
         scope = self._scope(node, name, PLUGIN, line)
@@ -533,16 +637,84 @@ class FastifyDeclarations:
         """Whether ``name`` at ``at`` is the module-level binding, bound once in the file."""
         return self._enclosing_binding(at, name) == _MODULE and self._counts[name] == 1
 
-    def _receiver(self, at: Node, name: str) -> _Scope | None:
-        """The application or plugin server ``name`` is where ``at`` uses it."""
+    def _resolve(self, at: Node, name: str) -> tuple[_Scope, _Held | None] | None:
+        """The receiver ``name`` is where ``at`` uses it, and what holds it when it is of a
+        kind M8 adds (an instance, an entry application or a factory's own application)."""
         bound = self._enclosing_binding(at, name)
         if isinstance(bound, str):
-            if bound == _MODULE and self._counts[name] == 1:
-                return self._apps.get(name)
+            if bound != _MODULE:
+                return None
+            app = self._apps.get(name)
+            if app is not None:
+                return (app, None) if self._counts[name] == 1 else None
+            if self._module_bindings()[name] != 1:
+                return None  # a parameter of another function is not a second binding here
+            held = self._held.get((None, name))
+            return (held.scope, held) if held is not None else None
+        if _first_parameter(self._source, bound) == name:
+            scope = self._scopes.get(_key(bound))
+            return (scope, None) if scope is not None else None
+        held = self._held.get((_key(bound), name))
+        return (held.scope, held) if held is not None else None
+
+    def _receiver(self, at: Node, name: str) -> _Scope | None:
+        """The application or plugin server ``name`` is where ``at`` uses it, or the instance,
+        entry application or factory application it is, when ``at`` is a straight-line call
+        in that receiver's own body."""
+        found = self._resolve(at, name)
+        if found is None:
             return None
-        if _first_parameter(self._source, bound) != name:
+        scope, held = found
+        if held is not None and not self._directly_in(at, held.body):
             return None
-        return self._scopes.get(_key(bound))
+        return scope
+
+    def _is_void(self, node: Node) -> bool:
+        if node.type != "unary_expression":
+            return False
+        operator = node.child_by_field_name("operator")
+        return operator is not None and node_text(self._source, operator) == "void"
+
+    def _directly_in(self, call: Node, body: Node) -> bool:
+        """Whether the statement holding ``call`` sits in ``body`` itself, in a form that runs
+        it whatever else happens: ``call;``, ``await call;``, ``void call;``, ``return call;``
+        or ``const r = [await] call;``. An arrow function's expression body is the call."""
+        node = call
+        while True:
+            parent = node.parent
+            if parent is None:
+                return False
+            if parent.type in {"await_expression", "parenthesized_expression"} or self._is_void(
+                parent
+            ):
+                node = parent
+            else:
+                break
+        if _key(node) == _key(body):
+            return True
+        if parent.type == "variable_declarator":
+            name = parent.child_by_field_name("name")
+            value = parent.child_by_field_name("value")
+            declaration = parent.parent
+            kind = declaration.child_by_field_name("kind") if declaration is not None else None
+            if (
+                name is None
+                or name.type != "identifier"
+                or value is None
+                or _key(value) != _key(node)
+                or declaration is None
+                or declaration.type != "lexical_declaration"
+                or kind is None
+                or node_text(self._source, kind) != "const"
+            ):
+                return False
+            parent = declaration
+        elif parent.type not in {"expression_statement", "return_statement"}:
+            return False
+        holder = parent.parent
+        if holder is not None and holder.type == "export_statement":
+            holder = holder.parent
+        return holder is not None and _key(holder) == _key(body)
 
     # -- registrations -----------------------------------------------------------------
 
@@ -566,6 +738,8 @@ class FastifyDeclarations:
             arguments = _arguments(node) or []
             if owner is None or not 1 <= len(arguments) <= 2:
                 continue
+            if self._traced and owner.kind == PLUGIN:
+                continue  # a file without fastify states the registrations of instances only
             child = self._registered(node, _operand(arguments[0]))
             if child is None:
                 continue
@@ -619,6 +793,7 @@ class FastifyDeclarations:
             scope = self._scopes.get(_key(value)) or self._plugin(
                 value, f"@{line + 1}:{column + 1}", line + 1, wrapped=wrapped
             )
+            self._touch(scope)
             return {"local": scope.id}, wrapped
         if value.type != "identifier":
             return None
@@ -626,6 +801,7 @@ class FastifyDeclarations:
         if not self._module_name(at, name):
             return None
         if name in self._named:
+            self._touch(self._named[name])
             return {"local": name}, wrapped or self._named[name].wrapped
         if name in self._imported:
             module, imported = self._imported[name]
@@ -691,12 +867,30 @@ class FastifyDeclarations:
         function = _Function(
             node, line, ready, is_async=any(child.type == "async" for child in node.children)
         )
-        function.factory = self._is_factory(node)
+        function.factory = self._reads and self._is_factory(node)
         self._functions[name] = function
         if function.factory:
-            self._factory_scopes[name] = _Scope(
-                f"{name}()", FACTORY, line, is_async=function.is_async
-            )
+            scope = _Scope(f"{name}()", FACTORY, line, is_async=function.is_async)
+            self._factory_scopes[name] = scope
+            built = self._application(node)
+            body = node.child_by_field_name("body")
+            if built is not None and body is not None:
+                self._held[(_key(node), built[0])] = _Held(scope, body, "", {built[0]: built[1]})
+
+    def _application(self, function: Node) -> tuple[str, int] | None:
+        """The name a factory binds its application to, and where that binding ends, if the
+        factory binds it to a name at all."""
+        body = function.child_by_field_name("body")
+        if body is None or body.type != "statement_block":
+            return None
+        for statement in body.named_children:
+            for declarator, name_node, value in self._const_declarators(statement):
+                if self._fastify_call(_operand(value)):
+                    name = node_text(self._source, name_node)
+                    if self._own_counts(function)[name] != 1:
+                        return None
+                    return name, declarator.end_byte
+        return None
 
     def _is_factory(self, function: Node) -> bool:
         """Whether every call of ``function`` hands back the one application it builds."""
@@ -829,6 +1023,8 @@ class FastifyDeclarations:
         call, awaited = _unwrapped(value)
         if call.type != "call_expression" or not self._bound_once(owner, receiver):
             return
+        if self._source.count(receiver.encode()) < 2:
+            return  # written once, at its declaration: nothing uses it
         function: _Function | None = None
         refusal: str | None = None
         reference: dict[str, str] = {}
@@ -855,7 +1051,10 @@ class FastifyDeclarations:
         scope = self._program if owner is None else owner[1].node
         if refusal is None and self._used_before(scope, name_node, declarator):
             refusal = RECEIVER_BEFORE_BINDING
-        aliases = [] if refusal else self._aliases(owner, scope, declarator, receiver)
+        reached = self._aliases(owner, scope, declarator, receiver)
+        if not self._used(owner, [receiver, *(alias for alias, _hops, _ready in reached)]):
+            return  # nothing serves from this receiver or hands it on
+        aliases = [] if refusal else reached
         status = PROVEN
         if refusal is not None:
             status = REFUSED
@@ -867,22 +1066,31 @@ class FastifyDeclarations:
             "entry": owner[0] if owner is not None else "",
             **reference,
             "status": status,
-            "aliases": json.dumps(aliases),
+            "aliases": json.dumps([[alias, hops] for alias, hops, _ready in aliases]),
         }
         if refusal is not None:
             meta["refusal"] = refusal
         start, end = line_range(declarator)
+        target = receiver if owner is None else f"{owner[0]}>{receiver}"
         found.append(
             pending_reference(
                 EdgeType.REFERENCES,
                 EntityType.SYMBOL,
-                receiver if owner is None else f"{owner[0]}>{receiver}",
+                target,
                 start,
                 end,
                 role=FASTIFY_INSTANCE,
                 **meta,
             )
         )
+        body = scope if owner is None else owner[1].node.child_by_field_name("body")
+        if body is not None:
+            ready = {receiver: declarator.end_byte}
+            ready.update({alias: at for alias, _hops, at in aliases})
+            held = _Held(_Scope(target, kind, start), body, owner[0] if owner else "", ready)
+            where = None if owner is None else _key(owner[1].node)
+            for name in ready:
+                self._held[(where, name)] = held
 
     def _factory_callee(self, call: Node) -> tuple[dict[str, str], _Function | None] | None:
         """What ``F(...)`` names: a function of this file, or a relative module's export."""
@@ -918,8 +1126,9 @@ class FastifyDeclarations:
         return CALLEE_BEFORE_BINDING if calls else ENTRY_NOT_CALLED
 
     def _bound_once(self, owner: tuple[str, _Function] | None, name: str) -> bool:
-        """Whether ``name`` is bound once where the declaration is: the file, or the entry."""
-        counts = self._counts if owner is None else self._own_counts(owner[1].node)
+        """Whether ``name`` is bound once where the declaration is: the module's own scope
+        (a parameter of a function is no binding there), or the entry's."""
+        counts = self._module_bindings() if owner is None else self._own_counts(owner[1].node)
         return counts[name] == 1
 
     def _identifiers(self, scope: Node) -> dict[str, list[int]]:
@@ -954,40 +1163,137 @@ class FastifyDeclarations:
         scope: Node,
         declarator: Node,
         receiver: str,
-    ) -> list[tuple[str, int]]:
-        """``(name, hops)`` of each ``const y = x`` that makes ``y`` the receiver ``x`` is: in
-        the same scope, bound once, declared after what it names, at most
+    ) -> list[tuple[str, int, int]]:
+        """``(name, hops, where its binding ends)`` of each ``const y = x`` that makes ``y`` the
+        receiver ``x`` is: in the same scope, bound once, declared after what it names, at most
         :data:`_MAX_ALIAS_HOPS` hops from the instance."""
-        if owner is None:
-            statements = list(_module_statements(self._program))
-        else:
-            body = owner[1].node.child_by_field_name("body")
-            statements = list(body.named_children) if body is not None else []
         #: Name → hops from the instance, and where its binding ends.
         known = {receiver: (0, declarator.end_byte)}
-        found: list[tuple[str, int]] = []
-        for statement in statements:
-            for later, name_node, value in self._const_declarators(statement):
-                origin, awaited = _unwrapped(value)
-                if awaited or origin.type != "identifier":
-                    continue
-                hops, ready = known.get(node_text(self._source, origin), (_MAX_ALIAS_HOPS, 0))
-                if hops >= _MAX_ALIAS_HOPS or later.start_byte < ready:
-                    continue
-                alias = node_text(self._source, name_node)
-                if not self._bound_once(owner, alias):
-                    continue
-                if self._used_before(scope, name_node, later):
-                    continue
-                known[alias] = (hops + 1, later.end_byte)
-                found.append((alias, hops + 1))
+        found: list[tuple[str, int, int]] = []
+        for later, name_node, origin in self._alias_candidates(owner):
+            hops, ready = known.get(origin, (_MAX_ALIAS_HOPS, 0))
+            if hops >= _MAX_ALIAS_HOPS or later.start_byte < ready:
+                continue
+            alias = node_text(self._source, name_node)
+            if not self._bound_once(owner, alias):
+                continue
+            if self._used_before(scope, name_node, later):
+                continue
+            known[alias] = (hops + 1, later.end_byte)
+            found.append((alias, hops + 1, later.end_byte))
         return found
+
+    def _alias_candidates(
+        self, owner: tuple[str, _Function] | None
+    ) -> list[tuple[Node, Node, str]]:
+        """``(declarator, name, x)`` of each ``const y = x`` at the top level of a scope, the
+        module's or an entry function's, in source order."""
+        where = None if owner is None else _key(owner[1].node)
+        found = self._alias_sites.get(where)
+        if found is None:
+            found = []
+            if owner is None:
+                statements = list(_module_statements(self._program))
+            else:
+                body = owner[1].node.child_by_field_name("body")
+                statements = list(body.named_children) if body is not None else []
+            for statement in statements:
+                for later, name_node, value in self._const_declarators(statement):
+                    origin, awaited = _unwrapped(value)
+                    if not awaited and origin.type == "identifier":
+                        found.append((later, name_node, node_text(self._source, origin)))
+            self._alias_sites[where] = found
+        return found
+
+    # -- use ---------------------------------------------------------------------------
+
+    def _name_index(self) -> dict[str, list[Node]]:
+        """Every identifier of the file by name, in source order."""
+        if self._names is None:
+            found: dict[str, list[Node]] = {}
+            for node in walk(self._program):
+                if node.type in _IDENTIFIERS:
+                    found.setdefault(node_text(self._source, node), []).append(node)
+            self._names = found
+        return self._names
+
+    def _used(self, owner: tuple[str, _Function] | None, names: list[str]) -> bool:
+        """Whether the file serves from a receiver or hands it on: some name of ``names`` is
+        the receiver of a route verb, ``route``, ``register``, ``listen`` or ``ready``, or an
+        argument (or held by an object, array or spread that is one) of a call of a function of
+        this file or of a relative module."""
+        # a name written once is only its own declaration: no need to look at the file's nodes
+        written = [name for name in names if self._source.count(name.encode()) > 1]
+        if not written:
+            return False
+        index = self._name_index()
+        for name in written:
+            for node in index.get(name, ()):
+                bound = self._enclosing_binding(node, name)
+                if owner is None:
+                    if not isinstance(bound, str) or bound != _MODULE:
+                        continue  # another binding of the same name, in a function
+                elif isinstance(bound, str) or _key(bound) != _key(owner[1].node):
+                    continue  # another binding of the same name
+                if self._is_use(node):
+                    return True
+        return False
+
+    def _is_use(self, node: Node) -> bool:
+        parent = node.parent
+        if parent is None:
+            return False
+        if parent.type == "member_expression":
+            held = parent.child_by_field_name("object")
+            prop = parent.child_by_field_name("property")
+            call = parent.parent
+            if held is None or _key(held) != _key(node) or prop is None or call is None:
+                return False
+            if node_text(self._source, prop) not in _USES or call.type != "call_expression":
+                return False
+            function = call.child_by_field_name("function")
+            return function is not None and _key(function) == _key(parent)
+        while parent.type in _CARRIERS and parent.parent is not None:
+            node, parent = parent, parent.parent
+        if parent.type != "arguments" or parent.parent is None:
+            return False
+        call = parent.parent
+        if call.type != "call_expression" or not any(
+            _key(argument) == _key(node) for argument in _scanned(call)
+        ):
+            return False
+        callee = call.child_by_field_name("function")
+        return callee is not None and self._known_callee(callee)
+
+    def _known_callee(self, callee: Node) -> bool:
+        """Whether a call names a function of this file or of a relative module."""
+        callee = _operand(callee)
+        if callee.type == "identifier":
+            name = node_text(self._source, callee)
+            return name in self._functions or name in self._imported
+        if callee.type != "member_expression":
+            return False
+        owner = callee.child_by_field_name("object")
+        prop = callee.child_by_field_name("property")
+        return (
+            owner is not None
+            and prop is not None
+            and owner.type == "identifier"
+            and prop.type == "property_identifier"
+            and node_text(self._source, owner) in self._namespaces
+        )
 
     # -- routes ------------------------------------------------------------------------
 
     def call_references(self, node: Node, source_symbol: str | None) -> list[ParsedReference]:
-        if not self._reads:
+        if not (self._reads or self._traced):
             return []
+        return [
+            *self._route_references(node, source_symbol),
+            *self._helper_references(node, source_symbol),
+        ]
+
+    def _route_references(self, node: Node, source_symbol: str | None) -> list[ParsedReference]:
         callee = node.child_by_field_name("function")
         if callee is None or callee.type != "member_expression":
             return []
@@ -1029,6 +1335,31 @@ class FastifyDeclarations:
                 for method in methods
             ]
         shown = "".join(part[1] if part[0] == "t" else "{" + part[2] + "}" for part in parts)
+        if scope.kind in _TRACED_KINDS or self._traced:
+            traced: list[ParsedReference] = []
+            for method in methods:
+                if self._traced_total >= _MAX_TRACED_ROUTES:
+                    break
+                self._traced_total += 1
+                traced.append(
+                    pending_reference(
+                        EdgeType.SERVES_HTTP_ROUTE,
+                        EntityType.HTTP_ROUTE,
+                        f"{method} {shown}",
+                        start,
+                        end,
+                        role=FASTIFY_TRACED_ROUTE,
+                        source_symbol=source_symbol,
+                        method=method,
+                        path=json.dumps(parts),
+                        scope=scope.id,
+                        owner_kind=scope.kind,
+                        provenance=EXACT if literal else COMPOSED,
+                    )
+                )
+            if traced:
+                self._touch(scope)
+            return traced
         return [
             pending_reference(
                 EdgeType.SERVES_HTTP_ROUTE,
@@ -1138,6 +1469,337 @@ class FastifyDeclarations:
             return ["r", module, imported]
         return None
 
+    # -- helper calls ------------------------------------------------------------------
+
+    def _helper_references(self, node: Node, source_symbol: str | None) -> list[ParsedReference]:
+        """A claim for each receiver ``node`` hands over, until the file's bound is reached."""
+        if self._helper_total >= _MAX_HELPER_CALLS:
+            return []
+        callee = node.child_by_field_name("function")
+        handed: list[tuple[int, str, bool, _Scope, _Held | None]] = []
+        for index, argument in enumerate(_scanned(node)):
+            for identifier, inside in self._handed(argument):
+                name = node_text(self._source, identifier)
+                found = self._resolve(identifier, name)
+                if found is not None:
+                    scope, held = found
+                    if scope.kind == APP:
+                        held = self._application_held(scope, name)
+                    handed.append((index, name, inside, scope, held))
+        if callee is None or not handed:
+            return []
+        reached = self._callee(callee)
+        if reached is None:
+            return []
+        target, named_refusal = reached
+        start, end = line_range(node)
+        claims: list[ParsedReference] = []
+        for index, name, inside, scope, held in handed:
+            if self._helper_total >= _MAX_HELPER_CALLS:
+                break
+            self._helper_total += 1
+            meta = {
+                "owner": scope.id,
+                "owner_kind": scope.kind,
+                "receiver": name,
+                "arg": str(index),
+                **target,
+            }
+            refusal = self._helper_refusal(node, name, inside, scope, held, target, named_refusal)
+            if refusal is not None:
+                meta["refusal"] = refusal
+            self._touch(scope)
+            claims.append(
+                pending_reference(
+                    EdgeType.REFERENCES,
+                    EntityType.SYMBOL,
+                    node_text(self._source, callee)[:_MAX_CONSTANT],
+                    start,
+                    end,
+                    role=FASTIFY_HELPER_CALL,
+                    source_symbol=source_symbol,
+                    **meta,
+                )
+            )
+        return claims
+
+    def _application_held(self, scope: _Scope, name: str) -> _Held:
+        """The module's own application as a receiver: the program runs it, from the end of
+        the declarator that binds it."""
+        node = scope.node
+        while node is not None and node.type != "variable_declarator":
+            node = node.parent
+        ready = node.end_byte if node is not None else 0
+        return _Held(scope, self._program, "", {name: ready})
+
+    def _handed(self, argument: Node) -> list[tuple[Node, bool]]:
+        """The names an argument hands over, and whether each sits inside an object, an array
+        or a spread rather than being the argument itself."""
+        node = _operand(argument)
+        if node.type == "identifier":
+            return [(node, False)]
+        found: list[Node] = []
+        self._holding(node, found, 0)
+        return [(identifier, True) for identifier in found]
+
+    def _holding(self, node: Node, found: list[Node], depth: int) -> None:
+        """The names an object, an array or a spread holds directly: a value, an element or
+        the operand of a spread, down to :data:`_MAX_HOLDING_DEPTH` levels."""
+        node = _operand(node)
+        if node.type in _IDENTIFIERS:
+            found.append(node)
+        elif node.type in _HOLDERS and depth < _MAX_HOLDING_DEPTH:
+            for child in node.named_children:
+                if child.type == "comment":
+                    continue
+                if child.type == "pair":
+                    value = child.child_by_field_name("value")
+                    if value is not None:
+                        self._holding(value, found, depth + 1)
+                else:
+                    self._holding(child, found, depth + 1)
+
+    def _callee(self, callee: Node) -> tuple[dict[str, str], str | None] | None:
+        """The function a call names and the first code that makes it untrustworthy, or
+        ``None`` when the callee names nothing this file can tell (a global, a package)."""
+        callee = _operand(callee)
+        if callee.type == "identifier":
+            return self._named_callee(callee)
+        if callee.type == "subscript_expression":
+            return {}, HELPER_DYNAMIC
+        if callee.type != "member_expression":
+            return {}, HELPER_CALLEE_UNSUPPORTED
+        owner = callee.child_by_field_name("object")
+        prop = callee.child_by_field_name("property")
+        if owner is None or prop is None or node_text(self._source, prop) in _REBINDING:
+            return {}, HELPER_CALLEE_UNSUPPORTED
+        name = node_text(self._source, owner)
+        if (
+            owner.type == "identifier"
+            and prop.type == "property_identifier"
+            and name in self._namespaces
+        ):
+            if self._binding_function(owner, name) is not None:
+                return {}, HELPER_SHADOWED
+            member = node_text(self._source, prop)
+            return {"module": self._namespaces[name], "name": member}, None
+        return {}, HELPER_CALLEE_UNSUPPORTED
+
+    def _named_callee(self, callee: Node) -> tuple[dict[str, str], str | None] | None:
+        name = node_text(self._source, callee)
+        bound = self._binding_function(callee, name)
+        if bound is None:
+            if name in self._functions:
+                return {"local": name}, None
+            if name in self._imported:
+                module, imported = self._imported[name]
+                return {"module": module, "name": imported}, None
+            if name in self._aliased():
+                return {}, HELPER_CALLEE_UNSUPPORTED
+            return None
+        kind = self._binder_kind(bound, name)
+        if kind in {"parameter", "loop"}:
+            return {}, HELPER_DYNAMIC
+        if kind == "alias":
+            return {}, HELPER_CALLEE_UNSUPPORTED
+        if self._module_bindings()[name]:
+            return {}, HELPER_SHADOWED  # a name of this file, hidden where it is called
+        return {}, HELPER_CALLEE_UNSUPPORTED  # a function declared in a function
+
+    def _aliased(self) -> set[str]:
+        """The module's ``const g = f`` names, bound once."""
+        if self._alias_names is None:
+            names = (node_text(self._source, name) for _d, name, _o in self._alias_candidates(None))
+            self._alias_names = {name for name in names if self._counts[name] == 1}
+        return self._alias_names
+
+    def _module_bindings(self) -> Counter[str]:
+        if self._module_bound is None:
+            self._module_bound = scope_bindings(self._source, self._program)
+        return self._module_bound
+
+    def _binding_function(self, at: Node, name: str) -> Node | None:
+        """The nearest function that binds ``name`` where ``at`` uses it, however often. A
+        function's own name is bound outside it, not in it."""
+        node = at.parent
+        while node is not None and node.type != "program":
+            if node.type in _FUNCTIONS:
+                label = node.child_by_field_name("name")
+                own = label is not None and node_text(self._source, label) == name
+                if self._own_counts(node)[name] > (1 if own else 0):
+                    return node
+            node = node.parent
+        return None
+
+    def _binder_kind(self, function: Node, name: str) -> str:
+        """How ``function``'s own scope binds ``name``: as a ``parameter``, a ``loop``
+        variable, an ``alias`` (a ``const`` naming another value), a ``function``, or
+        ``other``."""
+        key = _key(function)
+        stack = [function]
+        while stack:
+            node = stack.pop()
+            if _key(node) != key and node.type in _FUNCTIONS:
+                label = node.child_by_field_name("name")
+                if (
+                    node.type in _DECLARATIONS
+                    and label is not None
+                    and node_text(self._source, label) == name
+                ):
+                    return "function"
+                continue
+            for index, child in enumerate(node.children):
+                if (
+                    child.type in {"identifier", "shorthand_property_identifier_pattern"}
+                    and node_text(self._source, child) == name
+                ):
+                    kind = self._binder(node, node.field_name_for_child(index))
+                    if kind is not None:
+                        return kind
+            stack.extend(reversed(node.children))
+        return "other"
+
+    def _binder(self, parent: Node, field: str | None) -> str | None:
+        """What binding ``parent`` makes of its child in ``field``, or ``None`` if it binds
+        nothing."""
+        kind = parent.type
+        if kind == "variable_declarator":
+            if field != "name":
+                return None
+            declaration = parent.parent
+            if (
+                declaration is not None
+                and declaration.parent is not None
+                and declaration.parent.type == "for_statement"
+            ):
+                return "loop"
+            value = parent.child_by_field_name("value")
+            if value is None:
+                return "other"
+            value = _operand(value)
+            if value.type in _FUNCTION_VALUES:
+                return "function"
+            return "alias" if value.type in {"identifier", "member_expression"} else "other"
+        if kind == "for_in_statement":
+            return "loop" if field == "left" else None
+        if kind in {"required_parameter", "optional_parameter"}:
+            return "parameter" if field == "pattern" else None
+        if kind == "arrow_function":
+            return "parameter" if field == "parameter" else None
+        if kind in {"function_declaration", "function_expression", "function"}:
+            return "function" if field == "name" else None
+        if kind == "formal_parameters":
+            return "parameter"
+        if kind == "catch_clause":
+            return "other" if field == "parameter" else None
+        if kind in {"object_pattern", "array_pattern", "rest_pattern", "pair_pattern"}:
+            return self._pattern_kind(parent)
+        return None
+
+    def _pattern_kind(self, pattern: Node) -> str:
+        """What a destructuring pattern binds for: the parameters of a function, a loop, or
+        a declaration."""
+        node: Node | None = pattern
+        while node is not None and node.type not in _FUNCTIONS:
+            if node.type in {"formal_parameters", "required_parameter", "optional_parameter"}:
+                return "parameter"
+            if node.type == "for_in_statement":
+                return "loop"
+            if node.type in {"variable_declarator", "catch_clause"}:
+                return "other"
+            node = node.parent
+        return "other"
+
+    def _function_body(self, scope: _Scope) -> Node | None:
+        return scope.node.child_by_field_name("body") if scope.node is not None else None
+
+    def _helper_refusal(
+        self,
+        call: Node,
+        name: str,
+        inside: bool,
+        scope: _Scope,
+        held: _Held | None,
+        target: dict[str, str],
+        callee_refusal: str | None,
+    ) -> str | None:
+        """The first code, in the order of the claim's documentation, that stops a helper
+        call from being trusted; ``None`` when none applies."""
+        body = held.body if held is not None else self._function_body(scope)
+        if body is None or not self._directly_in(call, body):
+            return HELPER_CONTROL_FLOW
+        if callee_refusal is not None:
+            return callee_refusal
+        if inside:
+            return HELPER_ARGUMENT_UNSUPPORTED
+        if held is not None:
+            if call.start_byte < held.ready.get(name, 0):
+                return RECEIVER_BEFORE_BINDING
+            if self._callee_early(call, target, held):
+                return CALLEE_BEFORE_BINDING
+        names = set(held.ready) if held is not None else {name}
+        if self._listened(body, names, call):
+            return AFTER_LISTEN
+        return None
+
+    def _callee_early(self, call: Node, target: dict[str, str], held: _Held) -> bool:
+        """Whether the callee is a function of this file bound by a ``const`` that has not run
+        yet where the receiver's body runs the call."""
+        function = self._functions.get(target.get("local", ""))
+        if function is None:
+            return False
+        if held.body.type == "program":
+            point = call.start_byte
+        elif held.entry:
+            point = min(self._called.get(held.entry) or [call.start_byte])
+        else:
+            return False
+        return function.ready > point
+
+    def _listened(self, body: Node, names: set[str], call: Node) -> bool:
+        """Whether ``body`` awaits ``x.listen(...)`` or ``x.ready(...)`` on one of ``names``
+        before ``call``."""
+        key = _key(body)
+        points = self._listens.get(key)
+        if points is None:
+            points = []
+            if body.type == "program":
+                statements = list(_module_statements(body))
+            elif body.type == "statement_block":
+                statements = list(body.named_children)
+            else:
+                statements = []
+            for statement in statements:
+                for expression in self._expressions(statement):
+                    awaited_call, awaited = _unwrapped(expression)
+                    receiver = self._started(awaited_call)
+                    if awaited and receiver is not None:
+                        points.append((statement.end_byte, receiver))
+            self._listens[key] = points
+        return any(end <= call.start_byte and who in names for end, who in points)
+
+    def _expressions(self, statement: Node) -> list[Node]:
+        """The expression an expression statement is, or the values of a ``const``."""
+        if statement.type == "expression_statement":
+            inner = [child for child in statement.named_children if child.type != "comment"]
+            return inner[:1] if len(inner) == 1 else []
+        return [value for _declarator, _name, value in self._const_declarators(statement)]
+
+    def _started(self, node: Node) -> str | None:
+        """``x`` of ``x.listen(...)`` and ``x.ready(...)``."""
+        if node.type != "call_expression":
+            return None
+        callee = node.child_by_field_name("function")
+        if callee is None or callee.type != "member_expression":
+            return None
+        owner = callee.child_by_field_name("object")
+        prop = callee.child_by_field_name("property")
+        if owner is None or prop is None or owner.type != "identifier":
+            return None
+        if node_text(self._source, prop) not in {"listen", "ready"}:
+            return None
+        return node_text(self._source, owner)
+
     # -- claims ------------------------------------------------------------------------
 
     def references(self) -> list[ParsedReference]:
@@ -1156,6 +1818,25 @@ class FastifyDeclarations:
                         kind=scope.kind,
                         wrapped="true" if scope.wrapped else "false",
                         exports=json.dumps(scope.exports),
+                    )
+                )
+            found.extend(self._registrations)
+        elif self._traced:
+            for scope in self._touched.values():
+                receiver = ""
+                if scope.node is not None:
+                    receiver = _first_parameter(self._source, scope.node) or ""
+                found.append(
+                    pending_reference(
+                        EdgeType.REFERENCES,
+                        EntityType.SYMBOL,
+                        scope.id,
+                        scope.line,
+                        scope.line,
+                        role=FASTIFY_TRACED_SCOPE,
+                        kind=scope.kind,
+                        exports=json.dumps(scope.exports),
+                        receiver=receiver,
                     )
                 )
             found.extend(self._registrations)
@@ -1194,7 +1875,7 @@ class FastifyDeclarations:
                         is_async="true" if scope.is_async else "false",
                     )
                 )
-            found.extend(self._instances)
+        found.extend(self._instances)
         return found
 
 
