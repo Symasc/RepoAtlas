@@ -866,13 +866,16 @@ class FastifyDeclarations:
         if callee is None:
             return False
         if callee.type == "identifier":
-            return node_text(self._source, callee) in self._factories
+            # the module's binding, not a parameter or a local of the same name where it is called
+            name = node_text(self._source, callee)
+            return name in self._factories and self._binding_function(callee, name) is None
         if callee.type == "call_expression":
             inner = callee.child_by_field_name("function")
             return (
                 inner is not None
                 and inner.type == "identifier"
                 and node_text(self._source, inner) == "require"
+                and self._binding_function(inner, "require") is None
                 and self._required(_scanned(callee)) == "fastify"
             )
         return False
@@ -1149,7 +1152,7 @@ class FastifyDeclarations:
             name = node_text(self._source, callee)
             if name in self._functions:
                 return {"local": f"{name}()"}, self._functions[name]
-            if name in self._imported:
+            if name in self._imported and self._binding_function(callee, name) is None:
                 module, imported = self._imported[name]
                 return {"module": module, "name": imported}, None
         elif callee.type == "member_expression":
@@ -1161,6 +1164,7 @@ class FastifyDeclarations:
                 and owner.type == "identifier"
                 and prop.type == "property_identifier"
                 and node_text(self._source, owner) in self._namespaces
+                and self._binding_function(owner, node_text(self._source, owner)) is None
             ):
                 module = self._namespaces[node_text(self._source, owner)]
                 return {"module": module, "name": node_text(self._source, prop)}, None
