@@ -18,9 +18,11 @@ import json
 import textwrap
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 import pytest
 from repoatlas.capabilities.service import CapabilityService
+from repoatlas.graph.deploy_identity import COMMAND_UNREAD
 from repoatlas.graph.http_claims import HttpClaimPlan
 from repoatlas.graph.linker import ReferenceLinker
 from repoatlas.graph.resolution import ResolutionIndex
@@ -40,6 +42,7 @@ from repoatlas.graph.ts_routes import (
 )
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.http_inventory import HttpOperationsRequest
+from repoatlas.models.impact import ImpactRequest, ImpactResponse
 from repoatlas.parsers.http_facts import (
     FASTIFY_HELPER_CALL,
     FASTIFY_INSTANCE,
@@ -66,6 +69,7 @@ from repoatlas.services.workspace import Workspace
 from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
 from tests.impact_corpus import build
 from tests.incremental_corpus import assert_equals_fresh, edit, sync_all
+from tests.test_deployment_link_join import decided, handler_of, link
 
 
 def d(text: str) -> str:
@@ -1123,3 +1127,289 @@ def test_moving_a_helper_call_into_a_condition_unserves_its_routes(
     helpers = _by_path(plan.helper_outcomes, grouped[FASTIFY_HELPER_CALL], by_id)
     assert HELPER_CONTROL_FLOW in helpers["src/handlers.ts"]
     assert_equals_fresh(trace, settings, root, tmp_path, "condition")
+
+
+# -- what a client sees of a traced service (M8 review: exposure, dedup, link check) --------
+
+# A compose service per repository, as the equivalence pair frozen in ``M8_PREDICTIONS.md`` has
+# it: one service named for the repository, publishing 8080, whose image runs the server file.
+COMPOSE_SERVICE_TEXT = (
+    "services:\n  {name}:\n    build:\n      context: .\n      dockerfile: Dockerfile\n"
+    '    ports:\n      - "8080:8080"\n'
+)
+SERVER_DOCKERFILE = (
+    'FROM node:22-slim\nWORKDIR /app\nCOPY . /app\nCMD ["npx", "tsx", "src/main.ts"]\n'
+)
+
+# A factory that returns an object holding the application: the instance it builds is unproven.
+UNPROVEN_SERVER = d("""
+    import Fastify from 'fastify';
+
+    export function createBox() {
+      const app = Fastify();
+      return { app };
+    }
+""")
+
+UNPROVEN = {
+    "package.json": PACKAGE,
+    "src/routes/users.ts": PAIR_USERS,
+    "src/server.ts": UNPROVEN_SERVER,
+    "src/main.ts": d("""
+        import { createBox } from './server';
+        import { initializeUserRoutes } from './routes/users';
+
+        const server = createBox();
+        initializeUserRoutes(server);
+        server.listen({ port: 8080 });
+    """),
+}
+
+# One helper that registers GET /shared, reached from two proven instances in two files.
+SHARED = d("""
+    import type { FastifyInstance } from 'fastify';
+
+    export function registerShared(app: FastifyInstance) {
+      app.get('/shared', getShared);
+    }
+""")
+
+
+def _entry(name: str, port: int) -> str:
+    return (
+        "import { createServer } from './server';\n"
+        "import { registerShared } from './shared';\n\n"
+        f"const {name} = createServer();\n"
+        f"registerShared({name});\n"
+        f"{name}.listen({{ port: {port} }});\n"
+    )
+
+
+DEDUP = {
+    "package.json": PACKAGE,
+    "src/server.ts": PLAIN_SERVER,
+    "src/shared.ts": SHARED,
+    "src/a.ts": _entry("first", 1),
+    "src/b.ts": _entry("second", 2),
+}
+DEDUP_EDGE: Edge = ("src/shared.ts", "registerShared", "GET /shared", line(SHARED, "app.get("))
+
+#: The decision of a request to a service whose compose file the join reads but whose command
+#: it cannot tie to code (``repoatlas.graph.http_crossings.SOURCE_UNRESOLVED``).
+SOURCE_UNRESOLVED_DECISION = "http-deployment-source-unresolved"
+
+
+def _deployed(files: dict[str, str], service: str) -> dict[str, str]:
+    """``files`` plus a compose file declaring ``service`` and a Dockerfile running the server."""
+    return {
+        **files,
+        "docker-compose.yml": COMPOSE_SERVICE_TEXT.format(name=service),
+        "Dockerfile": SERVER_DOCKERFILE,
+    }
+
+
+CLIENT_PROJECT = '[project]\nname = "client"\nversion = "1.0.0"\ndependencies = ["requests"]\n'
+
+
+def _client(*services: str) -> dict[str, str]:
+    """A Python repository whose ``fetch_<service>`` requests ``http://<service>:8080/users``."""
+    calls = "import requests\n" + "".join(
+        f"\n\ndef fetch_{service}() -> dict:\n"
+        f'    return requests.get("http://{service}:8080/users", timeout=5).json()\n'
+        for service in services
+    )
+    return {"pyproject.toml": CLIENT_PROJECT, "client/__init__.py": "", "client/calls.py": calls}
+
+
+def _edge_count(workspace: Workspace, slug: str, edge_type: str) -> int:
+    """How many edges of the type leave an entity of the repository."""
+    row = workspace.database.execute(
+        """
+        SELECT COUNT(*) FROM edges e
+        JOIN entities s ON s.id = e.src_id
+        JOIN repositories r ON r.id = s.repo_id
+        WHERE e.type = ? AND r.slug = ?
+        """,
+        (edge_type, slug),
+    ).fetchone()
+    return int(row[0])
+
+
+def _served_count(workspace: Workspace, slug: str, body: str) -> int:
+    """How many ``SERVES_HTTP_ROUTE`` edges the repository's code has to the route ``body``."""
+    row = workspace.database.execute(
+        """
+        SELECT COUNT(*) FROM edges e
+        JOIN entities s ON s.id = e.src_id
+        JOIN entities d ON d.id = e.dst_id
+        JOIN repositories r ON r.id = s.repo_id
+        WHERE e.type = 'SERVES_HTTP_ROUTE' AND r.slug = ? AND d.name = ?
+        """,
+        (slug, body),
+    ).fetchone()
+    return int(row[0])
+
+
+def _file_id(workspace: Workspace, slug: str, path: str) -> int:
+    row = workspace.database.execute(
+        "SELECT f.id FROM files f JOIN repositories r ON r.id = f.repo_id "
+        "WHERE r.slug = ? AND f.rel_path = ?",
+        (slug, path),
+    ).fetchone()
+    return int(row[0])
+
+
+def _impact(workspace: Workspace, slug: str, name: str, path: str) -> ImpactResponse:
+    """The impact of changing the declaration ``name`` of ``path``, seeded by its key."""
+    row = workspace.database.execute(
+        "SELECT key FROM entities WHERE qualified_name = ? AND key LIKE ?",
+        (name, f"sym:{slug}:{path}:%"),
+    ).fetchone()
+    assert row is not None, (slug, name)
+    request = ImpactRequest(context=CapabilityContext(scope=CapabilityScope.GLOBAL), seed=row[0])
+    return CapabilityService(workspace).impact(request)
+
+
+def _reached(response: ImpactResponse) -> set[tuple[str | None, str]]:
+    """(path, name) of everything an impact answer reaches, tests included."""
+    return {(item.path, item.name) for item in (*response.candidates, *response.tests)}
+
+
+def _kinds(chain: list[dict[str, Any]]) -> list[tuple[Any, Any]]:
+    return [(hop["kind"], hop["status"]) for hop in chain]
+
+
+def test_a_factory_returning_an_object_leaves_the_instance_unproven_and_serves_nothing(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    indexed = build(workspace, tmp_path, {"unproven": _deployed(UNPROVEN, "unproven")})
+    plan, grouped, by_id = _plan(indexed)
+    instances = _by_path(plan.instance_outcomes, grouped[FASTIFY_INSTANCE], by_id)
+    assert instances.get("src/main.ts") == [FACTORY_UNPROVEN]
+    assert _edges(indexed, "unproven") == set()
+    assert _edge_count(indexed, "unproven", "SERVES_HTTP_ROUTE") == 0
+    # nothing serves a route, so nothing is exposed: no claim of the join, no stored edge
+    repository = indexed.repositories.get_by_slug("unproven")
+    assert repository is not None
+    http_plan = _http(indexed)
+    assert [row for row in http_plan.code_routes if row.repo_id == repository.id] == []
+    assert [claim for claim in http_plan.exposed if claim.repo_id == repository.id] == []
+    assert _edge_count(indexed, "unproven", "EXPOSES_HTTP_ENDPOINT") == 0
+
+
+def test_a_compose_service_running_node_ties_no_code_so_the_source_alone_links_nothing(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    # The deployment tie reads the commands of python, uvicorn and gunicorn only
+    # (deploy_identity._application); a Dockerfile that runs node reaches no code, for a
+    # registered plugin and a handed server alike. So a client reaches a TypeScript service by
+    # the source alone in none of them, and every link below is a user's deployment link.
+    repositories = {
+        "direct": _deployed(DIRECT, "direct"),
+        "traced": _deployed(PAIRED, "traced"),
+        "unproven": _deployed(UNPROVEN, "unproven"),
+        "client": _client("direct", "traced", "unproven"),
+    }
+    built = build(workspace, tmp_path, repositories)
+    assert sorted(_http(built).deployments.values()) == [COMMAND_UNREAD] * 3
+    for service in ("direct", "traced", "unproven"):
+        assert decided(built, f"fetch_{service}")[0] == SOURCE_UNRESOLVED_DECISION
+        assert handler_of(built, f"fetch_{service}") is None
+
+
+def test_registering_a_plugin_and_handing_it_the_server_link_the_same_client(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    repositories = {
+        "direct": _deployed(DIRECT, "direct"),
+        "traced": _deployed(PAIRED, "traced"),
+        "client": _client("direct", "traced"),
+    }
+    built = build(workspace, tmp_path, repositories)
+    for service in ("direct", "traced"):
+        link(built, service, url=f"http://{service}:8080")
+    sync_all(built, tmp_path / "repos")
+    # the control first: a plugin registered on a plain instance must link, or the fixture is wrong
+    direct_decision, direct_chain, direct_evidence = decided(built, "fetch_direct")
+    assert direct_decision == "linked"
+    assert handler_of(built, "fetch_direct") == "direct/src/routes/users.ts"
+    traced_decision, traced_chain, traced_evidence = decided(built, "fetch_traced")
+    assert traced_decision == direct_decision
+    assert handler_of(built, "fetch_traced") == "traced/src/routes/users.ts"
+    assert _kinds(traced_chain) == _kinds(direct_chain)
+    assert traced_evidence["identity_source"] == direct_evidence["identity_source"]
+    assert traced_evidence["identity_source"] == "deployment-link"
+
+
+def test_a_client_of_an_unproven_service_is_not_linked_where_the_proven_control_is(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    repositories = {
+        "unproven": _deployed(UNPROVEN, "unproven"),
+        "traced": _deployed(PAIRED, "traced"),
+        "client": _client("unproven", "traced"),
+    }
+    built = build(workspace, tmp_path, repositories)
+    # a user states where each is deployed: only a repository whose code serves the route can join
+    for service in ("unproven", "traced"):
+        link(built, service, url=f"http://{service}:8080")
+    sync_all(built, tmp_path / "repos")
+
+    # the control: the proven instance's route is served, so the request links and impact follows
+    assert decided(built, "fetch_traced")[0] == "linked"
+    assert handler_of(built, "fetch_traced") == "traced/src/routes/users.ts"
+    traced = _impact(built, "traced", "initializeUserRoutes", "src/routes/users.ts")
+    assert traced.seed.status == "resolved"
+    assert "fetch_traced" in {name for _path, name in _reached(traced)}
+
+    # the unproven instance serves and exposes nothing, so even a stated deployment links nothing
+    assert _edges(built, "unproven") == set()
+    assert _edge_count(built, "unproven", "SERVES_HTTP_ROUTE") == 0
+    assert _edge_count(built, "unproven", "EXPOSES_HTTP_ENDPOINT") == 0
+    repository = built.repositories.get_by_slug("unproven")
+    assert repository is not None
+    assert [c for c in _http(built).exposed if c.repo_id == repository.id] == []
+    decision, _chain, evidence = decided(built, "fetch_unproven")
+    assert decision == SOURCE_UNRESOLVED_DECISION
+    assert "declaration_ids" not in evidence
+    assert handler_of(built, "fetch_unproven") is None
+    unproven = _impact(built, "unproven", "initializeUserRoutes", "src/routes/users.ts")
+    assert unproven.seed.status == "resolved"
+    reached = _reached(unproven)
+    assert not {name for _path, name in reached if name.startswith("fetch_")}
+    assert not [path for path, _name in reached if path and path.endswith("calls.py")]
+
+
+def test_one_helper_reached_from_two_instances_is_served_once_and_rooted_at_both(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    indexed = build(workspace, tmp_path, {"dedup": DEDUP})
+    assert _edges(indexed, "dedup") == {DEDUP_EDGE}
+    # one edge, not one per application (the set above would hide a duplicate)
+    assert _served_count(indexed, "dedup", "GET /shared") == 1
+    served = [row for row in _http(indexed).code_routes if row.body == "GET /shared"]
+    assert len(served) == 1
+    assert _roots(indexed, "dedup") == {("src/shared.ts", "GET /shared"): {"src/a.ts", "src/b.ts"}}
+
+
+def test_the_order_files_are_indexed_in_does_not_change_what_is_served_or_rooted(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    # `reversed` is the same repository with its files written, and so first indexed, in the
+    # opposite order; its a.ts then arrives last, by a sync, so its file IDs run the other way
+    others = {path: text for path, text in DEDUP.items() if path != "src/a.ts"}
+    built = build(
+        workspace,
+        tmp_path,
+        {"dedup": DEDUP, "reversed": dict(reversed(others.items()))},
+    )
+    root = tmp_path / "repos"
+    edit(root, "reversed", "src/a.ts", DEDUP["src/a.ts"])
+    sync_all(built, root)
+    forward = _file_id(built, "dedup", "src/a.ts") < _file_id(built, "dedup", "src/b.ts")
+    backward = _file_id(built, "reversed", "src/a.ts") < _file_id(built, "reversed", "src/b.ts")
+    assert forward != backward
+    assert _edges(built, "reversed") == _edges(built, "dedup") == {DEDUP_EDGE}
+    assert _served_count(built, "reversed", "GET /shared") == 1
+    assert _roots(built, "reversed") == _roots(built, "dedup")
+    assert _roots(built, "reversed") == {("src/shared.ts", "GET /shared"): {"src/a.ts", "src/b.ts"}}
