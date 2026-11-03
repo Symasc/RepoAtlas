@@ -428,14 +428,14 @@ class FastifyDeclarations:
         for child in clause.named_children:
             if child.type == "identifier":
                 local = node_text(self._source, child)
-                if self._counts[local] != 1:
-                    continue
-                if module == "fastify":
-                    self._factories.add(local)
-                elif module == "fastify-plugin":
-                    self._wrappers.add(local)
-                elif module.startswith("."):
-                    self._imported[local] = (module, "default")
+                if module == "fastify-plugin":
+                    if self._counts[local] == 1:
+                        self._wrappers.add(local)
+                elif self._bound_once_in_module(local):
+                    if module == "fastify":
+                        self._factories.add(local)
+                    elif module.startswith("."):
+                        self._imported[local] = (module, "default")
             elif child.type == "named_imports":
                 for specifier in child.named_children:
                     if specifier.type != "import_specifier":
@@ -446,7 +446,7 @@ class FastifyDeclarations:
                         continue
                     local = node_text(self._source, alias)
                     name = node_text(self._source, imported)
-                    if self._counts[local] != 1:
+                    if not self._bound_once_in_module(local):
                         continue
                     if module == "fastify" and name == "fastify":
                         self._factories.add(local)
@@ -454,8 +454,13 @@ class FastifyDeclarations:
                         self._imported[local] = (module, name)
             elif child.type == "namespace_import" and module.startswith("."):
                 bound = next((c for c in child.named_children if c.type == "identifier"), None)
-                if bound is not None and self._counts[node_text(self._source, bound)] == 1:
+                if bound is not None and self._bound_once_in_module(node_text(self._source, bound)):
                     self._namespaces[node_text(self._source, bound)] = module
+
+    def _bound_once_in_module(self, name: str) -> bool:
+        """An import's local name is judged by the module's own scope: a parameter or a nested
+        function binding the same name is no second binding of the import."""
+        return self._module_bindings()[name] == 1
 
     def _declaration(self, statement: Node, *, exported: bool) -> list[tuple[str, str, bool]]:
         kind = statement.child_by_field_name("kind")
@@ -472,10 +477,13 @@ class FastifyDeclarations:
             name = node_text(self._source, name_node)
             line = line_range(declarator)[0]
             if self._counts[name] != 1:
-                # Only an application is judged by the module's own scope: a parameter or a
-                # nested function binding the same name is no second binding of it here.
+                # Only an application, or the required factory, is judged by the module's own
+                # scope: a parameter or a nested function binding the same name is no second
+                # binding of it here.
                 if self._module_bindings()[name] == 1:
-                    self._application_value(_operand(value), name, line)
+                    value = _operand(value)
+                    if not self._application_value(value, name, line):
+                        self._required_factory(value, name)
                 continue
             text = static_string(self._source, value)
             if text is not None:
@@ -497,18 +505,33 @@ class FastifyDeclarations:
     def _call_value(self, value: Node, name: str, line: int) -> None:
         if self._application_value(value, name, line):
             return
+        if self._required_factory(value, name):
+            return
         callee = value.child_by_field_name("function")
         arguments = _arguments(value) or []
         if callee is None or callee.type != "identifier":
             return
-        callee_name = node_text(self._source, callee)
-        if callee_name == "require" and self._required(arguments) == "fastify":
-            self._factories.add(name)
-            self._reads = True
-        elif callee_name in self._wrappers and len(arguments) >= 1:
+        if node_text(self._source, callee) in self._wrappers and len(arguments) >= 1:
             inner = _operand(arguments[0])
             if inner.type in _FUNCTION_VALUES:
                 self._plugin(inner, name, line, wrapped=True)
+
+    def _required_factory(self, value: Node, name: str) -> bool:
+        """Record ``name`` as the factory when ``value`` is ``require("fastify")``. Whether the
+        name is bound once is the caller's."""
+        if value.type != "call_expression":
+            return False
+        callee = value.child_by_field_name("function")
+        if (
+            callee is None
+            or callee.type != "identifier"
+            or node_text(self._source, callee) != "require"
+            or self._required(_arguments(value) or []) != "fastify"
+        ):
+            return False
+        self._factories.add(name)
+        self._reads = True
+        return True
 
     def _application_value(self, value: Node, name: str, line: int) -> bool:
         """Record ``name`` as an application when ``value`` builds one: ``Fastify(...)`` or

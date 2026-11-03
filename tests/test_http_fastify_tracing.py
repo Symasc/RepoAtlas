@@ -1532,6 +1532,154 @@ def test_d6_a_required_application_is_judged_in_the_module_scope_too() -> None:
     assert _served(source) == {"GET /a", "GET /b"}
 
 
+# -- D6b: the factory import is bound once in the module's own scope, not in the whole file ----
+#
+# Before D6b the local name of `import fastify from 'fastify'` (or the named, the
+# `require('fastify')` factory) had to be bound once in the WHOLE file, so the very common
+#     import fastify from 'fastify';  const app = fastify();
+#     app.register(async (fastify) => { ... });
+# bound `fastify` twice (the import and the parameter): the import was not recorded as the
+# factory, `app` was no application, `_app_scopes` was [] and nothing the file serves was read.
+# After D6b the import is judged in the module's scope, as D6 did for the application: the
+# parameter is a binding of the plugin, not of the module. A true module-level double binding
+# (a second import, a module-level const or function of the same name) is still refused.
+# Relative imports (named, default, namespace) are judged the same way. The namespace form of
+# the `fastify` package, `import * as fastify from 'fastify'`, is not read as a factory by the
+# parser (only relative namespaces are), so there is no D6b test for it.
+
+
+def test_d6b_a_parameter_named_like_the_factory_import_does_not_hide_the_application() -> None:
+    source = (
+        "import fastify from 'fastify';\n"
+        "const app = fastify();\n"
+        "app.register(async (fastify) => { app.get('/x', h); });\n"
+        "app.get('/top', h);\n"
+    )
+    # before D6b: no application, nothing served; now `app` is one and serves its own route
+    assert _app_scopes(source) == ["app"]
+    assert "GET /top" in _served(source)
+
+
+@pytest.mark.parametrize(
+    "imports",
+    [
+        "import fastify from 'fastify';",
+        "import { fastify } from 'fastify';",
+        "import { fastify as build } from 'fastify';",
+    ],
+)
+def test_d6b_every_factory_import_form_is_judged_in_the_module_scope(imports: str) -> None:
+    local = "build" if "as build" in imports else "fastify"
+    source = (
+        imports
+        + f"\nconst app = {local}();\n"
+        + f"app.register(async ({local}) => {{ {local}.get('/x', h); }});\n"
+        + "app.get('/top', h);\n"
+    )
+    assert _app_scopes(source) == ["app"]
+    assert "GET /top" in _served(source)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "const fastify = 1;",
+        "let fastify;",
+        "function fastify() {}",
+        "import fastify from 'other';",
+    ],
+)
+def test_d6b_a_module_level_double_binding_of_the_factory_name_is_still_no_application(
+    extra: str,
+) -> None:
+    source = (
+        "import fastify from 'fastify';\n"
+        + extra
+        + "\nconst app = fastify();\napp.get('/top', h);\n"
+    )
+    assert _app_scopes(source) == []
+    assert _served(source) == set()
+
+
+def test_d6b_a_module_level_double_binding_is_not_cured_by_a_parameter() -> None:
+    source = (
+        "import fastify from 'fastify';\nconst fastify = 1;\n"
+        "const app = fastify();\napp.register(async (fastify) => {});\napp.get('/top', h);\n"
+    )
+    assert _app_scopes(source) == []
+    assert _served(source) == set()
+
+
+@pytest.mark.parametrize(
+    "nested",
+    [
+        "function other() { const fastify = 1; return fastify; }",
+        "function other() { function fastify() {} return fastify; }",
+        "const wire = (fastify) => { fastify.get('/x', h); };",
+        "function other(a, { fastify }) { return a + fastify; }",
+    ],
+)
+def test_d6b_a_nested_binding_of_the_factory_name_does_not_disqualify_the_import(
+    nested: str,
+) -> None:
+    source = (
+        "import fastify from 'fastify';\nconst app = fastify();\n"
+        + nested
+        + "\napp.get('/top', h);\n"
+    )
+    assert _app_scopes(source) == ["app"]
+    assert "GET /top" in _served(source)
+
+
+def test_d6b_a_required_factory_is_recognised_with_or_without_a_shadowing_parameter() -> None:
+    plain = "const fastify = require('fastify');\nconst app = fastify();\napp.get('/top', h);\n"
+    assert _app_scopes(plain) == ["app"]
+    assert _served(plain) == {"GET /top"}
+    # before D6b the parameter made the required factory name a second binding: no application
+    shadowed = (
+        "const fastify = require('fastify');\nconst app = fastify();\n"
+        "function plugin(fastify) { fastify.get('/x', h); }\n"
+        "app.register(async (fastify) => {});\napp.get('/top', h);\n"
+    )
+    assert _app_scopes(shadowed) == ["app"]
+    assert "GET /top" in _served(shadowed)
+
+
+def test_d6b_a_required_factory_bound_twice_in_the_module_is_still_no_application() -> None:
+    source = (
+        "const fastify = require('fastify');\nlet fastify;\n"
+        "const app = fastify();\napp.get('/top', h);\n"
+    )
+    assert _app_scopes(source) == []
+    assert _served(source) == set()
+
+
+@pytest.mark.parametrize(
+    ("imports", "call", "module", "name"),
+    [
+        ("import { createServer } from './server';", "createServer()", "./server", "createServer"),
+        ("import createServer from './server';", "createServer()", "./server", "default"),
+        (
+            "import * as server from './server';",
+            "server.createServer()",
+            "./server",
+            "createServer",
+        ),
+    ],
+)
+def test_d6b_a_parameter_named_like_a_relative_import_does_not_hide_it(
+    imports: str, call: str, module: str, name: str
+) -> None:
+    local = "server" if "* as server" in imports else "createServer"
+    source = IMPORT + imports + f"\nconst app = {call};\n"
+    source += f"function f({local}) {{}}\napp.listen();\n"
+    claim = _only(source)
+    # before D6b: no instance claim at all; now the global pass is left to resolve it
+    assert claim.target_key == "app"
+    assert (claim.meta["module"], claim.meta["name"]) == (module, name)
+    assert claim.meta["status"] == PENDING
+
+
 # -- registrations on the new receivers ---------------------------------------------------
 
 PLUGIN_IMPORT = IMPORT + "import plugin from './plugin';\n"
