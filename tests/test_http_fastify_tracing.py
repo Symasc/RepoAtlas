@@ -1831,3 +1831,31 @@ def test_d6b_lexical_a_parameter_named_require_builds_no_factory() -> None:
     assert _factories(read + body.format("require")) == []
     # the control: with the global `require`, `make` is a factory
     assert [c.target_key for c in _factories(read + body.format(""))] == ["make()"]
+
+
+FACTORY_EXPRESSION = "const make = function {0}() {{ const app = fastify(); return app; }};\n"
+
+
+def test_d6b_lexical_a_named_function_expression_named_like_the_factory_is_no_factory() -> None:
+    # the name of a function expression is bound inside the expression, so the `fastify()` in
+    # its body calls the function itself, not the import
+    source = SHADOW_IMPORT + FACTORY_EXPRESSION.format("fastify")
+    assert _factories(source) == []
+    # the control: a distinct inner name leaves `fastify()` the import, and `make` a factory
+    control = SHADOW_IMPORT + FACTORY_EXPRESSION.format("build")
+    assert [c.target_key for c in _factories(control)] == ["make()"]
+
+
+def test_d6b_lexical_a_function_expression_named_like_the_factory_is_no_proven_instance() -> None:
+    use = "const server = make();\nserver.listen();\n"
+    source = SHADOW_IMPORT + FACTORY_EXPRESSION.format("fastify") + use
+    # `make` is a local function that is no factory: the instance is refused, never proven.
+    # Before the fix `make` was a factory and this instance was PROVEN.
+    claim = _only(source)
+    assert claim.meta["status"] == REFUSED
+    assert claim.meta["refusal"] == FACTORY_UNPROVEN
+    assert claim.meta["local"] == "make()"
+    # the control: a distinct inner name makes `make` a factory with a proven instance
+    control = _only(SHADOW_IMPORT + FACTORY_EXPRESSION.format("build") + use)
+    assert control.meta["status"] == PROVEN
+    assert "refusal" not in control.meta
