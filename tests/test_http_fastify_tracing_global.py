@@ -796,7 +796,7 @@ def test_trace_has_the_claims_the_prediction_counts(trace: Workspace) -> None:
     factories = [
         by_id[claim.file_id].rel_path
         for claim in grouped[FASTIFY_SCOPE]
-        if json.loads(claim.meta_json)["kind"] == "factory"
+        if json.loads(claim.meta_json or "{}")["kind"] == "factory"
     ]
     assert factories == ["src/server.ts", "src/server.ts"]
 
@@ -841,7 +841,11 @@ def test_example_serves_the_one_route_of_a_file_with_no_fastify_import(
     # the instance hands the server to initializeHandlers, which is a plugin scope that hands it
     # on to initializeUserRoutes: two helper calls, both accepted
     calls = sorted(
-        (json.loads(c.meta_json)["owner"], json.loads(c.meta_json)["owner_kind"], c.target_key)
+        (
+            json.loads(c.meta_json or "{}")["owner"],
+            json.loads(c.meta_json or "{}")["owner_kind"],
+            c.target_key,
+        )
         for c in grouped[FASTIFY_HELPER_CALL]
     )
     assert calls == [
@@ -995,7 +999,7 @@ def test_an_exported_factory_registered_as_a_plugin_resolves_exactly_as_it_did(
     factories = [
         by_id[claim.file_id].rel_path
         for claim in grouped[FASTIFY_SCOPE]
-        if json.loads(claim.meta_json)["kind"] == "factory"
+        if json.loads(claim.meta_json or "{}")["kind"] == "factory"
     ]
     assert factories == ["src/factory.ts"]
     assert _edges(indexed, "fp") == {("src/factory.ts", "makeApp", "GET /f/via-plugin", None)}
