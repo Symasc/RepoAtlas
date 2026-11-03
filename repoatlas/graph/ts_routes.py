@@ -13,27 +13,40 @@ than the routes. The parser records each side as a claim
   where it comes from and its prefix;
 * ``ts-constants`` -- a module's exported path-like string constants.
 
-M8 adds the claims of a server that is handed on instead of registered:
+A server that is handed on to a function, or built by a factory, instead of being
+registered adds these claims:
 
 * ``fastify-instance`` -- ``const x = F()`` (``F`` a factory), or an application built at
   the top of an entry function, and whether the parser proved it, left it to this pass
   (an imported factory) or refused it (with a code);
 * ``fastify-helper-call`` -- ``helper(x)``: a receiver handed to a function;
 * ``fastify-traced-scope`` -- a plugin function of a file that does not import Fastify;
-* ``fastify-traced-route`` -- a route on one of those receivers.
+* ``fastify-traced-route`` -- a route on an instance, an entry, a factory's own
+  application, or a plugin of a file that does not import Fastify.
 
 This stage serves a route only when every step is proven:
 
 * a registered plugin is declared in this file, or exported by the one module a
   relative import resolves to, under exactly one scope of that name. A factory is never
   a plugin export: its scope is indexed apart, so a registration never sees it;
+* an instance's factory is a factory of its own file, or the one factory the module a
+  relative import resolves to exports under that name, in the same repository. A module
+  outside the repository, or none, says :data:`FACTORY_UNRESOLVED`; a module that exports
+  no one factory of that name, or a function that is none, says ``fastify-factory-unproven``;
+  an ``async`` factory must be awaited;
+* a helper call's callee is a plugin function of its own file or of the module a relative
+  import resolves to, in the same repository, under exactly one scope of that name, and the
+  receiver is its first argument. Otherwise the call says :data:`HELPER_UNRESOLVED`,
+  :data:`HELPER_NOT_A_PLUGIN` (a factory, or a scope that is no plugin) or
+  :data:`HELPER_ARGUMENT_POSITION`; a call the parser refused keeps its own code;
 * every imported name in its path is a string constant that module exports;
 * a chain of readable registrations and helper calls reaches an application, a proven
-  instance or a proven entry. A registration counts at most :data:`MAX_DEPTH` plugins
-  deep, a helper call at most :data:`MAX_HELPER_DEPTH` calls deep, and a factory is
-  crossed at most :data:`MAX_FACTORY_DEPTH` time (from the factory's own application to
-  the instances of it). The route is served at the chain's prefixes joined to its path,
-  and a ``/`` route under a prefix at the prefix itself. A helper call adds no prefix.
+  instance or a proven entry. A chain of registrations may pass through at most
+  :data:`MAX_DEPTH` plugins between the route's own plugin and the application, a chain of
+  helper calls is at most :data:`MAX_HELPER_DEPTH` calls long, and a factory is crossed at
+  most :data:`MAX_FACTORY_DEPTH` time (from the factory's own application to the instances
+  of it). The route is served at the chain's prefixes joined to its path, and a ``/`` route
+  under a prefix at the prefix itself. A helper call is a registration with no prefix.
 
 A registration or a helper call counts only when its owner is a proven receiver: an
 application, a plugin, a factory, a proven instance or a proven entry. One made on a
@@ -44,11 +57,14 @@ leaves its plugin unserved everywhere. A route whose prefixes are all empty and 
 path is literal keeps its lines; anything else is composed.
 
 A scope already on the chain being followed contributes nothing: a plugin that reaches
-itself again is not served under the prefix of its own cycle. Per route the walk visits
-at most :data:`MAX_VISITS` scopes; beyond that the route is not served and
+itself again is not served under the prefix of its own cycle. The walk from a route's scope
+visits at most :data:`MAX_VISITS` scopes; beyond that the route is not served and
 :data:`CHAIN_TOO_COMPLEX` says why. A route reached through many applications stays
 served: only the visits bound the work. A route cut by a hop limit and served nowhere says
 :data:`CHAIN_TOO_DEEP`. Both are diagnostics in ``chain_refusals``, never an edge.
+
+A traced route is walked the same way. When it is not promoted it is only a diagnostic, in
+``traced_outcomes``: no outcome, no declared route, no count and no provider row.
 
 A proven instance is an application rooted at the file that holds it, not at the file of
 the factory or of the function that registers the routes.
