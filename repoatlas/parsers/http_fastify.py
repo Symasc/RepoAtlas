@@ -1672,12 +1672,17 @@ class FastifyDeclarations:
 
     def _binding_function(self, at: Node, name: str) -> Node | None:
         """The nearest function that binds ``name`` where ``at`` uses it, however often. A
-        function's own name is bound outside it, not in it."""
+        declaration's own name is bound outside it, not in it; a function expression's own
+        name is bound inside it."""
         node = at.parent
         while node is not None and node.type != "program":
             if node.type in _FUNCTIONS:
                 label = node.child_by_field_name("name")
-                own = label is not None and node_text(self._source, label) == name
+                own = (
+                    node.type in _DECLARATIONS
+                    and label is not None
+                    and node_text(self._source, label) == name
+                )
                 if self._own_counts(node)[name] > (1 if own else 0):
                     return node
             node = node.parent
