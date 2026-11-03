@@ -5,7 +5,8 @@ matched by method name. A receiver counts only when the source proves what it is
 
 * **an application** -- ``Fastify()`` or ``fastify()``, the factory imported from
   ``"fastify"`` (a default or named ``fastify`` import, or ``require``), assigned
-  to a module-level ``const`` bound once in the file;
+  to a module-level ``const`` bound once in the module's own scope (a parameter or a
+  nested function binding the same name is no second binding of it);
 * **a plugin's server** -- the first parameter of a plugin function, bound once
   in that function's own scope. A plugin function is a module-level function (a
   declaration, or a ``const`` holding one, possibly wrapped in
@@ -469,9 +470,13 @@ class FastifyDeclarations:
             if name_node is None or name_node.type != "identifier" or value is None:
                 continue
             name = node_text(self._source, name_node)
-            if self._counts[name] != 1:
-                continue
             line = line_range(declarator)[0]
+            if self._counts[name] != 1:
+                # Only an application is judged by the module's own scope: a parameter or a
+                # nested function binding the same name is no second binding of it here.
+                if self._module_bindings()[name] == 1:
+                    self._application_value(_operand(value), name, line)
+                continue
             text = static_string(self._source, value)
             if text is not None:
                 self._constants[name] = (text, line)
@@ -490,32 +495,47 @@ class FastifyDeclarations:
         return found
 
     def _call_value(self, value: Node, name: str, line: int) -> None:
+        if self._application_value(value, name, line):
+            return
         callee = value.child_by_field_name("function")
         arguments = _arguments(value) or []
-        if callee is None:
+        if callee is None or callee.type != "identifier":
             return
+        callee_name = node_text(self._source, callee)
+        if callee_name == "require" and self._required(arguments) == "fastify":
+            self._factories.add(name)
+            self._reads = True
+        elif callee_name in self._wrappers and len(arguments) >= 1:
+            inner = _operand(arguments[0])
+            if inner.type in _FUNCTION_VALUES:
+                self._plugin(inner, name, line, wrapped=True)
+
+    def _application_value(self, value: Node, name: str, line: int) -> bool:
+        """Record ``name`` as an application when ``value`` builds one: ``Fastify(...)`` or
+        ``require("fastify")(options)``. Whether the name is bound once is the caller's."""
+        if value.type != "call_expression":
+            return False
+        callee = value.child_by_field_name("function")
+        if callee is None:
+            return False
         if callee.type == "identifier":
-            callee_name = node_text(self._source, callee)
-            if callee_name in self._factories:
-                self._apps[name] = self._scope(value, name, APP, line)
-            elif callee_name == "require" and self._required(arguments) == "fastify":
-                self._factories.add(name)
-                self._reads = True
-            elif callee_name in self._wrappers and len(arguments) >= 1:
-                inner = _operand(arguments[0])
-                if inner.type in _FUNCTION_VALUES:
-                    self._plugin(inner, name, line, wrapped=True)
+            if node_text(self._source, callee) not in self._factories:
+                return False
         elif callee.type == "call_expression":
             # `require("fastify")(options)`: an application straight from the factory.
             inner = callee.child_by_field_name("function")
-            if (
+            if not (
                 inner is not None
                 and inner.type == "identifier"
                 and node_text(self._source, inner) == "require"
                 and self._required(_arguments(callee) or []) == "fastify"
             ):
-                self._reads = True
-                self._apps[name] = self._scope(value, name, APP, line)
+                return False
+            self._reads = True
+        else:
+            return False
+        self._apps[name] = self._scope(value, name, APP, line)
+        return True
 
     def _required(self, arguments: list[Node]) -> str | None:
         if len(arguments) != 1 or arguments[0].type != "string":
@@ -646,7 +666,7 @@ class FastifyDeclarations:
                 return None
             app = self._apps.get(name)
             if app is not None:
-                return (app, None) if self._counts[name] == 1 else None
+                return (app, None) if self._module_bindings()[name] == 1 else None
             if self._module_bindings()[name] != 1:
                 return None  # a parameter of another function is not a second binding here
             held = self._held.get((None, name))

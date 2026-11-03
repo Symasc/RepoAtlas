@@ -1391,25 +1391,145 @@ def test_a_function_of_the_file_bound_after_the_call_is_refused_for_the_applicat
     assert _refusal(source) == CALLEE_BEFORE_BINDING
 
 
-def test_a_parameter_named_like_the_application_is_still_decided_file_wide() -> None:
-    # A pinned limit: the module's application is bound once in the whole file (a parameter of
-    # that name counts), so `server` here is no application and its helper call is recorded
-    # nowhere. This is the pre-existing file-wide application rule; see D6.
+# -- D6: the application is bound once in the module's own scope, not in the whole file --------
+#
+# Before D6 the module's application was bound once in the WHOLE file, so a parameter or a
+# nested binding of the same name made `server` below no application: no `app` scope claim,
+# the top-level route unserved, the helper call recorded nowhere. After D6 the count is the
+# module's own (as it already was for a module-level instance), so the application stands.
+# Plugin, factory and entry rules are untouched and still count the whole file.
+
+
+def _served(source: str) -> set[str]:
+    """The routes the file itself serves: the application's, never a claim."""
+    return {
+        r.target_key
+        for r in _refs(source)
+        if r.edge_type is EdgeType.SERVES_HTTP_ROUTE and PENDING_FACT not in r.meta
+    }
+
+
+def _app_scopes(source: str) -> list[str]:
+    return [c.target_key for c in _claims(source, FASTIFY_SCOPE) if c.meta["kind"] == APP]
+
+
+def test_d6_a_parameter_named_like_the_application_does_not_hide_it() -> None:
     source = (
         ROUTES
         + "const server = Fastify();\nfunction plugin(server) { server.get('/x', h); }\n"
         + "setupRoutes(server);\n"
     )
-    assert _helpers(source) == []
+    # before D6: no application, no helper call; now the helper call is the application's
+    assert _app_scopes(source) == ["server"]
+    [call] = _helpers(source)
+    assert call.meta["owner"] == "server"
+    assert call.meta["owner_kind"] == APP
+    assert call.meta["receiver"] == "server"
     assert _instances(source) == []
+    # the parameter's own route is still the plugin's, as on master
     [route] = _claims(source, FASTIFY_ROUTE)
     assert route.meta["scope"] == "plugin"
-    served = [
-        r
-        for r in _refs(source)
-        if r.edge_type is EdgeType.SERVES_HTTP_ROUTE and PENDING_FACT not in r.meta
-    ]
-    assert served == []
+    assert route.target_key == "GET /x"
+    assert _served(source) == set()
+
+
+def test_d6_the_module_level_route_of_such_an_application_is_served() -> None:
+    source = IMPORT + (
+        "const server = Fastify();\n"
+        "function routes(server) { server.get('/x', h); }\n"
+        "server.get('/top', h);\n"
+        "routes(server);\n"
+    )
+    # before D6: no `app` scope and nothing served; now the application serves /top
+    assert _app_scopes(source) == ["server"]
+    assert _served(source) == {"GET /top"}
+    # the route in the function that receives it is that function's, never the application's
+    [route] = _claims(source, FASTIFY_ROUTE)
+    assert (route.target_key, route.meta["scope"]) == ("GET /x", "routes")
+    [call] = _helpers(source)
+    assert (call.meta["owner"], call.meta["owner_kind"]) == ("server", APP)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "function routes(server) { server.get('/x', h); }",
+        "const wire = (server) => { server.get('/x', h); };",
+        "function other() { const server = 1; return server; }",
+        "function other() { function server() {} return server; }",
+        "function other(a, { server }) { return a + server; }",
+    ],
+)
+def test_d6_a_binding_of_the_name_inside_a_function_does_not_disqualify_the_application(
+    extra: str,
+) -> None:
+    source = IMPORT + "const server = Fastify();\n" + extra + "\nserver.get('/top', h);\n"
+    assert _app_scopes(source) == ["server"]
+    assert "GET /top" in _served(source)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "let app = 1;",
+        "const app = Fastify();",
+        "function app() {}",
+        "var app;",
+    ],
+)
+def test_d6_a_module_level_double_binding_is_still_no_application(extra: str) -> None:
+    source = IMPORT + "const app = Fastify();\n" + extra + "\napp.get('/top', h);\n"
+    assert _app_scopes(source) == []
+    assert _served(source) == set()
+
+
+def test_d6_a_double_binding_in_the_module_is_not_cured_by_a_parameter() -> None:
+    source = IMPORT + (
+        "const app = Fastify();\nlet app = 1;\nfunction routes(app) {}\napp.get('/top', h);\n"
+    )
+    assert _app_scopes(source) == []
+    assert _served(source) == set()
+
+
+def test_d6_a_plugin_named_like_the_application_in_the_module_is_still_no_scope() -> None:
+    source = IMPORT + (
+        "const server = Fastify();\nconst server = async (s) => { s.get('/x', h); };\n"
+        "server.get('/top', h);\n"
+    )
+    assert _claims(source, FASTIFY_SCOPE) == []
+    assert _served(source) == set()
+
+
+def test_d6_a_function_that_gets_the_application_under_another_name_is_as_before() -> None:
+    source = IMPORT + (
+        "const app = Fastify();\n"
+        "function routes(instance) { instance.get('/x', h); }\n"
+        "app.get('/top', h);\n"
+        "routes(app);\n"
+    )
+    assert _app_scopes(source) == ["app"]
+    assert _served(source) == {"GET /top"}
+    [route] = _claims(source, FASTIFY_ROUTE)
+    assert (route.target_key, route.meta["scope"]) == ("GET /x", "routes")
+    [call] = _helpers(source)
+    assert (call.meta["owner"], call.meta["owner_kind"], call.meta["receiver"]) == (
+        "app",
+        APP,
+        "app",
+    )
+
+
+def test_d6_a_required_application_is_judged_in_the_module_scope_too() -> None:
+    source = (
+        "const Fastify = require('fastify');\n"
+        "const server = Fastify();\n"
+        "const direct = require('fastify')({ logger: true });\n"
+        "function routes(server, direct) {}\n"
+        "server.get('/a', h);\n"
+        "direct.get('/b', h);\n"
+    )
+    assert _app_scopes(source) == ["server", "direct"]
+    assert _served(source) == {"GET /a", "GET /b"}
 
 
 # -- registrations on the new receivers ---------------------------------------------------
