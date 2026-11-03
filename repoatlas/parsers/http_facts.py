@@ -128,6 +128,17 @@ FASTIFY_SCOPE = "fastify-scope"
 FASTIFY_ROUTE = "fastify-route"
 #: ``server.register(plugin, { prefix })``: the plugin, where it comes from, and its prefix.
 FASTIFY_REGISTER = "fastify-register"
+#: ``const x = F()`` where ``F`` may be a function that returns a Fastify application, or an
+#: application built at the top of an entry function: the receiver, the factory it names,
+#: and whether the parser proved it or why it refused (M8).
+FASTIFY_INSTANCE = "fastify-instance"
+#: A call that hands a receiver to a function of the same file or of a relative module (M8).
+FASTIFY_HELPER_CALL = "fastify-helper-call"
+#: A function a helper call reaches, and the receiver its body reads (M8).
+FASTIFY_TRACED_SCOPE = "fastify-traced-scope"
+#: A route declared on a receiver a helper call handed over, served only where the global
+#: pass proves the chain back to an instance (M8).
+FASTIFY_TRACED_ROUTE = "fastify-traced-route"
 #: A TypeScript module's exported string constants that could be part of a path or a URL,
 #: for the routes and requests in other modules that import them.
 TS_CONSTANTS = "ts-constants"
