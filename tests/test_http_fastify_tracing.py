@@ -1734,3 +1734,100 @@ def test_a_file_states_at_most_256_traced_routes_in_the_order_it_declares_them()
     source = IMPORT + MAKE + SERVER + "".join(f"server.get('/r{i}', h);\n" for i in range(300))
     claims = _traced(source)
     assert [c.target_key for c in claims] == [f"GET /r{i}" for i in range(256)]
+
+
+# -- D6b: the module's binding is read where it is the module's -------------------------------
+#
+# D6b made a factory import eligible when its name is bound once in the module's own scope, so a
+# parameter of the same name no longer disqualifies it. But two call sites still read that name
+# without asking what it means where it is called: `_fastify_call` took any call of the factory
+# name for `Fastify(...)`, and `_factory_callee` took any call of an imported name (or of a
+# relative namespace's member) for the imported factory. Before the fix, a function taking the
+# factory's name as a parameter, `function make(fastify) { const app = fastify(); ... }`, was a
+# factory scope with its routes traced, an entry function was a proven entry application, and
+# `main(createServer)` / `main(lib)` recorded an instance of the imported factory. After the fix
+# the name means the parameter inside the function that binds it, so none of these is recorded.
+# The same files with a distinct parameter name behave as D6b intends (the controls).
+
+SHADOW_IMPORT = "import fastify from 'fastify';\n"
+FACTORY_SHADOW = (
+    "function make(fastify) {\n  const app = fastify();\n  app.get('/x', h);\n  return app;\n}\n"
+)
+ENTRY_SHADOW = (
+    "async function start(fastify) {\n  const app = fastify();\n  app.get('/e', h);\n"
+    "  await app.listen();\n}\nstart();\n"
+)
+SERVER_IMPORT = "import { initA } from './a';\nimport { createServer } from './server';\n"
+LIB_IMPORT = "import { initA } from './a';\nimport * as lib from './lib';\n"
+
+
+def test_d6b_lexical_a_function_taking_the_factory_name_as_a_parameter_is_no_factory() -> None:
+    source = SHADOW_IMPORT + FACTORY_SHADOW
+    assert _factories(source) == []
+    assert _traced(source) == []
+    # the control: the same function with a distinct parameter name is a factory with its route
+    control = source.replace("make(fastify)", "make(options)")
+    [scope] = _factories(control)
+    assert scope.target_key == "make()"
+    [route] = _traced(control)
+    assert (route.target_key, route.meta["scope"]) == ("GET /x", "make()")
+
+
+def test_d6b_lexical_a_local_function_that_shadows_the_factory_is_no_proven_instance() -> None:
+    source = SHADOW_IMPORT + FACTORY_SHADOW + "const server = make();\nserver.listen();\n"
+    # `make` is a local function that is no factory: the instance is refused, never proven.
+    # Before the fix `make` was a factory and this instance was PROVEN.
+    claim = _only(source)
+    assert claim.meta["status"] == REFUSED
+    assert claim.meta["refusal"] == FACTORY_UNPROVEN
+    assert _factories(source) == []
+
+
+def test_d6b_lexical_an_entry_taking_the_factory_name_as_a_parameter_records_no_entry() -> None:
+    source = SHADOW_IMPORT + ENTRY_SHADOW
+    # the actual recorded outcome is no claim at all: the call `fastify()` inside `start` is
+    # no `Fastify(...)`, so there is no entry application (neither proven nor refused), and
+    # its route is no traced route. Before the fix this was `start>app` with status PROVEN.
+    assert _instances(source) == []
+    assert _traced(source) == []
+    # the control: a distinct parameter name leaves `fastify()` the imported factory
+    control = source.replace("start(fastify)", "start(options)")
+    claim = _only(control)
+    assert claim.target_key == "start>app"
+    assert (claim.meta["kind"], claim.meta["status"]) == (ENTRY, PROVEN)
+    assert [r.target_key for r in _traced(control)] == ["GET /e"]
+
+
+def test_d6b_lexical_a_parameter_named_like_an_imported_factory_records_no_instance() -> None:
+    body = "async function main({0}) {{\n  const server = createServer();\n  initA(server);\n}}\n"
+    source = SHADOW_IMPORT + SERVER_IMPORT + body.format("createServer") + "main(x);\n"
+    # before the fix: a PENDING instance of `./server`'s `createServer`; now none
+    assert _instances(source) == []
+    # the control: a distinct parameter name is the D6b case, an instance left to the global pass
+    control = SHADOW_IMPORT + SERVER_IMPORT + body.format("build") + "main(x);\n"
+    claim = _only(control)
+    assert claim.target_key == "main>server"
+    assert (claim.meta["module"], claim.meta["name"]) == ("./server", "createServer")
+    assert (claim.meta["kind"], claim.meta["status"]) == (INSTANCE, PENDING)
+
+
+def test_d6b_lexical_a_parameter_named_like_a_relative_namespace_records_no_instance() -> None:
+    body = (
+        "async function main({0}) {{\n  const server = lib.createServer();\n  initA(server);\n}}\n"
+    )
+    source = SHADOW_IMPORT + LIB_IMPORT + body.format("lib") + "main(x);\n"
+    # before the fix: a PENDING instance of `./lib`'s `createServer`; now none
+    assert _instances(source) == []
+    control = SHADOW_IMPORT + LIB_IMPORT + body.format("other") + "main(x);\n"
+    claim = _only(control)
+    assert claim.target_key == "main>server"
+    assert (claim.meta["module"], claim.meta["name"]) == ("./lib", "createServer")
+    assert (claim.meta["kind"], claim.meta["status"]) == (INSTANCE, PENDING)
+
+
+def test_d6b_lexical_a_parameter_named_require_builds_no_factory() -> None:
+    read = "const f = require('fastify');\n"  # makes the file one that reads Fastify
+    body = "function make({0}) {{\n  const app = require('fastify')();\n  return app;\n}}\n"
+    assert _factories(read + body.format("require")) == []
+    # the control: with the global `require`, `make` is a factory
+    assert [c.target_key for c in _factories(read + body.format(""))] == ["make()"]
