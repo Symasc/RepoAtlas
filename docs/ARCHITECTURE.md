@@ -2082,9 +2082,13 @@ Until the pass proves one, it stays a pending claim that records the declaration
     - on an instance, an entry or a factory's application, a call inside a callback is not a route;
     - a factory's return must be its last statement;
     - a registration made inside a plugin function of a file without a `fastify` import is not read;
-    - a conditional `register()` is accepted (a plugin's server keeps its rule for registrations), while a
-      conditional helper call is refused with `fastify-helper-control-flow` (D5);
-    - helper hops count the landing on the instance, while registration hops do not.
+    - a conditional `register()` on an application or a plugin's server is accepted, as before M8; on an instance,
+      an entry or a factory's application it is not read (straight-line rule); a conditional helper call is refused
+      with `fastify-helper-control-flow` (D5);
+    - helper hops count the landing on the application, instance or entry they reach, while registration hops do
+      not;
+    - a named function expression whose name is the factory import's name (`const make = function fastify() {...}`)
+      is treated as shadowing the import inside its own body, so such a function is not a factory.
 - **fetch** means the global function, only when the file binds no `fetch` of its own.
   - With no options the method is GET.
   - With options, the method must be a literal in an object literal with no spread, shorthand or computed key.
