@@ -5,8 +5,9 @@ matched by method name. A receiver counts only when the source proves what it is
 
 * **an application** -- ``Fastify()`` or ``fastify()``, the factory imported from
   ``"fastify"`` (a default or named ``fastify`` import, or ``require``), assigned
-  to a module-level ``const`` bound once in the module's own scope (a parameter or a
-  nested function binding the same name is no second binding of it);
+  to a module-level ``const``. The import and the ``const`` are each bound once in the
+  module's own scope: a parameter or a nested function binding the same name is no
+  second binding of either, a true second binding in the module's own scope refuses it;
 * **a plugin's server** -- the first parameter of a plugin function, bound once
   in that function's own scope. A plugin function is a module-level function (a
   declaration, or a ``const`` holding one, possibly wrapped in
@@ -31,17 +32,19 @@ readable when absent, or when they are an object literal with no spread whose
 ``prefix``, if any, is a literal Fastify accepts. A ``fastify-plugin`` plugin ignores
 ``prefix``, so it is unreadable with one.
 
-**A factory** (M8) is a module-level function bound once that hands back an application it
+**A factory** is a module-level function bound once that hands back an application it
 builds: its body's top level holds exactly one ``const app = Fastify(...)`` bound once in
-its own scope and every ``return`` in its own body returns ``app`` (there is at least one);
-or its body is ``return Fastify(...)``, or its expression is ``Fastify(...)``. Returning
-``{ app }``, returning something else on a branch, or building two applications is no
-factory. Each is a :data:`~repoatlas.parsers.http_facts.FASTIFY_SCOPE` claim of kind
-:data:`FACTORY`, with the scope id ``F()``.
+its own scope (the body holds no other ``Fastify(...)`` call), every ``return`` in its own
+body returns ``app`` (there is at least one) and its last statement is a ``return``; or its
+body is ``return Fastify(...)``, or its expression is ``Fastify(...)``. Returning
+``{ app }``, returning something else on a branch, ending without a ``return``, or building
+two applications is no factory. Each is a :data:`~repoatlas.parsers.http_facts.FASTIFY_SCOPE`
+claim of kind :data:`FACTORY`, with the scope id ``F()``.
 
-**An instance** is ``const x = F()`` (or ``await F()``), bound once, at the module's level
-or at the top level of an entry function, where ``F`` is a factory of this file, a name
-imported from a relative module, or ``ns.F`` of a relative namespace import. **An entry
+**An instance** is ``const x = F()`` (or ``await F()``), bound once in the scope that holds
+it, at the module's level or at the top level of an entry function, where ``F`` is a factory
+of this file, a name imported from a relative module, or ``ns.F`` of a relative namespace
+import (each import bound once in the module's own scope). **An entry
 application** is ``const x = Fastify()`` at the top level of a module-level function ``G``
 that is no factory, proven only where the file calls ``G`` unconditionally at its top level
 (``G();``, ``void G();``, ``await G();``, ``G().catch(...)``). Each is a
@@ -53,7 +56,7 @@ only for a receiver (or an alias of it) that the file uses: as the receiver of a
 ``route``, ``register``, ``listen`` or ``ready``, or as an argument of a call of a function of
 this file or of a relative module (``f(x)``, ``ns.f(x)`` on a relative namespace import).
 
-**Tracing** (M8). An instance, an entry application and a factory's own application are
+**Tracing.** An instance, an entry application and a factory's own application are
 receivers on a straight line only: a route, a registration or a helper call on one counts
 when its statement sits directly in that receiver's own body (the module's, the entry
 function's or the factory's) as ``call;``, ``await call;``, ``void call;``, ``return call;`` or
@@ -82,11 +85,13 @@ there is one, and ``refusal`` the first code that applies: :data:`HELPER_CONTROL
 receiver, and how deep a chain goes, are for the global pass.
 
 A file that imports neither ``fastify`` nor ``fastify-plugin`` is read only when it has an
-instance claim, and then records only claims of the roles M8 adds -- instances, helper
-calls, traced routes and, for each module-level function they name,
-a :data:`~repoatlas.parsers.http_facts.FASTIFY_TRACED_SCOPE` claim (``kind``, ``exports``, and
+instance claim, and then records only the claims that trace a receiver -- instances, helper
+calls, traced routes and, for each plugin function they name, a
+:data:`~repoatlas.parsers.http_facts.FASTIFY_TRACED_SCOPE` claim (``kind``, ``exports``, and
 ``receiver``, the name of the function's first parameter) -- besides the registrations an
-instance makes. In a file that imports fastify nothing it recorded before changes.
+instance makes. A route there is always a traced one, and a registration made on a plugin's
+server is not recorded. In a file that imports fastify the claims of an application and of
+a plugin are the same as without any tracing.
 
 Parsed, never executed (V1_SPEC §17).
 """

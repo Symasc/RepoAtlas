@@ -2007,7 +2007,7 @@ Until the pass proves one, it stays a pending claim that records the declaration
     `variables`, or a base with a placeholder or query, leaves the document unserved by code. The document still
     serves its own routes, as before.
 - **Fastify** (`repoatlas/parsers/http_fastify.py`). An application is `Fastify()`/`fastify()` from `"fastify"`,
-  a module-level `const` bound once.
+  a module-level `const` bound once in the module's own scope.
   - A plugin's server is the first parameter of a plugin function, bound once in that function's own scope, so
     `fastify.register(async (fastify) => …)` shadowing its parent's name is read. Plugins are read only in a file
     importing `fastify` or `fastify-plugin`.
@@ -2021,6 +2021,60 @@ Until the pass proves one, it stays a pending claim that records the declaration
     literal without a trailing slash. Any other registration, and a `fastify-plugin` plugin given a prefix it
     ignores, leaves the plugin unserved everywhere. A route is exact only when no prefix applies and its path is
     literal.
+  - Receivers beyond an application and a plugin's server (`repoatlas/graph/ts_routes.py` serves them):
+    - a factory is a module-level function, bound once, whose every path returns the one application it builds: a
+      `const app = Fastify()` in its body followed by a last-statement `return app` (every `return` of its own body
+      returns `app`), or a body that is `return Fastify()`, or an expression body that is `Fastify()`. Returning
+      `{ app }`, returning something else on a branch, or building two applications is no factory;
+    - an instance is `const x = F()` (or `await F()`), bound once, at the module's level or at the top of an entry
+      function, where `F` is a factory of the file, a name imported from a relative module, or the member of a
+      relative namespace import; an `async` factory must be awaited;
+    - an entry application is a `const x = Fastify()` at the top of a module-level function that is no factory, and
+      counts only where the file calls that function unconditionally at its top level (`G();`, `void G();`,
+      `await G();`, `G().catch(…)`);
+    - an alias is `const y = x` in the same scope after `x`, at most 4 hops from the instance or the entry. A
+      receiver is recorded only when the file uses it: as the receiver of a route verb, `route`, `register`,
+      `listen` or `ready`, or as an argument of a call of a function of the file or of a relative module.
+  - Scope rule. The Fastify factory import, an application, an instance and a relative import are judged in the
+    module's own scope, so a parameter or a nested binding of the same name does not hide them; a true module-level
+    double binding is still refused. Plugin functions and the `fastify-plugin` wrapper keep their file-wide count.
+  - Helper calls. A call that hands a proven receiver to a function of the file or of a relative module (or the
+    member of a relative namespace import) is a registration with no prefix: the target's first parameter is the
+    server, and the receiver must be the first argument. A call through a package import, or to a name the file does
+    not know, records nothing; a member call on anything but a relative namespace import is recorded and refused
+    with `fastify-helper-callee-unsupported`.
+  - Straight-line rule. A route, registration or helper call on an instance, an entry or a factory's application
+    counts only when its statement sits directly in that receiver's own body (`call;`, `await call;`, `void call;`,
+    `return call;` or `const r = [await] call;`). Uses in nested functions, callbacks, conditions, loops or `try`
+    blocks are no routes and no registrations, and a helper call there is refused with
+    `fastify-helper-control-flow`; a helper call after an awaited `listen` or `ready` on the receiver is refused
+    with `fastify-after-listen`. A plugin's server keeps its rule for routes and registrations (anywhere in its
+    body); its helper calls need the straight line.
+  - Files without a `fastify` import are read only when they hold a used instance. Their routes are traced, and are
+    served only when a proven chain reaches them; otherwise they are diagnostics, never provider rows.
+  - Chain. A route on a plugin, an instance or a factory is served under each chain of registrations and helper
+    calls that reaches an application, an instance or an entry. A chain passes through at most 4 plugins between the
+    route's plugin and the application, at most 4 helper calls, and at most 1 factory (from its application to its
+    instances). A scope already on the chain contributes nothing (cycle guard), so a register cycle yields no extra
+    prefixes. A walk visits at most 1,024 scopes; beyond that the route is not served (`fastify-chain-too-complex`;
+    `fastify-chain-too-deep` when a hop bound cut it). An instance is rooted at the file that holds it.
+  - Bounds per file: 256 helper-call claims, 256 traced routes, 64 instance claims, 8 arguments scanned per call.
+  - Refusal codes. Parser side: `fastify-helper-control-flow`, `fastify-helper-dynamic`,
+    `fastify-helper-callee-unsupported`, `fastify-helper-shadowed`, `fastify-helper-argument-unsupported`,
+    `fastify-receiver-before-binding`, `fastify-callee-before-binding`, `fastify-after-listen`,
+    `fastify-factory-unproven`, `fastify-factory-not-awaited`, `fastify-entry-not-called`. Planner side:
+    `fastify-factory-unresolved` (an imported factory's module is not in the repository), `fastify-helper-unresolved`,
+    `fastify-helper-not-a-plugin`, `fastify-helper-argument-position`, `fastify-chain-too-deep`,
+    `fastify-chain-too-complex`. A call made on a receiver nothing proves is ignored, not refused.
+  - Limits:
+    - a helper imported from a package is not followed, and cross-module tracing needs a relative import;
+    - `autoload`, `register(import())` and `register(require())` are not read, and options held in a `const` make a
+      registration unreadable;
+    - a chain on `Fastify()` such as `Fastify().withTypeProvider()` is not recognised;
+    - a helper call on an entry application the file does not call unconditionally is not followed;
+    - the `fastify-plugin` wrapper import is judged file-wide;
+    - on an instance, an entry or a factory's application, a call inside a callback is not a route;
+    - a factory's return must be its last statement.
 - **fetch** means the global function, only when the file binds no `fetch` of its own.
   - With no options the method is GET.
   - With options, the method must be a literal in an object literal with no spread, shorthand or computed key.
