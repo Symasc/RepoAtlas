@@ -2064,7 +2064,7 @@ Until the pass proves one, it stays a pending claim that records the declaration
     instances). A scope already on the chain contributes nothing (cycle guard), so a register cycle yields no extra
     prefixes. A walk visits at most 1,024 scopes; beyond that the route is not served (`fastify-chain-too-complex`;
     `fastify-chain-too-deep` when a hop bound cut it). An instance is rooted at the file that holds it.
-  - Bounds per file: 256 helper-call claims, 256 traced routes, 64 instance claims, 8 arguments scanned per call.
+  - Bounds per file: 256 helper-call claims, 256 traced routes, 64 instance claims, 8 arguments scanned per call. A file past one of these bounds records nothing further and gives no refusal code: a chain that needs a dropped claim is left unserved silently (fail-closed, never a false route).
   - Refusal codes. Parser side: `fastify-helper-control-flow`, `fastify-helper-dynamic`,
     `fastify-helper-callee-unsupported`, `fastify-helper-shadowed`, `fastify-helper-argument-unsupported`,
     `fastify-receiver-before-binding`, `fastify-callee-before-binding`, `fastify-after-listen`,
