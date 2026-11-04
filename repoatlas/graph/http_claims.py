@@ -94,7 +94,7 @@ from pathlib import PurePosixPath
 from repoatlas.graph.deploy_identity import ServedRoute, plan_deployment_exposures
 from repoatlas.graph.keys import global_key
 from repoatlas.graph.py_modules import PythonModules
-from repoatlas.graph.py_routes import plan_python_routes
+from repoatlas.graph.py_routes import Place, plan_python_routes
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.graph.ts_injection import plan_injected_requests
 from repoatlas.graph.ts_oas3 import plan_spec_routed
@@ -289,6 +289,24 @@ class HttpClaimPlan:
     #: The routes code serves, with the applications serving them: what the global pass's
     #: artifact join ties CI-established deployments to (repoatlas.graph.deploy_artifacts).
     code_routes: tuple[ServedRoute, ...] = ()
+    #: Diagnostic facts of the route planners (R1), recorded beside the results above and read by
+    #: no decision, no edge and no consumer of the global pass. Each is the sub-plan's own table,
+    #: keyed by route claim id: ``route_codes`` the cause the planner itself names for a route
+    #: served nowhere; ``resolved_routes`` the route body an unserved, undeclared claim's path
+    #: evaluates to; ``route_bounds`` the bounds on its evidence path; ``related`` the claims
+    #: that caused its code (file id, first line, last line, role).
+    route_codes: dict[int, str] = field(default_factory=dict)
+    route_bounds: dict[int, tuple[str, ...]] = field(default_factory=dict)
+    resolved_routes: dict[int, str] = field(default_factory=dict)
+    related: dict[int, tuple[Place, ...]] = field(default_factory=dict)
+    #: Fastify traced route claim id → why it is served nowhere (not an outcome).
+    traced_outcomes: dict[int, str] = field(default_factory=dict)
+    #: Python class route claim id → why its class is no proven application.
+    class_unproven: dict[int, str] = field(default_factory=dict)
+    #: oas3-tools application claim id → why its specification was refused.
+    spec_refusals: dict[int, str] = field(default_factory=dict)
+    #: Fastify route claim id → the bound that stopped its chain.
+    chain_refusals: dict[int, str] = field(default_factory=dict)
 
     @property
     def detail(self) -> str:
@@ -492,6 +510,15 @@ def plan_http_claims(
     route_outcomes: dict[int, str] = {}
     promoted_routes: dict[int, tuple[str, ...]] = {}
     declared_routes: dict[int, str] = {}
+    # Diagnostic facts of the route planners (R1): copied beside the results, read by none.
+    route_codes: dict[int, str] = {}
+    route_bounds: dict[int, tuple[str, ...]] = {}
+    resolved_routes: dict[int, str] = {}
+    related: dict[int, tuple[Place, ...]] = {}
+    traced_outcomes: dict[int, str] = {}
+    class_unproven: dict[int, str] = {}
+    spec_refusals: dict[int, str] = {}
+    chain_refusals: dict[int, str] = {}
     for claim in grouped[NESTJS_ROUTE]:
         meta = _meta(claim)
         origin = resolver.origin(claim)
@@ -583,6 +610,10 @@ def plan_http_claims(
     route_outcomes.update(python.outcomes)
     promoted_routes.update(python.promoted)
     declared_routes.update(python.declared)
+    route_codes.update(python.route_codes)
+    resolved_routes.update(python.resolved_routes)
+    related.update(python.related)
+    class_unproven.update(python.class_unproven)
     resolved += python.resolved
     unresolved += python.unresolved
 
@@ -605,6 +636,12 @@ def plan_http_claims(
     route_outcomes.update(fastify.outcomes)
     promoted_routes.update(fastify.promoted)
     declared_routes.update(fastify.declared)
+    route_codes.update(fastify.route_codes)
+    route_bounds.update(fastify.route_bounds)
+    resolved_routes.update(fastify.resolved_routes)
+    related.update(fastify.related)
+    traced_outcomes.update(fastify.traced_outcomes)
+    chain_refusals.update(fastify.chain_refusals)
     resolved += fastify.resolved
     unresolved += fastify.unresolved
 
@@ -626,6 +663,7 @@ def plan_http_claims(
         )
     route_outcomes.update(oas3.outcomes)
     promoted_routes.update(oas3.promoted)
+    spec_refusals.update(oas3.spec_refusals)
     resolved += oas3.resolved
     unresolved += oas3.unresolved
 
@@ -715,6 +753,14 @@ def plan_http_claims(
         identities=(*deployed.identities, *deployed.patterns),
         deployments=deployed.outcomes,
         code_routes=tuple(code_routes),
+        route_codes=route_codes,
+        route_bounds=route_bounds,
+        resolved_routes=resolved_routes,
+        related=related,
+        traced_outcomes=traced_outcomes,
+        class_unproven=class_unproven,
+        spec_refusals=spec_refusals,
+        chain_refusals=chain_refusals,
     )
 
 
