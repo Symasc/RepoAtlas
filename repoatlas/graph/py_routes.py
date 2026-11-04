@@ -128,6 +128,41 @@ _FAMILY = {
 _PACKAGE_FILES = ("__init__.py", "__init__.pyi")
 
 Key = tuple[int, str]
+#: ``(file id, first line, last line, role)``: a claim that caused a refusal, for a reader to
+#: place it (R1 diagnostics). Never read by a decision.
+Place = tuple[int, int | None, int | None, str]
+
+#: Diagnostic codes this stage establishes itself (R1): a flag set beside an unchanged return.
+CODE_CONSTANT_HOPS = "python-constant-hops"
+CODE_ROUTER_PATH_UNROOTED = "python-router-path-unrooted"
+CODE_CHAIN_TOO_DEEP = "python-chain-too-deep"
+
+
+def claim_place(claim: UnresolvedRefRecord, role: str) -> Place:
+    return (claim.file_id, claim.line_start, claim.line_end, role)
+
+
+def ordered_places(places: Sequence[Place]) -> tuple[Place, ...]:
+    """The places without repeats, in a fixed order."""
+    return tuple(sorted(set(places), key=lambda p: (p[0], p[1] or 0, p[2] or 0, p[3])))
+
+
+@dataclass(slots=True)
+class _Trace:
+    """What one route claim's evaluation met, beside its unchanged result (R1 diagnostics)."""
+
+    #: The receiver the route names, once its module resolved.
+    key: Key | None = None
+    #: The path text, once every part of it was evaluated.
+    path: str | None = None
+    #: A router or mount chain cut by :data:`MAX_DEPTH`.
+    deep: bool = False
+    #: A constant followed through :data:`MAX_CONSTANT_HOPS` modules and no further.
+    hops: bool = False
+    #: A constant that names itself again (not a bound).
+    cycle: bool = False
+    #: A router route whose path has no leading ``/``.
+    unrooted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +207,16 @@ class PythonRoutePlan:
     #: merged into ``outcomes``, never counted in ``unresolved``, never in ``declared``: a route
     #: on a receiver whose class only another module could vouch for is not a declared route.
     class_unproven: dict[int, str] = field(default_factory=dict)
+    #: Diagnostic facts (R1), recorded beside the results above and read by none of them.
+    #: Route (or class route) claim id → the code of the flag the stage itself set when the
+    #: claim was not served: ``python-constant-hops``, ``python-router-path-unrooted`` or
+    #: ``python-chain-too-deep``. A claim with no such flag has no entry.
+    route_codes: dict[int, str] = field(default_factory=dict)
+    #: Claim id → the receiver-relative route body its path evaluates to, for a claim that is not
+    #: served and not in ``declared`` (a path built from constants, say).
+    resolved_routes: dict[int, str] = field(default_factory=dict)
+    #: Claim id → the mounts that left its router unreadable (file, lines, ``mount``).
+    related: dict[int, tuple[Place, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,7 +415,9 @@ def plan_python_routes(
     app_mounts: dict[Key, list[tuple[Key, str]]] = defaultdict(list)
     mounted_apps: set[Key] = set()
     blocked: set[Key] = set()
-    readable: list[tuple[Key, _Mount]] = []
+    #: Where each blocked receiver was blocked: the mount claims (diagnostics only).
+    blocked_at: dict[Key, list[Place]] = defaultdict(list)
+    readable: list[tuple[Key, _Mount, Place]] = []
     for claim in grouped.get(PYTHON_MOUNT, ()):
         meta = _meta(claim)
         origin = by_id.get(claim.file_id)
@@ -380,6 +427,8 @@ def plan_python_routes(
         if meta.get("call") == "mount" and (child is None or child not in receivers):
             # Identity not proven: any application of that name in this repository may be it.
             blocked.update(applications.get((origin.repo_id, claim.target_key), ()))
+            for application in applications.get((origin.repo_id, claim.target_key), ()):
+                blocked_at[application].append(claim_place(claim, "mount"))
         if child is None:
             continue
         mounted_at = _mount_path(meta)
@@ -396,6 +445,7 @@ def plan_python_routes(
             continue
         if meta.get("readable") != "true":
             blocked.add(child)
+            blocked_at[child].append(claim_place(claim, "mount"))
             continue
         mount = _Mount(
             owner=(claim.file_id, meta.get("owner", "")),
@@ -403,22 +453,25 @@ def plan_python_routes(
             call=meta.get("call", ""),
             prefix=json.loads(meta.get("prefix", "null")),
         )
-        readable.append((child, mount))
+        readable.append((child, mount, claim_place(claim, "mount")))
     # An include or registration on a sub-application is unreadable, whatever module mounts it.
     # Decided against the sub-applications as every mount claim leaves them, so the claims'
     # order does not matter; the children it adds are routers, never applications.
     sub_applications = frozenset(blocked | mounted_apps)
-    for child, mount in readable:
+    for child, mount, where in readable:
         if mount.owner_kind in _APPLICATIONS and mount.owner in sub_applications:
             blocked.add(child)
+            blocked_at[child].append(where)
             continue
         mounts[child].append(mount)
 
     chains = _Chains(receivers, mounts, blocked, app_mounts)
     for claim in claims:
+        trace = _Trace()
         outcome, bodies, exact = _route(
-            claim, imports, receivers, constants, composed, chains, by_id
+            claim, imports, receivers, constants, composed, chains, by_id, trace
         )
+        _record_facts(plan, claim, outcome, trace, blocked_at, _relative(claim) is not None)
         if claim.id is not None:
             plan.outcomes[claim.id] = outcome
         if outcome == PROMOTED:
@@ -449,7 +502,11 @@ def plan_python_routes(
 
     classes = _offered_classes(grouped.get(PYTHON_CLASS, ()))
     for claim in class_claims:
-        outcome, bodies, exact = _class_route(claim, imports, classes, constants, composed, by_id)
+        trace = _Trace()
+        outcome, bodies, exact = _class_route(
+            claim, imports, classes, constants, composed, by_id, trace
+        )
+        _record_facts(plan, claim, outcome, trace, blocked_at, False)
         if outcome != PROMOTED:
             if claim.id is not None:
                 plan.class_unproven[claim.id] = outcome
@@ -473,6 +530,38 @@ def plan_python_routes(
             plan.outcomes[claim.id] = outcome
             plan.promoted[claim.id] = tuple(bodies)
     return plan
+
+
+def _record_facts(
+    plan: PythonRoutePlan,
+    claim: UnresolvedRefRecord,
+    outcome: str,
+    trace: _Trace,
+    blocked_at: Mapping[Key, Sequence[Place]],
+    will_declare: bool,
+) -> None:
+    """Record, beside a claim's unchanged outcome, what its evaluation met (R1 diagnostics).
+
+    Nothing is recorded for a claim that is served. ``will_declare``: the claim lands in
+    ``plan.declared``, whose route body is already a fact of the plan."""
+    if claim.id is None or outcome in (PROMOTED, SERVED_HERE):
+        return
+    code: str | None = None
+    if outcome == CONSTANT_UNRESOLVED and trace.hops:
+        code = CODE_CONSTANT_HOPS
+    elif outcome == NOT_MOUNTED and trace.unrooted:
+        code = CODE_ROUTER_PATH_UNROOTED
+    elif outcome == NOT_MOUNTED and trace.deep:
+        code = CODE_CHAIN_TOO_DEEP
+    if code is not None:
+        plan.route_codes[claim.id] = code
+    if outcome == UNREADABLE_MOUNT and trace.key is not None and blocked_at.get(trace.key):
+        plan.related[claim.id] = ordered_places(blocked_at[trace.key])
+    if trace.path is not None and not will_declare:
+        route = http.route_path(trace.path or "/")
+        body = http.route_body(_meta(claim).get("method", ""), route) if route is not None else ""
+        if body and http.canonical_route(body) is not None:
+            plan.resolved_routes[claim.id] = body
 
 
 def _offered_classes(claims: Sequence[UnresolvedRefRecord]) -> dict[Key, tuple[str, int]]:
@@ -523,7 +612,11 @@ class _Chains:
         return receiver is not None and receiver.usable and key not in self._blocked
 
     def mounted(
-        self, key: Key, depth: int = 0, seen: frozenset[Key] | None = None
+        self,
+        key: Key,
+        depth: int = 0,
+        seen: frozenset[Key] | None = None,
+        trace: _Trace | None = None,
     ) -> list[tuple[str, int]]:
         """``(prefix, root)`` such that a route path ``p`` on application ``key`` is also
         served at ``prefix + p`` by the application module ``root``: each proven mount of it on
@@ -532,6 +625,8 @@ class _Chains:
         a factory's application, which is no receiver, ends the chain with its own file as
         root. An application already on the chain is never entered again."""
         if depth > MAX_DEPTH:
+            if trace is not None:
+                trace.deep = True
             return []
         visited = seen if seen is not None else frozenset({key})
         found: list[tuple[str, int]] = []
@@ -546,17 +641,25 @@ class _Chains:
             found.append((prefix, owner[0]))
             found.extend(
                 (f"{base}{prefix}", root)
-                for base, root in self.mounted(owner, depth + 1, visited | {owner})
+                for base, root in self.mounted(owner, depth + 1, visited | {owner}, trace)
             )
         return found
 
-    def fastapi(self, key: Key, *, own_module: bool, depth: int = 0) -> list[tuple[str, bool, int]]:
+    def fastapi(
+        self, key: Key, *, own_module: bool, depth: int = 0, trace: _Trace | None = None
+    ) -> list[tuple[str, bool, int]]:
         """``(prefix, exact, root)`` such that a route path ``p`` on router ``key`` is served
         at ``prefix + p`` by the application module ``root``: the chain's prefixes and the
         router's own. The mounts its own module makes are left out at the first level when
         the route is in that module, which serves those itself."""
         receiver = self._receivers.get(key)
-        if receiver is None or depth > MAX_DEPTH or not self.usable(key):
+        if receiver is None:
+            return []
+        if depth > MAX_DEPTH:
+            if trace is not None:
+                trace.deep = True
+            return []
+        if not self.usable(key):
             return []
         own = receiver.prefix or ""
         found: list[tuple[str, bool, int]] = []
@@ -571,7 +674,7 @@ class _Chains:
                 found.append((f"{prefix}{own}", not prefix and not own, mount.owner[0]))
             elif mount.owner_kind == _FASTAPI_ROUTER:
                 for base, exact, root in self.fastapi(
-                    mount.owner, own_module=False, depth=depth + 1
+                    mount.owner, own_module=False, depth=depth + 1, trace=trace
                 ):
                     found.append((f"{base}{prefix}{own}", exact and not prefix and not own, root))
         return found
@@ -604,6 +707,7 @@ def _constant_value(
     name: str,
     hops_left: int = MAX_CONSTANT_HOPS,
     seen: frozenset[Key] = frozenset(),
+    trace: _Trace | None = None,
 ) -> str | None:
     """The text of the string constant ``name`` of ``module``, as ``origin`` imports it.
 
@@ -616,7 +720,13 @@ def _constant_value(
     if target is None:
         return None
     key = (target.file_id, name)
-    if key in seen or hops_left == 0:
+    if key in seen:
+        if trace is not None:
+            trace.cycle = True
+        return None
+    if hops_left == 0:
+        if trace is not None:
+            trace.hops = True
         return None
     literal = constants.get(target.file_id, {}).get(name)
     if literal is not None:
@@ -630,7 +740,15 @@ def _constant_value(
             text += part[1]
             continue
         found = _constant_value(
-            imports, constants, composed, target, part[1], part[2], hops_left - 1, seen | {key}
+            imports,
+            constants,
+            composed,
+            target,
+            part[1],
+            part[2],
+            hops_left - 1,
+            seen | {key},
+            trace,
         )
         if found is None:
             return None
@@ -645,6 +763,7 @@ def _class_route(
     constants: Mapping[int, Mapping[str, str]],
     composed: Mapping[int, Mapping[str, list[list[str]]]],
     by_id: Mapping[int, FileRow],
+    trace: _Trace | None = None,
 ) -> tuple[str, list[str], dict[str, tuple[bool, frozenset[int]]]]:
     """A route on an application built from a class another module defines.
 
@@ -676,10 +795,12 @@ def _class_route(
         if part[0] == "t":
             path += part[1]
             continue
-        value = _constant_value(imports, constants, composed, origin, part[1], part[2])
+        value = _constant_value(imports, constants, composed, origin, part[1], part[2], trace=trace)
         if value is None:
             return CONSTANT_UNRESOLVED, [], {}
         path += value
+    if trace is not None:
+        trace.path = path
     route = http.route_path(path) if path else None
     body = http.route_body(meta.get("method", ""), route) if route is not None else ""
     if not body or http.canonical_route(body) is None:
@@ -696,6 +817,7 @@ def _route(
     composed: Mapping[int, Mapping[str, list[list[str]]]],
     chains: _Chains,
     by_id: Mapping[int, FileRow],
+    trace: _Trace | None = None,
 ) -> tuple[str, list[str], dict[str, tuple[bool, frozenset[int]]]]:
     meta = _meta(claim)
     origin = by_id.get(claim.file_id)
@@ -705,6 +827,8 @@ def _route(
     key = _key(imports, origin, module, meta.get("router", ""))
     if key is None:
         return MODULE_UNRESOLVED, [], {}
+    if trace is not None:
+        trace.key = key
     receiver = receivers.get(key)
     if receiver is None:
         return NOT_DECLARED, [], {}
@@ -716,10 +840,12 @@ def _route(
         if part[0] == "t":
             path += part[1]
             continue
-        value = _constant_value(imports, constants, composed, origin, part[1], part[2])
+        value = _constant_value(imports, constants, composed, origin, part[1], part[2], trace=trace)
         if value is None:
             return CONSTANT_UNRESOLVED, [], {}
         path += value
+    if trace is not None:
+        trace.path = path
     # A literal route on a FastAPI application, whose own module's edge states it as written.
     served_here = meta.get("served_here") == "true"
     if not chains.usable(key):
@@ -730,13 +856,18 @@ def _route(
     if receiver.kind in _APPLICATIONS:
         served = [] if served_here else [(path, True, key[0])]
         if receiver.kind == _FASTAPI_APP and path.startswith("/"):
-            served.extend((f"{prefix}{path}", False, root) for prefix, root in chains.mounted(key))
+            served.extend(
+                (f"{prefix}{path}", False, root)
+                for prefix, root in chains.mounted(key, trace=trace)
+            )
     elif receiver.kind == _FASTAPI_ROUTER:
         if path and not path.startswith("/"):
+            if trace is not None:
+                trace.unrooted = True
             return NOT_MOUNTED, [], {}
         served = [
             (f"{base}{path}", exact, root)
-            for base, exact, root in chains.fastapi(key, own_module=own_module)
+            for base, exact, root in chains.fastapi(key, own_module=own_module, trace=trace)
         ]
     else:
         served = [

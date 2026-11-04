@@ -355,7 +355,7 @@ NEG_DECLARED = {
 NEG_GENERIC = (
     ("src/n04.ts", "/n4"),
     ("src/n06.ts", "/n6"),
-    ("src/n07.ts", "/n7"),
+    # Amendment A1 (2026-11-04): n07 records no route claim at all, so it has no row
     ("src/n11.ts", "/n11"),
     ("src/real10.ts", "/n10"),
     ("src/decoy10.ts", "/decoy10"),
@@ -406,7 +406,8 @@ def test_case_6_a_factory_nothing_calls_and_a_file_without_fastify_are_new_unpub
     # P3: neg has exactly these two
     assert response.coverage.provider_lifecycle.unpublished == 2
     # a helper that does not resolve, and one from a package, record no route at all
-    for silent in ("src/n09.ts", "src/n20.ts"):
+    # Amendment A1 (2026-11-04): nor does n07, whose callee a local function shadows
+    for silent in ("src/n07.ts", "src/n09.ts", "src/n20.ts"):
         assert not [row for row in listed(rows) if row.path == silent]
 
 
@@ -472,15 +473,17 @@ def test_case_7_a_plugin_nothing_registers_beside_a_file_at_the_helper_cap_is_bo
 
 
 @G3
-def test_f3_two_registrations_one_detail_two_categories(corpora: Corpora) -> None:
+def test_f3_a_wrapper_at_the_call_with_a_prefix_reads_as_unreadable(corpora: Corpora) -> None:
+    # Amendment A1 (2026-11-04): a wrapper at the call with a prefix is stored exactly like
+    # unreadable options, so plugA reads as unreadable like plugB (the parser's own record)
     rows, _ = diagnosed(corpora, "fastify", "ftblk")
     prefixed = find(rows, path="src/app.ts", route="/pa")
     spread = find(rows, path="src/app.ts", route="/pb")
     expect(
         prefixed,
         status="declared",
-        category="framework-constraint",
-        code="fastify-plugin-prefix-ignored",
+        category="registration-unproven",
+        code="fastify-registration-unreadable",
         path="resolved",
         identity="resolved",
         registration="unproven",
