@@ -64,6 +64,12 @@ from repoatlas.storage.sqlite.search import path_scope
 #: What every environment variable's key starts with (repoatlas.graph.keys.env_key).
 ENV_KEY_PREFIX = "env:"
 
+#: The producers :meth:`SqliteKnowledgeStore.list_code_served_routes` tells apart, spelled as
+#: ``repoatlas.graph.linker.GLOBAL_PARSER`` and the structured-config parser's name (storage
+#: imports neither; a test pins both spellings).
+_GLOBAL_PARSER = "linker:global"
+_STRUCTURED_PARSER = "structured-config"
+
 #: Everything an :class:`EntityIdentity` needs, shared by both key lookups.
 #: ``LEFT JOIN`` throughout: an interned entity has no file and no repository row,
 #: and resolving its key must still work.
@@ -1132,6 +1138,52 @@ class SqliteKnowledgeStore:
                 str(EntityType.HTTP_ROUTE),
                 str(EdgeType.SERVES_HTTP_ROUTE),
                 exclude_parser,
+                repo_id,
+                repo_id,
+            ),
+        ).fetchall()
+        served: dict[int, list[str]] = {}
+        for row in rows:
+            served.setdefault(row["repo_id"], []).append(row["body"])
+        return served
+
+    def list_code_served_routes(
+        self, *, offerable: bool, repo_id: int | None = None
+    ) -> dict[int, list[str]]:
+        """Per repository, the route bodies its code serves, from every producer's edges.
+
+        The same route nodes as :meth:`list_served_routes`, but the global pass's own
+        edges are read too (a NestJS route is stored only by it), and an edge a
+        specification document states (``structured-config``) is left out: a document
+        is no application. With ``offerable`` an edge counts only when the global pass
+        wrote it or it states a line: a link is offered at a route that has a
+        declaration line, and the global pass's routes carry theirs apart from the edge.
+
+        This is never an input of the global pass itself, which reads
+        :meth:`list_served_routes` and so never reads its own output.
+        """
+        rows = self._db.execute(
+            """
+            SELECT DISTINCT e.repo_id AS repo_id, t.name AS body
+            FROM entities t
+            JOIN edges e ON e.dst_id = t.id
+            WHERE t.key >= ? AND t.key < ?
+              AND t.type = ?
+              AND e.type = ?
+              AND e.repo_id IS NOT NULL
+              AND (e.parser IS NULL OR e.parser <> ?)
+              AND (? = 0 OR e.parser = ? OR e.line_start IS NOT NULL)
+              AND (? IS NULL OR e.repo_id = ?)
+            ORDER BY e.repo_id, t.name
+            """,
+            (
+                ROUTE_KEY_PREFIX,
+                _after(ROUTE_KEY_PREFIX),
+                str(EntityType.HTTP_ROUTE),
+                str(EdgeType.SERVES_HTTP_ROUTE),
+                _STRUCTURED_PARSER,
+                int(offerable),
+                _GLOBAL_PARSER,
                 repo_id,
                 repo_id,
             ),
