@@ -49,11 +49,15 @@ export function useGroup(group: string | null, filters: ConnectionFilters) {
   });
 }
 
-/** What a mapping would do, request by request: read-only, asked again whenever the form changes. */
+/**
+ * What a mapping would do, request by request: read-only, asked again whenever the form changes.
+ * It asks for the provider diagnostics too (hints about routes the service declares and does not
+ * serve): the flag is added here, not in the request builder, and changes nothing else in the answer.
+ */
 export function useMapPreview(request: HttpConnectionPreviewRequest | null) {
   return useQuery({
     queryKey: ["http_connections", "preview", request],
-    queryFn: ({ signal }) => call("http_connections/preview", request!, signal),
+    queryFn: ({ signal }) => call("http_connections/preview", { ...request!, include_diagnostics: true }, signal),
     enabled: request !== null,
     staleTime: 0,
     retry: false,
@@ -63,11 +67,12 @@ export function useMapPreview(request: HttpConnectionPreviewRequest | null) {
 /**
  * What a scoped declaration would do: the same read-only preview, asked with the caller's file
  * (and symbol) and the base's hash. The answer carries no origin or URL, and the base shown masked.
+ * It asks for the provider diagnostics like {@link useMapPreview}.
  */
 export function useScopedPreview(request: HttpConnectionPreviewRequest | null) {
   return useQuery({
     queryKey: ["http_connections", "preview", "scoped", request],
-    queryFn: ({ signal }) => call("http_connections/preview", request!, signal),
+    queryFn: ({ signal }) => call("http_connections/preview", { ...request!, include_diagnostics: true }, signal),
     enabled: request !== null,
     staleTime: 0,
     retry: false,
