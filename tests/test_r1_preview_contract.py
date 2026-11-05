@@ -17,7 +17,9 @@ from typing import Any
 import pytest
 from repoatlas.capabilities.errors import InvalidDeploymentLinkError
 from repoatlas.capabilities.service import CapabilityService
+from repoatlas.config.settings import DECLARATIONS_SLUG
 from repoatlas.graph import link_exposures
+from repoatlas.graph.linker import repository_http_with_routes, repository_routes
 from repoatlas.models.http_connections import (
     HttpConnectionPreviewRequest,
     HttpConnectionPreviewResponse,
@@ -131,6 +133,21 @@ def test_a_refused_preview_is_refused_the_same_with_the_flag_on(corpora: Corpora
                     include_diagnostics=diagnostics,
                 )
             )
+
+
+# -- the routes of the one-plan helper are the routes the default path reads --------------------
+
+
+@pytest.mark.parametrize("corpus", CORPUS_NAMES)
+def test_the_one_plan_helper_gives_exactly_the_routes_the_default_path_reads(
+    corpora: Corpora, corpus: str
+) -> None:
+    workspace = corpora.workspace(corpus)
+    for repository in workspace.repositories.list_all():
+        if repository.slug == DECLARATIONS_SLUG or repository.id is None:
+            continue
+        _, routes = repository_http_with_routes(workspace.knowledge, repository.id)
+        assert routes == repository_routes(workspace.knowledge, repository.id), repository.slug
 
 
 # -- (iii) the response schema -----------------------------------------------------------------
