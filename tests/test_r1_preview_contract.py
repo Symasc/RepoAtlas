@@ -28,6 +28,7 @@ from repoatlas.models.http_connections import (
 from repoatlas.services.workspace import Workspace
 from tests.r1_golden import GOLDEN, normalise, strip_ids
 from tests.r1_provider_corpus import CORPUS_NAMES, GLOBAL, ORDERS_ORIGIN, Corpora, preview
+from tests.r1_superseded import SUPERSEDED, problems
 
 SHOP_ORIGIN = "https://shop.example.test"
 #: What a preview decides: all of it must be the same with the flag on.
@@ -72,7 +73,20 @@ def ask(
 # -- (i) the flag off changes nothing -----------------------------------------------------------
 
 
-@pytest.mark.parametrize("corpus", CORPUS_NAMES)
+def _unless_superseded(name: str) -> Any:
+    """The corpus, marked ``xfail(strict)`` where F1 and F2 change its previews (the allowlist in
+    ``tests.r1_superseded``, checked by the replacement test below)."""
+    if (name, "previews") not in SUPERSEDED:
+        return name
+    return pytest.param(
+        name,
+        marks=pytest.mark.xfail(
+            strict=True, reason="superseded by F1 composed NestJS routes join (previews)"
+        ),
+    )
+
+
+@pytest.mark.parametrize("corpus", [_unless_superseded(name) for name in CORPUS_NAMES])
 def test_with_the_flag_off_every_golden_preview_is_what_it_was(
     corpora: Corpora, corpus: str
 ) -> None:
@@ -93,6 +107,33 @@ def test_with_the_flag_off_every_golden_preview_is_what_it_was(
             normalise(entry["preview"]), sort_keys=True
         ), (entry["origin"], entry["repository"])
         assert "provider_diagnostics" not in written
+
+
+@pytest.mark.parametrize("corpus", [n for n in CORPUS_NAMES if (n, "previews") in SUPERSEDED])
+def test_with_the_flag_off_a_superseded_preview_differs_from_the_golden_only_as_allowed(
+    corpora: Corpora, corpus: str
+) -> None:
+    """Replaces the exact comparison above for the previews F1 and F2 change: the golden is
+    untouched, and ``tests.r1_superseded`` names every entry that may differ and how."""
+    workspace = corpora.workspace(corpus)
+    pinned = golden()["corpora"][corpus]["previews"]
+    by_origin = groups(workspace)
+    now: list[Any] = []
+    for entry in pinned:
+        if "refused" in entry["preview"]:
+            now.append(entry)
+            continue
+        response = ask(workspace, by_origin[entry["origin"]], entry["repository"])
+        written = strip_ids(json.loads(response.model_dump_json()))
+        written.pop("context", None)
+        now.append(
+            {
+                "origin": entry["origin"],
+                "repository": entry["repository"],
+                "preview": normalise(written),
+            }
+        )
+    assert problems(corpus, "previews", pinned, now) == []
 
 
 # -- (ii) the flag on decides nothing more (mutant M17) ----------------------------------------
