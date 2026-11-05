@@ -94,6 +94,10 @@ class OperationStatus(StrEnum):
     NO_INDEXED_CALLER = "no_indexed_caller"
     #: A route declared here whose mount is not proven; ``detail`` says why.
     DECLARED = "declared"
+    #: A recognized route declaration, or a route-serving application (oas3-tools), that is
+    #: neither served nor a ``declared`` row; ``detail`` is the planner's reason and
+    #: ``diagnostic`` the failed stage. Emitted only when ``include_diagnostics`` asks for it.
+    UNPUBLISHED = "unpublished"
 
 
 class CrossingStatus(StrEnum):
@@ -195,8 +199,29 @@ class HttpOperationsRequest(BaseModel):
         "cited and so its route can be named in a grounded claim. Off keeps pages "
         "small and allocates no evidence.",
     )
+    include_diagnostics: bool = Field(
+        default=False,
+        description="Also describe each provider row's lifecycle (path, identity, registration, "
+        "publication, join eligibility) and why a stage failed, and list as `unpublished` the "
+        "recognized route declarations this repository neither serves nor lists as declared. "
+        "Repository scope only. A declaration RepoAtlas does not recognize is never listed: "
+        "absence here is not absence in source.",
+    )
     investigation_id: str | None = None
     depth: FreshnessDepth = FreshnessDepth.STORED
+
+    @model_validator(mode="after")
+    def _diagnostics_describe_one_repository(self) -> HttpOperationsRequest:
+        if self.include_diagnostics:
+            if self.discover:
+                raise ValueError(
+                    "include_diagnostics describes one repository, never with discover"
+                )
+            if self.decision_ref is not None:
+                raise ValueError(
+                    "include_diagnostics describes provider routes; decision_ref names a request"
+                )
+        return self
 
     @model_validator(mode="after")
     def _decision_ref_is_one_caller_s(self) -> HttpOperationsRequest:
@@ -435,6 +460,91 @@ class HttpCrossing(BaseModel):
         return _lean(handler(self), frozenset({"decision_ref", "status", "chain"}))
 
 
+#: What a declaration's path, identity or registration came to (R1 diagnostics).
+DiagnosticStage = Literal["resolved", "unresolved", "not-evaluated"]
+RegistrationStage = Literal["proven", "unproven", "not-evaluated"]
+DiagnosticCategory = Literal[
+    "registration-unproven",
+    "path-unresolved",
+    "identity-unresolved",
+    "framework-constraint",
+    "bound-reached",
+    "unclassified",
+]
+
+
+class DiagnosticPlace(BaseModel):
+    """A real claim location that caused a refusal: a helper call, registration, mount or
+    instance, as a reader can open it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+    line_start: int | None = None
+    line_end: int | None = None
+    role: str
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        return _lean(handler(self), frozenset({"path", "role"}))
+
+
+class ProviderDiagnostic(BaseModel):
+    """The lifecycle of one provider row, and the most precise reason a stage failed.
+
+    Opt-in (``include_diagnostics``). Built from claims and edges already stored; a hint for a
+    reader, never an edge or a decision. The planner's own reason stays in the row's ``detail``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: ``application`` only for an unpublished oas3-tools application.
+    subject: Literal["route", "application"]
+    #: ``fastapi``, ``flask``, ``fastapi-or-flask``, ``nestjs``, ``fastify``, ``oas3-tools`` or
+    #: ``openapi`` (a specification document's edge); ``None`` when not known.
+    framework: str | None = None
+    #: The claim's pending-fact role; ``None`` for a per-file edge.
+    fact: str | None = None
+    #: A per-file edge, or the global pass from a claim.
+    decided_by: Literal["file", "global-pass"]
+    path: DiagnosticStage
+    identity: DiagnosticStage
+    registration: RegistrationStage
+    #: The row is a served operation.
+    published: bool
+    #: The route is among those a deployment declaration can expose.
+    join_eligible: bool
+    #: Why a served, eligible row may still not be joined: ``no-declaration-line`` or
+    #: ``openapi-document``.
+    join_limits: tuple[str, ...] = ()
+    #: ``None`` exactly when ``published``.
+    category: DiagnosticCategory | None = None
+    #: A stable kebab code; empty exactly when ``published``.
+    code: str = ""
+    #: Bounds reached on this row's evidence path, sorted, at most four.
+    bounds: tuple[str, ...] = ()
+    #: The claim locations that caused the refusal (at most three), by path then line.
+    related: tuple[DiagnosticPlace, ...] = ()
+    related_count: int = 0
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        return _lean(
+            handler(self),
+            frozenset(
+                {
+                    "subject",
+                    "decided_by",
+                    "path",
+                    "identity",
+                    "registration",
+                    "published",
+                    "join_eligible",
+                }
+            ),
+        )
+
+
 class HttpOperation(BaseModel):
     """One request the source makes or one route it serves or declares."""
 
@@ -469,6 +579,9 @@ class HttpOperation(BaseModel):
     #: How many counterparts exist; more than are named when it exceeds them.
     counterpart_count: int = 0
     declared_matches: tuple[DeclaredMatch, ...] = ()
+    #: How many declared routes match, where ``declared_matches`` names at most five. Set only
+    #: with ``include_diagnostics``.
+    declared_match_count: int = 0
     #: Whether something outside this row's own lines decided its method or route:
     #: a helper default, a wrapper base, a controller prefix, the server's
     #: parameter spelling. Its evidence shows the lines as written, not those parts.
@@ -477,6 +590,9 @@ class HttpOperation(BaseModel):
     #: The workspace join's decisions for the requests this caller row makes, by
     #: ``decision_ref``. Its ``status`` is unchanged by them.
     crossings: tuple[HttpCrossing, ...] = ()
+    #: A provider row's lifecycle and the reason a stage failed. Set only with
+    #: ``include_diagnostics``.
+    diagnostic: ProviderDiagnostic | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
@@ -560,6 +676,50 @@ class CoverageLimitation(BaseModel):
     note: str = ""
 
 
+class BoundNote(BaseModel):
+    """An analysis bound that was reached: where, and its limit."""
+
+    model_config = ConfigDict(frozen=True)
+
+    bound: str
+    #: The limit, or ``None`` when it is not one number.
+    limit: int | None = None
+    #: ``file`` (a parser cap hit in one file) or ``route`` (a bound on one route's evidence).
+    scope: Literal["file", "repository", "route"]
+    path: str | None = None
+
+
+LIFECYCLE_BASIS = (
+    "Counts are over recognized declarations in this repository's indexed source. A route "
+    "RepoAtlas does not recognize is not counted, and its absence is not evidence of absence. "
+    "`truncated` is false only when no bound RepoAtlas can detect was reached; the per-call "
+    "argument and alias bounds and the constructs under `not_extracted` can never be detected."
+)
+
+
+class ProviderLifecycle(BaseModel):
+    """How many recognized provider declarations reached each stage (R1, opt-in)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    recognized: int = 0
+    published: int = 0
+    declared: int = 0
+    unpublished: int = 0
+    join_eligible: int = 0
+    #: Over the declared and unpublished rows, by category and by code.
+    by_category: dict[str, int] = Field(default_factory=dict)
+    by_code: dict[str, int] = Field(default_factory=dict)
+    bounds_reached: tuple[BoundNote, ...] = ()
+    bound_notes_omitted: int = 0
+    #: Unpublished rows the cap cut, and whether anything was cut or a bound reached.
+    unpublished_omitted: int = 0
+    truncated: bool = False
+    #: Constructs not extracted at all, so never counted (count ``None``).
+    not_extracted: tuple[CoverageLimitation, ...] = ()
+    basis: str = LIFECYCLE_BASIS
+
+
 class OperationCoverage(BaseModel):
     """What was read in scope, and what could not be."""
 
@@ -574,6 +734,13 @@ class OperationCoverage(BaseModel):
     #: Unresolved callers whose path is unknown: any of them could reach any route.
     unknown_paths: int = 0
     limitations: tuple[CoverageLimitation, ...] = ()
+    provider_lifecycle: ProviderLifecycle | None = Field(
+        default=None,
+        # Every other answer is written exactly as before: no provider_lifecycle key.
+        exclude_if=lambda value: value is None,
+        description="How many recognized provider declarations reached each stage. Set only "
+        "with `include_diagnostics`; absent from the JSON otherwise.",
+    )
 
 
 class HttpOperationsResponse(BaseModel):

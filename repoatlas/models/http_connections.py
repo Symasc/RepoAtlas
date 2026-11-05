@@ -30,7 +30,7 @@ from repoatlas.models.deployment_targets import (
     DeclarationScope,
     Verification,
 )
-from repoatlas.models.http_inventory import DECISION_REF_PATTERN, CrossingStatus
+from repoatlas.models.http_inventory import DECISION_REF_PATTERN, CrossingStatus, ProviderLifecycle
 from repoatlas.models.service_declarations import ServiceDeclarationView
 
 #: A worklist group's key: opaque, deterministic, the same origin has the same key after any sync.
@@ -372,6 +372,13 @@ class HttpConnectionPreviewRequest(BaseModel):
     environment: str | None = Field(default=None, min_length=1, max_length=MAX_LINK_TEXT)
     limit: int = Field(default=50, ge=1, le=MAX_GROUP_PAGE)
     scope: PreviewScope | None = None
+    include_diagnostics: bool = Field(
+        default=False,
+        description="Also describe, for the repository the declaration would map, how many of "
+        "its served routes a declaration could expose, which declared or unpublished routes the "
+        "requests this declaration would not join resemble, and its provider lifecycle. Hints "
+        "only: never edges or decisions, and nothing else in the answer changes.",
+    )
 
     @field_validator("base_path")
     @classmethod
@@ -387,6 +394,42 @@ class HttpConnectionPreviewRequest(BaseModel):
         if self.base_path:
             raise ValueError("a scoped preview states its base path in the scope")
         return self
+
+
+class UnpublishedMatch(BaseModel):
+    """A route the target declares, or recognizes and does not serve, that a request this
+    declaration would not join resembles: a hint, never an edge or a decision."""
+
+    model_config = ConfigDict(frozen=True)
+
+    decision_ref: str = Field(pattern=DECISION_REF_PATTERN)
+    #: ``METHOD /route`` as the target's code declares it, relative to wherever it is mounted.
+    route: str
+    status: Literal["declared", "unpublished"]
+    path: str | None = None
+    line: int | None = None
+    category: str | None = None
+    code: str = ""
+    #: The planner's own reason the route is not served.
+    detail: str = ""
+
+
+class PreviewProviderDiagnostics(BaseModel):
+    """What a preview knows of the target's provider routes beyond the ones it serves (R1)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    #: Distinct routes the declaration would expose at its URL.
+    routes_exposable: int = 0
+    #: Served routes no declaration can expose: they state no line (a route built from a prefix).
+    routes_without_declaration_line: int = 0
+    #: A link's exposure cap was reached, so some routes were not offered.
+    exposures_truncated: bool = False
+    lifecycle: ProviderLifecycle
+    #: At most five, and how many there are.
+    unpublished_matches: tuple[UnpublishedMatch, ...] = ()
+    unpublished_match_count: int = 0
+    basis: str = "hints, never edges or decisions"
 
 
 class HttpConnectionPreviewResponse(BaseModel):
@@ -416,6 +459,13 @@ class HttpConnectionPreviewResponse(BaseModel):
     conflicts_with: int | None = None
     can_create: bool
     basis: str = BASIS
+    provider_diagnostics: PreviewProviderDiagnostics | None = Field(
+        default=None,
+        # Without include_diagnostics the answer is written exactly as before: no key.
+        exclude_if=lambda value: value is None,
+        description="Hints about the target's provider routes. Set only with "
+        "`include_diagnostics`; absent from the JSON otherwise.",
+    )
 
     @model_validator(mode="after")
     def _requirements_block(self) -> HttpConnectionPreviewResponse:
@@ -480,8 +530,10 @@ __all__ = [
     "HttpConnectionsResponse",
     "HttpDeclarationHistoryRequest",
     "HttpDeclarationHistoryResponse",
+    "PreviewProviderDiagnostics",
     "PreviewRow",
     "PreviewScope",
     "RequestIdentity",
     "ScopeChoice",
+    "UnpublishedMatch",
 ]

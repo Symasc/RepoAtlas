@@ -43,7 +43,7 @@ export const NO_FILTERS: ConnectionFilters = {
 export const STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: "http-service-unmatched", label: "No service identified (http-service-unmatched)" },
   { value: "http-base-unknown", label: "Host not stated (http-base-unknown)" },
-  { value: "http-route-unmatched", label: "Route not served (http-route-unmatched)" },
+  { value: "http-route-unmatched", label: "No proven route matches (http-route-unmatched)" },
   { value: "http-provider-ambiguous", label: "Several providers fit (http-provider-ambiguous)" },
   { value: "http-deployment-source-unresolved", label: "Service known, code not (http-deployment-source-unresolved)" },
   { value: "http-deployment-binding-unresolved", label: "Host pattern unbound (http-deployment-binding-unresolved)" },
@@ -76,7 +76,7 @@ export const REASON_TEXT: Readonly<Record<string, string>> = {
   "": "",
   "applies-at-next-sync": "Applies at the next sync.",
   ambiguous: "More than one handler of the service answers the request, so nothing is joined.",
-  "route-unmatched": "The service serves no route with the request's method and shape.",
+  "route-unmatched": "No route this index proves the service serves has the request's method and shape.",
   "callers-excluded": "The requests at this origin are made by repositories it does not name.",
   "source-established": "The source already identifies this origin; a declaration never overrides it.",
   "no-request-matched": "No request at this origin was joined by it.",
@@ -96,7 +96,7 @@ export const REASON_TEXT: Readonly<Record<string, string>> = {
 export const REFUSAL_TEXT: Readonly<Record<string, string>> = {
   no_identity: "No deployment or declaration identifies a service at this origin.",
   host_not_stated: "The source does not state the host this request goes to.",
-  route_unmatched: "A service is published here, but it does not serve this route.",
+  route_unmatched: "A service is published here, but no route this index proves it serves matches this request.",
   claim_unread: "The request could not be read.",
   source_unresolved: "The deployment's service is known, but the code behind it is not.",
   binding_unresolved: "The host fits an Ingress pattern no local deployment binds.",

@@ -52,7 +52,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
 
-from repoatlas.capabilities import http_connections, http_inventory, service_declarations
+from repoatlas.capabilities import (
+    http_connections,
+    http_inventory,
+    http_repository,
+    service_declarations,
+)
 from repoatlas.capabilities.budget import (
     apply_budget_policy,
     ceiling_for,
@@ -201,7 +206,6 @@ from repoatlas.graph.declared import root_path
 from repoatlas.graph.deployment_targets import Elsewhere, build_targets
 from repoatlas.graph.impact import ImpactWalk
 from repoatlas.graph.keys import is_positional
-from repoatlas.graph.linker import plan_repository_http
 from repoatlas.graph.release_values import CONTAINER_ARTIFACT
 from repoatlas.graph.service_declarations import classifications, classified_text, origin_of_url
 from repoatlas.graph.traversal import RELATIONSHIP_CROSSING_EDGES, WalkResult, WalkStep, walk
@@ -1761,7 +1765,9 @@ class CapabilityService:
                     ):
                         raise FileNotIndexedError("no indexed file stands at or beneath that path")
                     if repository is not None:
-                        inventory = self._http_inventory(repository, slugs)
+                        inventory = self._http_inventory(
+                            repository, slugs, include_diagnostics=request.include_diagnostics
+                        )
                     elif ref is not None:
                         # No stored decision has that ref: nothing to read, and no row.
                         inventory = http_inventory.Inventory(
@@ -2865,31 +2871,22 @@ class CapabilityService:
         )
 
     def _http_inventory(
-        self, repository: Repository, slugs: Mapping[int, str] | None = None
+        self,
+        repository: Repository,
+        slugs: Mapping[int, str] | None = None,
+        *,
+        include_diagnostics: bool = False,
     ) -> http_inventory.Inventory:
         """Replan one repository and read what its rows need. Inside the snapshot."""
         assert repository.id is not None
         if slugs is None:
             registered = self._workspace.repositories.list_all()
             slugs = {repo.id: repo.slug for repo in registered if repo.id is not None}
-        knowledge = self._workspace.knowledge
-        planned = plan_repository_http(knowledge, repository.id)
-        edges = knowledge.list_http_edges(repository.id)
-        decisions = knowledge.list_http_call_decisions(repository.id)
-        wanted = {claim.src_id for claim in planned.claims}
-        wanted.update(row.src_id for row in decisions)
-        wanted.update(http_inventory.handler_ids(decisions))
-        return http_inventory.build_inventory(
-            plan=planned.plan,
-            claims=planned.claims,
-            entities=knowledge.keys_for_entities(sorted(wanted)),
-            files=planned.files,
-            index=planned.index,
-            edges=edges,
-            parsers=dict(knowledge.list_file_parsers(repository.id)),
-            joined=decisions,
-            slugs=slugs,
-            crossings_built=knowledge.http_call_decisions_built(),
+        return http_repository.repository_inventory(
+            self._workspace,
+            repository.id,
+            slugs,
+            include_diagnostics=include_diagnostics,
         )
 
     def _http_operation_supplies(
@@ -3045,7 +3042,11 @@ class CapabilityService:
             summary=http_inventory.summarize(chosen),
             operations=tuple(rows),
             coverage=http_inventory.coverage(
-                inventory, http_inventory.in_scope(inventory.drafts, prefix), prefix
+                inventory,
+                http_inventory.in_scope(inventory.drafts, prefix),
+                prefix,
+                statuses=request.status,
+                include_diagnostics=request.include_diagnostics,
             ),
             evidence=tuple(items),
             freshness=freshness,
