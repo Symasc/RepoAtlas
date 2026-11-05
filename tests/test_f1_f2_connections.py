@@ -44,13 +44,16 @@ from tests.f1_f2_corpus import (
     PING_ORIGIN,
     USERS_CONTROLLER,
     WEBCLIENT,
+    d,
     open_built,
     ping_repos,
+    python_repo,
 )
 from tests.impact_corpus import build
 from tests.incremental_corpus import assert_equals_fresh, edit, sync_all
 from tests.r1_provider_corpus import (
     GLOBAL,
+    PYPROV2,
     caller_decisions,
     declare_plain,
     group_key,
@@ -60,6 +63,38 @@ from tests.r1_provider_corpus import (
 )
 
 API_REPOS = {"nestapi": NESTAPI, "webclient": WEBCLIENT}
+ORDERS_ORIGIN = "https://orders.example.test"
+MISS_ORIGIN = "https://miss.example.test"
+
+#: ``pyprov2`` mounts its router from another module, so it has no per-file route: only the global
+#: pass serves ``GET /orders/{oid}``. ``ordersclient`` requests it; ``missclient`` requests a path
+#: it does not serve, at an origin nothing else states.
+ORDERSCLIENT = python_repo(
+    "ordersclient",
+    "requests",
+    {
+        "svc/client.py": d(f"""
+            import requests
+
+
+            def fetch_order() -> dict:
+                return requests.get("{ORDERS_ORIGIN}/orders/42", timeout=5).json()
+        """)
+    },
+)
+MISSCLIENT = python_repo(
+    "missclient",
+    "requests",
+    {
+        "svc/client.py": d(f"""
+            import requests
+
+
+            def fetch_nothing() -> dict:
+                return requests.get("{MISS_ORIGIN}/nothing/here", timeout=5).json()
+        """)
+    },
+)
 GET_USERS = "GET /api/v1/users"
 POST_USERS = "POST /api/v1/users"
 
@@ -91,6 +126,17 @@ def api(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Workspace]:
 def duplicated(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Workspace]:
     workspace = open_built(
         tmp_path_factory.mktemp("f2-dup"), "dup", {"dupapi": DUPAPI, "webclient": WEBCLIENT}
+    )
+    yield workspace
+    workspace.close()
+
+
+@pytest.fixture(scope="module")
+def orders(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Workspace]:
+    workspace = open_built(
+        tmp_path_factory.mktemp("f2-orders"),
+        "orders",
+        {"pyprov2": PYPROV2, "ordersclient": ORDERSCLIENT},
     )
     yield workspace
     workspace.close()
@@ -197,6 +243,36 @@ def test_a_declaration_of_a_service_serving_only_promoted_routes_is_applied_and_
     assert declaration.repository == slug_of(workspace, "nestapi")
     assert (declaration.state, declaration.reason, declaration.joined) == ("applied", "", 1)
     assert caller_decisions(workspace)["fetch_users"][0] == "linked"
+
+
+def test_an_unjoined_declaration_of_a_service_serving_only_promoted_routes_is_ineffective_not_invalidated(  # noqa: E501
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    """M22: ``pyprov2`` serves ``GET /orders/{oid}`` only through the global pass. A declaration of
+    it at an origin whose request it does not answer is ``ineffective``/``route-unmatched``: the
+    service does serve routes. Without the global pass's routes it read as
+    ``invalidated``/``repository-serves-no-routes``."""
+    build(workspace, tmp_path, {"pyprov2": PYPROV2, "missclient": MISSCLIENT})
+    declare_plain(workspace, "pyprov2", MISS_ORIGIN)
+    sync_all(workspace, tmp_path / "repos")
+    [declaration] = declarations(workspace)
+    assert (declaration.state, declaration.reason) == ("ineffective", "route-unmatched")
+    assert declaration.joined == 0
+    assert declaration.declined == {"route-unmatched": 1}
+    # the gap the declaration state used to fall into
+    provider = repo_id(workspace, "pyprov2")
+    assert provider not in workspace.knowledge.list_served_routes(exclude_parser=GLOBAL_PARSER)
+    served = workspace.knowledge.list_code_served_routes(offerable=False)
+    assert served[provider] == ["GET /orders/{oid}"]
+
+
+def test_a_service_whose_only_routes_are_promoted_is_a_candidate_for_a_matching_request(
+    orders: Workspace,
+) -> None:
+    """M22 for the candidates: the group's request matches ``GET /orders/{oid}``."""
+    [candidate] = candidates(orders, ORDERS_ORIGIN)
+    assert candidate.repository == slug_of(orders, "pyprov2")
+    assert candidate.requests_unique == 1
 
 
 def test_a_declaration_made_from_the_worklist_is_refused_an_update_once_the_code_drifts(
