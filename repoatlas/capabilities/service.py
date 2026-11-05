@@ -1761,7 +1761,9 @@ class CapabilityService:
                     ):
                         raise FileNotIndexedError("no indexed file stands at or beneath that path")
                     if repository is not None:
-                        inventory = self._http_inventory(repository, slugs)
+                        inventory = self._http_inventory(
+                            repository, slugs, include_diagnostics=request.include_diagnostics
+                        )
                     elif ref is not None:
                         # No stored decision has that ref: nothing to read, and no row.
                         inventory = http_inventory.Inventory(
@@ -2865,7 +2867,11 @@ class CapabilityService:
         )
 
     def _http_inventory(
-        self, repository: Repository, slugs: Mapping[int, str] | None = None
+        self,
+        repository: Repository,
+        slugs: Mapping[int, str] | None = None,
+        *,
+        include_diagnostics: bool = False,
     ) -> http_inventory.Inventory:
         """Replan one repository and read what its rows need. Inside the snapshot."""
         assert repository.id is not None
@@ -2890,6 +2896,7 @@ class CapabilityService:
             joined=decisions,
             slugs=slugs,
             crossings_built=knowledge.http_call_decisions_built(),
+            include_diagnostics=include_diagnostics,
         )
 
     def _http_operation_supplies(

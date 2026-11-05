@@ -36,6 +36,12 @@ from repoatlas.capabilities.dependencies import digest
 from repoatlas.capabilities.errors import InvalidCursorError, StaleCursorError
 from repoatlas.graph import http_chain, http_claims
 from repoatlas.graph.http_claims import CallDecision, HttpClaimPlan
+from repoatlas.graph.http_provider_diagnostics import (
+    RouteDiagnostic,
+    diagnose,
+    framework_of,
+    join_limits,
+)
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models import http
 from repoatlas.models.dependency_inventory import AppliedPageLimits
@@ -43,6 +49,7 @@ from repoatlas.models.http_inventory import (
     DEFAULT_PAGE_SIZE,
     MAX_COUNTERPARTS,
     MAX_PAGE_SIZE,
+    BoundNote,
     CoverageLimitation,
     CrossingArtifact,
     CrossingHop,
@@ -57,6 +64,8 @@ from repoatlas.models.http_inventory import (
     OperationRole,
     OperationStatus,
     OperationSummary,
+    ProviderDiagnostic,
+    ProviderLifecycle,
 )
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.parsers.http_facts import (
@@ -68,6 +77,7 @@ from repoatlas.parsers.http_facts import (
     PYTHON_ROUTE,
     TS_HANDLER_OBJECT,
 )
+from repoatlas.parsers.http_fastify import _MAX_ALIAS_HOPS, MAX_ARGUMENTS
 from repoatlas.storage.protocols import (
     EntityIdentity,
     FileRow,
@@ -131,6 +141,71 @@ _NOT_EXTRACTED = (
 #: The parser whose trees those constructs belong to, by the name the index
 #: records for it. Pinned against the parser itself by the capability's tests.
 _TYPESCRIPT_PARSERS = frozenset({"tree-sitter-typescript"})
+_PYTHON_PARSERS = frozenset({"python-ast"})
+
+#: Unpublished rows one repository lists at most (R1); the rest are counted, never dropped
+#: silently: ``unpublished_omitted`` and ``truncated`` say so.
+MAX_UNPUBLISHED_ROWS = 1000
+
+#: Constructs a provider declaration can be written in that are not extracted at all, so
+#: never counted: (code, parsers whose trees may hold it, note). Listed with a repository's
+#: lifecycle only when it has files of the matching language (R1).
+_NOT_EXTRACTED_PROVIDERS = (
+    (
+        "express-router-without-mount",
+        _TYPESCRIPT_PARSERS,
+        "A router with no mount in its own file serves no route that is recorded.",
+    ),
+    (
+        "express-path-not-literal",
+        _TYPESCRIPT_PARSERS,
+        "An Express route whose path is not a literal is not recorded.",
+    ),
+    (
+        "nestjs-controller-unreadable",
+        _TYPESCRIPT_PARSERS,
+        "A NestJS controller whose decorator cannot be read, or that has a class-level "
+        "version, records no route.",
+    ),
+    (
+        "nestjs-handler-unreadable",
+        _TYPESCRIPT_PARSERS,
+        "A NestJS handler written with @All, an array path or an unreadable @Version "
+        "records no route.",
+    ),
+    (
+        "python-route-not-module-level",
+        _PYTHON_PARSERS,
+        "A route decorator that is not at module level is not recorded.",
+    ),
+    (
+        "python-receiver-unusable",
+        _PYTHON_PARSERS,
+        "A route on a receiver the parser cannot use is not recorded.",
+    ),
+    (
+        "python-path-not-readable",
+        _PYTHON_PARSERS,
+        "A route whose path the parser cannot read at all is not recorded.",
+    ),
+    (
+        "fastify-path-not-readable",
+        _TYPESCRIPT_PARSERS,
+        "A Fastify route whose path the parser cannot read at all is not recorded.",
+    ),
+    (
+        "fastify-argument-bound",
+        _TYPESCRIPT_PARSERS,
+        f"A Fastify call is scanned for at most {MAX_ARGUMENTS} arguments; a bound reached "
+        "there leaves no trace.",
+    ),
+    (
+        "fastify-alias-bound",
+        _TYPESCRIPT_PARSERS,
+        f"A Fastify alias is followed through at most {_MAX_ALIAS_HOPS} bindings; a bound "
+        "reached there leaves no trace.",
+    ),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +242,12 @@ class Inventory:
     stale_graph: bool = False
     #: Whether a global link pass has stored the join's decisions in this index.
     crossings_built: bool = False
+    #: Whether the rows were built with ``include_diagnostics`` (R1), and what that adds:
+    #: the bounds reached, the notes the cap cut, and the paths of the unpublished rows it cut.
+    diagnostics: bool = False
+    bound_notes: tuple[BoundNote, ...] = ()
+    bound_notes_omitted: int = 0
+    unpublished_cut: tuple[str | None, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,16 +274,26 @@ def build_inventory(
     joined: Sequence[HttpCallDecisionRow] = (),
     slugs: Mapping[int, str] | None = None,
     crossings_built: bool = False,
+    include_diagnostics: bool = False,
 ) -> Inventory:
     """Every caller and provider row of one repository, unfiltered.
 
     ``joined`` are the stored join decisions of this repository's requests; their
     handlers and callers must be in ``entities``, and every repository their chains
     name in ``slugs``.
+
+    With ``include_diagnostics`` (R1) every provider row also carries its lifecycle, the
+    recognized route declarations the plan neither serves nor lists as declared are added as
+    ``unpublished`` rows, and the inventory records the bounds reached. Nothing else changes: the
+    rows below are the ones built without it, field for field but the opt-in ones.
     """
     by_file = {row.file_id: row for row in files}
     by_path = {row.rel_path: row for row in files}
     by_claim = {claim.id: claim for claim in claims if claim.id is not None}
+    diagnosis = diagnose(plan, claims, files) if include_diagnostics else None
+    refusals = diagnosis.by_claim() if diagnosis is not None else {}
+    served_by_code = {(route.src_id, route.body): route for route in plan.code_routes}
+    declared_ids: set[int] = set()
 
     def package(path: str | None) -> str | None:
         row = by_path.get(path) if path else None
@@ -282,6 +373,7 @@ def build_inventory(
                     package=package(origin.rel_path if origin else None),
                     serving=serving,
                     declared=declared,
+                    count_matches=include_diagnostics,
                 )
             )
 
@@ -320,6 +412,7 @@ def build_inventory(
                 package=package(edge.path),
                 serving=serving,
                 declared=declared,
+                count_matches=include_diagnostics,
             )
         )
 
@@ -364,58 +457,100 @@ def build_inventory(
         if bodies:
             for body in bodies:
                 composed = promoted_lines.get((claim.src_id, body)) is None
-                drafts.append(
-                    _provider(
-                        body=body,
-                        path=path,
-                        lines=(claim.line_start, claim.line_end),
-                        entity=entity,
-                        package=package(path),
-                        reaching=reaching,
-                        composed=composed,
-                    )
+                draft = _provider(
+                    body=body,
+                    path=path,
+                    lines=(claim.line_start, claim.line_end),
+                    entity=entity,
+                    package=package(path),
+                    reaching=reaching,
+                    composed=composed,
                 )
+                if include_diagnostics:
+                    served = served_by_code.get((claim.src_id, body))
+                    draft = _labelled(
+                        draft,
+                        _published(
+                            framework=framework_of(role or "", meta),
+                            fact=role,
+                            decided_by="global-pass",
+                            eligible=served is not None,
+                            line_start=served.line_start if served else None,
+                            declared_at=served.declared_at if served else None,
+                            structured=False,
+                        ),
+                    )
+                drafts.append(draft)
             continue
         body = plan.declared.get(claim.id, "")
         method, _, route = body.partition(" ")
-        drafts.append(
-            Draft(
-                operation=HttpOperation(
-                    role="provider",
-                    status=OperationStatus.DECLARED,
-                    method=method or meta.get("method") or None,
-                    route=route,
-                    path=path,
-                    line_start=claim.line_start,
-                    line_end=claim.line_end,
-                    entity=entity.key if entity else None,
-                    package=package(path),
-                    detail=plan.routes.get(claim.id, ""),
-                    composed=bool(meta.get("controller_path")) or meta.get("provenance") != EXACT,
-                ),
-                qualified_name=entity.qualified_name if entity else None,
-            )
+        declared_ids.add(claim.id)
+        draft = Draft(
+            operation=HttpOperation(
+                role="provider",
+                status=OperationStatus.DECLARED,
+                method=method or meta.get("method") or None,
+                route=route,
+                path=path,
+                line_start=claim.line_start,
+                line_end=claim.line_end,
+                entity=entity.key if entity else None,
+                package=package(path),
+                detail=plan.routes.get(claim.id, ""),
+                composed=bool(meta.get("controller_path")) or meta.get("provenance") != EXACT,
+            ),
+            qualified_name=entity.qualified_name if entity else None,
         )
+        if include_diagnostics:
+            draft = _labelled(draft, _refusal(refusals.get(claim.id), role or ""))
+        drafts.append(draft)
     for edge in local:
         if edge.type is not EdgeType.SERVES_HTTP_ROUTE:
             continue
-        drafts.append(
-            _provider(
-                body=edge.target_name,
-                path=edge.path,
-                lines=(edge.line_start, edge.line_end),
-                entity=EntityIdentity(
-                    entity_id=edge.src_id,
-                    key=edge.src_key,
-                    type=_entity_type(entities, edge.src_id),
-                    name=edge.src_name,
-                    qualified_name=edge.src_qualified_name,
-                ),
-                package=package(edge.path),
-                reaching=reaching,
-                composed=edge.line_start is None,
-            )
+        draft = _provider(
+            body=edge.target_name,
+            path=edge.path,
+            lines=(edge.line_start, edge.line_end),
+            entity=EntityIdentity(
+                entity_id=edge.src_id,
+                key=edge.src_key,
+                type=_entity_type(entities, edge.src_id),
+                name=edge.src_name,
+                qualified_name=edge.src_qualified_name,
+            ),
+            package=package(edge.path),
+            reaching=reaching,
+            composed=edge.line_start is None,
         )
+        if include_diagnostics:
+            structured = edge.parser in http_claims._NOT_APPLICATIONS
+            draft = _labelled(
+                draft,
+                _published(
+                    framework="openapi" if structured else None,
+                    fact=None,
+                    decided_by="file",
+                    eligible=not structured,
+                    line_start=edge.line_start,
+                    declared_at=edge.line_start,
+                    structured=structured,
+                ),
+            )
+        drafts.append(draft)
+
+    # -- recognized declarations the plan neither serves nor lists as declared -----------
+    cut: tuple[str | None, ...] = ()
+    if diagnosis is not None:
+        hidden: list[Draft] = []
+        for entry in diagnosis.entries:
+            if entry.claim_id in declared_ids:
+                continue
+            claim = by_claim[entry.claim_id]
+            hidden.append(_unpublished(entry, claim, entities, package(entry.file)))
+        hidden.sort(key=lambda draft: draft.sort_key)
+        kept = hidden[:MAX_UNPUBLISHED_ROWS]
+        cut = tuple(draft.operation.path for draft in hidden[MAX_UNPUBLISHED_ROWS:])
+        drafts.extend(kept)
 
     stored = {
         (edge.src_id, str(edge.type), edge.target_key, edge.line_start, edge.line_end)
@@ -431,6 +566,130 @@ def build_inventory(
         parsers=parsers,
         stale_graph=stored != planned,
         crossings_built=crossings_built,
+        diagnostics=diagnosis is not None,
+        bound_notes=tuple(
+            BoundNote.model_validate(
+                {"bound": note.bound, "limit": note.limit, "scope": note.scope, "path": note.path}
+            )
+            for note in (diagnosis.bound_notes if diagnosis is not None else ())
+        ),
+        bound_notes_omitted=diagnosis.bound_notes_omitted if diagnosis is not None else 0,
+        unpublished_cut=cut,
+    )
+
+
+def _labelled(draft: Draft, diagnostic: ProviderDiagnostic) -> Draft:
+    """The row with its lifecycle."""
+    return replace(draft, operation=draft.operation.model_copy(update={"diagnostic": diagnostic}))
+
+
+def _published(
+    *,
+    framework: str | None,
+    fact: str | None,
+    decided_by: str,
+    eligible: bool,
+    line_start: int | None,
+    declared_at: int | None,
+    structured: bool,
+) -> ProviderDiagnostic:
+    """The lifecycle of a served row: every stage reached, and what keeps a declaration from
+    being able to expose it."""
+    return ProviderDiagnostic.model_validate(
+        {
+            "subject": "route",
+            "framework": framework,
+            "fact": fact,
+            "decided_by": decided_by,
+            "path": "resolved",
+            "identity": "resolved",
+            "registration": "proven",
+            "published": True,
+            "join_eligible": eligible,
+            "join_limits": join_limits(
+                eligible=eligible,
+                line_start=line_start,
+                declared_at=declared_at,
+                structured=structured,
+            ),
+        }
+    )
+
+
+def _refusal(entry: RouteDiagnostic | None, role: str) -> ProviderDiagnostic:
+    """The lifecycle of a route that is not served: the stage that failed, as classified. A claim
+    the diagnosis does not know (it cannot happen for a row the plan lists) reads as
+    ``unclassified``, never as a precise category."""
+    if entry is None:
+        return ProviderDiagnostic.model_validate(
+            {
+                "subject": "route",
+                "fact": role or None,
+                "decided_by": "global-pass",
+                "path": "not-evaluated",
+                "identity": "not-evaluated",
+                "registration": "not-evaluated",
+                "published": False,
+                "join_eligible": False,
+                "category": "unclassified",
+                "code": "unclassified",
+            }
+        )
+    return ProviderDiagnostic.model_validate(
+        {
+            "subject": entry.subject,
+            "framework": entry.framework,
+            "fact": entry.fact,
+            "decided_by": "global-pass",
+            "path": entry.path,
+            "identity": entry.identity,
+            "registration": entry.registration,
+            "published": False,
+            "join_eligible": False,
+            "category": entry.category,
+            "code": entry.code,
+            "bounds": entry.bounds,
+            "related": [
+                {
+                    "path": place.path,
+                    "line_start": place.line_start,
+                    "line_end": place.line_end,
+                    "role": place.role,
+                }
+                for place in entry.related
+            ],
+            "related_count": entry.related_count,
+        }
+    )
+
+
+def _unpublished(
+    entry: RouteDiagnostic,
+    claim: UnresolvedRefRecord,
+    entities: Mapping[int, EntityIdentity],
+    package: str | None,
+) -> Draft:
+    """A recognized declaration nothing serves and no ``declared`` row lists. ``detail`` is the
+    planner's own reason, verbatim; the route is what its path evaluates to, else ``""``."""
+    meta = _meta(claim)
+    entity = entities.get(claim.src_id)
+    method, _, route = entry.route.partition(" ")
+    return Draft(
+        operation=HttpOperation(
+            role="provider",
+            status=OperationStatus.UNPUBLISHED,
+            method=(method or entry.method or None) if entry.subject == "route" else None,
+            route=route,
+            path=entry.file,
+            line_start=entry.line_start,
+            line_end=entry.line_end,
+            entity=entity.key if entity else None,
+            package=package,
+            detail=entry.outcome,
+            composed=bool(meta.get("controller_path")) or meta.get("provenance") != EXACT,
+            diagnostic=_refusal(entry, entry.fact),
+        ),
+        qualified_name=entity.qualified_name if entity else None,
     )
 
 
@@ -802,6 +1061,7 @@ def _caller(
     package: str | None,
     serving: Mapping[str, list[OperationCounterpart]],
     declared: Sequence[tuple[str, DeclaredMatch]],
+    count_matches: bool = False,
 ) -> Draft:
     handlers = [provider for body in decision.matched for provider in serving.get(body, [])]
     matches: list[DeclaredMatch] = []
@@ -829,6 +1089,7 @@ def _caller(
             counterparts=tuple(_unique(handlers)[:MAX_COUNTERPARTS]),
             counterpart_count=len(_unique(handlers)),
             declared_matches=tuple(matches[:MAX_COUNTERPARTS]),
+            declared_match_count=len(matches) if count_matches else 0,
             composed=decision.composed,
         ),
         qualified_name=entity.qualified_name if entity else None,
@@ -1078,6 +1339,7 @@ def coverage(
                 "(another version built it, or a link pass failed); sync the repository.",
             )
         )
+    lifecycle = _lifecycle(inventory, scoped, prefix, files) if inventory.diagnostics else None
     return OperationCoverage(
         files=dict(sorted(files.items())),
         unresolved=dict(sorted(unresolved.items())),
@@ -1085,6 +1347,49 @@ def coverage(
         declared=declared,
         unknown_paths=sum(unresolved.values()),
         limitations=tuple(limitations),
+        provider_lifecycle=lifecycle,
+    )
+
+
+def _lifecycle(
+    inventory: Inventory, scoped: Sequence[Draft], prefix: str | None, files: Mapping[str, int]
+) -> ProviderLifecycle:
+    """How many recognized provider declarations reached each stage, over the rows in scope.
+
+    ``recognized`` is the published, declared and unpublished rows, with the unpublished rows the
+    cap cut that stand in scope: they are counted, never dropped silently. Bound notes outside a
+    ``within_path`` scope are left out; the cut notes and the cut rows are always counted."""
+    providers = [d.operation for d in scoped if d.operation.role == "provider"]
+    published = sum(1 for r in providers if r.diagnostic is not None and r.diagnostic.published)
+    declared = sum(1 for r in providers if r.status is OperationStatus.DECLARED)
+    unpublished = sum(1 for r in providers if r.status is OperationStatus.UNPUBLISHED)
+    eligible = sum(1 for r in providers if r.diagnostic is not None and r.diagnostic.join_eligible)
+    omitted = sum(1 for path in inventory.unpublished_cut if prefix is None or _under(path, prefix))
+    refused = [
+        r.diagnostic for r in providers if r.diagnostic is not None and not r.diagnostic.published
+    ]
+    notes = tuple(
+        note
+        for note in inventory.bound_notes
+        if note.path is None or prefix is None or _under(note.path, prefix)
+    )
+    return ProviderLifecycle(
+        recognized=published + declared + unpublished + omitted,
+        published=published,
+        declared=declared,
+        unpublished=unpublished,
+        join_eligible=eligible,
+        by_category=dict(sorted(Counter(str(d.category) for d in refused).items())),
+        by_code=dict(sorted(Counter(d.code for d in refused).items())),
+        bounds_reached=notes,
+        bound_notes_omitted=inventory.bound_notes_omitted,
+        unpublished_omitted=omitted,
+        truncated=bool(notes) or omitted > 0 or inventory.bound_notes_omitted > 0,
+        not_extracted=tuple(
+            CoverageLimitation(code=code, note=note)
+            for code, parsers, note in _NOT_EXTRACTED_PROVIDERS
+            if any(parser in parsers for parser in files)
+        ),
     )
 
 
@@ -1103,22 +1408,24 @@ def page_limits_for(request: HttpOperationsRequest) -> AppliedPageLimits:
 
 def request_digest(request: HttpOperationsRequest, repository: str, prefix: str | None) -> str:
     """Everything a cursor must still agree with. ``limit`` alone may change."""
-    return digest(
-        [
-            ("scope", str(request.context.scope)),
-            ("repository", repository),
-            ("role", request.role.value),
-            ("within_path", prefix or ""),
-            ("owner", request.owner or ""),
-            ("method", request.method or ""),
-            ("route_prefix", request.route_prefix or ""),
-            ("status", *sorted(status.value for status in request.status)),
-            ("crossing", *sorted(status.value for status in request.crossing)),
-            ("cross_repository", str(request.cross_repository)),
-            ("decision_ref", request.decision_ref or ""),
-            ("provenance", str(request.include_provenance)),
-        ]
-    )
+    parts: list[tuple[str, ...]] = [
+        ("scope", str(request.context.scope)),
+        ("repository", repository),
+        ("role", request.role.value),
+        ("within_path", prefix or ""),
+        ("owner", request.owner or ""),
+        ("method", request.method or ""),
+        ("route_prefix", request.route_prefix or ""),
+        ("status", *sorted(status.value for status in request.status)),
+        ("crossing", *sorted(status.value for status in request.crossing)),
+        ("cross_repository", str(request.cross_repository)),
+        ("decision_ref", request.decision_ref or ""),
+        ("provenance", str(request.include_provenance)),
+    ]
+    if request.include_diagnostics:
+        # Only when asked for: a cursor of a plain request digests as it always did.
+        parts.append(("diagnostics", "true"))
+    return digest(parts)
 
 
 def inventory_digest(drafts: Sequence[Draft]) -> str:
@@ -1143,6 +1450,8 @@ def inventory_digest(drafts: Sequence[Draft]) -> str:
                 *(f"{m.route}@{m.entity}" for m in row.declared_matches),
                 "|",
                 *(f"{c.decision_ref}={c.status.value}" for c in row.crossings),
+                # Only a row that has one: a plain inventory digests as it always did.
+                *((row.diagnostic.model_dump_json(),) if row.diagnostic is not None else ()),
             )
         )
     return digest(records)
