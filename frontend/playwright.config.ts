@@ -17,6 +17,10 @@ import { E2E_STATE, assertScratchDatabase } from "./e2e/isolation";
  *   source never states, built fresh for the run. Its test declares a scope, syncs
  *   and revokes, so it has an index of its own.
  *
+ * - `r1`: `repoatlas serve` on the R1 provider-evidence corpus (tests/r1_e2e_corpus.py), built
+ *   fresh for the run: services that declare routes they do not serve, which the HTTP
+ *   Connections preview shows as hints. Its test only reads, but it has an index of its own.
+ *
  * One production build of the explorer serves all, each reading its own
  * connection file. Nothing is mocked except where a test says so.
  */
@@ -55,9 +59,22 @@ export const SCOPED_ENV: Record<string, string> = {
   XDG_DATA_HOME: path.join(STATE, "xdg-data"),
 };
 
+/** The R1 provider-evidence corpus (tests/r1_e2e_corpus.py): its own index, connection file and ports. */
+export const R1 = path.join(STATE, "r1");
+
 assertScratchDatabase(path.join(LINKED, "state/atlas.db"), STATE);
 assertScratchDatabase(path.join(SCOPED, "state/atlas.db"), STATE);
-const PORTS = { liveApi: 7337, live: 7338, linkedApi: 7347, linked: 7348, scopedApi: 7357, scoped: 7358 } as const;
+assertScratchDatabase(path.join(R1, "state/atlas.db"), STATE);
+const PORTS = {
+  liveApi: 7337,
+  live: 7338,
+  linkedApi: 7347,
+  linked: 7348,
+  scopedApi: 7357,
+  scoped: 7358,
+  r1Api: 7367,
+  r1: 7368,
+} as const;
 
 function api(port: number, connectionFile: string, env: Record<string, string> = {}, build = "") {
   return {
@@ -95,7 +112,7 @@ export default defineConfig({
   projects: [
     {
       name: "live",
-      testIgnore: /(linked|scoped)\.spec\.ts/,
+      testIgnore: /(linked|scoped|r1)\.spec\.ts/,
       use: {
         ...devices["Desktop Chrome"],
         viewport: { width: 1536, height: 960 },
@@ -118,6 +135,15 @@ export default defineConfig({
         ...devices["Desktop Chrome"],
         viewport: { width: 1536, height: 960 },
         baseURL: `http://localhost:${PORTS.scoped}`,
+      },
+    },
+    {
+      name: "r1",
+      testMatch: /r1\.spec\.ts/,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1536, height: 960 },
+        baseURL: `http://localhost:${PORTS.r1}`,
       },
     },
   ],
@@ -151,8 +177,21 @@ export default defineConfig({
       SCOPED_ENV,
       `rm -rf "${SCOPED}" && "${PYTHON}" -m tests.scoped_e2e_corpus "${SCOPED}" && `,
     ),
+    // the R1 provider-evidence corpus: read-only in its test, built fresh like the others
+    api(
+      PORTS.r1Api,
+      path.join(STATE, "r1-api.json"),
+      {
+        REPOATLAS_CONFIG: path.join(R1, "config.yaml"),
+        REPOATLAS_DB: path.join(R1, "state/atlas.db"),
+        XDG_CONFIG_HOME: path.join(STATE, "xdg-config"),
+        XDG_DATA_HOME: path.join(STATE, "xdg-data"),
+      },
+      `rm -rf "${R1}" && "${PYTHON}" -m tests.r1_e2e_corpus "${R1}" && `,
+    ),
     explorer(PORTS.live, path.join(STATE, "live-api.json"), true),
     explorer(PORTS.linked, path.join(STATE, "linked-api.json"), false),
     explorer(PORTS.scoped, path.join(STATE, "scoped-api.json"), false),
+    explorer(PORTS.r1, path.join(STATE, "r1-api.json"), false),
   ],
 });
