@@ -1923,6 +1923,10 @@ export interface HttpConnectionPreviewRequest {
   context: CapabilityContext;
   environment?: string | null;
   group: string;
+  /**
+   * Also describe, for the repository the declaration would map, how many of its served routes a declaration could expose, which declared or unpublished routes the requests this declaration would not join resemble, and its provider lifecycle. Hints only: never edges or decisions, and nothing else in the answer changes.
+   */
+  include_diagnostics?: boolean;
   limit?: number;
   repository: string;
   scope?: PreviewScope | null;
@@ -1960,6 +1964,10 @@ export interface HttpConnectionPreviewResponse {
   group: string;
   has_more?: boolean;
   origin?: string | null;
+  /**
+   * Hints about the target's provider routes. Set only with `include_diagnostics`; absent from the JSON otherwise.
+   */
+  provider_diagnostics?: PreviewProviderDiagnostics | null;
   repository: string;
   requirements?: string[];
   routes_served: number;
@@ -1967,6 +1975,63 @@ export interface HttpConnectionPreviewResponse {
   scope?: DeclarationScope | null;
   url?: string | null;
   warnings?: string[];
+}
+/**
+ * What a preview knows of the target's provider routes beyond the ones it serves (R1).
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "PreviewProviderDiagnostics".
+ */
+export interface PreviewProviderDiagnostics {
+  basis?: string;
+  exposures_truncated?: boolean;
+  lifecycle: ProviderLifecycle;
+  routes_exposable?: number;
+  routes_without_declaration_line?: number;
+  unpublished_match_count?: number;
+  unpublished_matches?: UnpublishedMatch[];
+}
+/**
+ * How many recognized provider declarations reached each stage (R1, opt-in).
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ProviderLifecycle".
+ */
+export interface ProviderLifecycle {
+  basis?: string;
+  bound_notes_omitted?: number;
+  bounds_reached?: BoundNote[];
+  by_category?: {
+    [k: string]: number | undefined;
+  };
+  by_code?: {
+    [k: string]: number | undefined;
+  };
+  declared?: number;
+  join_eligible?: number;
+  not_extracted?: CoverageLimitation[];
+  published?: number;
+  recognized?: number;
+  truncated?: boolean;
+  unpublished?: number;
+  unpublished_omitted?: number;
+}
+/**
+ * A route the target declares, or recognizes and does not serve, that a request this
+ * declaration would not join resembles: a hint, never an edge or a decision.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "UnpublishedMatch".
+ */
+export interface UnpublishedMatch {
+  category?: string | null;
+  code?: string;
+  decision_ref: string;
+  detail?: string;
+  line?: number | null;
+  path?: string | null;
+  route: string;
+  status: "declared" | "unpublished";
 }
 /**
  * This interface was referenced by `ApiIndex`'s JSON-Schema
@@ -2247,31 +2312,6 @@ export interface OperationCoverage {
   unresolved?: {
     [k: string]: number | undefined;
   };
-}
-/**
- * How many recognized provider declarations reached each stage (R1, opt-in).
- *
- * This interface was referenced by `ApiIndex`'s JSON-Schema
- * via the `definition` "ProviderLifecycle".
- */
-export interface ProviderLifecycle {
-  basis?: string;
-  bound_notes_omitted?: number;
-  bounds_reached?: BoundNote[];
-  by_category?: {
-    [k: string]: number | undefined;
-  };
-  by_code?: {
-    [k: string]: number | undefined;
-  };
-  declared?: number;
-  join_eligible?: number;
-  not_extracted?: CoverageLimitation[];
-  published?: number;
-  recognized?: number;
-  truncated?: boolean;
-  unpublished?: number;
-  unpublished_omitted?: number;
 }
 /**
  * Counts over the whole filtered set, not the page.
