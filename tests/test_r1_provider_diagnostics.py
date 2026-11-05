@@ -655,11 +655,20 @@ def test_the_flag_is_refused_where_it_cannot_apply_and_unpublished_needs_it(
     py = corpora.workspace("py")
     context = repository_context(py, "pyprov")
     assert HttpOperationsRequest(context=context, include_diagnostics=True)
-    # unpublished rows exist only with the flag
+    # Amendment A3/A3a (2026-11-04): naming unpublished without the flag is allowed; the answer
+    # lists none and says why. With the flag, pyprov's three unpublished rows (P3) are listed.
     status: Any = ("unpublished",)
-    assert HttpOperationsRequest(context=context, include_diagnostics=True, status=status)
-    with pytest.raises(ValidationError):
-        HttpOperationsRequest(context=context, status=status)
+    service = CapabilityService(py)
+    asked = service.http_operations(
+        HttpOperationsRequest(context=context, include_diagnostics=True, status=status)
+    )
+    assert len(asked.operations) == 3
+    assert all(row.status is OperationStatus.UNPUBLISHED for row in asked.operations)
+    assert not [i for i in asked.coverage.limitations if i.code == "unpublished_needs_diagnostics"]
+    unasked = service.http_operations(HttpOperationsRequest(context=context, status=status))
+    assert unasked.operations == ()
+    notes = [i for i in unasked.coverage.limitations if i.code == "unpublished_needs_diagnostics"]
+    assert len(notes) == 1 and notes[0].count is None
     # discovery and a stored decision's lookup answer other questions
     discovering: dict[str, Any] = {
         "context": GLOBAL,

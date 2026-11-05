@@ -52,7 +52,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
 
-from repoatlas.capabilities import http_connections, http_inventory, service_declarations
+from repoatlas.capabilities import (
+    http_connections,
+    http_inventory,
+    http_repository,
+    service_declarations,
+)
 from repoatlas.capabilities.budget import (
     apply_budget_policy,
     ceiling_for,
@@ -2877,8 +2882,8 @@ class CapabilityService:
         if slugs is None:
             registered = self._workspace.repositories.list_all()
             slugs = {repo.id: repo.slug for repo in registered if repo.id is not None}
-        return http_inventory.repository_inventory(
-            self._workspace.knowledge,
+        return http_repository.repository_inventory(
+            self._workspace,
             repository.id,
             slugs,
             include_diagnostics=include_diagnostics,
@@ -3037,7 +3042,11 @@ class CapabilityService:
             summary=http_inventory.summarize(chosen),
             operations=tuple(rows),
             coverage=http_inventory.coverage(
-                inventory, http_inventory.in_scope(inventory.drafts, prefix), prefix
+                inventory,
+                http_inventory.in_scope(inventory.drafts, prefix),
+                prefix,
+                statuses=request.status,
+                include_diagnostics=request.include_diagnostics,
             ),
             evidence=tuple(items),
             freshness=freshness,
