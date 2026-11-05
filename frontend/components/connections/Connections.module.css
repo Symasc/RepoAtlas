@@ -245,6 +245,27 @@
   color: var(--ra-success);
 }
 
+/* -- provider evidence: what a preview knows of routes a service declares and does not serve -- */
+
+/* under a preview row, on a line of its own */
+.hintBlock {
+  display: flex;
+  flex-direction: column;
+  flex-basis: 100%;
+  gap: 4px;
+}
+
+/* A hint is a hypothesis: dashed and quiet, never the success colour, with no link or action. */
+.hypothesis {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  border: 1px dashed var(--ra-border-strong);
+  border-radius: var(--ra-radius-s);
+  color: var(--ra-text-muted);
+}
+
 .state {
   font-family: var(--mantine-font-family-monospace);
   font-size: var(--mantine-font-size-xs);
