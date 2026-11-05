@@ -125,15 +125,29 @@ def test_the_flag_is_refused_with_a_decision_ref(corpora: Corpora) -> None:
         )
 
 
-def test_the_unpublished_status_needs_the_flag(corpora: Corpora) -> None:
+def test_the_unpublished_status_without_the_flag_is_answered_and_says_none_was_asked_for(
+    corpora: Corpora,
+) -> None:
+    """Amendment A3: not a refusal. The answer lists no unpublished row and says why."""
     py = corpora.workspace("py")
-    context = repository_context(py, "pyprov")
-    with pytest.raises(ValidationError, match="include_diagnostics"):
-        HttpOperationsRequest(context=context, status=(OperationStatus.UNPUBLISHED,))
-    asked = HttpOperationsRequest(
-        context=context, status=(OperationStatus.UNPUBLISHED,), include_diagnostics=True
-    )
-    assert asked.status == (OperationStatus.UNPUBLISHED,)
+    code = "unpublished_needs_diagnostics"
+
+    def noted(**fields: Any) -> tuple[list[HttpOperation], list[Any]]:
+        rows, first = inventory(py, "pyprov", **fields)
+        return rows, [item for item in first.coverage.limitations if item.code == code]
+
+    rows, notes = noted(status=(OperationStatus.UNPUBLISHED,))
+    assert [row for row in rows if row.status is OperationStatus.UNPUBLISHED] == []
+    [note] = notes
+    assert note.count is None and "include_diagnostics" in note.note
+    # with the flag the rows are listed and there is nothing to say
+    listed, with_flag = noted(status=(OperationStatus.UNPUBLISHED,), include_diagnostics=True)
+    assert {row.status for row in listed} == {OperationStatus.UNPUBLISHED}
+    assert with_flag == []
+    # a request that does not name the status gets no such note, with or without the flag
+    assert noted()[1] == []
+    assert noted(status=(OperationStatus.DECLARED,))[1] == []
+    assert noted(include_diagnostics=True)[1] == []
 
 
 def test_the_unpublished_filter_selects_only_those_rows(corpora: Corpora) -> None:
