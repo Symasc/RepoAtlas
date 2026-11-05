@@ -183,7 +183,6 @@ def test_case_15_a_repository_with_no_route_is_not_a_service_and_recognises_noth
 # -- case 17b: served, but not declarable ---------------------------------------------------------
 
 
-@G4
 def test_case_17b_a_route_with_a_controller_prefix_is_published_and_cannot_be_exposed(
     corpora: Corpora,
 ) -> None:
@@ -192,9 +191,14 @@ def test_case_17b_a_route_with_a_controller_prefix_is_published_and_cannot_be_ex
     routes = {row.route: row for row in rows if row.role == "provider"}
     assert set(routes) == {"/health", "/shop/items/:id"}
     assert all(row.status in PUBLISHED for row in routes.values())
-    assert tuple(routes["/health"].diagnostic.join_limits) == ()  # pyright: ignore[reportAttributeAccessIssue]
-    assert tuple(routes["/shop/items/:id"].diagnostic.join_limits) == ("no-declaration-line",)  # pyright: ignore[reportAttributeAccessIssue]
-    assert all(row.diagnostic.join_eligible for row in routes.values())  # pyright: ignore[reportAttributeAccessIssue]
+    health = routes["/health"].diagnostic
+    shop = routes["/shop/items/:id"].diagnostic
+    assert health is not None and shop is not None
+    assert tuple(health.join_limits) == ()
+    assert tuple(shop.join_limits) == ("no-declaration-line",)
+    assert all(
+        row.diagnostic is not None and row.diagnostic.join_eligible for row in routes.values()
+    )
 
 
 @G4
