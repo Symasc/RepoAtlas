@@ -76,6 +76,7 @@ def rows_of(corpora: Corpora, corpus: str, name: str) -> Rows:
 # -- F1: a route built from a prefix states no line ------------------------------------------
 
 
+@pytest.mark.xfail(strict=True, reason="superseded by F1 NestJS composed routes state a line")
 def test_f1_a_request_a_composed_route_answers_is_refused_beside_one_a_plain_route_answers(
     corpora: Corpora,
 ) -> None:
@@ -87,6 +88,22 @@ def test_f1_a_request_a_composed_route_answers_is_refused_beside_one_a_plain_rou
     by_outcome = {row.outcome: row for row in result.rows}
     handler = by_outcome["would-link"].handler
     assert handler is not None and handler.startswith("src/health.controller.ts:")
+    assert result.can_create and result.requirements == ()
+
+
+def test_f1_a_request_a_composed_nest_route_answers_now_joins_beside_a_plain_one(
+    corpora: Corpora,
+) -> None:
+    """The replacement: the composed route states its decorator line (5), so both requests of
+    ``buyer3`` would join, each at its own handler."""
+    result = preview(corpora.workspace("nest"), NEST_ORIGIN, "nestok")
+    assert result.routes_served == 2
+    assert result.counts == {"would-link": 2}
+    handlers = {row.route: row.handler for row in result.rows}
+    assert handlers == {
+        "/health": "src/health.controller.ts:5",
+        "/shop/items/42": "src/shop.controller.ts:5",
+    }
     assert result.can_create and result.requirements == ()
 
 
@@ -108,6 +125,7 @@ def test_f1_a_mounted_router_with_a_prefix_is_served_without_lines(corpora: Corp
 # -- F2: the state of a declaration reads per-file edges only -----------------------------------
 
 
+@pytest.mark.xfail(strict=True, reason="superseded by F2 one definition of served routes")
 def test_f2_a_repository_serving_only_promoted_routes_reads_as_serving_none(
     corpora: Corpora,
 ) -> None:
@@ -125,6 +143,26 @@ def test_f2_a_repository_serving_only_promoted_routes_reads_as_serving_none(
     assert found[("GET", "/shop/items/:id")][0].status in PUBLISHED
     # and the declaration joined nothing: the callers' requests are refused as before
     assert all(decision != "linked" for decision, _ in caller_decisions(nest).values())
+
+
+def test_f2_a_repository_serving_only_promoted_routes_is_applied_and_joins_its_caller(
+    corpora: Corpora,
+) -> None:
+    """The replacement: ``nestcomposed`` is declared through a plain API create and synced; its
+    declaration is applied and joined once, ``fetch_item`` is linked through it, and
+    ``fetch_health`` (a route nothing serves there) stays unmatched."""
+    nest = corpora.workspace("nest-declared")
+    listed = CapabilityService(nest).http_connections(HttpConnectionsRequest(context=GLOBAL))
+    [declaration] = listed.declarations
+    assert declaration.repository == slug_of(nest, "nestcomposed")
+    assert (declaration.state, declaration.reason) == ("applied", "")
+    assert declaration.joined == 1
+    found = rows_of(corpora, "nest-declared", "nestcomposed")
+    assert set(found) == {("GET", "/shop/items/:id")}
+    assert found[("GET", "/shop/items/:id")][0].status in PUBLISHED
+    made = caller_decisions(nest)
+    assert made["fetch_item"][0] == "linked"
+    assert made["fetch_health"][0] == "http-service-unmatched"
 
 
 def test_f2_without_a_declaration_the_worklist_lists_none(corpora: Corpora) -> None:
