@@ -2064,7 +2064,7 @@ Until the pass proves one, it stays a pending claim that records the declaration
     instances). A scope already on the chain contributes nothing (cycle guard), so a register cycle yields no extra
     prefixes. A walk visits at most 1,024 scopes; beyond that the route is not served (`fastify-chain-too-complex`;
     `fastify-chain-too-deep` when a hop bound cut it). An instance is rooted at the file that holds it.
-  - Bounds per file: 256 helper-call claims, 256 traced routes, 64 instance claims, 8 arguments scanned per call. A file past one of these bounds records nothing further and gives no refusal code: a chain that needs a dropped claim is left unserved silently (fail-closed, never a false route).
+  - Bounds per file: 256 helper-call claims, 256 traced routes, 64 instance claims, 8 arguments scanned per call. A file past one of these bounds records nothing further and gives no refusal code at the parser: a chain that needs a dropped claim is left unserved (fail-closed, never a false route). These bounds are now reported and unchanged: with `include_diagnostics` a file holding as many claims of that role as the cap is a bound note, and a Fastify route nothing registers in a repository where such a cap was reached says so (see "Provider route lifecycle (R1)"). The 8-argument bound still leaves no trace and is listed under `not_extracted`.
   - Refusal codes. Parser side: `fastify-helper-control-flow`, `fastify-helper-dynamic`,
     `fastify-helper-callee-unsupported`, `fastify-helper-shadowed`, `fastify-helper-argument-unsupported`,
     `fastify-receiver-before-binding`, `fastify-callee-before-binding`, `fastify-after-listen`,
@@ -2712,6 +2712,102 @@ model (`member-of`) and the model's users. A step through a field use reads "use
 typed parameter" or "by construction"; the steps after it, an HTTP caller's included, say nothing about the field: a
 caller is reached because it calls a handler that uses it, not because it reads it. A field answers to its qualified
 name or its key, never to its bare name, and is no member of a class, file or directory seed.
+
+### Provider route lifecycle (R1)
+
+> **Invariant.** A diagnostic describes why a recognized route declaration is not a served route. It is never an
+> edge, a decision, a `declared` row or an input to a declaration, and with its flag off every answer is byte for
+> byte what it was.
+
+**Opt-in.** `http_operations` takes `include_diagnostics` (default off). It is refused together with `discover` and
+with `decision_ref`, and the `unpublished` status can be filtered for only with it. The connections preview
+(`http_connection_preview`) takes the same flag. A cursor issued with the flag is refused without it and the other
+way round. The golden snapshot (`tests/data/r1_golden.json`, written once before any R1 code) and the inventory and
+preview contract tests pin the flag-off output.
+
+**Evidence boundary.** Diagnostics are computed at read time from claims and edges the index already holds
+(`plan_repository_http`, then `repoatlas/graph/http_provider_diagnostics.py`). The planners record raw facts beside
+their unchanged results (`route_codes`, `resolved_routes`, `route_bounds`, `related`, and the tables that were
+planned but never copied: `traced_outcomes`, `class_unproven`, `spec_refusals`, `chain_refusals`). No parser, schema
+or migration changed, nothing is stored, and the global link pass never imports the classification module (an
+import-boundary test enforces it). A declaration RepoAtlas does not recognize is never listed: absence here is not
+absence in source.
+
+**Stages.** Each provider row carries a `diagnostic`: `subject` (`route`, or `application` for an oas3-tools
+application), `framework`, `fact` (the claim role), `decided_by` (`file` for a per-file edge, `global-pass` for a
+claim), `path` and `identity` (`resolved`, `unresolved` or `not-evaluated`), `registration` (`proven`, `unproven` or
+`not-evaluated`), `published`, `join_eligible`, `join_limits`, and, for a row that is not served, `category`, `code`,
+`bounds`, and up to three `related` places (real claim locations: a helper call, registration, mount or instance).
+The planner's own reason stays in `detail`, verbatim.
+
+**The `unpublished` status.** A recognized route declaration, or an oas3-tools application, that is neither served
+nor listed as `declared` (an unmounted Python router with a readable path, a Python route whose path is built from
+a call, a class no module offers as an application, a traced Fastify route nothing proves, an oas3-tools
+application that serves nothing). Its `detail` is the planner's outcome; its `route` is what the path evaluates to,
+else empty. At most 1,000 are listed (`MAX_UNPUBLISHED_ROWS`); `unpublished_omitted` counts the rest.
+
+**Categories and codes.** Six categories: `registration-unproven`, `path-unresolved`, `identity-unresolved`,
+`framework-constraint`, `bound-reached` and `unclassified`. The stable code of each failure and its stages are the
+table in `repoatlas/graph/http_provider_diagnostics.py` (`_CODES`, with the NestJS reason texts and the oas3-tools
+`spec-...` codes); it is not copied here. The code of a route comes from, in order: a chain refusal
+(`bound-reached`), the cause its planner named (`route_codes`), the planner's outcome text through the table, then
+the generic code of its role. Anything not in the table is `unclassified` with every stage `not-evaluated`; nothing
+is mapped to a precise category by guess.
+
+**Join limits.** `join_eligible` says a served route is among those an operator's declaration can expose.
+`join_limits` lists why a served row may still not be joined: `no-declaration-line` (the route states no line, so a
+declaration cannot expose it or tie it to a deployment identity; see F1) and `openapi-document` (an OpenAPI
+document's edge, matched within its own repository only, never an application).
+
+**Bounds and `truncated`.** `coverage.provider_lifecycle` counts the recognized declarations in scope (`recognized`,
+`published`, `declared`, `unpublished`, `join_eligible`, by category and by code) and lists the bounds reached.
+
+| Bound | Limit | How it is detected |
+|---|---|---|
+| Fastify helper calls per file | 256 | a file holds that many `fastify-helper-call` claims; also named on a route nothing registers in a repository where it was reached |
+| Fastify traced routes per file | 256 | a file holds that many `fastify-traced-route` claims |
+| Fastify instances per file | 64 | a file holds that many `fastify-instance` claims; named like helper calls |
+| `ts-constants` entries per module | 64 | a route's imported name is missing from a table that full |
+| Fastify chain | 4 / 4 / 1 hops, 1,024 visits | `fastify-chain-too-deep`, `fastify-chain-too-complex` |
+| Python router or mount depth, constant hops, class depth | as in the Python route bounds | a flag the planner sets beside its unchanged result |
+| NestJS modules, dynamic-module arguments | 4,096, and the parser's truncation flag | the planner's reason text |
+| oas3-tools specification depth | the path reader's | the `spec-depth-exceeded` and `spec-propagation-depth` codes |
+| Link exposures per declaration | 2,000 | the preview's `exposures_truncated` |
+
+Listed notes are capped at 64 (`bound_notes_omitted` counts the rest), a row lists at most four bounds, a preview
+names at most five hints. `truncated` is true when a bound note is in scope, an unpublished row or a note was cut.
+It is false only when no bound RepoAtlas can detect was reached: the bounds on scanned arguments (8) and alias hops
+(4), the Python constant depth and part limits, and every construct under `not_extracted` (an Express router with no
+mount or a non-literal path, an unreadable NestJS controller or handler, a Python route that is not at module level,
+on an unusable receiver or with an unreadable path, a Fastify path or argument or alias bound) leave no trace and
+can never be detected. `not_extracted` is listed, with no count, only for languages the repository has files of.
+
+**Preview.** With the flag, a preview adds `provider_diagnostics`: `routes_exposable` (distinct routes the declaration
+would expose), `routes_without_declaration_line` (served routes no declaration can expose), `exposures_truncated`,
+the target's `lifecycle`, and `unpublished_matches` (at most five, with `unpublished_match_count`). A match is a
+declared or unpublished route of the target, of the same method, that a request which would join nothing could reach
+under the join's own rule (`endpoint_matches`, so a concrete value reaches a declared parameter) once the declared
+base path is taken off; a request that does not start with the base path has none. They are hints: the preview's
+requirements, warnings, rows, counts, `routes_served` and `can_create` are the same with the flag on or off.
+
+**Recorded limits.**
+- *F1.* A route whose path is built from a prefix (a NestJS controller or global prefix, a router mounted with a
+  prefix in the same file) is stored with no lines. Both `declared_at` and `line_start` are then empty, so a
+  declaration's exposures skip it and the deployment-identity join cannot cite it: the preview can say "nothing would
+  be joined" for a service whose routes are all composed. R1 reports this (`no-declaration-line`,
+  `routes_without_declaration_line`); it does not change it.
+- *F2.* A declaration's `repository-serves-no-routes` state reads per-file edges only
+  (`list_served_routes(exclude_parser=GLOBAL_PARSER)`), so a repository that serves only routes the global pass
+  promoted can read as invalidated while `http_operations` lists those routes as published. Characterized by a test;
+  not changed.
+- *One-hop attribution.* A refused helper call or instance is attributed to the route's own scope only. A callee
+  that is dynamic, shadowed or unsupported, or that did not resolve to the scope, is never blamed on it.
+- *A1.* A `fastify-plugin` wrapper written at the registration call, with a literal prefix, is stored exactly like
+  options the parser cannot read, so it reads as `fastify-registration-unreadable`. `fastify-plugin-prefix-ignored`
+  is given when the wrapper is on the plugin's own declaration or export.
+- *Cap detection by claim count.* A cap is reported when a file holds as many claims of the role as the cap. It
+  assumes the index keeps one claim per item; a file with exactly that many claims is reported even if nothing was
+  dropped.
 
 ### Refused HTTP requests: listed where the walk went, never followed
 
