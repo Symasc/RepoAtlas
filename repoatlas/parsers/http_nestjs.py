@@ -25,7 +25,9 @@ global pass (:mod:`repoatlas.graph.http_claims`) reads them together:
   to the application could change a route (documenting it with ``SwaggerModule``
   cannot) — and its URI versioning: the prefix before each version and the default
   version. Any other versioning type, or an option this cannot read, leaves the
-  prefix unknown;
+  prefix unknown. The options argument of ``NestFactory.create`` is an object literal,
+  or a name that is provably one (a ``const`` bound once to a literal, read nowhere
+  else); any other second argument may be an adapter, and leaves the prefix unknown;
 * **markers** — an import of ``RouterModule`` or ``ApplicationConfig``, or of
   ``@nestjs/core`` without a named list. Each can change routes that the
   registration it appears in never mentions. A ``require`` or ``import()`` of it
@@ -804,7 +806,7 @@ class NestDeclarations:
         versioning: str | None = None
         if not arguments or len(arguments) > 2:
             reason = "arguments"
-        elif len(arguments) == 2 and arguments[1].type != "object":
+        elif len(arguments) == 2 and not self._options(arguments[1], call):
             reason = "adapter"
         else:
             application = self._application(call)
@@ -819,6 +821,70 @@ class NestDeclarations:
         else:
             meta.update(prefix_status=UNKNOWN, reason=reason)
         return _Root(target, meta, start, end)
+
+    def _options(self, node: Node, call: Node) -> bool:
+        """Whether the second argument of ``NestFactory.create`` is plain options.
+
+        An inline object is. A name is only when nothing could have made it more than one
+        object literal by the time the call reads it: ``N`` is bound once in the file, by a
+        ``const`` whose value is an object literal without a spread, declared in a block
+        (or the file) that holds the call and ends before the call starts, and ``N`` is
+        written exactly twice in the file -- there, and as this argument. Anything else --
+        a call, ``new``, an import, ``let``, a value assigned to or passed on -- may be an
+        adapter or a value this cannot read, which can change routes.
+        """
+        if node.type == "object":
+            return True
+        if node.type != "identifier":
+            return False
+        name = node_text(self._source, node)
+        if self._counts[name] != 1:
+            return False
+        tree = call
+        while tree.parent is not None:
+            tree = tree.parent
+        declarators: list[Node] = []
+        mentions = 0
+        for found in walk(tree):
+            if found.type in {"identifier", "shorthand_property_identifier"} and (
+                node_text(self._source, found) == name
+            ):
+                mentions += 1
+            if found.type == "variable_declarator":
+                declared = found.child_by_field_name("name")
+                if (
+                    declared is not None
+                    and declared.type == "identifier"
+                    and node_text(self._source, declared) == name
+                ):
+                    declarators.append(found)
+        if len(declarators) != 1 or mentions != 2:
+            return False
+        [declarator] = declarators
+        declaration = declarator.parent
+        kind = declaration.child_by_field_name("kind") if declaration is not None else None
+        if (
+            declaration is None
+            or declaration.type != "lexical_declaration"
+            or kind is None
+            or node_text(self._source, kind) != "const"
+        ):
+            return False
+        value = declarator.child_by_field_name("value")
+        if (
+            value is None
+            or value.type != "object"
+            or any(child.type == "spread_element" for child in value.named_children)
+        ):
+            return False
+        scope = declaration.parent
+        return (
+            scope is not None
+            and scope.type in {"statement_block", "program"}
+            and scope.start_byte <= call.start_byte
+            and call.end_byte <= scope.end_byte
+            and declaration.end_byte <= call.start_byte
+        )
 
     def _application(self, call: Node) -> tuple[str, Node] | None:
         """The ``const`` the application is bound to, bound nowhere else."""
