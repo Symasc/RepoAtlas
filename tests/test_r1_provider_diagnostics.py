@@ -1,16 +1,15 @@
 """R1 provider diagnostics through ``http_operations(include_diagnostics=true)`` (gate G3).
 
-Every test here describes NEW behaviour, written before it exists (gate G0) from the fixtures of
-``R1_PREDICTIONS.md`` section 4, and is marked ``xfail(strict=True)``: it fails today, and when
-the feature lands it must pass, so an unexpected pass fails the run and the marker has to be
-removed deliberately. An expectation that fails once the feature exists is escalated, never
-edited to fit: the predictions are frozen.
+Every test here describes behaviour written down before it existed (gate G0) from the fixtures
+of ``R1_PREDICTIONS.md`` section 4. They were ``xfail(strict=True)`` until the feature landed
+(gate G3) and are plain tests now. An expectation that fails is escalated, never edited to fit:
+the predictions are frozen.
 
 What each recognised-but-unserved declaration is shown as: its lifecycle (path, identity,
 registration, publication, join eligibility), the category and stable code of the stage that
 failed, the planner's own reason verbatim in ``detail``, and the real places that caused it.
 
-Rows are typed ``Any`` below: ``HttpOperation.diagnostic`` does not exist until G3.
+Rows are typed ``Any`` below.
 """
 
 from __future__ import annotations
@@ -42,8 +41,6 @@ from tests.r1_provider_corpus import (
     inventory,
     repository_context,
 )
-
-G3 = pytest.mark.xfail(strict=True, reason="R1 gate G3/G4")
 
 PUBLISHED = {OperationStatus.CALLED, OperationStatus.NO_INDEXED_CALLER}
 #: The corpora whose rows are all classified: every existing declared row has a real category.
@@ -117,7 +114,6 @@ def line_of(text: str, needle: str) -> int:
 # -- pyprov: Python routes, mounts and classes (cases 1-5, 8a, 17) ---------------------------------
 
 
-@G3
 def test_case_1_a_route_the_application_serves_is_published_and_join_eligible(
     corpora: Corpora,
 ) -> None:
@@ -132,7 +128,6 @@ def test_case_1_a_route_the_application_serves_is_published_and_join_eligible(
     assert said(diagnostic.registration) == "proven"
 
 
-@G3
 def test_case_17_a_route_served_through_a_prefix_is_join_eligible_but_states_no_line(
     corpora: Corpora,
 ) -> None:
@@ -144,7 +139,6 @@ def test_case_17_a_route_served_through_a_prefix_is_join_eligible_but_states_no_
     assert tuple(diagnostic.join_limits) == ("no-declaration-line",)
 
 
-@G3
 def test_case_2_an_unmounted_router_is_declared_and_says_which_stage_stopped(
     corpora: Corpora,
 ) -> None:
@@ -160,7 +154,6 @@ def test_case_2_an_unmounted_router_is_declared_and_says_which_stage_stopped(
     )
 
 
-@G3
 def test_case_3_an_unreadable_mount_names_the_mount_and_not_the_route_s_own_file(
     corpora: Corpora,
 ) -> None:
@@ -179,7 +172,6 @@ def test_case_3_an_unreadable_mount_names_the_mount_and_not_the_route_s_own_file
     assert related[0].line_start == line_of(PY_MAIN, "app.include_router(carts")
 
 
-@G3
 def test_case_5_a_receiver_imported_from_a_module_that_does_not_exist_is_an_identity_failure(
     corpora: Corpora,
 ) -> None:
@@ -194,7 +186,6 @@ def test_case_5_a_receiver_imported_from_a_module_that_does_not_exist_is_an_iden
     )
 
 
-@G3
 def test_case_4_a_route_whose_path_is_a_call_result_is_a_new_unpublished_row(
     corpora: Corpora,
 ) -> None:
@@ -211,7 +202,6 @@ def test_case_4_a_route_whose_path_is_a_call_result_is_a_new_unpublished_row(
     assert reports.route == ""
 
 
-@G3
 def test_case_4b_a_route_with_a_readable_path_and_no_mount_was_hidden_and_is_now_listed(
     corpora: Corpora,
 ) -> None:
@@ -229,7 +219,6 @@ def test_case_4b_a_route_with_a_readable_path_and_no_mount_was_hidden_and_is_now
     assert audit.route == "/audit" and audit.method == "GET"
 
 
-@G3
 def test_case_8a_a_class_no_module_offers_is_an_identity_failure(corpora: Corpora) -> None:
     rows, _ = diagnosed(corpora, "py", "pyprov")
     expect(
@@ -240,7 +229,6 @@ def test_case_8a_a_class_no_module_offers_is_an_identity_failure(corpora: Corpor
     )
 
 
-@G3
 def test_the_lifecycle_of_pyprov_adds_up(corpora: Corpora) -> None:
     _, response = diagnosed(corpora, "py", "pyprov")
     lifecycle = response.coverage.provider_lifecycle
@@ -254,7 +242,6 @@ def test_the_lifecycle_of_pyprov_adds_up(corpora: Corpora) -> None:
     assert lifecycle.truncated is False
 
 
-@G3
 def test_case_8b_a_blueprint_registered_under_a_condition_is_declared_as_not_mounted(
     corpora: Corpora,
 ) -> None:
@@ -268,7 +255,6 @@ def test_case_8b_a_blueprint_registered_under_a_condition_is_declared_as_not_mou
     )
 
 
-@G3
 def test_a_router_mounted_by_a_main_is_published_where_the_same_one_unmounted_is_declared(
     corpora: Corpora,
 ) -> None:
@@ -284,7 +270,6 @@ def test_a_router_mounted_by_a_main_is_published_where_the_same_one_unmounted_is
 # -- the Python bounds ----------------------------------------------------------------------
 
 
-@G3
 def test_a_router_nested_deeper_than_the_bound_is_bound_reached_and_the_last_in_bound_is_served(
     corpora: Corpora,
 ) -> None:
@@ -302,7 +287,6 @@ def test_a_router_nested_deeper_than_the_bound_is_bound_reached_and_the_last_in_
         assert "python-mount-depth" in row.diagnostic.bounds
 
 
-@G3
 def test_a_constant_chain_of_five_hops_is_bound_reached_and_four_is_served(
     corpora: Corpora,
 ) -> None:
@@ -322,7 +306,6 @@ def test_a_constant_chain_of_five_hops_is_bound_reached_and_four_is_served(
     assert served.status in PUBLISHED and served.diagnostic.category is None
 
 
-@G3
 def test_a_cycle_of_constants_is_unresolved_and_not_a_bound(corpora: Corpora) -> None:
     rows, _ = diagnosed(corpora, "pybounds", "cycle")
     row = find(rows, path="src/routes.py")
@@ -362,7 +345,6 @@ NEG_GENERIC = (
 )
 
 
-@G3
 @pytest.mark.parametrize(("path", "route"), sorted(NEG_DECLARED))
 def test_case_6_a_refused_helper_call_gives_its_route_the_refusal_code(
     corpora: Corpora, path: str, route: str
@@ -372,7 +354,6 @@ def test_case_6_a_refused_helper_call_gives_its_route_the_refusal_code(
     expect(find(rows, path=path, route=route), status="declared", category=category, code=code)
 
 
-@G3
 @pytest.mark.parametrize(("path", "route"), NEG_GENERIC)
 def test_case_6_a_route_no_scoped_refusal_explains_keeps_the_generic_code(
     corpora: Corpora, path: str, route: str
@@ -386,7 +367,6 @@ def test_case_6_a_route_no_scoped_refusal_explains_keeps_the_generic_code(
     )
 
 
-@G3
 def test_case_6_a_factory_nothing_calls_and_a_file_without_fastify_are_new_unpublished_rows(
     corpora: Corpora,
 ) -> None:
@@ -411,7 +391,6 @@ def test_case_6_a_factory_nothing_calls_and_a_file_without_fastify_are_new_unpub
         assert not [row for row in listed(rows) if row.path == silent]
 
 
-@G3
 def test_case_7_a_chain_too_deep_and_a_fan_out_too_complex_are_bound_reached(
     corpora: Corpora,
 ) -> None:
@@ -438,7 +417,6 @@ def test_case_7_a_chain_too_deep_and_a_fan_out_too_complex_are_bound_reached(
 # -- case 7: the per-file caps ----------------------------------------------------------------
 
 
-@G3
 def test_case_7_a_file_at_the_traced_route_cap_is_reported_and_one_below_it_is_not(
     corpora: Corpora,
 ) -> None:
@@ -453,7 +431,6 @@ def test_case_7_a_file_at_the_traced_route_cap_is_reported_and_one_below_it_is_n
     assert lifecycle.published == 256 + 255
 
 
-@G3
 def test_case_7_a_plugin_nothing_registers_beside_a_file_at_the_helper_cap_is_bound_reached(
     corpora: Corpora,
 ) -> None:
@@ -472,7 +449,6 @@ def test_case_7_a_plugin_nothing_registers_beside_a_file_at_the_helper_cap_is_bo
     assert tuple(unbounded.diagnostic.bounds) == ()
 
 
-@G3
 def test_f3_a_wrapper_at_the_call_with_a_prefix_reads_as_unreadable(corpora: Corpora) -> None:
     # Amendment A1 (2026-11-04): a wrapper at the call with a prefix is stored exactly like
     # unreadable options, so plugA reads as unreadable like plugB (the parser's own record)
@@ -500,7 +476,6 @@ def test_f3_a_wrapper_at_the_call_with_a_prefix_reads_as_unreadable(corpora: Cor
 # -- case 9: what stays unrecoverable ------------------------------------------------------------
 
 
-@G3
 def test_case_9_an_express_router_with_no_mount_has_no_row_and_the_gap_is_declared(
     corpora: Corpora,
 ) -> None:
@@ -515,7 +490,6 @@ def test_case_9_an_express_router_with_no_mount_has_no_row_and_the_gap_is_declar
 # -- cases 10, 11: NestJS and oas3-tools --------------------------------------------------------
 
 
-@G3
 def test_case_10_a_router_module_withholds_the_application_s_routes(corpora: Corpora) -> None:
     rows, _ = diagnosed(corpora, "nest", "nestprov")
     row = find(rows, path="src/items.controller.ts", route="/items/:id")
@@ -530,7 +504,6 @@ def test_case_10_a_router_module_withholds_the_application_s_routes(corpora: Cor
     assert row.detail in {"RouterModule is imported in this package", "RouterModule is registered"}
 
 
-@G3
 def test_case_10_a_repository_with_no_application_says_there_is_none(corpora: Corpora) -> None:
     rows, _ = diagnosed(corpora, "nest", "nestbare")
     row = find(rows, path="src/bare.controller.ts", route="/bare/list")
@@ -538,7 +511,6 @@ def test_case_10_a_repository_with_no_application_says_there_is_none(corpora: Co
     assert row.detail == "not registered by a proven application"
 
 
-@G3
 def test_case_11_the_document_is_published_and_not_join_eligible_and_two_applications_say_why(
     corpora: Corpora,
 ) -> None:
@@ -568,7 +540,6 @@ def repositories(workspace: Workspace) -> list[str]:
     ]
 
 
-@G3
 @pytest.mark.parametrize("corpus", CLASSIFIED)
 def test_p1_p2_a_row_is_published_or_it_is_declared_or_unpublished_and_never_unclassified(
     corpora: Corpora, corpus: str
@@ -597,7 +568,6 @@ def written(row: Row, drop: frozenset[str] = frozenset()) -> dict[str, Any]:
     return {k: v for k, v in json.loads(row.model_dump_json()).items() if k not in drop}
 
 
-@G3
 @pytest.mark.parametrize("corpus", CLASSIFIED)
 def test_p1_p2_p8_what_the_default_inventory_listed_is_listed_unchanged_beside_the_diagnostics(
     corpora: Corpora, corpus: str
@@ -629,7 +599,6 @@ def _mounted(module: str, alias: str) -> str:
     )
 
 
-@G3
 def test_case_16a_mounting_a_declared_router_publishes_it(
     workspace: Workspace, settings: Settings, tmp_path: Path
 ) -> None:
@@ -647,7 +616,6 @@ def test_case_16a_mounting_a_declared_router_publishes_it(
     assert orders.diagnostic.category is None
 
 
-@G3
 def test_case_16b_deleting_the_route_removes_the_row(
     workspace: Workspace, settings: Settings, tmp_path: Path
 ) -> None:
@@ -662,7 +630,6 @@ def test_case_16b_deleting_the_route_removes_the_row(
     assert not [row for row in listed(after) if row.path == "svc/orders.py"]
 
 
-@G3
 def test_case_16c_mounting_the_hidden_router_publishes_it(
     workspace: Workspace, settings: Settings, tmp_path: Path
 ) -> None:
@@ -682,16 +649,15 @@ def test_case_16c_mounting_the_hidden_router_publishes_it(
 # -- the request, the cursor and the caps -------------------------------------------------------
 
 
-@G3
 def test_the_flag_is_refused_where_it_cannot_apply_and_unpublished_needs_it(
     corpora: Corpora,
 ) -> None:
     py = corpora.workspace("py")
     context = repository_context(py, "pyprov")
-    assert HttpOperationsRequest(context=context, include_diagnostics=True)  # pyright: ignore[reportCallIssue]
+    assert HttpOperationsRequest(context=context, include_diagnostics=True)
     # unpublished rows exist only with the flag
     status: Any = ("unpublished",)
-    assert HttpOperationsRequest(context=context, include_diagnostics=True, status=status)  # pyright: ignore[reportCallIssue]
+    assert HttpOperationsRequest(context=context, include_diagnostics=True, status=status)
     with pytest.raises(ValidationError):
         HttpOperationsRequest(context=context, status=status)
     # discovery and a stored decision's lookup answer other questions
@@ -702,14 +668,13 @@ def test_the_flag_is_refused_where_it_cannot_apply_and_unpublished_needs_it(
     }
     assert HttpOperationsRequest(**discovering)
     with pytest.raises(ValidationError):
-        HttpOperationsRequest(**discovering, include_diagnostics=True)  # pyright: ignore[reportCallIssue]
+        HttpOperationsRequest(**discovering, include_diagnostics=True)
     looking_up: dict[str, Any] = {"context": context, "decision_ref": "hcd1-" + "0" * 20}
     assert HttpOperationsRequest(**looking_up)
     with pytest.raises(ValidationError):
-        HttpOperationsRequest(**looking_up, include_diagnostics=True)  # pyright: ignore[reportCallIssue]
+        HttpOperationsRequest(**looking_up, include_diagnostics=True)
 
 
-@G3
 def test_every_page_size_yields_the_same_diagnosed_inventory_and_a_cursor_keeps_its_question(
     corpora: Corpora,
 ) -> None:
@@ -726,7 +691,7 @@ def test_every_page_size_yields_the_same_diagnosed_inventory_and_a_cursor_keeps_
                     context=context,
                     limit=size,
                     cursor=cursor,
-                    include_diagnostics=True,  # pyright: ignore[reportCallIssue]
+                    include_diagnostics=True,
                 )
             )
             seen += [row.model_dump_json() for row in page.operations]
@@ -742,11 +707,10 @@ def test_every_page_size_yields_the_same_diagnosed_inventory_and_a_cursor_keeps_
     assert cursor is not None
     with pytest.raises(InvalidCursorError):
         service.http_operations(
-            HttpOperationsRequest(context=context, limit=2, cursor=cursor, include_diagnostics=True)  # pyright: ignore[reportCallIssue]
+            HttpOperationsRequest(context=context, limit=2, cursor=cursor, include_diagnostics=True)
         )
 
 
-@G3
 def test_m13_the_unpublished_cap_says_how_many_it_cut(
     corpora: Corpora, monkeypatch: pytest.MonkeyPatch
 ) -> None:
