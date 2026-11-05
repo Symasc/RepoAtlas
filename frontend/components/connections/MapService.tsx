@@ -15,8 +15,10 @@ import {
   previewRequest,
   type MapForm,
 } from "@/lib/model/connections";
+import { NO_MATCH_NOTE, rowEvidence } from "@/lib/model/providerEvidence";
 
 import classes from "./Connections.module.css";
+import { ProviderEvidence, RowHints } from "./ProviderEvidence";
 
 /**
  * Declares that a group's origin is served by one indexed service. Nothing is stored until the
@@ -155,6 +157,9 @@ export function MapService({
             {preview.data.routes_served === 1 ? "" : "s"} this index holds. URL declared:{" "}
             <span className={classes.mono}>{preview.data.url}</span>
           </p>
+          {preview.data.provider_diagnostics && (
+            <ProviderEvidence diagnostics={preview.data.provider_diagnostics} repository={preview.data.repository} />
+          )}
           <ul className={classes.preview}>
             {(preview.data.rows ?? []).map((row) => (
               <li key={row.decision_ref} className={classes.previewRow}>
@@ -168,9 +173,13 @@ export function MapService({
                   {row.site.line_start != null ? `:${row.site.line_start}` : ""}
                 </span>
                 {row.handler && <span className={classes.detail}>→ handler {row.handler}</span>}
+                <RowHints {...rowEvidence(preview.data!.provider_diagnostics, preview.data!.repository, row)} />
               </li>
             ))}
           </ul>
+          {(preview.data.rows ?? []).some((row) => row.outcome === "no-matching-route") && (
+            <p className={classes.detail}>{NO_MATCH_NOTE(preview.data.repository)}</p>
+          )}
           {preview.data.has_more && <p className={classes.detail}>More requests than are listed here match.</p>}
           {preview.data.duplicate_of != null && (
             <p className={classes.detail}>Already declared as #{preview.data.duplicate_of}: confirming returns it.</p>
@@ -185,11 +194,13 @@ export function MapService({
         </section>
       )}
       {unique.length > 0 && (
-        <ul className={classes.problems} role="alert" aria-label="What must change first">
-          {unique.map((problem) => (
-            <li key={problem}>{problem}</li>
-          ))}
-        </ul>
+        <div role="alert" aria-label="What must change first">
+          <ul className={classes.problems}>
+            {unique.map((problem) => (
+              <li key={problem}>{problem}</li>
+            ))}
+          </ul>
+        </div>
       )}
       {declare.error && (
         <p className={classes.banner} data-tone="danger" role="alert">

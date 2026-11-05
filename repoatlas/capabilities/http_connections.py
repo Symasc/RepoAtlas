@@ -14,13 +14,16 @@ import binascii
 import json
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from pydantic import ValidationError
 
+from repoatlas.capabilities import http_inventory, http_repository
 from repoatlas.capabilities.errors import InvalidCursorError, InvalidDeploymentLinkError
 from repoatlas.config.settings import DECLARATIONS_SLUG
+from repoatlas.graph import link_exposures
+from repoatlas.graph.deploy_identity import ServedRoute
 from repoatlas.graph.http_crossings import (
     DECLARABLE,
     LINKED,
@@ -59,7 +62,12 @@ from repoatlas.graph.http_scopes import (
     symbols_overlap,
 )
 from repoatlas.graph.link_exposures import plan_link_exposures, plan_scoped_exposures
-from repoatlas.graph.linker import GLOBAL_PARSER, repository_routes
+from repoatlas.graph.linker import (
+    GLOBAL_PARSER,
+    RepositoryHttp,
+    repository_http_with_routes,
+    repository_routes,
+)
 from repoatlas.graph.service_declarations import (
     KNOWN_EXTERNAL,
     classifications,
@@ -89,10 +97,12 @@ from repoatlas.models.http_connections import (
     HttpConnectionsResponse,
     HttpDeclarationHistoryRequest,
     HttpDeclarationHistoryResponse,
+    PreviewProviderDiagnostics,
     PreviewRow,
     ScopeChoice,
+    UnpublishedMatch,
 )
-from repoatlas.models.http_inventory import CrossingStatus
+from repoatlas.models.http_inventory import CrossingStatus, OperationStatus
 from repoatlas.models.repository import Repository
 from repoatlas.models.service_declarations import (
     ExternalServiceFields,
@@ -100,12 +110,42 @@ from repoatlas.models.service_declarations import (
     ServiceDeclarationView,
 )
 from repoatlas.services.workspace import Workspace
+from repoatlas.storage.protocols import UnresolvedRefRecord
 
 #: Samples a group lists inline; the rest are one expansion away.
 SAMPLES = 3
 #: Base paths tried per candidate service: the root, and up to this many leading literal segments.
 MAX_BASE_DEPTH = 3
 _CURSOR = "hcc1:"
+#: Hints a preview names at most; the rest are counted.
+MAX_UNPUBLISHED_MATCHES = 5
+
+
+@dataclass(slots=True)
+class _Tally:
+    """What the exposures a preview builds offered (R1 diagnostics): filled beside the matching,
+    never read by it."""
+
+    #: Distinct ``(method, route)`` offered.
+    routes: set[tuple[str, str]] = field(default_factory=set)
+    #: Whether a link reached ``MAX_LINK_EXPOSURES``, so routes may have gone unoffered.
+    truncated: bool = False
+
+    def add(self, claims: Sequence[UnresolvedRefRecord]) -> None:
+        for claim in claims:
+            meta = json.loads(claim.meta_json or "{}")
+            self.routes.add((str(meta.get("method", "")), str(meta.get("route", ""))))
+        if len(claims) >= link_exposures.MAX_LINK_EXPOSURES:
+            self.truncated = True
+
+
+@dataclass(frozen=True, slots=True)
+class _Hinting:
+    """The target's plan and routes, planned once, and the tally of what was offered."""
+
+    planned: RepositoryHttp
+    routes: list[ServedRoute]
+    tally: _Tally
 
 
 def _slugs(workspace: Workspace) -> tuple[dict[int, str], set[str]]:
@@ -615,6 +655,9 @@ def _evaluate_scoped(
     repository: Repository,
     base_path: str,
     members: Sequence[RequestFacts],
+    *,
+    known: list[ServedRoute] | None = None,
+    tally: _Tally | None = None,
 ) -> tuple[list[tuple[RequestFacts, str, str | None]], int]:
     """What a scoped declaration of ``repository`` under ``base_path`` would do to each scopable
     request, as :func:`_evaluate` does for a URL: the repository's routes as the global pass sees
@@ -625,7 +668,9 @@ def _evaluate_scoped(
     assert repository.id is not None
     routes = [
         route
-        for route in repository_routes(workspace.knowledge, repository.id)
+        for route in (
+            known if known is not None else repository_routes(workspace.knowledge, repository.id)
+        )
         if route.repo_id == repository.id
     ]
     ids = {repo.slug: repo.id for repo in workspace.repositories.list_all() if repo.id is not None}
@@ -653,10 +698,10 @@ def _evaluate_scoped(
             updated_at=now,
             verified_at=None,
         )
-        offered = (
-            _scoped_exposure(claim, json.loads(claim.meta_json or "{}"))
-            for claim in plan_scoped_exposures([synthetic], {repository.id: routes}, ids)
-        )
+        claims = plan_scoped_exposures([synthetic], {repository.id: routes}, ids)
+        if tally is not None:
+            tally.add(claims)
+        offered = (_scoped_exposure(claim, json.loads(claim.meta_json or "{}")) for claim in claims)
         offers[(caller, shown)] = [e for e in offered if e is not None]
     result: list[tuple[RequestFacts, str, str | None]] = []
     for fact in mine:
@@ -746,12 +791,19 @@ def _evaluate(
     callers: Sequence[str],
     environment: str | None,
     members: Sequence[RequestFacts],
+    *,
+    known: list[ServedRoute] | None = None,
+    tally: _Tally | None = None,
 ) -> tuple[list[tuple[RequestFacts, str, str | None]], int]:
     """What a declaration of ``url`` for ``repository`` would do to each request: the repository's
     routes as the global pass sees them, the exposures the link would add, the join's own matching.
-    Returns each request with its outcome and handler place, and how many routes it serves."""
+    Returns each request with its outcome and handler place, and how many routes it serves.
+
+    ``known`` are the repository's routes when the caller planned it already (a preview with
+    diagnostics), else they are read as the global pass sees them; ``tally`` records, beside the
+    matching, what the exposures offered."""
     assert repository.id is not None
-    routes = repository_routes(workspace.knowledge, repository.id)
+    routes = known if known is not None else repository_routes(workspace.knowledge, repository.id)
     served = len([r for r in routes if r.repo_id == repository.id])
     now = datetime.now(timezone.utc)
     # Never stored, so not validated: a loopback origin with no callers is a question the preview
@@ -771,16 +823,10 @@ def _evaluate(
         updated_at=now,
         verified_at=None,
     )
-    exposures = [
-        e
-        for e in (
-            parse_exposure(claim)
-            for claim in plan_link_exposures(
-                [synthetic], {}, routes, {repository.slug: repository.id}
-            )
-        )
-        if e is not None
-    ]
+    claims = plan_link_exposures([synthetic], {}, routes, {repository.slug: repository.id})
+    if tally is not None:
+        tally.add(claims)
+    exposures = [e for e in (parse_exposure(claim) for claim in claims) if e is not None]
     files = {row.file_id: row for row in workspace.knowledge.list_file_rows(repository.id)}
     result: list[tuple[RequestFacts, str, str | None]] = []
     for fact in members:
@@ -827,6 +873,94 @@ _SCOPED_WARNINGS = (
         "and would stay refused",
     ),
 )
+
+
+def _hinting(workspace: Workspace, repository: Repository) -> _Hinting:
+    """Plan the target once for a preview with diagnostics: its plan, and the routes
+    :func:`repository_routes` would give from it."""
+    assert repository.id is not None
+    planned, routes = repository_http_with_routes(workspace.knowledge, repository.id)
+    return _Hinting(planned, routes, _Tally())
+
+
+def _provider_diagnostics(
+    workspace: Workspace,
+    repository: Repository,
+    hinting: _Hinting,
+    requests: Sequence[tuple[RequestFacts, str, str | None]],
+    served: int,
+    base_path: str,
+) -> PreviewProviderDiagnostics:
+    """What a preview with ``include_diagnostics`` adds (R1): hints, never edges or decisions.
+
+    The target's lifecycle, as ``http_operations`` lists it. How many routes the declaration could
+    expose, and how many served routes no declaration can (they state no line: composed). And,
+    for each request that would join nothing, the target's declared or unpublished routes of the
+    same method it could reach once the declared ``base_path`` is taken off, by the rule the join
+    matches served routes with (:func:`repoatlas.models.http.endpoint_matches`: a concrete value
+    reaches a declared parameter). A request that does not start with the base path has none.
+    Nothing here reaches the preview's requirements, warnings, rows, counts or ``can_create``."""
+    assert repository.id is not None
+    registered = workspace.repositories.list_all()
+    slugs = {repo.id: repo.slug for repo in registered if repo.id is not None}
+    inventory = http_repository.repository_inventory(
+        workspace,
+        repository.id,
+        slugs,
+        include_diagnostics=True,
+        planned=hinting.planned,
+    )
+    lifecycle = http_inventory.coverage(inventory, inventory.drafts, None).provider_lifecycle
+    assert lifecycle is not None
+    mine = [route for route in hinting.routes if route.repo_id == repository.id]
+    stated = {r.body for r in mine if r.line_start is not None or r.declared_at is not None}
+    unstated = {r.body for r in mine if r.line_start is None and r.declared_at is None} - stated
+
+    unserved = sorted(
+        (
+            draft.operation
+            for draft in inventory.drafts
+            if draft.operation.role == "provider"
+            and draft.operation.status in (OperationStatus.DECLARED, OperationStatus.UNPUBLISHED)
+            and draft.operation.route
+            and draft.operation.method
+        ),
+        key=lambda row: (row.path or "", row.line_start or 0, row.method or "", row.route),
+    )
+    base = tuple(part for part in base_path.split("/") if part)
+    matches: list[UnpublishedMatch] = []
+    for fact, outcome, _ in requests:
+        if outcome != "no-matching-route" and served != 0:
+            continue
+        segments = tuple(fact.target.segments)
+        if segments[: len(base)] != base:
+            continue
+        for row in unserved:
+            if row.method != fact.row.method or not http.endpoint_matches(
+                segments[len(base) :], row.route
+            ):
+                continue
+            diagnostic = row.diagnostic
+            matches.append(
+                UnpublishedMatch(
+                    decision_ref=fact.row.decision_ref,
+                    route=f"{row.method} {row.route}",
+                    status="declared" if row.status is OperationStatus.DECLARED else "unpublished",
+                    path=row.path,
+                    line=row.line_start,
+                    category=diagnostic.category if diagnostic else None,
+                    code=diagnostic.code if diagnostic else "",
+                    detail=row.detail,
+                )
+            )
+    return PreviewProviderDiagnostics(
+        routes_exposable=len(hinting.tally.routes),
+        routes_without_declaration_line=len(unstated),
+        exposures_truncated=hinting.tally.truncated,
+        lifecycle=lifecycle,
+        unpublished_matches=tuple(matches[:MAX_UNPUBLISHED_MATCHES]),
+        unpublished_match_count=len(matches),
+    )
 
 
 def _problems(error: ValidationError) -> list[str]:
@@ -977,7 +1111,15 @@ def _preview_scoped(
         waiting.append((fact, verdict))
 
     covered = [fact for fact, verdict in waiting if verdict == COVERED]
-    evaluated, served = _evaluate_scoped(workspace, service, scope.base_path, covered)
+    hinting = _hinting(workspace, service) if request.include_diagnostics else None
+    evaluated, served = _evaluate_scoped(
+        workspace,
+        service,
+        scope.base_path,
+        covered,
+        known=hinting.routes if hinting else None,
+        tally=hinting.tally if hinting else None,
+    )
     reached = {fact.row.decision_ref: (outcome, handler) for fact, outcome, handler in evaluated}
     placed: list[tuple[RequestFacts, str, str | None]] = []
     for fact, verdict in waiting:
@@ -1047,6 +1189,18 @@ def _preview_scoped(
         )
         for fact, outcome, handler in placed
     ]
+    hints = (
+        _provider_diagnostics(
+            workspace,
+            service,
+            hinting,
+            [item for item in placed if item[0].row.decision_ref in reached],
+            served,
+            scope.base_path,
+        )
+        if hinting is not None
+        else None
+    )
     return HttpConnectionPreviewResponse(
         context=request.context,
         group=request.group,
@@ -1061,6 +1215,7 @@ def _preview_scoped(
         duplicate_of=duplicate_of,
         conflicts_with=conflicts_with,
         can_create=not requirements,
+        provider_diagnostics=hints,
     )
 
 
@@ -1114,6 +1269,7 @@ def preview(
     if classified is not None:
         requirements.append(f"{origin} is {classified_text(classified.id)}")
 
+    hinting = _hinting(workspace, repository) if request.include_diagnostics else None
     evaluated, served = _evaluate(
         workspace,
         repository,
@@ -1121,6 +1277,8 @@ def preview(
         request.callers,
         request.environment,
         [f for f in members if f.target.origin == origin],
+        known=hinting.routes if hinting else None,
+        tally=hinting.tally if hinting else None,
     )
     if served == 0:
         requirements.append(
@@ -1181,6 +1339,11 @@ def preview(
             f"{counts['caller-excluded']} request(s) are made by repositories this declaration "
             "does not name"
         )
+    hints = (
+        _provider_diagnostics(workspace, repository, hinting, evaluated, served, request.base_path)
+        if hinting is not None
+        else None
+    )
     return HttpConnectionPreviewResponse(
         context=request.context,
         group=request.group,
@@ -1196,6 +1359,7 @@ def preview(
         duplicate_of=duplicate_of,
         conflicts_with=conflicts_with,
         can_create=not requirements,
+        provider_diagnostics=hints,
     )
 
 
