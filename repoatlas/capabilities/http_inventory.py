@@ -42,7 +42,6 @@ from repoatlas.graph.http_provider_diagnostics import (
     framework_of,
     join_limits,
 )
-from repoatlas.graph.linker import RepositoryHttp, plan_repository_http
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models import http
 from repoatlas.models.dependency_inventory import AppliedPageLimits
@@ -86,7 +85,6 @@ from repoatlas.storage.protocols import (
     HttpEdgeRow,
     UnresolvedRefRecord,
 )
-from repoatlas.storage.sqlite.stores import SqliteKnowledgeStore
 
 #: Claims whose routes the global pass serves, or lists as declared.
 _ROUTE_ROLES = frozenset(
@@ -577,39 +575,6 @@ def build_inventory(
         ),
         bound_notes_omitted=diagnosis.bound_notes_omitted if diagnosis is not None else 0,
         unpublished_cut=cut,
-    )
-
-
-def repository_inventory(
-    knowledge: SqliteKnowledgeStore,
-    repository_id: int,
-    slugs: Mapping[int, str],
-    *,
-    include_diagnostics: bool = False,
-    planned: RepositoryHttp | None = None,
-) -> Inventory:
-    """Replan one repository (unless ``planned`` is its plan already) and read what its rows
-    need. Inside one snapshot. What the service lists, and a preview of a declaration reads for
-    the repository it would map, so the two cannot differ."""
-    if planned is None:
-        planned = plan_repository_http(knowledge, repository_id)
-    edges = knowledge.list_http_edges(repository_id)
-    decisions = knowledge.list_http_call_decisions(repository_id)
-    wanted = {claim.src_id for claim in planned.claims}
-    wanted.update(row.src_id for row in decisions)
-    wanted.update(handler_ids(decisions))
-    return build_inventory(
-        plan=planned.plan,
-        claims=planned.claims,
-        entities=knowledge.keys_for_entities(sorted(wanted)),
-        files=planned.files,
-        index=planned.index,
-        edges=edges,
-        parsers=dict(knowledge.list_file_parsers(repository_id)),
-        joined=decisions,
-        slugs=slugs,
-        crossings_built=knowledge.http_call_decisions_built(),
-        include_diagnostics=include_diagnostics,
     )
 
 
@@ -1286,9 +1251,18 @@ def summarize(drafts: Sequence[Draft]) -> OperationSummary:
 
 
 def coverage(
-    inventory: Inventory, scoped: Sequence[Draft], prefix: str | None
+    inventory: Inventory,
+    scoped: Sequence[Draft],
+    prefix: str | None,
+    *,
+    statuses: Iterable[OperationStatus] = (),
+    include_diagnostics: bool = False,
 ) -> OperationCoverage:
-    """What was read in scope, and every limitation that applies to it."""
+    """What was read in scope, and every limitation that applies to it.
+
+    ``statuses`` are the request's status filter and ``include_diagnostics`` its flag: a request
+    that names ``unpublished`` without the flag is answered, with a limitation saying none was
+    asked for."""
     files = Counter(
         parser or "unparsed"
         for path, parser in inventory.parsers.items()
@@ -1358,6 +1332,14 @@ def coverage(
     if any(parser in _TYPESCRIPT_PARSERS for parser in files):
         limitations.extend(
             CoverageLimitation(code=code, note=note) for code, note in _NOT_EXTRACTED
+        )
+    if not include_diagnostics and OperationStatus.UNPUBLISHED in set(statuses):
+        limitations.append(
+            CoverageLimitation(
+                code="unpublished_needs_diagnostics",
+                note="Rows of status unpublished are listed only with include_diagnostics; "
+                "this answer did not ask for them, so none is listed.",
+            )
         )
     limitations.append(
         CoverageLimitation(

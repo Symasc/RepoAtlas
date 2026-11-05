@@ -221,8 +221,6 @@ class HttpOperationsRequest(BaseModel):
                 raise ValueError(
                     "include_diagnostics describes provider routes; decision_ref names a request"
                 )
-        elif OperationStatus.UNPUBLISHED in self.status:
-            raise ValueError("the unpublished status exists only with include_diagnostics")
         return self
 
     @model_validator(mode="after")
