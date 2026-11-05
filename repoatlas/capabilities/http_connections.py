@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from pydantic import ValidationError
 
-from repoatlas.capabilities import http_inventory
+from repoatlas.capabilities import http_inventory, http_repository
 from repoatlas.capabilities.errors import InvalidCursorError, InvalidDeploymentLinkError
 from repoatlas.config.settings import DECLARATIONS_SLUG
 from repoatlas.graph import link_exposures
@@ -903,8 +903,8 @@ def _provider_diagnostics(
     assert repository.id is not None
     registered = workspace.repositories.list_all()
     slugs = {repo.id: repo.slug for repo in registered if repo.id is not None}
-    inventory = http_inventory.repository_inventory(
-        workspace.knowledge,
+    inventory = http_repository.repository_inventory(
+        workspace,
         repository.id,
         slugs,
         include_diagnostics=True,
