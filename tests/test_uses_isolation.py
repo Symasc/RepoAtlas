@@ -216,6 +216,7 @@ REVIEWED_EDGE_READS = {
     "replace_file_facts": "maintenance: deletes one file's facts",
     "delete_edges_by_parser": "maintenance: deletes one producer's edges",
     "list_served_routes": "typed: SERVES_HTTP_ROUTE",
+    "list_code_served_routes": "typed: SERVES_HTTP_ROUTE, the routes a link may be offered at",
     "list_route_servers": "typed: SERVES_HTTP_ROUTE, the routes deployment identities expose",
     "list_env_reads": "typed: READS to environment variables, the readers DF3a's crossings reach",
     "reads_in": "typed: READS, whether a repository reads a seed_repository's variable",

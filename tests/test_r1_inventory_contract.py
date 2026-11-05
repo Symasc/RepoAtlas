@@ -37,6 +37,7 @@ from tests.r1_provider_corpus import (
     providers,
     repository_context,
 )
+from tests.r1_superseded import SUPERSEDED, problems
 
 PUBLISHED = {OperationStatus.CALLED, OperationStatus.NO_INDEXED_CALLER}
 
@@ -79,7 +80,20 @@ def test_the_coverage_schema_keeps_every_field_it_had() -> None:
 # -- P8 (mutant M18): the flag off changes nothing ----------------------------------------------
 
 
-@pytest.mark.parametrize("corpus", CORPUS_NAMES)
+def _unless_superseded(name: str) -> Any:
+    """The corpus, marked ``xfail(strict)`` where F1 and F2 change its operations (the allowlist in
+    ``tests.r1_superseded``, checked by the replacement test below)."""
+    if (name, "operations") not in SUPERSEDED:
+        return name
+    return pytest.param(
+        name,
+        marks=pytest.mark.xfail(
+            strict=True, reason="superseded by F1 and F2: the declaration links fetch_item"
+        ),
+    )
+
+
+@pytest.mark.parametrize("corpus", [_unless_superseded(name) for name in CORPUS_NAMES])
 def test_p8_with_the_flag_off_every_repository_answers_as_the_golden_does(
     corpora: Corpora, corpus: str
 ) -> None:
@@ -90,6 +104,17 @@ def test_p8_with_the_flag_off_every_repository_answers_as_the_golden_does(
     assert sorted(now) == sorted(pinned)
     for slug in now:
         assert canonical(now[slug]) == canonical(pinned[slug]), slug
+
+
+@pytest.mark.parametrize("corpus", [n for n in CORPUS_NAMES if (n, "operations") in SUPERSEDED])
+def test_p8_with_the_flag_off_a_superseded_inventory_differs_only_as_allowed(
+    corpora: Corpora, corpus: str
+) -> None:
+    """Replaces the exact comparison above where F1 and F2 change an inventory: the golden is
+    untouched and ``tests.r1_superseded`` names the one repository that may differ, and how."""
+    pinned = json.loads(GOLDEN.read_text(encoding="utf-8"))["corpora"][corpus]["operations"]
+    now = normalise(operations(corpora.workspace(corpus)))
+    assert problems(corpus, "operations", pinned, now) == []
 
 
 @pytest.mark.parametrize("corpus", CORPUS_NAMES)
