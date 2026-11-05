@@ -1604,6 +1604,24 @@ def repository_routes(knowledge: SqliteKnowledgeStore, repo_id: int) -> list[Ser
     return found
 
 
+def repository_http_with_routes(
+    knowledge: SqliteKnowledgeStore, repo_id: int
+) -> tuple[RepositoryHttp, list[ServedRoute]]:
+    """One repository's plan, and the routes :func:`repository_routes` gives, from that one plan.
+
+    The same logic as :func:`repository_routes` (which stays as it is): for a reader that also
+    needs the plan the routes were made from, so the repository is planned once."""
+    servers = knowledge.list_route_servers(exclude_parser=GLOBAL_PARSER, repo_id=repo_id)
+    planned = plan_repository_http(knowledge, repo_id)
+    seen: set[tuple[int, str]] = set()
+    found: list[ServedRoute] = []
+    for route in (*served_by_servers(servers), *planned.plan.code_routes):
+        if (route.src_id, route.body) not in seen:
+            seen.add((route.src_id, route.body))
+            found.append(route)
+    return planned, found
+
+
 def claim_role(claim: UnresolvedRefRecord) -> str | None:
     """The pending-fact role a claim carries, or ``None`` for an ordinary claim."""
     return _role_of(claim.meta_json) if claim.meta_json else None

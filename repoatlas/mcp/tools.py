@@ -201,7 +201,12 @@ HTTP_OPERATIONS = ToolSpec(
         "Reads the local index; paged, with optional evidence. For workspace "
         "discovery, use global scope, discover true and a non-root route_prefix. Rows "
         "retain source repository identity and local statuses; compatible candidates "
-        "do not establish runtime dependencies."
+        "do not establish runtime dependencies. With include_diagnostics true, also "
+        "describe each provider row's lifecycle (path, identity, registration, "
+        "publication, join eligibility) and why a stage failed, and list as unpublished "
+        "the recognized route declarations this repository neither serves nor lists as "
+        "declared; repository scope only. A declaration RepoAtlas does not recognize is "
+        "never listed: absence here is not absence in source."
     ),
     request=HttpOperationsRequest,
     capability="http_operations",

@@ -337,7 +337,8 @@ export type OperationStatus =
   | "join_only"
   | "called"
   | "no_indexed_caller"
-  | "declared";
+  | "declared"
+  | "unpublished";
 /**
  * What a candidate does to the changed thing's reach.
  *
@@ -489,6 +490,18 @@ export interface AppliedPageLimits {
 export interface AuthenticationTarget {
   environment?: string | null;
   repository: string;
+}
+/**
+ * An analysis bound that was reached: where, and its limit.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "BoundNote".
+ */
+export interface BoundNote {
+  bound: string;
+  limit?: number | null;
+  path?: string | null;
+  scope: "file" | "repository" | "route";
 }
 /**
  * An indexed service whose served routes match some of a group's requests: a hypothesis.
@@ -1910,6 +1923,10 @@ export interface HttpConnectionPreviewRequest {
   context: CapabilityContext;
   environment?: string | null;
   group: string;
+  /**
+   * Also describe, for the repository the declaration would map, how many of its served routes a declaration could expose, which declared or unpublished routes the requests this declaration would not join resemble, and its provider lifecycle. Hints only: never edges or decisions, and nothing else in the answer changes.
+   */
+  include_diagnostics?: boolean;
   limit?: number;
   repository: string;
   scope?: PreviewScope | null;
@@ -1947,6 +1964,10 @@ export interface HttpConnectionPreviewResponse {
   group: string;
   has_more?: boolean;
   origin?: string | null;
+  /**
+   * Hints about the target's provider routes. Set only with `include_diagnostics`; absent from the JSON otherwise.
+   */
+  provider_diagnostics?: PreviewProviderDiagnostics | null;
   repository: string;
   requirements?: string[];
   routes_served: number;
@@ -1954,6 +1975,63 @@ export interface HttpConnectionPreviewResponse {
   scope?: DeclarationScope | null;
   url?: string | null;
   warnings?: string[];
+}
+/**
+ * What a preview knows of the target's provider routes beyond the ones it serves (R1).
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "PreviewProviderDiagnostics".
+ */
+export interface PreviewProviderDiagnostics {
+  basis?: string;
+  exposures_truncated?: boolean;
+  lifecycle: ProviderLifecycle;
+  routes_exposable?: number;
+  routes_without_declaration_line?: number;
+  unpublished_match_count?: number;
+  unpublished_matches?: UnpublishedMatch[];
+}
+/**
+ * How many recognized provider declarations reached each stage (R1, opt-in).
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ProviderLifecycle".
+ */
+export interface ProviderLifecycle {
+  basis?: string;
+  bound_notes_omitted?: number;
+  bounds_reached?: BoundNote[];
+  by_category?: {
+    [k: string]: number | undefined;
+  };
+  by_code?: {
+    [k: string]: number | undefined;
+  };
+  declared?: number;
+  join_eligible?: number;
+  not_extracted?: CoverageLimitation[];
+  published?: number;
+  recognized?: number;
+  truncated?: boolean;
+  unpublished?: number;
+  unpublished_omitted?: number;
+}
+/**
+ * A route the target declares, or recognizes and does not serve, that a request this
+ * declaration would not join resembles: a hint, never an edge or a decision.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "UnpublishedMatch".
+ */
+export interface UnpublishedMatch {
+  category?: string | null;
+  code?: string;
+  decision_ref: string;
+  detail?: string;
+  line?: number | null;
+  path?: string | null;
+  route: string;
+  status: "declared" | "unpublished";
 }
 /**
  * This interface was referenced by `ApiIndex`'s JSON-Schema
@@ -2147,6 +2225,10 @@ export interface HttpOperationsRequest {
    */
   discover?: boolean;
   /**
+   * Also describe each provider row's lifecycle (path, identity, registration, publication, join eligibility) and why a stage failed, and list as `unpublished` the recognized route declarations this repository neither serves nor lists as declared. Repository scope only. A declaration RepoAtlas does not recognize is never listed: absence here is not absence in source.
+   */
+  include_diagnostics?: boolean;
+  /**
    * Supply each returned row's own lines as evidence, so it can be cited and so its route can be named in a grounded claim. Off keeps pages small and allocates no evidence.
    */
   include_provenance?: boolean;
@@ -2222,6 +2304,10 @@ export interface OperationCoverage {
     [k: string]: number | undefined;
   };
   limitations?: CoverageLimitation[];
+  /**
+   * How many recognized provider declarations reached each stage. Set only with `include_diagnostics`; absent from the JSON otherwise.
+   */
+  provider_lifecycle?: ProviderLifecycle | null;
   unknown_paths?: number;
   unresolved?: {
     [k: string]: number | undefined;
