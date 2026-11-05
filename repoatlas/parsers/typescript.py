@@ -892,7 +892,10 @@ class TypeScriptParser:
     # 22: Fastify factories (functions that return an application), the instances and entry
     #    applications built from them, and the aliases of each (M8,
     #    repoatlas.parsers.http_fastify).
-    version = "22"
+    # 23: a NestFactory.create options argument that is a const bound once to an object
+    #    literal, read only there and here, proves a root's prefix like an inline one (F4,
+    #    repoatlas.parsers.http_nestjs).
+    version = "23"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
