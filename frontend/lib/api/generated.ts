@@ -337,7 +337,8 @@ export type OperationStatus =
   | "join_only"
   | "called"
   | "no_indexed_caller"
-  | "declared";
+  | "declared"
+  | "unpublished";
 /**
  * What a candidate does to the changed thing's reach.
  *
@@ -489,6 +490,18 @@ export interface AppliedPageLimits {
 export interface AuthenticationTarget {
   environment?: string | null;
   repository: string;
+}
+/**
+ * An analysis bound that was reached: where, and its limit.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "BoundNote".
+ */
+export interface BoundNote {
+  bound: string;
+  limit?: number | null;
+  path?: string | null;
+  scope: "file" | "repository" | "route";
 }
 /**
  * An indexed service whose served routes match some of a group's requests: a hypothesis.
@@ -2147,6 +2160,10 @@ export interface HttpOperationsRequest {
    */
   discover?: boolean;
   /**
+   * Also describe each provider row's lifecycle (path, identity, registration, publication, join eligibility) and why a stage failed, and list as `unpublished` the recognized route declarations this repository neither serves nor lists as declared. Repository scope only. A declaration RepoAtlas does not recognize is never listed: absence here is not absence in source.
+   */
+  include_diagnostics?: boolean;
+  /**
    * Supply each returned row's own lines as evidence, so it can be cited and so its route can be named in a grounded claim. Off keeps pages small and allocates no evidence.
    */
   include_provenance?: boolean;
@@ -2222,10 +2239,39 @@ export interface OperationCoverage {
     [k: string]: number | undefined;
   };
   limitations?: CoverageLimitation[];
+  /**
+   * How many recognized provider declarations reached each stage. Set only with `include_diagnostics`; absent from the JSON otherwise.
+   */
+  provider_lifecycle?: ProviderLifecycle | null;
   unknown_paths?: number;
   unresolved?: {
     [k: string]: number | undefined;
   };
+}
+/**
+ * How many recognized provider declarations reached each stage (R1, opt-in).
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "ProviderLifecycle".
+ */
+export interface ProviderLifecycle {
+  basis?: string;
+  bound_notes_omitted?: number;
+  bounds_reached?: BoundNote[];
+  by_category?: {
+    [k: string]: number | undefined;
+  };
+  by_code?: {
+    [k: string]: number | undefined;
+  };
+  declared?: number;
+  join_eligible?: number;
+  not_extracted?: CoverageLimitation[];
+  published?: number;
+  recognized?: number;
+  truncated?: boolean;
+  unpublished?: number;
+  unpublished_omitted?: number;
 }
 /**
  * Counts over the whole filtered set, not the page.

@@ -89,6 +89,7 @@ from repoatlas.parsers.http_facts import (
     PENDING_FACT,
     PYTHON_CLASS_ROUTE,
     PYTHON_ROUTE,
+    TS_HANDLER_OBJECT,
 )
 from repoatlas.parsers.http_fastify import (
     _MAX_CONSTANTS,
@@ -679,6 +680,14 @@ def _framework(role: str, meta: Mapping[str, str]) -> str | None:
     if role in (PYTHON_ROUTE, PYTHON_CLASS_ROUTE):
         return _FAMILIES.get(meta.get("family", ""))
     return _FRAMEWORKS.get(role)
+
+
+def framework_of(role: str, meta: Mapping[str, str]) -> str | None:
+    """The framework of a route claim of ``role``, served or not (G3 labels published rows with
+    it): as :func:`diagnose` labels its entries, and ``oas3-tools`` for a served handler object."""
+    if role == TS_HANDLER_OBJECT:
+        return "oas3-tools"
+    return _framework(role, meta)
 
 
 def _route(plan: HttpClaimPlan, claim_id: int, role: str, meta: Mapping[str, str]) -> str:
