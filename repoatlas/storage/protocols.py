@@ -653,6 +653,9 @@ class KnowledgeStore(Protocol):
     def list_served_routes(
         self, *, exclude_parser: str, repo_id: int | None = None
     ) -> dict[int, list[str]]: ...
+    def list_code_served_routes(
+        self, *, offerable: bool, repo_id: int | None = None
+    ) -> dict[int, list[str]]: ...
     def list_route_servers(
         self, *, exclude_parser: str, repo_id: int | None = None
     ) -> list[RouteServerRow]: ...
