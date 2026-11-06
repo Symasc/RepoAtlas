@@ -895,7 +895,10 @@ class TypeScriptParser:
     # 23: a NestFactory.create options argument that is a const bound once to an object
     #    literal, read only there and here, proves a root's prefix like an inline one (F4,
     #    repoatlas.parsers.http_nestjs).
-    version = "23"
+    # 24: an oas3-tools factory whose parameter is the last segment of an anchored join
+    #    (``spec_param_dir``), the string segment a call hands it, and a relative default
+    #    import as controllers (repoatlas.parsers.http_oas3).
+    version = "24"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
