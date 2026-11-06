@@ -698,13 +698,14 @@ class ModuleResolver:
 
     def build_layouts(self, repo_id: int, rel_path: str) -> tuple[str, ...]:
         """The directories the file ``rel_path`` runs from once built: each ``outDir``, joined to
-        the file's directory under its ``rootDir``, of a pair the tsconfig files nearest it
-        declare (``extends`` followed). Empty when they declare no pair, or one whose ``rootDir``
+        the file's directory under its ``rootDir``, for each pair declared by the nearest tsconfig
+        files that record ``rootDir`` or ``outDir``, themselves or through a resolved ``extends``;
+        a config that records only module-resolution options (``baseUrl``, ``paths``, ``include``)
+        does not hide an enclosing pair. Empty when they declare no pair, or one whose ``rootDir``
         does not hold the file: an output directory is never guessed."""
-        configs = {*self._tsconfigs.get(repo_id, {}), *self._includes.get(repo_id, {})}
         directory = _parent(rel_path)
         home = directory
-        while not any(_parent(config) == home for config in configs):
+        while not self._declares_layout(repo_id, home):
             if not home:
                 return ()
             home = _parent(home)
@@ -717,6 +718,14 @@ class ModuleResolver:
             if runtime is not None and runtime != directory:
                 found.append(runtime)
         return tuple(dict.fromkeys(found))
+
+    def _declares_layout(self, repo_id: int, directory: str) -> bool:
+        """A tsconfig in ``directory`` records ``rootDir`` or ``outDir`` (``extends`` followed)."""
+        return any(
+            {"rootDir", "outDir"} & set(self._options(repo_id, config))
+            for config in self._tsconfigs.get(repo_id, {})
+            if _parent(config) == directory
+        )
 
     def _find_build_dirs(self, repo_id: int, directory: str) -> list[tuple[str, str]]:
         pairs = set()
