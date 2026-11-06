@@ -73,20 +73,9 @@ def ask(
 # -- (i) the flag off changes nothing -----------------------------------------------------------
 
 
-def _unless_superseded(name: str) -> Any:
-    """The corpus, marked ``xfail(strict)`` where F1 and F2 change its previews (the allowlist in
-    ``tests.r1_superseded``, checked by the replacement test below)."""
-    if (name, "previews") not in SUPERSEDED:
-        return name
-    return pytest.param(
-        name,
-        marks=pytest.mark.xfail(
-            strict=True, reason="superseded by F1 composed NestJS routes join (previews)"
-        ),
-    )
-
-
-@pytest.mark.parametrize("corpus", [_unless_superseded(name) for name in CORPUS_NAMES])
+# The corpora F1 and F2 leave alone are compared exactly; those whose previews they change
+# (``tests.r1_superseded``) are compared by the allowlist test below.
+@pytest.mark.parametrize("corpus", [n for n in CORPUS_NAMES if (n, "previews") not in SUPERSEDED])
 def test_with_the_flag_off_every_golden_preview_is_what_it_was(
     corpora: Corpora, corpus: str
 ) -> None:
