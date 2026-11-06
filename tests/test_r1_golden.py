@@ -85,22 +85,15 @@ def test_the_golden_covers_exactly_the_corpora_and_sections_the_snapshot_takes()
 
 
 def _pairs() -> list[Any]:
-    """Every (corpus, section); the ones F1 and F2 change are ``xfail(strict)`` here and compared
-    with the allowlist of :mod:`tests.r1_superseded` below. The golden file is never touched."""
-    found: list[Any] = []
-    for corpus in CORPUS_NAMES:
-        for section in SECTIONS:
-            marks = (
-                [
-                    pytest.mark.xfail(
-                        strict=True, reason=f"superseded by F1 and F2 ({corpus}.{section})"
-                    )
-                ]
-                if (corpus, section) in SUPERSEDED
-                else []
-            )
-            found.append(pytest.param(corpus, section, marks=marks, id=f"{corpus}-{section}"))
-    return found
+    """Every (corpus, section) F1 and F2 leave alone, compared exactly with the golden. The pairs
+    they change are left out here: the allowlist test below compares them with
+    :mod:`tests.r1_superseded`. The golden file is never touched."""
+    return [
+        pytest.param(corpus, section, id=f"{corpus}-{section}")
+        for corpus in CORPUS_NAMES
+        for section in SECTIONS
+        if (corpus, section) not in SUPERSEDED
+    ]
 
 
 @pytest.mark.parametrize(("corpus", "section"), _pairs())
