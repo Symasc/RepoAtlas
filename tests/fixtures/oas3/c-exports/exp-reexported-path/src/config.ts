@@ -1,0 +1,1 @@
+export { SPEC } from './paths'
