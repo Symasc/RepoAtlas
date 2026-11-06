@@ -322,7 +322,9 @@ def test_each_call_of_a_factory_is_a_claim() -> None:
     [
         pytest.param("createApp()", [], id="no-argument"),
         pytest.param(
-            "createApp('api/a.yaml')", [{"refused": "spec-cwd-relative"}], id="a-literal-is-refused"
+            "createApp('api/a.yaml')",
+            [{"refused": "spec-cwd-relative", "segment": "api/a.yaml"}],
+            id="a-literal-is-refused-and-kept-as-a-segment",
         ),
         pytest.param("createApp(1, 2)", [{}, {}], id="positions-are-kept"),
         pytest.param(
@@ -443,7 +445,8 @@ def test_a_path_with_a_segment_from_another_module_is_recorded_as_parts() -> Non
         pytest.param("path.join(__dirname, DIR, 'a.yaml')", True, id="parts-ending-yaml"),
         pytest.param("path.join('api', 'a.yaml')", False, id="refused"),
         pytest.param("API_FILE", False, id="a-whole-imported-name"),
-        pytest.param("'a.yaml'", False, id="not-shaped-like-a-path"),
+        pytest.param("'a.yaml'", True, id="a-literal-document-segment"),
+        pytest.param("'api'", False, id="a-literal-that-names-no-document"),
         pytest.param("req", False, id="not-a-const"),
     ],
 )

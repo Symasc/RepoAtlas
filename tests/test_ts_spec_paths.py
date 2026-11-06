@@ -33,6 +33,7 @@ from repoatlas.parsers.ts_spec_paths import (
     SPEC_USED_BEFORE_BINDING,
     ImportedPath,
     Param,
+    ParamSegment,
     Parts,
     Refused,
     Result,
@@ -403,6 +404,46 @@ def test_param_carries_the_function_so_that_its_name_can_be_read() -> None:
     assert node_text(raw, name) == "load"
 
 
+@pytest.mark.parametrize(
+    ("lines", "parts", "index"),
+    [
+        pytest.param(
+            [PATH, "function load(spec: string) {", "  use(path.join(__dirname, spec));", "}"],
+            (),
+            0,
+            id="join-anchor-then-parameter",
+        ),
+        pytest.param(
+            [
+                PATH,
+                "export function load(root: string, spec: string) {",
+                "  use(path.resolve(__dirname, '..', 'api', spec));",
+                "}",
+            ],
+            ("..", "api"),
+            1,
+            id="resolve-literals-then-the-second-parameter",
+        ),
+        pytest.param(
+            [
+                PATH,
+                "const API = 'api';",
+                "const load = (spec: string) => use(path.join(__dirname, API, spec) as string);",
+            ],
+            ("api",),
+            0,
+            id="arrow-const-segment-and-a-cast",
+        ),
+    ],
+)
+def test_a_plain_parameter_as_the_last_join_segment_gives_param_segment(
+    lines: list[str], parts: tuple[str, ...], index: int
+) -> None:
+    result = _read(*lines)
+    assert isinstance(result, ParamSegment)
+    assert (result.parts, result.index) == (parts, index)
+
+
 # -- what a source does not state ---------------------------------------------------------------
 
 
@@ -596,9 +637,67 @@ def test_param_carries_the_function_so_that_its_name_can_be_read() -> None:
             id="unresolved-name",
         ),
         pytest.param(
-            [PATH, "function load(spec: string) {", "  use(path.join(__dirname, spec));", "}"],
+            [
+                PATH,
+                "function load(spec: string) {",
+                "  use(path.join(__dirname, spec, 'a.yaml'));",
+                "}",
+            ],
             SPEC_PARAMETER_UNSUPPORTED,
-            id="parameter-segment",
+            id="parameter-segment-not-last",
+        ),
+        pytest.param(
+            [PATH, "function load(spec = 'a.yaml') {", "  use(path.join(__dirname, spec));", "}"],
+            SPEC_PARAMETER_UNSUPPORTED,
+            id="parameter-last-segment-with-a-default",
+        ),
+        pytest.param(
+            [PATH, "function load(spec?: string) {", "  use(path.join(__dirname, spec));", "}"],
+            SPEC_PARAMETER_UNSUPPORTED,
+            id="parameter-last-segment-optional",
+        ),
+        pytest.param(
+            [
+                PATH,
+                "function outer() {",
+                "  function load(spec: string) {",
+                "    use(path.join(__dirname, spec));",
+                "  }",
+                "}",
+            ],
+            SPEC_PARAMETER_UNSUPPORTED,
+            id="parameter-last-segment-of-a-nested-function",
+        ),
+        pytest.param(
+            [PATH, "function load(spec: string) {", "  use(path.join(spec, 'a.yaml'));", "}"],
+            SPEC_PARAMETER_UNSUPPORTED,
+            id="parameter-as-the-anchor",
+        ),
+        pytest.param(
+            [PATH, "function load(spec: string) {", "  use(path.join('api', spec));", "}"],
+            SPEC_CWD_RELATIVE,
+            id="parameter-last-segment-unanchored",
+        ),
+        pytest.param(
+            [
+                PATH,
+                DIRS,
+                "function load(spec: string) {",
+                "  use(path.join(__dirname, API_DIR, spec));",
+                "}",
+            ],
+            SPEC_IMPORT_UNSUPPORTED,
+            id="parameter-last-segment-after-an-imported-one",
+        ),
+        pytest.param(
+            [
+                PATH,
+                "function load(root: string, spec: string) {",
+                "  use(path.join(__dirname, root, spec));",
+                "}",
+            ],
+            SPEC_PARAMETER_UNSUPPORTED,
+            id="two-parameter-segments",
         ),
         pytest.param(
             [

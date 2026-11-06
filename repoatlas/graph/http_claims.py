@@ -93,6 +93,7 @@ from pathlib import PurePosixPath
 
 from repoatlas.graph.deploy_identity import ServedRoute, plan_deployment_exposures
 from repoatlas.graph.keys import global_key
+from repoatlas.graph.modules import ModuleResolver
 from repoatlas.graph.py_modules import PythonModules
 from repoatlas.graph.py_routes import ExportTables, Place, plan_python_routes
 from repoatlas.graph.resolution import ResolutionIndex
@@ -114,6 +115,7 @@ from repoatlas.parsers.http_facts import (
     NESTJS_MODULE,
     NESTJS_ROOT,
     NESTJS_ROUTE,
+    OAS3_APP,
     PENDING_FACT,
     TRANSPORT_FETCH,
     TRANSPORT_WRAPPER,
@@ -658,7 +660,11 @@ def plan_http_claims(
     unresolved += fastify.unresolved
 
     # -- operations an oas3-tools application routes to its controllers -------------
-    oas3 = plan_spec_routed(grouped, index, by_id)
+    layouts = None
+    if grouped.get(OAS3_APP) and module_facts:
+        modules = ModuleResolver(index, list(module_facts))
+        layouts = lambda row: modules.build_layouts(row.repo_id, row.rel_path)  # noqa: E731
+    oas3 = plan_spec_routed(grouped, index, by_id, layouts)
     for route in oas3.routes:
         _keep(
             pending,

@@ -696,6 +696,37 @@ class ModuleResolver:
             self._build_dirs_of[key] = self._find_build_dirs(repo_id, directory)
         return self._build_dirs_of[key]
 
+    def build_layouts(self, repo_id: int, rel_path: str) -> tuple[str, ...]:
+        """The directories the file ``rel_path`` runs from once built: each ``outDir``, joined to
+        the file's directory under its ``rootDir``, for each pair declared by the nearest tsconfig
+        files that record ``rootDir`` or ``outDir``, themselves or through a resolved ``extends``;
+        a config that records only module-resolution options (``baseUrl``, ``paths``, ``include``)
+        does not hide an enclosing pair. Empty when they declare no pair, or one whose ``rootDir``
+        does not hold the file: an output directory is never guessed."""
+        directory = _parent(rel_path)
+        home = directory
+        while not self._declares_layout(repo_id, home):
+            if not home:
+                return ()
+            home = _parent(home)
+        found: list[str] = []
+        for out_dir, root_dir in self._build_dirs(repo_id, home):
+            if not _inside(directory, root_dir):
+                continue
+            relative = directory[len(root_dir) :].lstrip("/") if root_dir else directory
+            runtime = _join(out_dir, relative) if relative else out_dir
+            if runtime is not None and runtime != directory:
+                found.append(runtime)
+        return tuple(dict.fromkeys(found))
+
+    def _declares_layout(self, repo_id: int, directory: str) -> bool:
+        """A tsconfig in ``directory`` records ``rootDir`` or ``outDir`` (``extends`` followed)."""
+        return any(
+            {"rootDir", "outDir"} & set(self._options(repo_id, config))
+            for config in self._tsconfigs.get(repo_id, {})
+            if _parent(config) == directory
+        )
+
     def _find_build_dirs(self, repo_id: int, directory: str) -> list[tuple[str, str]]:
         pairs = set()
         for config in self._tsconfigs.get(repo_id, {}):
