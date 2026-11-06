@@ -2838,8 +2838,9 @@ through a helper is a mount of the caller's application, under every rule a fact
 - **A helper** (`python-helper`) is a module-level, undecorated, synchronous `def` bound once in the module, with a
   positional parameter `p` that nothing in it rebinds. Its recordable statements are its own top-level ones:
   `p.register_blueprint(X, ...)` or `p.include_router(X, ...)` with `X` this module's own router or an import one
-  name or one attribute away (`views.bp`) or a name the helper's own top-level `import` or `from … import` binds,
-  read as a factory's local import is, and read exactly as a factory's registration is (prefix, readable or not), and
+  name or one attribute away (`views.bp`) or a name the helper's own top-level `import` or `from … import` binds
+  (bound from its own statement onward, in statement order: see the local-import bullet below), and read exactly as a
+  factory's registration is (prefix, readable or not), and
   `G(p)` of another such helper. Anything else done with `p` (`app.config.get(...)`, `cors.init_app(app)`, a store to
   `app.url_map.strict_slashes`) is allowed and ignored. A helper with nothing recordable emits no claim at all
   (a claim only for a helper with a registration or a call of one that has), so a module's claims do not change.
@@ -2862,15 +2863,23 @@ through a helper is a mount of the caller's application, under every rule a fact
   A refusal adds no mount; it is a route's `route_codes` only when its router is mounted nowhere else. A refusal can
   only be recorded where a claim exists: beside a call of a helper with something recordable, or in that helper's
   claim. A helper with nothing recordable, and a call of a function that is no helper, leave no trace.
-- **Inherited limit.** A function-local import placed after the registration inside a helper is read, as it is for a
-  factory; at run time that statement would raise `UnboundLocalError`. The import is read as a binding, not as an
-  error, and this is not new to R2c-1.
+- **Local imports in a helper (R2c-1).** A function-local import binds its name from its own statement onward, in
+  statement order. A registration above that import reads an unbound local at run time, so it is not recorded: no
+  mount, no claim, and the route stays `python-not-mounted`. The module-level binding of the same name is never used as
+  a fallback. Test: `tests/test_r2c1_local_import_order.py`.
+- **Inherited limit, not fixed.** Factories and module scope still read a function-local import placed after a
+  registration. For a factory, `_factories` passes the whole function body to the import table, so an import after the
+  registration is still read; for module scope, a module-level registration above a module-level import is still read.
+  Concrete cases: LA1 (factory), LA6 (factory with a module-level import) and LA7 (module scope). At run time such code
+  raises `UnboundLocalError` (factory) or `NameError` (module scope), so the served route is a false positive. This is
+  recorded technical debt, not fixed in R2c-1.
 - **Not modelled.** Imported helpers (R2c-1b), registrations on a child of a child (`users.views.bp`, R2c-2: two-level
   children), and WSGI middleware or deployment-level path rewriting: an assignment to `app.wsgi_app`, or a dispatcher
   mounting the application under a path, does not change the routes this reads (the app's URL map is read, not the
-  path a server forwards). Inherited from the factory reading: a local import is read wherever it stands in the body,
-  so a registration placed before the import that binds its child is read although Python would raise
-  `UnboundLocalError` there. Binding counts are module-wide, so a module-level application whose name is also a
+  path a server forwards). For factories and module scope (not helpers, see the inherited limit above), a local import
+  is read wherever it stands in the body, so a registration placed before the import that binds its child is read
+  although Python would raise `UnboundLocalError` (factory) or `NameError` (module scope) there. Binding counts are
+  module-wide, so a module-level application whose name is also a
   helper's parameter is no application (fixture P5x). Mutants H-M4 and H-M5 are equivalent only under this rule;
   re-run them if scope-aware binding counts (R2d) are ever adopted.
 
