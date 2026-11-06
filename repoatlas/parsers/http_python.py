@@ -2899,7 +2899,6 @@ class PythonHttp:
         if not scans:
             return {}
         imported = {name: found for name, found in self._imported.items() if not counts[name]}
-        imported.update(_import_table(function.body, counts))
         aliases: dict[str, str] = {}
         for statement in function.body:
             if (
@@ -2912,6 +2911,11 @@ class PythonHttp:
             ):
                 aliases[statement.targets[0].id] = statement.value.id
         for statement in function.body:
+            if isinstance(statement, (ast.Import, ast.ImportFrom)):
+                # A local import binds its name from this statement on: a registration above it
+                # reads an unbound local at run time, so it sees no entry (and no module-level one).
+                imported.update(_import_table([statement], counts))
+                continue
             call = _expression_call(statement)
             if (
                 call is not None
