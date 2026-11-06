@@ -1,13 +1,12 @@
 """What the HTTP surface does today, and must still do after R1 (R1_PREDICTIONS sections 4-5).
 
-These pin EXISTING behaviour and pass at 2da633f. R1 adds an opt-in view of the routes the
-inventory hides; it changes none of what is asserted here:
+These pinned the behaviour at 2da633f. R1 adds an opt-in view of the routes the inventory
+hides; it changes none of what is asserted here, except where F1 and F2 changed it:
 
-* F1: a route built from a prefix (a NestJS controller prefix, a mounted router) states no line,
-  so an operator's declaration cannot expose it and a preview says nothing would be joined;
-* F2: a declaration's ``repository-serves-no-routes`` state reads per-file edges only, so a
-  repository serving only routes the global pass promoted shows it while the inventory lists
-  those routes as published;
+* F1: a NestJS route built from a controller prefix now states its decorator line, so a preview
+  joins it; a Python router mounted with a prefix in its own file still states no line;
+* F2: a declaration's state reads every route the code serves, the global pass's included, so a
+  repository serving only promoted routes is applied and joins its caller;
 * what the default inventory lists, and hides, for the R1 corpus;
 * the unmatched-caller cases 12-15: decisions, previews and the refusal to declare.
 
@@ -76,17 +75,20 @@ def rows_of(corpora: Corpora, corpus: str, name: str) -> Rows:
 # -- F1: a route built from a prefix states no line ------------------------------------------
 
 
-def test_f1_a_request_a_composed_route_answers_is_refused_beside_one_a_plain_route_answers(
+def test_f1_a_request_a_composed_nest_route_answers_now_joins_beside_a_plain_one(
     corpora: Corpora,
 ) -> None:
-    """``nestok`` serves ``/health`` (its own lines) and ``/shop/items/:id`` (a controller
-    prefix: composed, no lines). ``buyer3`` requests both. Only the first would join."""
+    """``nestok`` serves ``/health`` (its own lines) and ``/shop/items/:id`` (a controller prefix:
+    composed). The composed route states its decorator line (5), so both requests of ``buyer3``
+    would join, each at its own handler."""
     result = preview(corpora.workspace("nest"), NEST_ORIGIN, "nestok")
     assert result.routes_served == 2
-    assert result.counts == {"would-link": 1, "no-matching-route": 1}
-    by_outcome = {row.outcome: row for row in result.rows}
-    handler = by_outcome["would-link"].handler
-    assert handler is not None and handler.startswith("src/health.controller.ts:")
+    assert result.counts == {"would-link": 2}
+    handlers = {row.route: row.handler for row in result.rows}
+    assert handlers == {
+        "/health": "src/health.controller.ts:5",
+        "/shop/items/42": "src/shop.controller.ts:5",
+    }
     assert result.can_create and result.requirements == ()
 
 
@@ -108,23 +110,25 @@ def test_f1_a_mounted_router_with_a_prefix_is_served_without_lines(corpora: Corp
 # -- F2: the state of a declaration reads per-file edges only -----------------------------------
 
 
-def test_f2_a_repository_serving_only_promoted_routes_reads_as_serving_none(
+def test_f2_a_repository_serving_only_promoted_routes_is_applied_and_joins_its_caller(
     corpora: Corpora,
 ) -> None:
     """``nestcomposed`` serves ``/shop/items/:id`` and nothing else. Declared through a plain API
-    create and synced, its declaration is ``invalidated``/``repository-serves-no-routes`` while
+    create and synced, its declaration is applied and joined once, ``fetch_item`` is linked
+    through it, and ``fetch_health`` (a route nothing serves there) stays unmatched, while
     ``http_operations`` lists the route as published."""
     nest = corpora.workspace("nest-declared")
     listed = CapabilityService(nest).http_connections(HttpConnectionsRequest(context=GLOBAL))
     [declaration] = listed.declarations
     assert declaration.repository == slug_of(nest, "nestcomposed")
-    assert (declaration.state, declaration.reason) == ("invalidated", "repository-serves-no-routes")
-    assert declaration.joined == 0
+    assert (declaration.state, declaration.reason) == ("applied", "")
+    assert declaration.joined == 1
     found = rows_of(corpora, "nest-declared", "nestcomposed")
     assert set(found) == {("GET", "/shop/items/:id")}
     assert found[("GET", "/shop/items/:id")][0].status in PUBLISHED
-    # and the declaration joined nothing: the callers' requests are refused as before
-    assert all(decision != "linked" for decision, _ in caller_decisions(nest).values())
+    made = caller_decisions(nest)
+    assert made["fetch_item"][0] == "linked"
+    assert made["fetch_health"][0] == "http-service-unmatched"
 
 
 def test_f2_without_a_declaration_the_worklist_lists_none(corpora: Corpora) -> None:
