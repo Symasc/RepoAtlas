@@ -399,6 +399,7 @@ START = "async function start() {\n  const app = Fastify();\n  await app.listen(
         "start().catch(console.error);",
         "await start().catch(console.error);",
         "void start().catch(onError);",
+        "if (require.main === module) { start().then(); }",
     ],
 )
 def test_an_entry_function_the_top_level_calls_unconditionally_proves_its_application(
@@ -423,6 +424,12 @@ def test_an_entry_function_the_top_level_calls_unconditionally_proves_its_applic
         "",
         "if (process.env.RUN) { start(); }",
         "if (require.main === module) start();",
+        "if (require.main === module) { start().then(ready); }",
+        "if (module === require.main) { start().then(); }",
+        "if (require.main == module) { start().then(); }",
+        "if (require.main === module) { start().then(); report(); }",
+        "const require = {}; if (require.main === module) { start().then(); }",
+        "const module = {}; if (require.main === module) { start().then(); }",
         "process.env.RUN && start();",
         "setTimeout(() => start(), 0);",
         "process.on('ready', start);",

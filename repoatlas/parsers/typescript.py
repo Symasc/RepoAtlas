@@ -898,7 +898,9 @@ class TypeScriptParser:
     # 24: an oas3-tools factory whose parameter is the last segment of an anchored join
     #    (``spec_param_dir``), the string segment a call hands it, and a relative default
     #    import as controllers (repoatlas.parsers.http_oas3).
-    version = "24"
+    # 25: the CommonJS direct-entry guard proves a Fastify entry application
+    #    (repoatlas.parsers.http_fastify).
+    version = "25"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
