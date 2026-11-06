@@ -2008,8 +2008,10 @@ Until the pass proves one, it stays a pending claim that records the declaration
       else in a path is still refused.
     - A call in a test file (the change-impact convention, `is_test_path`) is an instance only of a factory in a
       test file; a factory only test files call is `spec-parameter-test-only`.
-    - `__dirname` is the file's own directory, and also, for each `outDir`/`rootDir` pair the tsconfig files
-      nearest it declare (`extends` followed), the directory the file is compiled to. Exactly one indexed
+    - `__dirname` is the file's own directory, and also, for each `outDir`/`rootDir` pair declared by the
+      nearest tsconfig files that record `rootDir` or `outDir`, themselves or through a resolved `extends`,
+      the directory the file is compiled to; a config that records only module-resolution options (`baseUrl`,
+      `paths`, `include`) does not hide an enclosing pair. Exactly one indexed
       document across those readings is the document; two are `spec-layout-ambiguous`. No pair, or a
       `rootDir` that does not hold the file, leaves the source's directory alone.
     - Roots stay the module of the `expressAppConfig` call.
