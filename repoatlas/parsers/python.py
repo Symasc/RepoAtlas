@@ -464,8 +464,12 @@ class PythonParser:
     #    its own that extends one -- records the routes on it as claims the global pass serves
     #    when the defining module offers the class (repoatlas.parsers.http_python,
     #    repoatlas.graph.py_routes).
-    version = f"28+{interpreter_tag()}"
-    version = f"28+{interpreter_tag()}"
+    # 29: a same-module function that registers a blueprint or router on its first-class
+    #    application parameter, or hands that parameter to another such function, is a claim
+    #    (``python-helper``); a call of one with a proven application of the module or of a
+    #    factory is a claim (``python-helper-call``), which the global pass expands into the
+    #    application's mounts (R2c-1, repoatlas.parsers.http_python, repoatlas.graph.py_routes).
+    version = f"29+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:

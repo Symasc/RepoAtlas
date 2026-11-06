@@ -1,0 +1,3174 @@
+{
+ "a10_chain5": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a10_chain5:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a10_chain5:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a10_chain5:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a11_rebound_param": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a11_rebound_param:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a11_rebound_param:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a11_rebound_param:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a12_conditional_call": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a12_conditional_call:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a12_conditional_call:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a12_conditional_call:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a13_star_args": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a13_star_args:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a13_star_args:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a13_star_args:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a14_before_construction": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a14_before_construction:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a14_before_construction:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a14_before_construction:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a15_imported_helper": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a15_imported_helper:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a15_imported_helper:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a15_imported_helper:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a16_decorated_helper": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a16_decorated_helper:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a16_decorated_helper:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a16_decorated_helper:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a17_wsgi_wrap": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a17_wsgi_wrap:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a17_wsgi_wrap:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a17_wsgi_wrap:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a18_init_rebound": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a18_init_rebound:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a18_init_rebound:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a18_init_rebound:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a19_init_from_views_only": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a19_init_from_views_only:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a19_init_from_views_only:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a19_init_from_views_only:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a1_conditional": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a1_conditional:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a1_conditional:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a1_conditional:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a20_three_levels": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a20_three_levels:pkg/a/b/c.py:three:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/a/b/c.py",
+     "role": "provider",
+     "route": "/three",
+     "status": "declared"
+    },
+    "qualified_name": "three",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a20_three_levels:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a20_three_levels:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a20_three_levels:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a21_constant_path": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a21_constant_path:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "composed": true,
+     "diagnostic": {
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": true,
+      "path": "resolved",
+      "published": true,
+      "registration": "proven",
+      "subject": "route"
+     },
+     "entity": "sym:a21_constant_path:pkg/vc.py:p:8",
+     "line_end": 7,
+     "line_start": 7,
+     "method": "GET",
+     "path": "pkg/vc.py",
+     "role": "provider",
+     "route": "/p",
+     "routes": [
+      "http-route:GET:/p"
+     ],
+     "status": "no_indexed_caller"
+    },
+    "qualified_name": "p",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a21_constant_path:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a21_constant_path:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [
+   {
+    "body": "GET /p",
+    "declared_at": 7,
+    "file_id": 119,
+    "line_end": null,
+    "line_start": null,
+    "repo_id": 13,
+    "roots": [
+     114
+    ],
+    "src_id": 392
+   }
+  ],
+  "serves": [
+   {
+    "file": "pkg/vc.py",
+    "lines": [
+     null,
+     null
+    ],
+    "parser": "linker:global",
+    "route": "GET /p"
+   }
+  ]
+ },
+ "a21b_two_level_constant_path": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a21b_two_level_constant_path:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a21b_two_level_constant_path:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a21b_two_level_constant_path:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a22_positional_mismatch": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a22_positional_mismatch:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a22_positional_mismatch:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a22_positional_mismatch:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a23_call_before_child_bound": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a23_call_before_child_bound:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a23_call_before_child_bound:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a23_call_before_child_bound:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a2_dynamic": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a2_dynamic:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a2_dynamic:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a2_dynamic:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a3_param_other": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a3_param_other:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a3_param_other:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a3_param_other:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a4_shadow": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a4_shadow:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a4_shadow:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a4_shadow:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a5_cycle": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a5_cycle:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a5_cycle:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a5_cycle:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a6_two_factories": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a6_two_factories:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "composed": true,
+     "diagnostic": {
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": true,
+      "path": "resolved",
+      "published": true,
+      "registration": "proven",
+      "subject": "route"
+     },
+     "entity": "sym:a6_two_factories:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/a/one",
+     "routes": [
+      "http-route:GET:/a/one"
+     ],
+     "status": "no_indexed_caller"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "composed": true,
+     "diagnostic": {
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": true,
+      "path": "resolved",
+      "published": true,
+      "registration": "proven",
+      "subject": "route"
+     },
+     "entity": "sym:a6_two_factories:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/b/one",
+     "routes": [
+      "http-route:GET:/b/one"
+     ],
+     "status": "no_indexed_caller"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a6_two_factories:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [
+   {
+    "body": "GET /a/one",
+    "declared_at": 6,
+    "file_id": 194,
+    "line_end": null,
+    "line_start": null,
+    "repo_id": 21,
+    "roots": [
+     190
+    ],
+    "src_id": 635
+   },
+   {
+    "body": "GET /b/one",
+    "declared_at": 6,
+    "file_id": 194,
+    "line_end": null,
+    "line_start": null,
+    "repo_id": 21,
+    "roots": [
+     190
+    ],
+    "src_id": 635
+   }
+  ],
+  "serves": [
+   {
+    "file": "pkg/views.py",
+    "lines": [
+     null,
+     null
+    ],
+    "parser": "linker:global",
+    "route": "GET /a/one"
+   },
+   {
+    "file": "pkg/views.py",
+    "lines": [
+     null,
+     null
+    ],
+    "parser": "linker:global",
+    "route": "GET /b/one"
+   }
+  ]
+ },
+ "a7_unresolved": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a7_unresolved:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a7_unresolved:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a7_unresolved:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "a8_url_prefix": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a8_url_prefix:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a8_url_prefix:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "composed": true,
+     "diagnostic": {
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": true,
+      "path": "resolved",
+      "published": true,
+      "registration": "proven",
+      "subject": "route"
+     },
+     "entity": "sym:a8_url_prefix:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/over/two",
+     "routes": [
+      "http-route:GET:/over/two"
+     ],
+     "status": "no_indexed_caller"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [
+   {
+    "body": "GET /over/two",
+    "declared_at": 6,
+    "file_id": 213,
+    "line_end": null,
+    "line_start": null,
+    "repo_id": 23,
+    "roots": [
+     208
+    ],
+    "src_id": 696
+   }
+  ],
+  "serves": [
+   {
+    "file": "pkg/views_b.py",
+    "lines": [
+     null,
+     null
+    ],
+    "parser": "linker:global",
+    "route": "GET /over/two"
+   }
+  ]
+ },
+ "a9_alias": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a9_alias:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a9_alias:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:a9_alias:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "p1_one_level": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p1_one_level:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "composed": true,
+     "diagnostic": {
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": true,
+      "path": "resolved",
+      "published": true,
+      "registration": "proven",
+      "subject": "route"
+     },
+     "entity": "sym:p1_one_level:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/c1/one",
+     "routes": [
+      "http-route:GET:/c1/one"
+     ],
+     "status": "no_indexed_caller"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p1_one_level:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [
+   {
+    "body": "GET /c1/one",
+    "declared_at": 6,
+    "file_id": 230,
+    "line_end": null,
+    "line_start": null,
+    "repo_id": 25,
+    "roots": [
+     226
+    ],
+    "src_id": 748
+   }
+  ],
+  "serves": [
+   {
+    "file": "pkg/views.py",
+    "lines": [
+     null,
+     null
+    ],
+    "parser": "linker:global",
+    "route": "GET /c1/one"
+   }
+  ]
+ },
+ "p2_two_level": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p2_two_level:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p2_two_level:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p2_two_level:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "p2b_two_level_bound": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p2b_two_level_bound:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p2b_two_level_bound:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p2b_two_level_bound:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "p3_helper": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p3_helper:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p3_helper:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p3_helper:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "p4_helper_reads": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p4_helper_reads:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p4_helper_reads:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p4_helper_reads:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "p4b_helper_reads_bound": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p4b_helper_reads_bound:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p4b_helper_reads_bound:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p4b_helper_reads_bound:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "p5_module_helper": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p5_module_helper:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p5_module_helper:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p5_module_helper:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "p5x_param_named_app": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p5x_param_named_app:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p5x_param_named_app:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p5x_param_named_app:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ },
+ "p6_outer_inner": {
+  "drafts": [
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p6_outer_inner:pkg/users/views.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/users/views.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p6_outer_inner:pkg/views.py:one:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views.py",
+     "role": "provider",
+     "route": "/one",
+     "status": "declared"
+    },
+    "qualified_name": "one",
+    "reaches": []
+   },
+   {
+    "operation": {
+     "detail": "not mounted by a proven application",
+     "diagnostic": {
+      "category": "registration-unproven",
+      "code": "python-not-mounted",
+      "decided_by": "global-pass",
+      "fact": "python-route",
+      "framework": "flask",
+      "identity": "resolved",
+      "join_eligible": false,
+      "path": "resolved",
+      "published": false,
+      "registration": "unproven",
+      "subject": "route"
+     },
+     "entity": "sym:p6_outer_inner:pkg/views_b.py:two:7",
+     "line_end": 6,
+     "line_start": 6,
+     "method": "GET",
+     "path": "pkg/views_b.py",
+     "role": "provider",
+     "route": "/two",
+     "status": "declared"
+    },
+    "qualified_name": "two",
+    "reaches": []
+   }
+  ],
+  "plan_code_routes": [],
+  "serves": []
+ }
+}
