@@ -2806,6 +2806,12 @@ requirements, warnings, rows, counts, `routes_served` and `can_create` are the s
   route or an Express router mounted with a prefix in its own file (D1, D3, X) is stored with no lines, so both
   `declared_at` and `line_start` are empty, and the preview can say "nothing would be joined" for a service whose
   routes are all of that kind. R1 reports this (`no-declaration-line`, `routes_without_declaration_line`).
+  Tracked for the provider-coverage work, not closed here.
+- *F3 (open, not implemented).* A Python router route whose path is a constant (local or imported), mounted only in
+  its own module, is served nowhere: no per-file edge (the path is not a literal) and no global-pass promotion
+  (the router's own-module mount is not followed). Registration is lost, not only provenance, so R1 does not report
+  it either. Synthetic cases B2 and C2 show it; no real corpus instance has been found yet. Tracked for the
+  provider-coverage work.
 - *F2 (resolved).* There is one definition of "served routes" per operation
   (`list_code_served_routes`, `repoatlas/storage/sqlite/stores.py`): the routes of every code producer's
   `SERVES_HTTP_ROUTE` edges, the global pass's included, an OpenAPI document's (`structured-config`) left out. A
