@@ -2838,6 +2838,91 @@ requirements, warnings, rows, counts, `routes_served` and `can_create` are the s
   assumes the index keeps one claim per item; a file with exactly that many claims is reported even if nothing was
   dropped.
 
+### Flask and FastAPI registration through a same-module helper (R2c-1)
+
+A Flask application factory often registers its blueprints through a function it calls with the application
+(`create_app` calls `register_blueprints(app)`, whose body does `app.register_blueprint(views.bp)`). R2c-1 reads that
+shape, in the same module only. The Python parser (version 29) records two claim roles beside the existing mount
+claims; the global pass (`repoatlas/graph/py_routes.py`) expands them before any chain is built, so a registration
+through a helper is a mount of the caller's application, under every rule a factory's own mount already meets.
+
+- **A helper** (`python-helper`) is a module-level, undecorated, synchronous `def` bound once in the module, with a
+  positional parameter `p` that nothing in it rebinds. Its recordable statements are its own top-level ones:
+  `p.register_blueprint(X, ...)` or `p.include_router(X, ...)` with `X` this module's own router or an import one
+  name or one attribute away (`views.bp`) or a name the helper's own top-level `import` or `from … import` binds
+  (bound from its own statement onward, in statement order: see the local-import bullet below), and read exactly as a
+  factory's registration is (prefix, readable or not), and
+  `G(p)` of another such helper. Anything else done with `p` (`app.config.get(...)`, `cors.init_app(app)`, a store to
+  `app.url_map.strict_slashes`) is allowed and ignored. A helper with nothing recordable emits no claim at all
+  (a claim only for a helper with a registration or a call of one that has), so a module's claims do not change.
+- **A call** (`python-helper-call`) is a top-level statement `H(app)` or `H(app=app)` of a module-level function,
+  where `app` is that function's local bound once to `Flask(...)`/`FastAPI(...)` before the call, or of the module,
+  where `app` is a module-level application bound once, constructed, and with the helper and every child it registers
+  bound, before the call. The argument must be the helper's own parameter by position or keyword.
+- **Expansion.** Each accepted call becomes the helper's registrations as mounts of the call's application, then those
+  of the helpers it hands the application to, breadth first, each helper once (a cycle ends where it returns), at
+  most 4 helpers from the call (`MAX_HELPER_DEPTH`) and 1,024 visits. The routes keep the rules of any factory mount:
+  an unreadable registration blocks its child; the roots are the application's own file, never the helper's.
+- **Refusals** (codes in `_CODES`): `python-helper-control-flow` (a call or registration inside a branch, loop, `with`,
+  `try`, nested function or any non-top-level position), `python-helper-argument` (`*args`/`**kwargs`, the application
+  at another position than the parameter, a child that is the helper's own parameter, or a name it binds other than by
+  a top-level import),
+  `python-helper-rebound-or-alias` (a registration on an alias of the parameter), `python-helper-shadowed` (the helper's
+  name bound in the calling function), `python-helper-before-construction`, `python-helper-before-binding` (the helper,
+  or a child, bound after a module-level call), `python-helper-chain-too-deep`, `python-helper-child-unsupported`
+  (`a.b.c.bp`, a call, a subscript) and `python-helper-unresolved` (a callee that is not a same-module helper).
+  A refusal adds no mount; it is a route's `route_codes` only when its router is mounted nowhere else. A refusal can
+  only be recorded where a claim exists: beside a call of a helper with something recordable, or in that helper's
+  claim. A helper with nothing recordable, and a call of a function that is no helper, leave no trace.
+- **Local imports in a helper (R2c-1).** A function-local import binds its name from its own statement onward, in
+  statement order. A registration above that import reads an unbound local at run time, so it is not recorded: no
+  mount, no claim, and the route stays `python-not-mounted`. The module-level binding of the same name is never used as
+  a fallback. Test: `tests/test_r2c1_local_import_order.py`.
+- **Inherited limit, not fixed.** Factories and module scope still read a function-local import placed after a
+  registration. For a factory, `_factories` passes the whole function body to the import table, so an import after the
+  registration is still read; for module scope, a module-level registration above a module-level import is still read.
+  Concrete cases: LA1 (factory), LA6 (factory with a module-level import) and LA7 (module scope). At run time such code
+  raises `UnboundLocalError` (factory) or `NameError` (module scope), so the served route is a false positive. This is
+  recorded technical debt, not fixed in R2c-1.
+- **Not modelled.** Imported helpers (R2c-1b), and WSGI middleware or deployment-level path rewriting: an assignment to `app.wsgi_app`, or a dispatcher
+  mounting the application under a path, does not change the routes this reads (the app's URL map is read, not the
+  path a server forwards). For factories and module scope (not helpers, see the inherited limit above), a local import
+  is read wherever it stands in the body, so a registration placed before the import that binds its child is read
+  although Python would raise `UnboundLocalError` (factory) or `NameError` (module scope) there. Binding counts are
+  module-wide, so a module-level application whose name is also a
+  helper's parameter is no application (fixture P5x). Mutants H-M4 and H-M5 are equivalent only under this rule;
+  re-run them if scope-aware binding counts (R2d) are ever adopted.
+
+### Two-level children (R2c-2)
+
+A registration's child that is `head.A.name` -- `users.views.bp` after `from pkg import users` -- where `head` is a name
+the module imports from a module (`from M import head`, bound once). It is recorded in a registration of a module, a
+factory or a helper as a mount claim of the usual shape plus three fields: `module` (`M`, relative dots as the import
+states them), `head_import` (`head`) and `through` (`A`); `name` is the router or blueprint. Only `register_blueprint`
+and `include_router` read it; a `mount` of an application keeps its one-level child. Parser version 30.
+
+The global pass (`repoatlas/graph/py_routes.py`, `_child_key`) serves it only when both hops are proven by the export
+tables of the packages (`list_export_tables`, passed to the planner by the linker):
+
+1. `M` resolves to a package `__init__`, and `head` is a submodule of it: the package's table is not conditional on
+   `head`, and `head` is either bound by `from . import head` (an `import` entry that names `head` and resolves to the
+   package itself) or not bound at all, with no star import and no module `__getattr__`, so the import system, not
+   the package, decides what `head` is.
+2. In that submodule's own package (`M.head` must itself be a package `__init__`), `A` is a submodule by the same rule
+   -- except that an unbound `A` is never accepted: the package must state `from . import A`.
+
+The child is then the file `M/head/A` and `name` its router. `__all__` is never read.
+
+- **Fail closed.** Without export tables (a caller that passes none) every two-level child is refused. A hop that is not
+  proven adds no mount, and the route stays `python-not-mounted`; no new diagnostic code exists.
+- **Under-approximations** (nothing is served): `from .views import bp`, `from .views import *` and `from . import
+  views as v` in a package; `import pkg.users` and `import pkg.users as users` heads; a hop that is no regular package
+  (a plain module, a namespace package); `__all__` ignored; a child more than two levels away.
+- **Residual unsoundness.** Writes to `sys.modules`, `setattr` or `globals()` on a package, import hooks and a changed
+  `__path__` can make the name mean something else at run time. They are not modelled.
+- **Inherited limit.** Factories and module scope still read a local import placed after the registration, so LA1, LA6
+  and LA7 apply to two-level children too.
+
 ### Refused HTTP requests: listed where the walk went, never followed
 
 > **Invariant.** A refused request is never a candidate, a step or an edge, and never changes which requests link. An

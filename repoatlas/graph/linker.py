@@ -89,7 +89,7 @@ from repoatlas.graph.persistence import plan_persistence
 from repoatlas.graph.prisma_schema import plan_prisma, prisma_projects
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
 from repoatlas.graph.salt_pillar import resolve_pillar_reads
-from repoatlas.graph.uses import use_resolution
+from repoatlas.graph.uses import table_from_meta, use_resolution
 from repoatlas.graph.uses_link import (
     UsesChangeLog,
     UsesPlan,
@@ -922,6 +922,7 @@ class ReferenceLinker:
                 served_routes=served,
                 module_facts=module_facts,
                 route_servers=self._knowledge.list_route_servers(exclude_parser=GLOBAL_PARSER),
+                export_tables=_export_tables(self._knowledge),
             )
             edges.extend(decided.edges)
             # What CI configurations configure, and every step not interpreted
@@ -1543,6 +1544,20 @@ class ReferenceLinker:
         return planned, len(cross_pairs)
 
 
+def _export_tables(knowledge: SqliteKnowledgeStore) -> Callable[[int], Mapping[str, object] | None]:
+    """A file's stored export table (``None``: none), read once per file, for the planner's
+    two-level mounted children (R2c-2). Read on demand: a plan without such a child reads none."""
+    cache: dict[int, Mapping[str, object] | None] = {}
+
+    def table(file_id: int) -> Mapping[str, object] | None:
+        if file_id not in cache:
+            raw = knowledge.list_export_tables([file_id]).get(file_id)
+            cache[file_id] = table_from_meta(raw) if raw else None
+        return cache[file_id]
+
+    return table
+
+
 @dataclass(frozen=True, slots=True)
 class RepositoryHttp:
     """One repository's HTTP plan, with the inputs it was computed from."""
@@ -1582,7 +1597,13 @@ def plan_repository_http(knowledge: SqliteKnowledgeStore, repo_id: int) -> Repos
     own = {row.file_id for row in files}
     facts = [fact for fact in knowledge.list_module_facts() if fact.file_id in own]
     plan = plan_http_claims(
-        claims, index, files, producer=GLOBAL_PARSER, served_routes=served, module_facts=facts
+        claims,
+        index,
+        files,
+        producer=GLOBAL_PARSER,
+        served_routes=served,
+        module_facts=facts,
+        export_tables=_export_tables(knowledge),
     )
     return RepositoryHttp(plan=plan, files=files, claims=claims, index=index)
 
