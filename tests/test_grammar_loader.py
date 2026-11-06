@@ -66,7 +66,7 @@ DOWNLOADERS = ("tree_sitter_language_pack", "tree_sitter_languages", "tree_sitte
 #: A parser may outrun its grammar; what this table forbids is a grammar moving
 #: underneath a parser that stayed put.
 PARSER_FOR_PIN = {
-    ("tree-sitter-typescript", "0.23.2"): (TypeScriptParser, "24"),
+    ("tree-sitter-typescript", "0.23.2"): (TypeScriptParser, "25"),
     ("tree-sitter-javascript", "0.25.0"): (TypeScriptParser, "24"),
     ("tree-sitter-bash", "0.25.1"): (BashParser, "2"),
 }

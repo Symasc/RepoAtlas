@@ -46,8 +46,10 @@ it, at the module's level or at the top level of an entry function, where ``F`` 
 of this file, a name imported from a relative module, or ``ns.F`` of a relative namespace
 import (each import bound once in the module's own scope). **An entry
 application** is ``const x = Fastify()`` at the top level of a module-level function ``G``
-that is no factory, proven only where the file calls ``G`` unconditionally at its top level
-(``G();``, ``void G();``, ``await G();``, ``G().catch(...)``). Each is a
+that is no factory, proven where the file calls ``G`` unconditionally at its top level
+(``G();``, ``void G();``, ``await G();``, ``G().catch(...)``), or calls ``G().then()`` as the
+only statement inside ``if (require.main === module)`` with both globals unshadowed. Other
+conditionals do not prove an entry. Each is a
 :data:`~repoatlas.parsers.http_facts.FASTIFY_INSTANCE` claim, rooted at its own file; the
 claim names the factory (the global pass decides an imported one) or the refusal code that
 says why this parser would not trust it. ``const y = x`` in the same scope, after ``x``,
@@ -986,10 +988,17 @@ class FastifyDeclarations:
 
     def _top_level_calls(self, root: Node) -> dict[str, list[int]]:
         """Where the module's top level calls a function whatever happens: ``G();``,
-        ``void G();``, ``await G();`` or ``G().catch(...)``. A call under a condition, a loop,
-        a callback or a block is none of these."""
+        ``void G();``, ``await G();``, ``G().catch(...)``, or ``main().then()`` guarded by
+        ``require.main === module``. Other calls under a condition, loop, callback or block
+        are not evidence that the entry runs."""
         found: dict[str, list[int]] = {}
         for statement in root.named_children:
+            if statement.type == "if_statement":
+                guarded = self._commonjs_entry_call(statement)
+                if guarded is not None:
+                    name, at = guarded
+                    found.setdefault(name, []).append(at)
+                continue
             if statement.type != "expression_statement":
                 continue
             inner = [child for child in statement.named_children if child.type != "comment"]
@@ -1010,6 +1019,67 @@ class FastifyDeclarations:
             if name is not None:
                 found.setdefault(name, []).append(statement.start_byte)
         return found
+
+    def _commonjs_entry_call(self, statement: Node) -> tuple[str, int] | None:
+        """The one guarded entry form this reader proves: ``if (require.main === module) {
+        G().then()
+        }``. Require both names to be unshadowed module globals and the body to contain only
+        that direct call."""
+        condition = statement.child_by_field_name("condition")
+        consequence = statement.child_by_field_name("consequence")
+        if condition is None or consequence is None or consequence.type != "statement_block":
+            return None
+        if self._module_bindings()["require"] or self._module_bindings()["module"]:
+            return None
+        condition = _operand(condition)
+        if condition.type != "binary_expression":
+            return None
+        operator = condition.child_by_field_name("operator")
+        left = condition.child_by_field_name("left")
+        right = condition.child_by_field_name("right")
+        if (
+            operator is None
+            or node_text(self._source, operator) != "==="
+            or left is None
+            or right is None
+            or _operand(right).type != "identifier"
+            or node_text(self._source, _operand(right)) != "module"
+        ):
+            return None
+        left = _operand(left)
+        if left.type != "member_expression":
+            return None
+        owner = left.child_by_field_name("object")
+        prop = left.child_by_field_name("property")
+        if (
+            owner is None
+            or prop is None
+            or _operand(owner).type != "identifier"
+            or node_text(self._source, _operand(owner)) != "require"
+            or node_text(self._source, prop) != "main"
+        ):
+            return None
+        statements = [child for child in consequence.named_children if child.type != "comment"]
+        if len(statements) != 1 or statements[0].type != "expression_statement":
+            return None
+        expressions = [child for child in statements[0].named_children if child.type != "comment"]
+        if len(expressions) != 1:
+            return None
+        call = _operand(expressions[0])
+        if call.type != "call_expression":
+            return None
+        callee = call.child_by_field_name("function")
+        arguments = _arguments(call)
+        if (
+            callee is None
+            or callee.type != "member_expression"
+            or arguments != []
+            or node_text(self._source, callee.child_by_field_name("property")) != "then"
+        ):
+            return None
+        main_call = _operand(callee.child_by_field_name("object"))
+        name = self._called_name(main_call)
+        return (name, main_call.start_byte) if name is not None else None
 
     def _called_name(self, node: Node) -> str | None:
         """``G`` of ``G(...)``, or of ``G(...).catch(...)``."""

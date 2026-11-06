@@ -2053,8 +2053,9 @@ Until the pass proves one, it stays a pending claim that records the declaration
       function, where `F` is a factory of the file, a name imported from a relative module, or the member of a
       relative namespace import; an `async` factory must be awaited;
     - an entry application is a `const x = Fastify()` at the top of a module-level function that is no factory, and
-      counts only where the file calls that function unconditionally at its top level (`G();`, `void G();`,
-      `await G();`, `G().catch(…)`);
+      counts where the file calls that function unconditionally at its top level (`G();`, `void G();`, `await G();`,
+      `G().catch(…)`), or as the only statement in `if (require.main === module) { G().then(); }` with neither
+      CommonJS global shadowed. Other conditionals do not prove an entry;
     - an alias is `const y = x` in the same scope after `x`, at most 4 hops from the instance or the entry. A
       receiver is recorded only when the file uses it: as the receiver of a route verb, `route`, `register`,
       `listen` or `ready`, or as an argument of a call of a function of the file or of a relative module.
