@@ -1,0 +1,17 @@
+openapi: 3.0.3
+info:
+  title: widgets
+  version: '1.0'
+paths:
+  /status:
+    get:
+      operationId: getStatus
+      responses:
+        '200':
+          description: up
+  /widgets:
+    get:
+      operationId: listWidgets
+      responses:
+        '200':
+          description: widgets

@@ -1,0 +1,31 @@
+openapi: 3.0.3
+info:
+  title: widgets
+  version: '1.0'
+servers:
+  - url: /v1
+paths:
+  /widgets:
+    get:
+      operationId: listWidgets
+      responses:
+        '200':
+          description: widgets
+  /widgets/{id}:
+    get:
+      operationId: getWidget
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: one widget
+  /orphans:
+    get:
+      operationId: nobodyHandlesThis
+      responses:
+        '200':
+          description: orphans
