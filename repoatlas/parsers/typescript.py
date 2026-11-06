@@ -27,7 +27,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
     Severity,
 )
-from repoatlas.parsers.http_fastify import FastifyDeclarations
+from repoatlas.parsers.http_fastify import ES_MODULE_SUFFIXES, FastifyDeclarations
 from repoatlas.parsers.http_nestjs import NestDeclarations
 from repoatlas.parsers.http_oas3 import SpecRoutedApps
 from repoatlas.parsers.http_ts_injection import Injections
@@ -931,7 +931,9 @@ class TypeScriptParser:
         http = TypeScriptHttp(source, tree.root_node)
         nest = NestDeclarations(source, tree.root_node, http.counts)
         wrappers = FetchWrappers(source, tree.root_node, http.counts)
-        fastify = FastifyDeclarations(source, tree.root_node, http.counts)
+        fastify = FastifyDeclarations(
+            source, tree.root_node, http.counts, es_module=path.suffix in ES_MODULE_SUFFIXES
+        )
         injections = Injections(source, tree.root_node, http.counts, wrappers)
         oas3 = SpecRoutedApps(source, tree.root_node, http.counts, wrappers)
         # Uses are proven by scoping, and a tree the grammar had to recover may have
