@@ -880,8 +880,8 @@ def test_the_reader_executes_and_imports_nothing() -> None:
     )
 
 
-def test_the_parser_version_is_28() -> None:
-    assert PythonParser.version == f"28+{interpreter_tag()}"
+def test_the_parser_version_is_29() -> None:
+    assert PythonParser.version == f"29+{interpreter_tag()}"
 
 
 # -- the global pass --------------------------------------------------------------------------
