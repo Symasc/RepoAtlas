@@ -220,7 +220,8 @@ def test_every_spec_path_refusal_is_classified(code: str) -> None:
 
 
 def test_the_spec_codes_are_all_of_the_path_reader_s() -> None:
-    assert len(SPEC_CODES) == 18 and "spec-cwd-relative" in SPEC_CODES
+    assert len(SPEC_CODES) == 20 and "spec-cwd-relative" in SPEC_CODES
+    assert {"spec-layout-ambiguous", "spec-parameter-test-only"} <= set(SPEC_CODES)
 
 
 def test_every_nestjs_reason_the_stage_writes_is_classified() -> None:
