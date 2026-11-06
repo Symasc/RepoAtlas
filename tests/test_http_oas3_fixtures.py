@@ -155,6 +155,8 @@ class Case:
     #: The row's stable code and category; ``None`` code means the application is served.
     code: str | None = None
     category: str | None = None
+    #: Routes of a document that differ from ``DOCUMENT_ROUTES``: ``(path, labels)``.
+    documents: tuple[tuple[str, frozenset[str]], ...] = ()
 
     @property
     def promoted(self) -> bool:
@@ -176,8 +178,18 @@ def refused(
     headline: str,
     code: str,
     category: str = "path-unresolved",
+    documents: tuple[tuple[str, frozenset[str]], ...] = (),
 ) -> Case:
-    return Case(group, repo, app, headline, planner_code=code, code=code, category=category)
+    return Case(
+        group,
+        repo,
+        app,
+        headline,
+        planner_code=code,
+        code=code,
+        category=category,
+        documents=documents,
+    )
 
 
 A, B, C, D = "a-paths", "b-forwarding", "c-exports", "d-layouts"
@@ -223,13 +235,27 @@ CASES = [
     # Amended 2026-11-06: the plan predicted promotion. The code refuses it as
     # spec-layout-ambiguous, because src/tsconfig.json has no recorded options and so is not
     # seen; the root pair then applies (repoatlas/parsers/module_facts.py:137-159, 202-203;
-    # repoatlas/graph/modules.py:704-710; ts_oas3.py:320-321).
+    # repoatlas/graph/modules.py build_layouts / _declares_layout; ts_oas3.py:320-321).
     refused(D, "lay-nearest", "src/app.ts", SPEC_NOT_FOUND, "spec-layout-ambiguous"),
-    # Predicted by the reasoner: a nearer tsconfig that records a option takes the layout, so its
-    # src/ reading has no build pair and the root runtime build is ignored. This is a prediction,
-    # not proven; if the run disagrees, the mismatch goes back for review and the expectation is
-    # not changed.
-    served(D, "lay-nearest-visible"),
+    # Amended 2026-11-06 (user requirement, not a fit to a measurement): the plan predicted
+    # promotion and the code promoted against openapi.yaml, because src/tsconfig.json records
+    # only baseUrl, which stopped the layout walk at src/ where no outDir/rootDir pair is
+    # declared. baseUrl is a module-resolution option, not an output layout, and
+    # src/tsconfig.json extends nothing, so it neither sets nor hides the root pair: runtime/src
+    # reads runtime/openapi.yaml beside src's openapi.yaml, and two layouts naming two documents
+    # name none (repoatlas/graph/modules.py build_layouts; ts_oas3.py document()).
+    refused(D, "lay-nearest-visible", "src/app.ts", SPEC_NOT_FOUND, "spec-layout-ambiguous"),
+    # Added 2026-11-06 with the layout correction: a nearer tsconfig that records only baseUrl
+    # does not hide the enclosing rootDir/outDir pair. Two layouts naming two documents name
+    # none.
+    refused(
+        D,
+        "lay-nearest-baseurl-two-docs",
+        "src/app.ts",
+        SPEC_NOT_FOUND,
+        "spec-layout-ambiguous",
+        documents=(("runtime/openapi.yaml", frozenset({"GET /status", "GET /gadgets"})),),
+    ),
 ]
 #: Repositories indexed with the cases that are not a case themselves: ``(group, repo)``.
 EXTRA_REPOS = [(C, "exp-destructured-require")]
@@ -327,7 +353,8 @@ def test_a3_every_document_is_published_and_cannot_be_joined(indexed: Indexed, c
     assert documents, f"{case.repo} holds no document"
     for path in documents:
         at_document = [row for row in rows if row.path == path]
-        assert {label(row) for row in at_document} == DOCUMENT_ROUTES, (path, shown(at_document))
+        expected = dict(case.documents).get(path, DOCUMENT_ROUTES)
+        assert {label(row) for row in at_document} == expected, (path, shown(at_document))
         for row in at_document:
             diagnostic = diagnostic_of(row)
             assert diagnostic.published is True, (path, label(row))
