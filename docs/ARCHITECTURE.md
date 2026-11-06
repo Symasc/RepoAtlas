@@ -1939,6 +1939,15 @@ Until the pass proves one, it stays a pending claim that records the declaration
 - **Swagger 2.0** keeps the route (`GET /users`) apart from the base (`https://api.example.com/v1`), and emits one
   deployment per declared `http`/`https` scheme. An operation's own `schemes` replace the document's. Without `host`
   or `schemes` there is no deployment.
+- **NestJS.** A route is promoted only under an application the file proves (`NestFactory.create`). The second
+  argument of that call is plain options when it is an inline object literal, or a name that is provably one (F4,
+  `repoatlas/parsers/http_nestjs.py`): `const N = { ... }` with no spread, bound exactly once in the file, declared in a
+  block (or the file) that holds the call and ends before the call starts, and written exactly twice in the file --
+  there, and as this argument. A call, `new`, an import, `let` or `var`, an object with a spread, a `const` declared
+  outside the call's scope or after it, or a name used anywhere else (a property assigned, passed on, reassigned) is
+  an adapter or a value this cannot read, and leaves the root's prefix unknown (`adapter`). `setGlobalPrefix` and
+  `enableVersioning(options)` are read as before. Every promoted NestJS route states its own decorator line as
+  `declared_at` (F1), whatever its stored edge says.
 - **FastAPI and Flask.** Routes count only on an application or router whose identity the module proves: imported
   from `fastapi`/`flask`, constructed at module level, and bound exactly once in the module.
   - A module-level `from x import *` is one more possible binding of each module-level name it could rebind, and of
@@ -2791,15 +2800,24 @@ base path is taken off; a request that does not start with the base path has non
 requirements, warnings, rows, counts, `routes_served` and `can_create` are the same with the flag on or off.
 
 **Recorded limits.**
-- *F1.* A route whose path is built from a prefix (a NestJS controller or global prefix, a router mounted with a
-  prefix in the same file) is stored with no lines. Both `declared_at` and `line_start` are then empty, so a
-  declaration's exposures skip it and the deployment-identity join cannot cite it: the preview can say "nothing would
-  be joined" for a service whose routes are all composed. R1 reports this (`no-declaration-line`,
-  `routes_without_declaration_line`); it does not change it.
-- *F2.* A declaration's `repository-serves-no-routes` state reads per-file edges only
-  (`list_served_routes(exclude_parser=GLOBAL_PARSER)`), so a repository that serves only routes the global pass
-  promoted can read as invalidated while `http_operations` lists those routes as published. Characterized by a test;
-  not changed.
+- *F1 (resolved for NestJS).* A NestJS route the global pass promotes keeps its stored edge without lines (a
+  controller or global prefix composed it) but now carries its own method-decorator line as `declared_at`, so a
+  declaration's exposures take it and the deployment-identity join can cite it. Still limits, unchanged: a Python
+  route or an Express router mounted with a prefix in its own file (D1, D3, X) is stored with no lines, so both
+  `declared_at` and `line_start` are empty, and the preview can say "nothing would be joined" for a service whose
+  routes are all of that kind. R1 reports this (`no-declaration-line`, `routes_without_declaration_line`).
+  Tracked for the provider-coverage work, not closed here.
+- *F3 (open, not implemented).* A Python router route whose path is a constant (local or imported), mounted only in
+  its own module, is served nowhere: no per-file edge (the path is not a literal) and no global-pass promotion
+  (the router's own-module mount is not followed). Registration is lost, not only provenance, so R1 does not report
+  it either. Synthetic cases B2 and C2 show it; no real corpus instance has been found yet. Tracked for the
+  provider-coverage work.
+- *F2 (resolved).* There is one definition of "served routes" per operation
+  (`list_code_served_routes`, `repoatlas/storage/sqlite/stores.py`): the routes of every code producer's
+  `SERVES_HTTP_ROUTE` edges, the global pass's included, an OpenAPI document's (`structured-config`) left out. A
+  declaration's state reads them all (`offerable=False`); the candidate services of a group read those that state a
+  line, or that the global pass wrote (`offerable=True`). The global pass itself still reads
+  `list_served_routes(exclude_parser=GLOBAL_PARSER)`, so what it decides never depends on its own last output.
 - *One-hop attribution.* A refused helper call or instance is attributed to the route's own scope only. A callee
   that is dynamic, shadowed or unsupported, or that did not resolve to the scope, is never blamed on it.
 - *A1.* A `fastify-plugin` wrapper written at the registration call, with a literal prefix, is stored exactly like

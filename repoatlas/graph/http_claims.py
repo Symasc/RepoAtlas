@@ -519,6 +519,8 @@ def plan_http_claims(
     class_unproven: dict[int, str] = {}
     spec_refusals: dict[int, str] = {}
     chain_refusals: dict[int, str] = {}
+    # The decorator line each promoted NestJS route states for itself, whatever its stored edge.
+    nest_declared: dict[tuple[int, str], int | None] = {}
     for claim in grouped[NESTJS_ROUTE]:
         meta = _meta(claim)
         origin = resolver.origin(claim)
@@ -566,6 +568,7 @@ def plan_http_claims(
                         line_end=claim.line_end if exact else None,
                     ),
                 )
+                nest_declared.setdefault((claim.src_id, body), claim.line_start)
                 promoted = True
                 bodies.append(body)
         if promoted:
@@ -732,7 +735,11 @@ def plan_http_claims(
                 line_start=edge.line_start,
                 line_end=edge.line_end,
                 roots=route.roots if route is not None else frozenset(),
-                declared_at=route.declared_at if route is not None else edge.line_start,
+                declared_at=(
+                    route.declared_at
+                    if route is not None
+                    else nest_declared.get((edge.src_id, edge.target.name), edge.line_start)
+                ),
             )
         )
     deployed = plan_deployment_exposures(grouped, by_id, code_routes)
