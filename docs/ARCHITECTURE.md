@@ -2002,6 +2002,18 @@ Until the pass proves one, it stays a pending claim that records the declaration
     - A whole imported path is read from that module's `ts-path-constants`, anchored at the declaring file.
     - A one-level factory parameter: the factory is called in the same file or through one relative named import,
       and each call is anchored at the caller's file.
+    - A factory parameter that is the last segment of an anchored `join`/`resolve` written in the call: each
+      caller hands a string literal (or a `const` of one), joined to the factory's directory after the literal
+      segments before it. An anchored path handed there is refused as `spec-absolute`; a parameter anywhere
+      else in a path is still refused.
+    - A call in a test file (the change-impact convention, `is_test_path`) is an instance only of a factory in a
+      test file; a factory only test files call is `spec-parameter-test-only`.
+    - `__dirname` is the file's own directory, and also, for each `outDir`/`rootDir` pair declared by the
+      nearest tsconfig files that record `rootDir` or `outDir`, themselves or through a resolved `extends`,
+      the directory the file is compiled to; a config that records only module-resolution options (`baseUrl`,
+      `paths`, `include`) does not hide an enclosing pair. Exactly one indexed
+      document across those readings is the document; two are `spec-layout-ambiguous`. No pair, or a
+      `rootDir` that does not hold the file, leaves the source's directory alone.
     - Roots stay the module of the `expressAppConfig` call.
     - A refusal has a stable `spec-...` code under the unchanged `SPEC_UNREAD` / `SPEC_NOT_FOUND` headlines.
     - A document is never served because it exists or because something loads it: `swagger-ui-express`,
@@ -2009,8 +2021,9 @@ Until the pass proves one, it stays a pending claim that records the declaration
     - A limit: an operation's provider is listed at the handler object's file; the application module that
       exposes it and the call site that instantiates it are not shown.
   - The controllers are a handler object, or an object literal of spreads of handler objects, each declared in the
-    file or imported by name from a relative module; a later spread's key wins. A handler object is a module-level
-    `const`, bound once, whose every member is a function. A directory of controllers is not read.
+    file or imported from a relative module by name or as its default export; a later spread's key wins. A handler
+    object is a module-level `const`, bound once, whose every member is a function. A directory of controllers is
+    not read. A default-imported factory is still not followed.
   - Each operation is served at each root server's base path (the URL's path, one trailing slash dropped; none is
     the empty base) joined to its own path, by the handler object's `const`: composed, so no span. A server with
     `variables`, or a base with a placeholder or query, leaves the document unserved by code. The document still

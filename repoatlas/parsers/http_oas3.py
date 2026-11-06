@@ -29,20 +29,25 @@ routes alone, so each records its part as a claim (:mod:`repoatlas.graph.ts_oas3
     ``[["p", specifier, name]]``;
   * ``spec_param``, ``factory`` and ``factory_exports`` -- the path is the parameter at that
     index of the module-level function ``factory``, which is exported under the names in
-    ``factory_exports`` (a JSON list, empty when it is not);
+    ``factory_exports`` (a JSON list, empty when it is not); with ``spec_param_dir`` too (a
+    JSON list of literal segments) when the parameter is the last segment of an anchored
+    ``join``, so that a caller's string is joined to this file's directory after them;
   * ``spec_refused`` -- why the source states no path: a ``spec-...`` code.
 
   ``options.routing.controllers`` is read only as a handler object, or an object literal
-  of spreads of handler objects, each declared in the file or imported by name from a
-  relative module (later spreads win, as in JavaScript). A directory of controllers, or
-  anything else, is recorded as unread;
+  of spreads of handler objects, each declared in the file or imported from a relative
+  module by name or as its default export (later spreads win, as in JavaScript). A
+  directory of controllers, or anything else, is recorded as unread;
 * :data:`~repoatlas.parsers.http_facts.OAS3_FACTORY_CALL` -- a call of a function the file
   declares that holds an application (always, so a refusal is visible), or of a function
   imported by name from a relative module when an argument reads as a document: a path
-  whose last segment is a literal ending ``.yaml``, ``.yml`` or ``.json``, or is imported.
+  whose last segment is a literal ending ``.yaml``, ``.yml`` or ``.json``, or is imported,
+  or a string segment ending so.
   ``local``, or ``module`` and ``name``; and ``arguments``, a JSON list (at most 8) of
   ``{"spec": ...}``, ``{"spec_parts": ...}`` (the list above, nested), ``{"refused": code}``
-  or ``{}``, each read relative to the caller's file. An argument that is itself a parameter
+  or ``{}``, each read relative to the caller's file. An argument that is a string literal, or
+  a ``const`` bound to one, also records it as ``segment``: what a ``spec_param_dir`` factory
+  joins to its own directory. An argument that is itself a parameter
   is refused as ``spec-propagation-depth``: a second level is not followed;
 * :data:`~repoatlas.parsers.http_facts.TS_PATH_CONSTANTS` -- the module's exported
   module-level ``const`` values that the file alone reads as a path ending ``.yaml``,
@@ -86,6 +91,7 @@ from repoatlas.parsers.http_ts_wrappers import (
     arguments_of,
     operand,
 )
+from repoatlas.parsers.http_typescript import static_string
 from repoatlas.parsers.treesitter import line_range, node_text, string_literal, walk
 from repoatlas.parsers.ts_spec_paths import (
     _JOINS,
@@ -95,11 +101,13 @@ from repoatlas.parsers.ts_spec_paths import (
     SPEC_PROPAGATION_DEPTH,
     ImportedPath,
     Param,
+    ParamSegment,
     Parts,
     Refused,
     Result,
     Spec,
     SpecPathReader,
+    _ordered,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -146,6 +154,8 @@ class SpecRoutedApps:
         self._packages: dict[str, tuple[str, str]] = {}
         #: Local name → ``(relative specifier, imported name)``.
         self._relative: dict[str, tuple[str, str]] = {}
+        #: Local name → relative specifier, for a default import: read only as controllers.
+        self._defaults: dict[str, str] = {}
         #: Handler object name → ``(keys and their lines, first line, last line)``.
         self._objects: dict[str, tuple[dict[str, int], int, int]] = {}
         self._exports: dict[str, list[str]] = {}
@@ -184,7 +194,10 @@ class SpecRoutedApps:
             return
         for child in clause.named_children:
             if child.type == "identifier":
-                self._bind(node_text(self._source, child), module, _MODULE)
+                local = node_text(self._source, child)
+                self._bind(local, module, _MODULE)
+                if module.startswith(".") and self._counts[local] == 1:
+                    self._defaults[local] = module
             elif child.type == "namespace_import":
                 name = next((c for c in child.named_children if c.type == "identifier"), None)
                 if name is not None:
@@ -352,11 +365,11 @@ class SpecRoutedApps:
             return {"spec_parts": json.dumps(_parts(result))}
         if isinstance(result, ImportedPath):
             return {"spec_imported_path": json.dumps([["p", result.specifier, result.imported]])}
-        if isinstance(result, Param):
+        if isinstance(result, Param | ParamSegment):
             return self._parameter(result)
         return {"spec_refused": result.code}
 
-    def _parameter(self, result: Param) -> dict[str, str]:
+    def _parameter(self, result: Param | ParamSegment) -> dict[str, str]:
         """The path is the parameter of a function bound once at module level, by name."""
         function = result.function
         if function.type in _DECLARED:
@@ -369,11 +382,14 @@ class SpecRoutedApps:
         name = node_text(self._source, name_node)
         if self._counts[name] != 1:
             return {"spec_refused": SPEC_PARAMETER_UNSUPPORTED}
-        return {
+        found = {
             "spec_param": str(result.index),
             "factory": name,
             "factory_exports": json.dumps(self._function_exports(name)),
         }
+        if isinstance(result, ParamSegment):
+            found["spec_param_dir"] = json.dumps(list(result.parts))
+        return found
 
     def _function_exports(self, name: str) -> list[str]:
         """The names the module-level function or ``const`` ``name`` is exported under."""
@@ -506,8 +522,13 @@ class SpecRoutedApps:
                 entries.append({"refused": SPEC_DYNAMIC})
                 continue
             result = self._read(argument, proven=not local)
+            entry = _entry(result)
+            segment = self._segment(argument)
+            if segment is not None:
+                entry["segment"] = segment
+                document = document or segment.endswith(_DOCUMENT_SUFFIXES)
             document = document or _is_document(result)
-            entries.append(_entry(result))
+            entries.append(entry)
         if local:
             meta = {"local": name}
         elif imported is not None and document:
@@ -528,6 +549,18 @@ class SpecRoutedApps:
                 **meta,
             )
         ]
+
+    def _segment(self, node: Node, depth: int = 0) -> str | None:
+        """A string literal, or the one a ``const`` bound before ``node`` is, through at most
+        :data:`_MAX_DEPTH` names."""
+        node = operand(node)
+        text = static_string(self._source, node)
+        if text is not None or node.type != "identifier" or depth >= _MAX_DEPTH:
+            return text
+        binding = self._wrappers.lookup(node_text(self._source, node), node)
+        if not isinstance(binding, Const) or not _ordered(binding.value, node):
+            return None
+        return self._segment(binding.value, depth + 1)
 
     def _read(self, node: Node, *, proven: bool) -> Result | None:
         """What the reader says of an argument shaped like a path, or ``None`` for another."""
@@ -639,6 +672,8 @@ class SpecRoutedApps:
         if name in self._relative:
             module, imported = self._relative[name]
             return {"module": module, "name": imported}
+        if name in self._defaults:
+            return {"module": self._defaults[name], "name": "default"}
         return None
 
     # -- claims --------------------------------------------------------------------------
