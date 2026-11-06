@@ -429,6 +429,8 @@ EXPECTED = {
     ("shop", "shop/orders/views.py", "list_orders", "GET /orders/", None),
     ("shop", "shop/orders/views.py", "list_orders", "POST /orders/", None),
     ("shop", "shop/catalog.py", "items", "GET /catalog/items", None),
+    # a mount made by a same-module helper the factory calls (R2c-1): exact, at its decorator
+    ("shop", "shop/extras.py", "extras", "GET /extras", line(SHOP["shop/extras.py"], "@extras_bp")),
     # a package naming itself absolutely, nothing added: exact
     (
         "peers",
@@ -460,9 +462,9 @@ def test_what_is_not_served_says_why(indexed: Workspace) -> None:
     assert found[("gauges/src/web/odd.py", "reexported", "GET /{reexport.ROOT}/reexported")] == (
         CONSTANT_UNRESOLVED
     )
-    # a conditional mount, and a mount on a parameter, are not read
+    # a conditional mount is not read; a same-module helper mount the factory calls is (R2c-1)
     assert found[("shop/debug.py", "debug", "GET /debug")] == NOT_MOUNTED
-    assert found[("shop/extras.py", "extras", "GET /extras")] == NOT_MOUNTED
+    assert found[("shop/extras.py", "extras", "GET /extras")] == PROMOTED
     # nor one on a factory's application it rebinds
     assert found[("shop/admin.py", "admin", "GET /admin")] == NOT_MOUNTED
     # another repository's module of the same path is never resolved to
