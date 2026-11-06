@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from tests.r1_golden import GOLDEN, SECTIONS, normalise, snapshot
 from tests.r1_provider_corpus import CORPUS_NAMES, Corpora
+from tests.r1_superseded import SUPERSEDED, problems
 
 MISSING = (
     f"{GOLDEN} is missing. It is generated ONCE, at the code of commit 2da633f and before any R1 "
@@ -83,8 +84,19 @@ def test_the_golden_covers_exactly_the_corpora_and_sections_the_snapshot_takes()
         assert sorted(part) == sorted(SECTIONS), name
 
 
-@pytest.mark.parametrize("section", SECTIONS)
-@pytest.mark.parametrize("corpus", CORPUS_NAMES)
+def _pairs() -> list[Any]:
+    """Every (corpus, section) F1 and F2 leave alone, compared exactly with the golden. The pairs
+    they change are left out here: the allowlist test below compares them with
+    :mod:`tests.r1_superseded`. The golden file is never touched."""
+    return [
+        pytest.param(corpus, section, id=f"{corpus}-{section}")
+        for corpus in CORPUS_NAMES
+        for section in SECTIONS
+        if (corpus, section) not in SUPERSEDED
+    ]
+
+
+@pytest.mark.parametrize(("corpus", "section"), _pairs())
 def test_a_corpus_section_is_what_it_was_before_r1(
     corpus: str, section: str, current: Callable[[str], dict[str, Any]]
 ) -> None:
@@ -94,6 +106,19 @@ def test_a_corpus_section_is_what_it_was_before_r1(
     assert difference is None, (
         f"{difference}\nThe golden is never regenerated: escalate the difference, "
         "do not refresh the file."
+    )
+
+
+@pytest.mark.parametrize(("corpus", "section"), list(SUPERSEDED))
+def test_a_superseded_section_differs_from_the_golden_only_as_the_allowlist_says(
+    corpus: str, section: str, current: Callable[[str], dict[str, Any]]
+) -> None:
+    """The replacement for the exact comparison above, for exactly the sections F1 and F2 change:
+    each entry that may differ is named, with the way it may; anything else is a finding."""
+    pinned = golden()["corpora"][corpus][section]
+    now = normalise(current(corpus)[section])
+    assert problems(corpus, section, pinned, now) == [], (
+        "escalate the difference; do not widen the allowlist or refresh the golden"
     )
 
 

@@ -180,31 +180,28 @@ def test_case_15_a_repository_with_no_route_is_not_a_service_and_recognises_noth
 # -- case 17b: served, but not declarable ---------------------------------------------------------
 
 
-def test_case_17b_a_route_with_a_controller_prefix_is_published_and_cannot_be_exposed(
+def test_case_17b_a_route_with_a_controller_prefix_is_published_and_can_now_be_exposed(
     corpora: Corpora,
 ) -> None:
+    """The composed route states its decorator line, so it has no join limit."""
     nest = corpora.workspace("nest")
     rows, _ = inventory(nest, "nestok", include_diagnostics=True)
     routes = {row.route: row for row in rows if row.role == "provider"}
     assert set(routes) == {"/health", "/shop/items/:id"}
     assert all(row.status in PUBLISHED for row in routes.values())
-    health = routes["/health"].diagnostic
-    shop = routes["/shop/items/:id"].diagnostic
-    assert health is not None and shop is not None
-    assert tuple(health.join_limits) == ()
-    assert tuple(shop.join_limits) == ("no-declaration-line",)
-    assert all(
-        row.diagnostic is not None and row.diagnostic.join_eligible for row in routes.values()
-    )
+    for row in routes.values():
+        assert row.diagnostic is not None
+        assert tuple(row.diagnostic.join_limits) == ()
+        assert row.diagnostic.join_eligible
 
 
-def test_case_17b_the_preview_counts_what_the_declaration_could_not_expose(
+def test_case_17b_the_preview_counts_what_the_declaration_can_now_expose(
     corpora: Corpora,
 ) -> None:
+    """Both routes are exposable and none lacks a line."""
     result = preview(corpora.workspace("nest"), NEST_ORIGIN, "nestok", include_diagnostics=True)
-    # unchanged: F1
-    assert result.counts == {"would-link": 1, "no-matching-route": 1}
+    assert result.counts == {"would-link": 2}
     hints = result.provider_diagnostics
     assert hints is not None
-    assert hints.routes_exposable == 1
-    assert hints.routes_without_declaration_line == 1
+    assert hints.routes_exposable == 2
+    assert hints.routes_without_declaration_line == 0

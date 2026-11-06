@@ -162,17 +162,23 @@ def _snapshot(workspace: Workspace) -> tuple[list[RequestFacts], Mapping[str, ob
     by_id, indexed = _slugs(workspace)
     rows = knowledge.list_http_call_decisions()
     facts = [facts_of(row, by_id.get(row.repo_id, "")) for row in rows]
-    served = knowledge.list_served_routes(exclude_parser=GLOBAL_PARSER)
-    served_by_slug = {
-        by_id[repo_id]: bodies for repo_id, bodies in served.items() if repo_id in by_id
-    }
+    # One definition of "served" per operation: what a repository serves, for a declaration's
+    # state, is every route its code serves; what a link may be offered at is the ones among
+    # them that state a declaration line.
+    served = knowledge.list_code_served_routes(offerable=False)
+    offered = knowledge.list_code_served_routes(offerable=True)
     links = workspace.deployment_links.list_all()
     return facts, {
         "built": knowledge.http_call_decisions_built(),
         "pass_reads": knowledge.link_pass_reads(),
         "links": links,
         "indexed": indexed,
-        "served": served_by_slug,
+        "served": {
+            by_id[repo_id]: bodies for repo_id, bodies in served.items() if repo_id in by_id
+        },
+        "offered": {
+            by_id[repo_id]: bodies for repo_id, bodies in offered.items() if repo_id in by_id
+        },
         "scopes": _declared_files(workspace, links),
         "external": workspace.service_declarations.list_all("external_service"),
     }
@@ -492,13 +498,13 @@ def connections(workspace: Workspace, request: HttpConnectionsRequest) -> HttpCo
                 workspace,
                 origin_of,
                 members,
-                context["served"],  # type: ignore[arg-type]
+                context["offered"],  # type: ignore[arg-type]
             )
         elif members:
             candidates = _scoped_candidates(
                 workspace,
                 members,
-                context["served"],  # type: ignore[arg-type]
+                context["offered"],  # type: ignore[arg-type]
             )
 
     return HttpConnectionsResponse(
