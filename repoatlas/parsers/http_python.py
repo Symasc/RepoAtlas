@@ -125,7 +125,7 @@ import ast
 import json
 import re
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from repoatlas.models import http
@@ -134,8 +134,11 @@ from repoatlas.parsers.http_facts import (
     BASE_UNKNOWN,
     COMPOSED,
     EXACT,
+    HELPER_CALL_ROLE,
+    HELPER_ROLE,
     HTTP_CLIENT_CALL,
     HTTP_EXPOSED_ENDPOINT,
+    PENDING_FACT,
     PYTHON_CLASS,
     PYTHON_CLASS_ROUTE,
     PYTHON_CONSTANTS,
@@ -309,6 +312,22 @@ _MOUNT_CALLS = {
 }
 #: Applications, which serve their routes at the root of their paths.
 _APPLICATIONS = frozenset({_FASTAPI_APP, _FLASK_APP})
+
+#: Why a registration or a call of a same-module helper is not read (R2c-1): stable codes of the
+#: diagnostics (:mod:`repoatlas.graph.http_provider_diagnostics`). A refusal is recorded in the
+#: claim of a helper that has something to record, never in a claim of its own.
+PY_HELPER_CONTROL_FLOW = "python-helper-control-flow"
+PY_HELPER_ARGUMENT = "python-helper-argument"
+PY_HELPER_REBOUND_OR_ALIAS = "python-helper-rebound-or-alias"
+PY_HELPER_SHADOWED = "python-helper-shadowed"
+PY_HELPER_CHAIN_TOO_DEEP = "python-helper-chain-too-deep"
+PY_HELPER_BEFORE_CONSTRUCTION = "python-helper-before-construction"
+PY_HELPER_BEFORE_BINDING = "python-helper-before-binding"
+PY_HELPER_UNRESOLVED = "python-helper-unresolved"
+PY_HELPER_CHILD_UNSUPPORTED = "python-helper-child-unsupported"
+#: The pending-fact keys a helper's mount keeps from the mount claim it is made as; its owner is
+#: the application a call of the helper hands over, not these.
+_HELPER_OWNER_KEYS = frozenset({PENDING_FACT, "owner", "owner_kind"})
 #: A comprehension statement is looked at only when it calls one of these: a mount.
 _COMPREHENSION_MOUNTS = frozenset({"include_router", "register_blueprint", "mount"})
 #: What became of a comprehension statement that mounts: internal, for tests and measurement.
@@ -789,6 +808,25 @@ class _Imported:
     module: str
     #: The name taken from it; ``None`` for ``import module``, which binds the module.
     attribute: str | None
+
+
+@dataclass(slots=True)
+class _HelperScan:
+    """What a same-module function does with one of its positional parameters (R2c-1)."""
+
+    #: The parameter's position among the positional parameters, and whether a call may also
+    #: name it (a positional-only parameter may not be).
+    index: int
+    keyword: bool
+    #: Top-level registrations on it: the mount as a claim would state it (the owner is the
+    #: application a call hands over), and where its child is bound, when the module says.
+    mounts: list[tuple[ParsedReference, _Position | None]] = field(default_factory=list)
+    #: Top-level calls of a same-module function handing it over: ``(callee, line, how)``, the
+    #: parameter being the argument at position ``how`` (an ``int``) or the keyword ``how``.
+    calls: list[tuple[str, int, int | str]] = field(default_factory=list)
+    #: Refusals, each ``{"code", "line"}`` and, for a registration whose child is readable, its
+    #: ``module``/``name``.
+    refusals: list[dict[str, object]] = field(default_factory=list)
 
 
 def _submodule(module: str, name: str) -> str:
@@ -1467,6 +1505,31 @@ def _expression_call(statement: ast.stmt) -> ast.Call | None:
     return None
 
 
+def _name_call(statement: ast.stmt) -> ast.Call | None:
+    """``name(...)`` as a statement of its own."""
+    if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)):
+        return None
+    return statement.value if isinstance(statement.value.func, ast.Name) else None
+
+
+def _argument_names(call: ast.Call) -> list[str]:
+    """The names a call is handed directly, in order: positionally, then by keyword."""
+    values = [*call.args, *(keyword.value for keyword in call.keywords)]
+    return [value.id for value in values if isinstance(value, ast.Name)]
+
+
+def _passes(how: int | str, parameter: str, scan: _HelperScan) -> bool:
+    """Whether handing something over as ``how`` -- a position, or a keyword -- reaches the
+    callee's own parameter ``parameter``."""
+    if isinstance(how, int):
+        return how == scan.index
+    return scan.keyword and how == parameter
+
+
+def _refusal_order(refusal: dict[str, object]) -> tuple[int, str]:
+    return int(str(refusal["line"])), str(refusal["code"])
+
+
 def _main_guard(statement: ast.stmt) -> bool:
     """``if __name__ == "__main__":``, either way round."""
     test = statement.test if isinstance(statement, ast.If) else None
@@ -1818,6 +1881,9 @@ class PythonHttp:
         self._local_aliases: dict[str, tuple[str, _Position]] = {}
         #: Mounts only the global pass can decide: an imported router, or a factory's.
         self._mount_claims: list[ParsedReference] = []
+        #: Same-module helpers that register on an application they are handed, and the calls
+        #: that hand them one (R2c-1): claims for the global pass, which expands the calls.
+        self._helper_claims: list[ParsedReference] = []
         #: Factory-local applications that another application in the same factory mounts,
         #: as ``"<function>.<name>"``: the owner a claim for their includes carries.
         self._sub_owners: set[str] = set()
@@ -1890,6 +1956,7 @@ class PythonHttp:
         self._mounts(tree, counts)
         self._imported_escapes(tree)
         self._factories(tree)
+        self._helpers(tree)
         self._unserve_sub_applications()
         self._identities(tree, counts)
 
@@ -2580,6 +2647,7 @@ class PythonHttp:
         call: ast.Call,
         child: dict[str, str],
         shadow: Counter[str] | None = None,
+        sink: list[ParsedReference] | None = None,
     ) -> None:
         """A mount only the global pass can decide: of an imported router, or a factory's.
 
@@ -2593,6 +2661,9 @@ class PythonHttp:
         A ``mount`` of an application by a FastAPI application also carries ``mount_prefix``
         -- its path, when that is a non-empty prefix FastAPI itself accepts -- for the global
         pass, which serves the child's routes under it only if it proves the child.
+
+        The claim is added to ``sink`` instead of ``_mount_claims`` when one is given: a
+        helper's registration (:meth:`_helpers`), whose owner a call of the helper decides.
         """
         attribute = call.func.attr if isinstance(call.func, ast.Attribute) else ""
         readable = attribute in _MOUNT_CALLS and not _dynamic(call)
@@ -2634,7 +2705,7 @@ class PythonHttp:
             if found is not None and found[0] and _fastapi_prefix(found[0]):
                 mount_path = found[0]
         mounted_at = {"mount_prefix": json.dumps(mount_path)} if mount_path else {}
-        self._mount_claims.append(
+        (self._mount_claims if sink is None else sink).append(
             pending_reference(
                 EdgeType.REFERENCES,
                 EntityType.SYMBOL,
@@ -2712,6 +2783,476 @@ class PythonHttp:
                     child = {"module": ref[0], "name": ref[1]}
                 self._claim_mount(f"{function.name}.{name}", _Receiver(kind), call, child, counts)
 
+    # -- helpers: a same-module function that registers on the application it is handed ----
+
+    def _helpers(self, tree: ast.Module) -> None:
+        """Same-module helpers that register on an application they are handed (R2c-1).
+
+        A helper is a module-level, undecorated, synchronous function bound once in the module,
+        with a positional parameter bound only as that parameter. What it does with the
+        parameter, as its own top-level statements: ``p.register_blueprint(child)`` or
+        ``p.include_router(child)`` with a child one import away (or this module's own
+        receiver), read as a factory's registration is, and ``G(p)`` of another helper. A
+        registration or call inside a branch, a loop, a ``with``, a ``try`` or a nested
+        function is refused, as a parameter's alias or a child that is not readable is; any
+        other use of the parameter is allowed and ignored.
+
+        A claim (:data:`HELPER_ROLE`) is made only of a helper with something to record: a
+        registration, or a call of a helper that has. A call of one (:data:`HELPER_CALL_ROLE`) is
+        recorded where the application it hands over is proven in the module: a factory's local
+        (bound once to a constructor, before the call) or a module-level application, the call
+        being a top-level statement of the function or the module. The refusals are recorded
+        beside the call, or in the helper's claim, with the code of the diagnostics; the global
+        pass does the expansion (depth, cycles, the application's own rules).
+        """
+        definitions = {
+            statement.name: statement
+            for statement in tree.body
+            if isinstance(statement, ast.FunctionDef)
+            and not statement.decorator_list
+            and self._counts[statement.name] == 1
+        }
+        if not definitions:
+            return
+        scans = {
+            name: self._scan_helper(function, definitions) for name, function in definitions.items()
+        }
+        chosen: dict[str, tuple[str, _HelperScan]] = {}
+        changed = True
+        while changed:
+            changed = False
+            for name, parameters in scans.items():
+                if name in chosen:
+                    continue
+                for parameter, scan in parameters.items():
+                    if scan.mounts or any(
+                        callee in chosen and _passes(how, *chosen[callee])
+                        for callee, _, how in scan.calls
+                    ):
+                        chosen[name] = (parameter, scan)
+                        changed = True
+                        break
+        if not chosen:
+            return
+        claims: list[ParsedReference] = []
+        heads: dict[str, list[_Position | None]] = {}
+        passes: dict[str, list[str]] = {}
+        for name in sorted(chosen, key=lambda helper: definitions[helper].lineno):
+            parameter, scan = chosen[name]
+            calls: list[dict[str, object]] = []
+            refusals = list(scan.refusals)
+            for callee, line, how in scan.calls:
+                target = chosen.get(callee)
+                if target is None:
+                    continue
+                if _passes(how, *target):
+                    calls.append({"callee": callee, "line": line})
+                else:
+                    refusals.append({"code": PY_HELPER_ARGUMENT, "line": line})
+            heads[name] = [position for _, position in scan.mounts]
+            passes[name] = [str(call["callee"]) for call in calls]
+            mounts: list[dict[str, object]] = []
+            for mount, _ in scan.mounts:
+                entry: dict[str, object] = {
+                    key: value for key, value in mount.meta.items() if key not in _HELPER_OWNER_KEYS
+                }
+                entry["line"] = mount.line_start
+                entry["end"] = mount.line_end
+                mounts.append(entry)
+            line = definitions[name].lineno
+            claims.append(
+                pending_reference(
+                    EdgeType.REFERENCES,
+                    EntityType.SYMBOL,
+                    name,
+                    line,
+                    line,
+                    role=HELPER_ROLE,
+                    param=str(scan.index),
+                    param_name=parameter,
+                    mounts=json.dumps(mounts),
+                    calls=json.dumps(calls),
+                    refusals=json.dumps(sorted(refusals, key=_refusal_order)),
+                )
+            )
+        for function in tree.body:
+            if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                claims.extend(self._factory_helper_calls(function, chosen))
+        claims.extend(self._module_helper_calls(tree, definitions, chosen, heads, passes))
+        self._helper_claims = claims
+
+    def _scan_helper(
+        self, function: ast.FunctionDef, definitions: Mapping[str, ast.FunctionDef]
+    ) -> dict[str, _HelperScan]:
+        """What ``function`` does, at its top level, with each positional parameter that nothing
+        in it rebinds (a parameter bound twice, say to a fresh application, is no handle)."""
+        arguments = function.args
+        positional = [*arguments.posonlyargs, *arguments.args]
+        if not positional:
+            return {}
+        counts, _ = _binding_counts(function)
+        scans = {
+            argument.arg: _HelperScan(index=index, keyword=argument in arguments.args)
+            for index, argument in enumerate(positional)
+            if counts[argument.arg] == 1
+        }
+        if not scans:
+            return {}
+        imported = {name: found for name, found in self._imported.items() if not counts[name]}
+        aliases: dict[str, str] = {}
+        for statement in function.body:
+            if (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+                and isinstance(statement.value, ast.Name)
+                and statement.value.id in scans
+                and counts[statement.targets[0].id] == 1
+            ):
+                aliases[statement.targets[0].id] = statement.value.id
+        for statement in function.body:
+            if isinstance(statement, (ast.Import, ast.ImportFrom)):
+                # A local import binds its name from this statement on: a registration above it
+                # reads an unbound local at run time, so it sees no entry (and no module-level one).
+                imported.update(_import_table([statement], counts))
+                continue
+            call = _expression_call(statement)
+            if (
+                call is not None
+                and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.attr in _MOUNT_CALLS
+            ):
+                receiver = call.func.value.id
+                if receiver in scans:
+                    self._helper_registration(scans[receiver], receiver, call, counts, imported)
+                    continue
+                if receiver in aliases:
+                    scans[aliases[receiver]].refusals.append(
+                        {"code": PY_HELPER_REBOUND_OR_ALIAS, "line": call.lineno}
+                    )
+                    continue
+            named = _name_call(statement)
+            if (
+                named is not None
+                and isinstance(named.func, ast.Name)
+                and named.func.id in definitions
+            ):
+                self._helper_hand_over(named, named.func.id, scans, counts)
+                continue
+            self._helper_nested(statement, scans, aliases, counts, imported, definitions)
+        return scans
+
+    def _helper_registration(
+        self,
+        scan: _HelperScan,
+        receiver: str,
+        call: ast.Call,
+        counts: Counter[str],
+        imported: dict[str, _Imported],
+    ) -> None:
+        """``receiver.register_blueprint(child)`` as a top-level statement of a helper."""
+        attribute = call.func.attr if isinstance(call.func, ast.Attribute) else ""
+        kind = _FASTAPI_APP if attribute == "include_router" else _FLASK_APP
+        found = self._helper_child(_mount_target(kind, call), counts, imported)
+        if isinstance(found, str):
+            scan.refusals.append({"code": found, "line": call.lineno})
+            return
+        child, position = found
+        sink: list[ParsedReference] = []
+        self._claim_mount(receiver, _Receiver(kind), call, child, counts, sink)
+        scan.mounts.append((sink[0], position))
+
+    def _helper_child(
+        self, argument: ast.expr | None, counts: Counter[str], imported: dict[str, _Imported]
+    ) -> tuple[dict[str, str], _Position | None] | str:
+        """The child a helper registers -- this module's own receiver, or one name or one
+        attribute away on an import -- and where the module binds it (``None``: the helper binds
+        it); else the code of why it is not read. A child that is the helper's own parameter or
+        local is an argument (the caller decides it); anything else is unsupported."""
+        if (
+            isinstance(argument, ast.Name)
+            and argument.id in self._receivers
+            and not counts[argument.id]
+        ):
+            return {"name": argument.id}, (self._receivers[argument.id].line, 0)
+        ref = _module_ref(argument, imported)
+        if ref is not None:
+            node = argument.value if isinstance(argument, ast.Attribute) else argument
+            head = node.id if isinstance(node, ast.Name) else ""
+            at = self._positions.get(head) if head in self._imported and not counts[head] else None
+            return {"module": ref[0], "name": ref[1]}, at
+        if isinstance(argument, ast.Name) and counts[argument.id]:
+            return PY_HELPER_ARGUMENT
+        return PY_HELPER_CHILD_UNSUPPORTED
+
+    @staticmethod
+    def _helper_hand_over(
+        call: ast.Call, callee: str, scans: dict[str, _HelperScan], counts: Counter[str]
+    ) -> None:
+        """``callee(p)`` of another same-module function, as a top-level statement of a helper:
+        recorded, and judged once the callee's own parameter is known."""
+        if _dynamic(call):
+            names = {
+                node.id
+                for node in ast.walk(call)
+                if isinstance(node, ast.Name) and node.id in scans
+            }
+            for name in sorted(names):
+                scans[name].refusals.append({"code": PY_HELPER_ARGUMENT, "line": call.lineno})
+            return
+        passed = [name for name in _argument_names(call) if name in scans]
+        if not passed:
+            return
+        if counts[callee]:
+            for name in passed:
+                scans[name].refusals.append({"code": PY_HELPER_SHADOWED, "line": call.lineno})
+            return
+        for index, argument in enumerate(call.args):
+            if isinstance(argument, ast.Name) and argument.id in scans:
+                scans[argument.id].calls.append((callee, call.lineno, index))
+        for keyword in call.keywords:
+            if (
+                keyword.arg is not None
+                and isinstance(keyword.value, ast.Name)
+                and keyword.value.id in scans
+            ):
+                scans[keyword.value.id].calls.append((callee, call.lineno, keyword.arg))
+
+    def _helper_nested(
+        self,
+        statement: ast.stmt,
+        scans: dict[str, _HelperScan],
+        aliases: dict[str, str],
+        counts: Counter[str],
+        imported: dict[str, _Imported],
+        definitions: Mapping[str, ast.FunctionDef],
+    ) -> None:
+        """A registration or a hand-over somewhere other than a top-level statement of the
+        helper (a branch, a loop, a nested function, an assignment): refused."""
+        for node in ast.walk(statement):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.attr in _MOUNT_CALLS
+            ):
+                receiver = func.value.id
+                if receiver in scans:
+                    refusal: dict[str, object] = {
+                        "code": PY_HELPER_CONTROL_FLOW,
+                        "line": node.lineno,
+                    }
+                    kind = _FASTAPI_APP if func.attr == "include_router" else _FLASK_APP
+                    found = self._helper_child(_mount_target(kind, node), counts, imported)
+                    if not isinstance(found, str):
+                        refusal.update(found[0])
+                    scans[receiver].refusals.append(refusal)
+                elif receiver in aliases:
+                    scans[aliases[receiver]].refusals.append(
+                        {"code": PY_HELPER_REBOUND_OR_ALIAS, "line": node.lineno}
+                    )
+            elif isinstance(func, ast.Name) and func.id in definitions:
+                for name in sorted({name for name in _argument_names(node) if name in scans}):
+                    scans[name].refusals.append(
+                        {"code": PY_HELPER_CONTROL_FLOW, "line": node.lineno}
+                    )
+
+    @staticmethod
+    def _passed_application(
+        call: ast.Call, parameter: str, scan: _HelperScan, applications: Collection[str]
+    ) -> tuple[str | None, str | None]:
+        """``(application, refusal)`` of a call of a helper: the application handed over as the
+        helper's own parameter, or why not. ``(None, None)``: no application is involved."""
+        if not any(
+            isinstance(node, ast.Name) and node.id in applications for node in ast.walk(call)
+        ):
+            return None, None
+        if _dynamic(call):
+            return None, PY_HELPER_ARGUMENT
+        positional = call.args[scan.index] if len(call.args) > scan.index else None
+        named = _keywords(call).get(parameter) if scan.keyword else None
+        if positional is not None and named is not None:
+            return None, PY_HELPER_ARGUMENT
+        argument = positional if positional is not None else named
+        if isinstance(argument, ast.Name) and argument.id in applications:
+            return argument.id, None
+        return None, PY_HELPER_ARGUMENT
+
+    @staticmethod
+    def _call_claim(
+        call: ast.Call, helper: str, owner: str, kind: str, scope: str, refusal: str | None
+    ) -> ParsedReference:
+        """A call of a recordable helper with an application: the helper, the application's
+        owner name (the key the global pass mounts under) and kind, and the refusal, if any."""
+        refused: dict[str, str] = {} if refusal is None else {"refusal": refusal}
+        return pending_reference(
+            EdgeType.REFERENCES,
+            EntityType.SYMBOL,
+            helper,
+            call.lineno,
+            call.end_lineno or call.lineno,
+            role=HELPER_CALL_ROLE,
+            owner=owner,
+            owner_kind=kind,
+            scope=scope,
+            readable="true",
+            **refused,
+        )
+
+    def _factory_applications(
+        self, function: ast.FunctionDef | ast.AsyncFunctionDef, counts: Counter[str]
+    ) -> dict[str, tuple[str, int]]:
+        """The applications a function constructs as its own top-level statements, each bound
+        once, as :meth:`_factories` reads them: ``name -> (kind, index of the statement)``."""
+        applications: dict[str, tuple[str, int]] = {}
+        for index, statement in enumerate(function.body):
+            if (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+                and isinstance(statement.value, ast.Call)
+                and not _dynamic(statement.value)
+                and counts[statement.targets[0].id] == 1
+            ):
+                kind = self._constructed_kind(statement.value.func, None, counts)
+                if kind in _APPLICATIONS:
+                    applications[statement.targets[0].id] = (kind, index)
+        return applications
+
+    def _factory_helper_calls(
+        self,
+        function: ast.FunctionDef | ast.AsyncFunctionDef,
+        chosen: Mapping[str, tuple[str, _HelperScan]],
+    ) -> list[ParsedReference]:
+        """Calls of a recordable helper with an application the function constructs (R-6)."""
+        counts, _ = _binding_counts(function)
+        applications = self._factory_applications(function, counts)
+        if not applications:
+            return []
+        found: list[ParsedReference] = []
+        for index, statement in enumerate(function.body):
+            call = _name_call(statement)
+            if call is not None and isinstance(call.func, ast.Name) and call.func.id in chosen:
+                name = call.func.id
+                parameter, scan = chosen[name]
+                app, refusal = self._passed_application(call, parameter, scan, applications)
+                if app is None and refusal is None:
+                    continue
+                if counts[name]:
+                    refusal = PY_HELPER_SHADOWED
+                elif refusal is None and app is not None and applications[app][1] > index:
+                    refusal = PY_HELPER_BEFORE_CONSTRUCTION
+                if app is None and len(applications) == 1:
+                    app = next(iter(applications))
+                owner = f"{function.name}.{app}" if app is not None else ""
+                kind = applications[app][0] if app is not None else ""
+                found.append(self._call_claim(call, name, owner, kind, "factory", refusal))
+                continue
+            for node in ast.walk(statement):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id in chosen
+                ):
+                    passed = sorted({n for n in _argument_names(node) if n in applications})
+                    if passed:
+                        found.append(
+                            self._call_claim(
+                                node,
+                                node.func.id,
+                                f"{function.name}.{passed[0]}",
+                                applications[passed[0]][0],
+                                "factory",
+                                PY_HELPER_CONTROL_FLOW,
+                            )
+                        )
+        return found
+
+    def _module_helper_calls(
+        self,
+        tree: ast.Module,
+        definitions: Mapping[str, ast.FunctionDef],
+        chosen: Mapping[str, tuple[str, _HelperScan]],
+        heads: Mapping[str, list[_Position | None]],
+        passes: Mapping[str, list[str]],
+    ) -> list[ParsedReference]:
+        """Calls of a recordable helper with a module-level application (R-7): a top-level
+        statement of the module, after the application, the helper and every child it
+        registers are bound."""
+        applications = {
+            name: receiver
+            for name, receiver in self._receivers.items()
+            if receiver.kind in _APPLICATIONS
+        }
+        if not applications:
+            return []
+        found: list[ParsedReference] = []
+        for statement in tree.body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            call = _name_call(statement)
+            if call is not None and isinstance(call.func, ast.Name) and call.func.id in chosen:
+                name = call.func.id
+                parameter, scan = chosen[name]
+                app, refusal = self._passed_application(call, parameter, scan, applications)
+                if app is None and refusal is None:
+                    continue
+                if refusal is None and app is not None:
+                    at = (call.lineno, call.col_offset)
+                    if applications[app].line >= call.lineno:
+                        refusal = PY_HELPER_BEFORE_CONSTRUCTION
+                    elif definitions[name].lineno >= call.lineno or self._children_unbound(
+                        name, at, heads, passes
+                    ):
+                        refusal = PY_HELPER_BEFORE_BINDING
+                if app is None and len(applications) == 1:
+                    app = next(iter(applications))
+                kind = applications[app].kind if app is not None else ""
+                found.append(self._call_claim(call, name, app or "", kind, "module", refusal))
+                continue
+            for node in ast.walk(statement):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id in chosen
+                ):
+                    passed = sorted({n for n in _argument_names(node) if n in applications})
+                    if passed:
+                        found.append(
+                            self._call_claim(
+                                node,
+                                node.func.id,
+                                passed[0],
+                                applications[passed[0]].kind,
+                                "module",
+                                PY_HELPER_CONTROL_FLOW,
+                            )
+                        )
+        return found
+
+    @staticmethod
+    def _children_unbound(
+        helper: str,
+        at: _Position,
+        heads: Mapping[str, list[_Position | None]],
+        passes: Mapping[str, list[str]],
+    ) -> bool:
+        """Whether a child the helper -- or a helper it hands the application to -- registers is
+        bound at or after ``at`` in the module (a name the module imports later is no name yet)."""
+        seen = {helper}
+        queue = [helper]
+        for current in queue:
+            if any(position is not None and position >= at for position in heads.get(current, ())):
+                return True
+            for callee in passes.get(current, ()):
+                if callee not in seen:
+                    seen.add(callee)
+                    queue.append(callee)
+        return False
+
     def _unserve_sub_applications(self) -> None:
         """Nothing is served from a router included on a sub-application.
 
@@ -2732,6 +3273,8 @@ class PythonHttp:
             if any(owner in owners for _, owner in receiver.mounts):
                 receiver.usable = False
         self._mount_claims = [self._unserved(claim, owners) for claim in self._mount_claims]
+        # A helper called with a sub-application registers unreadably, as a mount on one is.
+        self._helper_claims = [self._unserved(claim, owners) for claim in self._helper_claims]
 
     @staticmethod
     def _unserved(claim: ParsedReference, owners: set[str]) -> ParsedReference:
@@ -3405,6 +3948,7 @@ class PythonHttp:
                 )
             )
         found.extend(self._mount_claims)
+        found.extend(self._helper_claims)
         for name, subclass in self.subclasses.items():
             if subclass.kind in _APPLICATIONS:
                 found.append(
