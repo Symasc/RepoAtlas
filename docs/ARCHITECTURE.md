@@ -2859,7 +2859,7 @@ through a helper is a mount of the caller's application, under every rule a fact
   `python-helper-rebound-or-alias` (a registration on an alias of the parameter), `python-helper-shadowed` (the helper's
   name bound in the calling function), `python-helper-before-construction`, `python-helper-before-binding` (the helper,
   or a child, bound after a module-level call), `python-helper-chain-too-deep`, `python-helper-child-unsupported`
-  (`users.views.bp`, a call, a subscript) and `python-helper-unresolved` (a callee that is not a same-module helper).
+  (`a.b.c.bp`, a call, a subscript) and `python-helper-unresolved` (a callee that is not a same-module helper).
   A refusal adds no mount; it is a route's `route_codes` only when its router is mounted nowhere else. A refusal can
   only be recorded where a claim exists: beside a call of a helper with something recordable, or in that helper's
   claim. A helper with nothing recordable, and a call of a function that is no helper, leave no trace.
@@ -2873,8 +2873,7 @@ through a helper is a mount of the caller's application, under every rule a fact
   Concrete cases: LA1 (factory), LA6 (factory with a module-level import) and LA7 (module scope). At run time such code
   raises `UnboundLocalError` (factory) or `NameError` (module scope), so the served route is a false positive. This is
   recorded technical debt, not fixed in R2c-1.
-- **Not modelled.** Imported helpers (R2c-1b), registrations on a child of a child (`users.views.bp`, R2c-2: two-level
-  children), and WSGI middleware or deployment-level path rewriting: an assignment to `app.wsgi_app`, or a dispatcher
+- **Not modelled.** Imported helpers (R2c-1b), and WSGI middleware or deployment-level path rewriting: an assignment to `app.wsgi_app`, or a dispatcher
   mounting the application under a path, does not change the routes this reads (the app's URL map is read, not the
   path a server forwards). For factories and module scope (not helpers, see the inherited limit above), a local import
   is read wherever it stands in the body, so a registration placed before the import that binds its child is read
@@ -2882,6 +2881,36 @@ through a helper is a mount of the caller's application, under every rule a fact
   module-wide, so a module-level application whose name is also a
   helper's parameter is no application (fixture P5x). Mutants H-M4 and H-M5 are equivalent only under this rule;
   re-run them if scope-aware binding counts (R2d) are ever adopted.
+
+### Two-level children (R2c-2)
+
+A registration's child that is `head.A.name` -- `users.views.bp` after `from pkg import users` -- where `head` is a name
+the module imports from a module (`from M import head`, bound once). It is recorded in a registration of a module, a
+factory or a helper as a mount claim of the usual shape plus three fields: `module` (`M`, relative dots as the import
+states them), `head_import` (`head`) and `through` (`A`); `name` is the router or blueprint. Only `register_blueprint`
+and `include_router` read it; a `mount` of an application keeps its one-level child. Parser version 30.
+
+The global pass (`repoatlas/graph/py_routes.py`, `_child_key`) serves it only when both hops are proven by the export
+tables of the packages (`list_export_tables`, passed to the planner by the linker):
+
+1. `M` resolves to a package `__init__`, and `head` is a submodule of it: the package's table is not conditional on
+   `head`, and `head` is either bound by `from . import head` (an `import` entry that names `head` and resolves to the
+   package itself) or not bound at all, with no star import and no module `__getattr__`, so the import system, not
+   the package, decides what `head` is.
+2. In that submodule's own package (`M.head` must itself be a package `__init__`), `A` is a submodule by the same rule
+   -- except that an unbound `A` is never accepted: the package must state `from . import A`.
+
+The child is then the file `M/head/A` and `name` its router. `__all__` is never read.
+
+- **Fail closed.** Without export tables (a caller that passes none) every two-level child is refused. A hop that is not
+  proven adds no mount, and the route stays `python-not-mounted`; no new diagnostic code exists.
+- **Under-approximations** (nothing is served): `from .views import bp`, `from .views import *` and `from . import
+  views as v` in a package; `import pkg.users` and `import pkg.users as users` heads; a hop that is no regular package
+  (a plain module, a namespace package); `__all__` ignored; a child more than two levels away.
+- **Residual unsoundness.** Writes to `sys.modules`, `setattr` or `globals()` on a package, import hooks and a changed
+  `__path__` can make the name mean something else at run time. They are not modelled.
+- **Inherited limit.** Factories and module scope still read a local import placed after the registration, so LA1, LA6
+  and LA7 apply to two-level children too.
 
 ### Refused HTTP requests: listed where the walk went, never followed
 

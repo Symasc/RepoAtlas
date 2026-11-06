@@ -470,7 +470,12 @@ class PythonParser:
     #    factory is a claim (``python-helper-call``), which the global pass expands into the
     #    application's mounts (R2c-1, repoatlas.parsers.http_python, repoatlas.graph.py_routes);
     #    helper-local imports are bound in statement order (LA3/LA5 fix).
-    version = f"29+{interpreter_tag()}"
+    # 30: a registration's child two attributes from a name the module imports from a package
+    #    (``users.views.bp`` after ``from pkg import users``) is a mount claim that also states
+    #    the head's import (``module``, ``head_import``) and the attribute between (``through``);
+    #    the global pass serves it only when the packages' export tables prove each step a
+    #    submodule (R2c-2, repoatlas.parsers.http_python, repoatlas.graph.py_routes).
+    version = f"30+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
