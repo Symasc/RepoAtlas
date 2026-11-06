@@ -48,10 +48,16 @@ import (each import bound once in the module's own scope). **An entry
 application** is ``const x = Fastify()`` at the top level of a module-level function ``G``
 that is no factory, proven where the file calls ``G`` unconditionally at its top level
 (``G();``, ``void G();``, ``await G();``, ``G().catch(...)``), or calls ``G().then()`` as the
-only statement inside ``if (require.main === module)`` with both globals unshadowed. Other
-conditionals do not prove an entry. Each is a
-:data:`~repoatlas.parsers.http_facts.FASTIFY_INSTANCE` claim, rooted at its own file; the
-claim names the factory (the global pass decides an imported one) or the refusal code that
+only statement of a braced ``if (require.main === module) { ... }`` with both globals
+unshadowed. That form
+is exact: ``===`` with ``require.main`` on the left and ``module`` on the right, a bare
+module-level ``G`` called with no arguments, and ``.then()`` with no arguments and no ``await``,
+parentheses, optional chaining or ``.catch(...)`` around it. A guard with an ``else`` still
+proves ``G``, which runs whenever the file is the main module. A ``.mjs`` or ``.mts`` file is an
+ES module and refuses the guard; a ``.js`` file made one by ``"type": "module"`` in its
+``package.json`` is not told apart (a known gap). Other conditionals do not prove an entry.
+Each is a :data:`~repoatlas.parsers.http_facts.FASTIFY_INSTANCE` claim, rooted at its own file;
+the claim names the factory (the global pass decides an imported one) or the refusal code that
 says why this parser would not trust it. ``const y = x`` in the same scope, after ``x``,
 makes ``y`` a receiver as well, for at most :data:`_MAX_ALIAS_HOPS` hops. A claim is recorded
 only for a receiver (or an alias of it) that the file uses: as the receiver of a route verb,
@@ -185,6 +191,9 @@ _DECLARATIONS = frozenset({"function_declaration", "generator_function_declarati
 _FUNCTION_VALUES = frozenset({"arrow_function", "function_expression", "function"})
 _TRANSPARENT = frozenset({"parenthesized_expression", "await_expression", "as_expression"})
 
+#: File suffixes that are always ES modules, where ``require`` and ``module`` do not exist.
+ES_MODULE_SUFFIXES = frozenset({".mjs", ".mts"})
+
 #: Where a name is bound, when no single function binds it.
 _MODULE = "module"
 _AMBIGUOUS = "ambiguous"
@@ -241,6 +250,11 @@ def _arguments(node: Node) -> list[Node] | None:
     if arguments is None or arguments.type != "arguments":
         return None
     return [child for child in arguments.children if child.is_named and child.type != "comment"]
+
+
+def _optional(node: Node) -> bool:
+    """Whether a member or call expression chains optionally (``?.``)."""
+    return any(child.type in {"optional_chain", "?."} for child in node.children)
 
 
 def _scanned(node: Node) -> list[Node]:
@@ -346,8 +360,12 @@ def _own_returns(body: Node) -> list[Node]:
 class FastifyDeclarations:
     """What one file proves about Fastify, and the facts and claims that follow."""
 
-    def __init__(self, source: bytes, root: Node, counts: Counter[str]) -> None:
+    def __init__(
+        self, source: bytes, root: Node, counts: Counter[str], *, es_module: bool = False
+    ) -> None:
         self._source = source
+        #: The file is an ES module by its suffix: it has no ``require`` or ``module``.
+        self._es_module = es_module
         self._program = root
         self._counts = counts
         self._factories: set[str] = set()
@@ -1022,42 +1040,20 @@ class FastifyDeclarations:
 
     def _commonjs_entry_call(self, statement: Node) -> tuple[str, int] | None:
         """The one guarded entry form this reader proves: ``if (require.main === module) {
-        G().then()
-        }``. Require both names to be unshadowed module globals and the body to contain only
-        that direct call."""
+        G().then(); }``. Both names must be unshadowed module globals in a file that is no ES
+        module, and the body must hold only that call: no ``await``, parentheses, optional
+        chaining or arguments, and ``G`` a bare identifier. An ``else`` branch is allowed: ``G``
+        runs whenever the file is the main module. Every node is checked by its own type; none
+        goes through :func:`_operand`, which would read through ``await`` and parentheses."""
+        if self._es_module:
+            return None
         condition = statement.child_by_field_name("condition")
         consequence = statement.child_by_field_name("consequence")
         if condition is None or consequence is None or consequence.type != "statement_block":
             return None
+        if not self._is_main_guard(condition):
+            return None
         if self._module_bindings()["require"] or self._module_bindings()["module"]:
-            return None
-        condition = _operand(condition)
-        if condition.type != "binary_expression":
-            return None
-        operator = condition.child_by_field_name("operator")
-        left = condition.child_by_field_name("left")
-        right = condition.child_by_field_name("right")
-        if (
-            operator is None
-            or node_text(self._source, operator) != "==="
-            or left is None
-            or right is None
-            or _operand(right).type != "identifier"
-            or node_text(self._source, _operand(right)) != "module"
-        ):
-            return None
-        left = _operand(left)
-        if left.type != "member_expression":
-            return None
-        owner = left.child_by_field_name("object")
-        prop = left.child_by_field_name("property")
-        if (
-            owner is None
-            or prop is None
-            or _operand(owner).type != "identifier"
-            or node_text(self._source, _operand(owner)) != "require"
-            or node_text(self._source, prop) != "main"
-        ):
             return None
         statements = [child for child in consequence.named_children if child.type != "comment"]
         if len(statements) != 1 or statements[0].type != "expression_statement":
@@ -1065,21 +1061,63 @@ class FastifyDeclarations:
         expressions = [child for child in statements[0].named_children if child.type != "comment"]
         if len(expressions) != 1:
             return None
-        call = _operand(expressions[0])
-        if call.type != "call_expression":
+        call = expressions[0]
+        if not self._plain_call(call):
             return None
         callee = call.child_by_field_name("function")
-        arguments = _arguments(call)
+        if callee is None or callee.type != "member_expression" or _optional(callee):
+            return None
+        prop = callee.child_by_field_name("property")
+        main_call = callee.child_by_field_name("object")
         if (
-            callee is None
-            or callee.type != "member_expression"
-            or arguments != []
-            or node_text(self._source, callee.child_by_field_name("property")) != "then"
+            prop is None
+            or node_text(self._source, prop) != "then"
+            or main_call is None
+            or not self._plain_call(main_call)
         ):
             return None
-        main_call = _operand(callee.child_by_field_name("object"))
-        name = self._called_name(main_call)
-        return (name, main_call.start_byte) if name is not None else None
+        started = main_call.child_by_field_name("function")
+        if started is None or started.type != "identifier":
+            return None
+        return node_text(self._source, started), main_call.start_byte
+
+    def _is_main_guard(self, condition: Node) -> bool:
+        """Whether an ``if`` condition is ``require.main === module``, parentheses of the
+        condition itself aside."""
+        while condition.type == "parenthesized_expression":
+            inner = [child for child in condition.named_children if child.type != "comment"]
+            if len(inner) != 1:
+                return False
+            condition = inner[0]
+        if condition.type != "binary_expression":
+            return False
+        operator = condition.child_by_field_name("operator")
+        left = condition.child_by_field_name("left")
+        right = condition.child_by_field_name("right")
+        if operator is None or left is None or right is None:
+            return False
+        if node_text(self._source, operator) != "===":
+            return False
+        if right.type != "identifier" or node_text(self._source, right) != "module":
+            return False
+        if left.type != "member_expression" or _optional(left):
+            return False
+        owner = left.child_by_field_name("object")
+        prop = left.child_by_field_name("property")
+        return (
+            owner is not None
+            and prop is not None
+            and owner.type == "identifier"
+            and node_text(self._source, owner) == "require"
+            and node_text(self._source, prop) == "main"
+        )
+
+    @staticmethod
+    def _plain_call(node: Node) -> bool:
+        """A ``call_expression`` with no arguments and no optional chaining."""
+        if node.type != "call_expression" or _optional(node):
+            return False
+        return _arguments(node) == []
 
     def _called_name(self, node: Node) -> str | None:
         """``G`` of ``G(...)``, or of ``G(...).catch(...)``."""

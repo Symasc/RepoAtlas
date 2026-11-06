@@ -400,6 +400,9 @@ START = "async function start() {\n  const app = Fastify();\n  await app.listen(
         "await start().catch(console.error);",
         "void start().catch(onError);",
         "if (require.main === module) { start().then(); }",
+        "if ((require.main === module)) { start().then(); }",
+        # G runs whenever the file is the main module, whatever the else branch does
+        "if (require.main === module) { start().then(); } else { module.exports = start; }",
     ],
 )
 def test_an_entry_function_the_top_level_calls_unconditionally_proves_its_application(
@@ -424,12 +427,29 @@ def test_an_entry_function_the_top_level_calls_unconditionally_proves_its_applic
         "",
         "if (process.env.RUN) { start(); }",
         "if (require.main === module) start();",
+        "if (require.main === module) start().then();",
+        "if (require?.main === module) { start().then(); }",
         "if (require.main === module) { start().then(ready); }",
         "if (module === require.main) { start().then(); }",
         "if (require.main == module) { start().then(); }",
         "if (require.main === module) { start().then(); report(); }",
         "const require = {}; if (require.main === module) { start().then(); }",
         "const module = {}; if (require.main === module) { start().then(); }",
+        "function require() {} if (require.main === module) { start().then(); }",
+        "let module = {}; if (require.main === module) { start().then(); }",
+        "if (require.main === exports) { start().then(); }",
+        "if (process.main === module) { start().then(); }",
+        "if (require.cache === module) { start().then(); }",
+        "if (require.main === module) { start().finally(); }",
+        "if (require.main === module) { start().catch(h).then(); }",
+        "if (require.main === module) { start(cfg).then(); }",
+        "if (require.main === module) { (start()).then(); }",
+        "if (require.main === module) { await start().then(); }",
+        "if (require.main === module) { start()?.then(); }",
+        "if (require.main === module) { start?.().then(); }",
+        "if (require.main === module) { app.start().then(); }",
+        "if (require.main === module) { (start().then()); }",
+        "if (require.main !== module) { start().then(); }",
         "process.env.RUN && start();",
         "setTimeout(() => start(), 0);",
         "process.on('ready', start);",
@@ -445,6 +465,26 @@ def test_an_entry_function_that_is_not_called_unconditionally_proves_nothing(cal
     assert claim.meta["status"] == REFUSED
     assert claim.meta["refusal"] == ENTRY_NOT_CALLED
     assert claim.meta["aliases"] == "[]"
+
+
+@pytest.mark.parametrize(
+    ("name", "status"),
+    [
+        ("a.js", PROVEN),
+        ("a.ts", PROVEN),
+        ("a.cjs", PROVEN),
+        ("a.cts", PROVEN),
+        ("a.mjs", REFUSED),
+        ("a.mts", REFUSED),
+    ],
+)
+def test_the_commonjs_guard_proves_nothing_in_an_es_module_file(name: str, status: str) -> None:
+    source = IMPORT + START + "if (require.main === module) { start().then(); }\n"
+    parsed = TypeScriptParser().parse(Path(name), source)
+    [claim] = [r for r in parsed.references if r.meta.get(PENDING_FACT) == FASTIFY_INSTANCE]
+    assert claim.meta["status"] == status
+    if status == REFUSED:
+        assert claim.meta["refusal"] == ENTRY_NOT_CALLED
 
 
 def test_an_entry_function_is_proven_by_any_one_unconditional_call() -> None:
