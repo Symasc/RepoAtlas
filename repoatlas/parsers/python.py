@@ -468,7 +468,8 @@ class PythonParser:
     #    application parameter, or hands that parameter to another such function, is a claim
     #    (``python-helper``); a call of one with a proven application of the module or of a
     #    factory is a claim (``python-helper-call``), which the global pass expands into the
-    #    application's mounts (R2c-1, repoatlas.parsers.http_python, repoatlas.graph.py_routes).
+    #    application's mounts (R2c-1, repoatlas.parsers.http_python, repoatlas.graph.py_routes);
+    #    helper-local imports are bound in statement order (LA3/LA5 fix).
     version = f"29+{interpreter_tag()}"
     language = "Python"
 
