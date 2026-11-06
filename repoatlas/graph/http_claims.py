@@ -94,7 +94,7 @@ from pathlib import PurePosixPath
 from repoatlas.graph.deploy_identity import ServedRoute, plan_deployment_exposures
 from repoatlas.graph.keys import global_key
 from repoatlas.graph.py_modules import PythonModules
-from repoatlas.graph.py_routes import Place, plan_python_routes
+from repoatlas.graph.py_routes import ExportTables, Place, plan_python_routes
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.graph.ts_injection import plan_injected_requests
 from repoatlas.graph.ts_oas3 import plan_spec_routed
@@ -425,6 +425,7 @@ def plan_http_claims(
     served_routes: Mapping[int, Iterable[str]] | None = None,
     module_facts: Sequence[UnresolvedRefRecord] = (),
     route_servers: Sequence[RouteServerRow] = (),
+    export_tables: ExportTables | None = None,
 ) -> HttpClaimPlan:
     """Decide every pending HTTP fact at once. Writes nothing.
 
@@ -434,7 +435,9 @@ def plan_http_claims(
     pass's previous output — which template calls are matched against together
     with the routes this plan proves. ``module_facts`` are the module-resolution
     facts Python routes mounted from another module are resolved with
-    (:mod:`repoatlas.graph.py_routes`).
+    (:mod:`repoatlas.graph.py_routes`). ``export_tables`` gives a Python package's
+    export table, which a two-level mounted child (R2c-2) is proven by; without it
+    such a child is refused.
     """
     by_id = {row.file_id: row for row in files}
     resolver = _Resolver(index, by_id)
@@ -595,7 +598,13 @@ def plan_http_claims(
                 )
 
     # -- Python routes mounted from another module ----------------------------------
-    python = plan_python_routes(grouped, lambda: PythonModules(index, module_facts), index, by_id)
+    python = plan_python_routes(
+        grouped,
+        lambda: PythonModules(index, module_facts),
+        index,
+        by_id,
+        tables=export_tables,
+    )
     for route in python.routes:
         _keep(
             pending,

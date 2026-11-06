@@ -22,7 +22,9 @@ side as a claim (:mod:`repoatlas.parsers.http_python`):
   :data:`MAX_HELPER_VISITS` helpers. A registration is read as a factory's is (a mount claim
   whose owner is the call's application), so the rules below apply to it unchanged: an unreadable
   one blocks its child. A refused call, or a helper beyond the depth, adds no mount; the code of
-  its refusal is a route's ``route_codes`` when the route's router is mounted nowhere else;
+  its refusal is a route's ``route_codes`` when the route's router is mounted nowhere else.
+  A two-level child (``through``, R2c-2) is a mount only when both hops are proven by export
+  tables; otherwise it adds no mount;
 * ``python-class`` -- a module-level subclass of FastAPI's or Flask's application, offered
   to the modules that build an application from it;
 * ``python-class-route`` -- a route on an application a module builds from a class it
@@ -152,6 +154,9 @@ _FAMILY = {
 _PACKAGE_FILES = ("__init__.py", "__init__.pyi")
 
 Key = tuple[int, str]
+#: A file's export table by file id (``None``: none stored or unreadable), for the two-level
+#: children (R2c-2) whose hops a package's own names must prove.
+ExportTables = Callable[[int], Mapping[str, object] | None]
 #: ``(file id, first line, last line, role)``: a claim that caused a refusal, for a reader to
 #: place it (R1 diagnostics). Never read by a decision.
 Place = tuple[int, int | None, int | None, str]
@@ -350,6 +355,9 @@ class _Imports:
             return target.file
         return self._own_package(origin, module)
 
+    def submodule(self, package: FileRow, name: str) -> FileRow | None:
+        return self._modules.submodule(package, name)
+
     def _script_directory(self, origin: FileRow) -> str | None:
         """The nearest directory at or above ``origin`` that holds a script."""
         scripts = self._layout(origin.repo_id).scripts
@@ -401,8 +409,13 @@ def plan_python_routes(
     modules: Callable[[], PythonModules],
     index: ResolutionIndex,
     by_id: Mapping[int, FileRow],
+    *,
+    tables: ExportTables | None = None,
 ) -> PythonRoutePlan:
-    """Serve every Python route claim a proven mount chain reaches. Writes nothing."""
+    """Serve every Python route claim a proven mount chain reaches. Writes nothing.
+
+    ``tables`` gives a file's export table, for the two-level children (R2c-2); without it
+    every two-level child is refused."""
     plan = PythonRoutePlan()
     claims = grouped.get(PYTHON_ROUTE, ())
     class_claims = grouped.get(PYTHON_CLASS_ROUTE, ())
@@ -449,7 +462,7 @@ def plan_python_routes(
         origin = by_id.get(file_id)
         if origin is None:
             return
-        child = _key(imports, origin, meta.get("module"), name)
+        child = _child_key(imports, tables, origin, meta, name)
         if meta.get("call") == "mount" and (child is None or child not in receivers):
             # Identity not proven: any application of that name in this repository may be it.
             blocked.update(applications.get((origin.repo_id, name), ()))
@@ -485,7 +498,7 @@ def plan_python_routes(
         add_mount(_meta(claim), claim.file_id, claim.target_key, claim_place(claim, "mount"))
     # Each call of a helper, before any chain is built: its registrations are mounts of the
     # application the call names. A refused one adds none; its children keep the code.
-    refused = _expand_helpers(grouped, imports, by_id, add_mount)
+    refused = _expand_helpers(grouped, imports, by_id, add_mount, tables)
     # An include or registration on a sub-application is unreadable, whatever module mounts it.
     # Decided against the sub-applications as every mount claim leaves them, so the claims'
     # order does not matter; the children it adds are routers, never applications.
@@ -622,6 +635,7 @@ def _expand_helpers(
     imports: _Imports,
     by_id: Mapping[int, FileRow],
     add_mount: Callable[[Mapping[str, str], int, str, Place], None],
+    tables: ExportTables | None,
 ) -> dict[Key, str]:
     """Hand every accepted helper call's registrations to ``add_mount``, as mounts of the
     application the call names, in the module the call stands in.
@@ -653,11 +667,10 @@ def _expand_helpers(
             if code is None:
                 for found in helper.refusals:
                     name = found.get("name")
-                    module = found.get("module")
                     if not (isinstance(name, str) and name):
                         continue
-                    where = module if isinstance(module, str) else None
-                    child = _key(imports, origin, where, name)
+                    fields = {str(k): v for k, v in found.items() if isinstance(v, str)}
+                    child = _child_key(imports, tables, origin, fields, name)
                     if child is not None:
                         refused.setdefault(child, str(found.get("code", "")))
             for entry in helper.mounts:
@@ -666,7 +679,7 @@ def _expand_helpers(
                 if not name:
                     continue
                 if code is not None:
-                    child = _key(imports, origin, fields.get("module"), name)
+                    child = _child_key(imports, tables, origin, fields, name)
                     if child is not None:
                         refused.setdefault(child, code)
                     continue
@@ -727,6 +740,67 @@ def _key(imports: _Imports, origin: FileRow, module: str | None, name: str) -> K
         return origin.file_id, name
     target = imports.resolve(origin, module)
     return (target.file_id, name) if target is not None else None
+
+
+def _child_key(
+    imports: _Imports,
+    tables: ExportTables | None,
+    origin: FileRow,
+    meta: Mapping[str, str],
+    name: str,
+) -> Key | None:
+    """The child a mount claim names. A two-level child (``through``: ``head.through.name``
+    after ``from module import head``) is the file two submodule hops down, only when each
+    hop is proven by the export table of the package it is taken from (R2c-2); else none."""
+    through = meta.get("through")
+    if through is None:
+        return _key(imports, origin, meta.get("module"), name)
+    module, head = meta.get("module"), meta.get("head_import")
+    if tables is None or not module or not head or not through:
+        return None
+    package = imports.resolve(origin, module)
+    first = _submodule_hop(imports, tables, package, head, unbound_ok=True) if package else None
+    second = _submodule_hop(imports, tables, first, through, unbound_ok=False) if first else None
+    return (second.file_id, name) if second is not None else None
+
+
+def _submodule_hop(
+    imports: _Imports,
+    tables: ExportTables,
+    package: FileRow,
+    attribute: str,
+    *,
+    unbound_ok: bool,
+) -> FileRow | None:
+    """The submodule ``attribute`` of ``package``, when the package's export table leaves its
+    name to the import system: never conditional; unbound (first hop only, and only without a
+    star import or a module ``__getattr__``) or bound by ``from . import attribute``."""
+    table = tables(package.file_id)
+    if not isinstance(table, Mapping):
+        return None
+    names = table.get("names")
+    if not isinstance(names, Mapping):
+        return None
+    conditional = table.get("conditional", [])
+    if not isinstance(conditional, list) or attribute in conditional:
+        return None
+    entry = names.get(attribute)
+    if entry is None:
+        if not unbound_ok or table.get("star") or table.get("getattr"):
+            return None
+    else:
+        if not (
+            isinstance(entry, list)
+            and len(entry) == 3
+            and entry[0] == "import"
+            and isinstance(entry[1], str)
+            and entry[2] == attribute
+        ):
+            return None
+        bound_from = imports.resolve(package, entry[1])
+        if bound_from is None or bound_from.file_id != package.file_id:
+            return None
+    return imports.submodule(package, attribute)
 
 
 def _relative(claim: UnresolvedRefRecord) -> str | None:
