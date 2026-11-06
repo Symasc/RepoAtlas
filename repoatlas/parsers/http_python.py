@@ -1495,6 +1495,30 @@ def _module_ref(node: ast.expr | None, imported: dict[str, _Imported]) -> tuple[
     return None
 
 
+def _child_ref(node: ast.expr | None, imported: dict[str, _Imported]) -> dict[str, str] | None:
+    """The child a registration names: ``_module_ref``'s, or (R2c-2) ``head.A.name`` where
+    ``head`` is a name imported from a module -- ``users.views.bp`` after ``from pkg import
+    users`` -- stating the module, the head's import and the attribute between; the global
+    pass serves it only when the packages' export tables prove both steps submodules."""
+    ref = _module_ref(node, imported)
+    if ref is not None:
+        return {"module": ref[0], "name": ref[1]}
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Attribute)
+        and isinstance(node.value.value, ast.Name)
+    ):
+        found = imported.get(node.value.value.id)
+        if found is not None and found.attribute is not None:
+            return {
+                "module": found.module,
+                "name": node.attr,
+                "through": node.value.attr,
+                "head_import": found.attribute,
+            }
+    return None
+
+
 def _expression_call(statement: ast.stmt) -> ast.Call | None:
     """``name.method(...)`` as a statement of its own."""
     if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)):
@@ -2613,9 +2637,9 @@ class PythonHttp:
         argument = _argument(call, 0, parameter)
         child = self._receivers.get(argument.id) if isinstance(argument, ast.Name) else None
         if child is None:
-            ref = _module_ref(argument, self._imported)
-            if ref is not None:
-                self._claim_mount(owner_name, owner, call, {"module": ref[0], "name": ref[1]})
+            found = _child_ref(argument, self._imported)
+            if found is not None:
+                self._claim_mount(owner_name, owner, call, found)
             return
         if child.kind != child_kind:
             return
@@ -2776,6 +2800,11 @@ class PythonHttp:
                     and not counts[argument.id]
                 ):
                     child = {"name": argument.id}
+                elif call.func.attr in _MOUNT_CALLS:
+                    found = _child_ref(argument, imported)
+                    if found is None:
+                        continue
+                    child = found
                 else:
                     ref = _module_ref(argument, imported)
                     if ref is None:
@@ -2966,22 +2995,25 @@ class PythonHttp:
     def _helper_child(
         self, argument: ast.expr | None, counts: Counter[str], imported: dict[str, _Imported]
     ) -> tuple[dict[str, str], _Position | None] | str:
-        """The child a helper registers -- this module's own receiver, or one name or one
-        attribute away on an import -- and where the module binds it (``None``: the helper binds
-        it); else the code of why it is not read. A child that is the helper's own parameter or
-        local is an argument (the caller decides it); anything else is unsupported."""
+        """The child a helper registers -- this module's own receiver, or one name, one
+        attribute or two attributes (R2c-2) away on an import -- and where the module binds it
+        (``None``: the helper binds it); else the code of why it is not read. A child that is the
+        helper's own parameter or local is an argument (the caller decides it); anything else is
+        unsupported."""
         if (
             isinstance(argument, ast.Name)
             and argument.id in self._receivers
             and not counts[argument.id]
         ):
             return {"name": argument.id}, (self._receivers[argument.id].line, 0)
-        ref = _module_ref(argument, imported)
-        if ref is not None:
-            node = argument.value if isinstance(argument, ast.Attribute) else argument
+        child = _child_ref(argument, imported)
+        if child is not None:
+            node = argument
+            while isinstance(node, ast.Attribute):
+                node = node.value
             head = node.id if isinstance(node, ast.Name) else ""
             at = self._positions.get(head) if head in self._imported and not counts[head] else None
-            return {"module": ref[0], "name": ref[1]}, at
+            return child, at
         if isinstance(argument, ast.Name) and counts[argument.id]:
             return PY_HELPER_ARGUMENT
         return PY_HELPER_CHILD_UNSUPPORTED

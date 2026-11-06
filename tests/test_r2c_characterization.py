@@ -6,8 +6,13 @@ test read the same observations:
 * the BASE characterization: the served-route edges and the plan's code routes equal the measured
   base in ``tests/data/r2c_base_golden.json`` (workspace-dependent row ids left out, the number of
   roots kept);
-* pins that hold now and after R2c-1 (R2c-2 shapes stay unserved; the constant-path shapes);
-* the R2c-1 predictions, now plain passing tests: the routes G1 serves for the helper shapes.
+* pins that hold now and after R2c-1 (the R2c-2 shapes whose proof fails stay unserved; the
+  constant-path shapes);
+* the R2c-1 predictions, now plain passing tests: the routes G1 serves for the helper shapes;
+* the R2c-2 deltas: the two-level child ``users.views.bp`` is served when both hops are proven by
+  export tables (p2b, p4b: ``R2C2_SUPERSEDED``) and records one more mount claim
+  (``R2C2_ADDED_CLAIMS``); the shapes whose proof fails (p2, a18, a19, a20) stay unserved. The
+  frozen goldens are not edited: every R2c-2 change is an explicit constant here.
 """
 
 from __future__ import annotations
@@ -65,10 +70,61 @@ R2C1_SUPERSEDED: dict[str, list[str]] = {
     "a17_wsgi_wrap": ["GET /one"],
 }
 
+#: Shapes whose BASE observation R2c-2 changes on purpose: the two-level child ``users.views.bp``
+#: is served where both hops are proven by export tables. Same format as ``R2C1_SUPERSEDED``; for
+#: p4b it is the whole addition to the base (the R2c-1 route ``GET /one`` and the two-level one).
+R2C2_SUPERSEDED: dict[str, list[str]] = {
+    "p2b_two_level_bound": ["GET /u/two"],
+    "p4b_helper_reads_bound": ["GET /one", "GET /u/two"],
+}
+
+#: Every superseded shape; R2c-2's entry for p4b replaces R2c-1's.
+SUPERSEDED: dict[str, list[str]] = {**R2C1_SUPERSEDED, **R2C2_SUPERSEDED}
+
 #: The ``lines`` of the global pass's edge for each superseded route (as the prediction tests pin).
 SUPERSEDED_EDGE_LINES: dict[str, list[int | None]] = {
     "GET /one": [6, 6],
     "GET /m/one": [None, None],
+    "GET /u/two": [None, None],
+}
+
+#: The file of the global pass's edge for a superseded route, when it is not ``pkg/views.py``.
+SUPERSEDED_EDGE_FILES: dict[str, str] = {"GET /u/two": "pkg/users/views.py"}
+
+#: The one ``python-mount`` claim R2c-2 adds to each of these shapes: the two-level registration
+#: ``app.register_blueprint(users.views.bp)`` of ``create_app`` (line 8), recorded whether or not
+#: its proof holds. Rows as ``CLAIMS_SQL`` dumps them; the meta compares as parsed JSON.
+R2C2_MOUNT_META = {
+    "call": "register_blueprint",
+    "head_import": "users",
+    "module": "pkg",
+    "name": "bp",
+    "owner": "create_app.app",
+    "owner_kind": "flask-app",
+    "parser": "python-ast",
+    "pending_fact": "python-mount",
+    "prefix": "null",
+    "readable": "true",
+    "through": "views",
+}
+R2C2_ADDED_CLAIMS: dict[str, list[list[str]]] = {
+    name: [
+        [
+            "pkg/app.py",
+            "8",
+            "8",
+            "REFERENCES",
+            "symbol",
+            "bp",
+            json.dumps(R2C2_MOUNT_META, sort_keys=True),
+        ]
+    ]
+    for name in (
+        "p2_two_level",
+        "p2b_two_level_bound",
+        "a18_init_rebound",
+        "a19_init_from_views_only",
+    )
 }
 
 EDGES_PATH = Path(__file__).parent / "data" / "r2c_base_edges.json"
@@ -206,6 +262,16 @@ def stored_claims(base: Path, name: str) -> list[list[str]]:
     return [[str(x) for x in row] for row in rows if not is_helper_claim(row[6])]
 
 
+def _same_claim(row: list[str], expected: list[str]) -> bool:
+    """Whether a stored claim row is ``expected``: the columns equal, the meta as parsed JSON."""
+    if row[:6] != expected[:6]:
+        return False
+    try:
+        return json.loads(row[6]) == json.loads(expected[6])
+    except ValueError:
+        return False
+
+
 def helper_claims(base: Path, name: str) -> list[tuple[str, str, dict]]:
     """``(file, pending_fact, meta)`` of each helper claim of a shape, read from the live index
     (the shape need not be in the base golden)."""
@@ -256,9 +322,9 @@ def guard_edges(base: Path, name: str) -> list[list[str]]:
     return [[str(x) for x in row] for row in rows]
 
 
-def global_edge(route: str, lines: list[int | None]) -> dict:
+def global_edge(route: str, lines: list[int | None], file: str = "pkg/views.py") -> dict:
     """The SERVES_HTTP_ROUTE edge the global pass adds for a helper-registered route."""
-    return {"parser": "linker:global", "file": "pkg/views.py", "route": route, "lines": lines}
+    return {"parser": "linker:global", "file": file, "route": route, "lines": lines}
 
 
 SERVES_TYPE = "SERVES_HTTP_ROUTE"
@@ -301,20 +367,20 @@ def test_golden_covers_every_shape() -> None:
 
 @pytest.mark.parametrize("name", sorted(GOLDEN))
 def test_base_characterization(observe: Callable[[str], Observed], name: str) -> None:
-    if name in R2C1_SUPERSEDED:
-        pytest.skip("superseded by R2c-1: checked by the predicted-addition test")
+    if name in SUPERSEDED:
+        pytest.skip("superseded by R2c-1 or R2c-2: checked by the predicted-addition test")
     obs = observe(name)
     assert sorted(obs.serves, key=_key) == golden_edges(name)
     rows = [{k: row[k] for k in (*PLAN_KEYS, "roots")} for row in obs.plan]
     assert sorted(rows, key=_key) == golden_plan(name)
 
 
-@pytest.mark.skipif(not R2C1_SUPERSEDED, reason="no R2c-1 superseded entries")
-@pytest.mark.parametrize("name", sorted(R2C1_SUPERSEDED))
+@pytest.mark.skipif(not SUPERSEDED, reason="no superseded entries")
+@pytest.mark.parametrize("name", sorted(SUPERSEDED))
 def test_superseded_shapes_change_only_by_the_predicted_addition(
     observe: Callable[[str], Observed], name: str
 ) -> None:
-    added = R2C1_SUPERSEDED[name]
+    added = SUPERSEDED[name]
     obs = observe(name)
     base_routes = [s["route"] for s in GOLDEN[name]["serves"]]
     assert served(obs) == sorted(base_routes + added)
@@ -329,7 +395,14 @@ def test_claims_golden_covers_every_shape() -> None:
 
 @pytest.mark.parametrize("name", sorted(CLAIMS))
 def test_existing_claims_are_unchanged_by_the_helper_roles(tmp_path: Path, name: str) -> None:
-    assert stored_claims(tmp_path, name) == CLAIMS[name]
+    # The helper claims are left out; R2c-2 adds exactly the rows of R2C2_ADDED_CLAIMS, each once,
+    # and every other stored row equals the golden's.
+    remaining = stored_claims(tmp_path, name)
+    for added in R2C2_ADDED_CLAIMS.get(name, []):
+        found = [row for row in remaining if _same_claim(row, added)]
+        assert len(found) == 1, f"{name}: {len(found)} rows equal the added claim {added}"
+        remaining.remove(found[0])
+    assert remaining == CLAIMS[name]
 
 
 def test_edges_golden_covers_every_shape() -> None:
@@ -339,11 +412,11 @@ def test_edges_golden_covers_every_shape() -> None:
 
 # Every edge of every type is compared and none is excluded: helper facts are claims, not edges,
 # so an edge of a type or target R2c-1 adds fails here. After G1 the only allowed additions are the
-# R2C1_SUPERSEDED SERVES_HTTP_ROUTE edges (parser ``linker:global``), compared order-insensitively.
+# SUPERSEDED SERVES_HTTP_ROUTE edges (parser ``linker:global``), compared order-insensitively.
 @pytest.mark.parametrize("name", sorted(EDGES))
 def test_all_edges_are_unchanged_by_the_helper_roles(tmp_path: Path, name: str) -> None:
     stored = stored_edges(tmp_path, name)
-    if name not in R2C1_SUPERSEDED:
+    if name not in SUPERSEDED:
         assert stored == EDGES[name]
         return
     # A superseded shape: every edge that is not a SERVES_HTTP_ROUTE edge is exact; the
@@ -352,8 +425,9 @@ def test_all_edges_are_unchanged_by_the_helper_roles(tmp_path: Path, name: str) 
         r for r in EDGES[name] if r[0] != SERVES_TYPE
     ]
     expected = [_serves_dict(r) for r in EDGES[name] if r[0] == SERVES_TYPE]
-    for route in R2C1_SUPERSEDED[name]:
-        expected.append(global_edge(route, SUPERSEDED_EDGE_LINES[route]))
+    for route in SUPERSEDED[name]:
+        file = SUPERSEDED_EDGE_FILES.get(route, "pkg/views.py")
+        expected.append(global_edge(route, SUPERSEDED_EDGE_LINES[route], file))
     found = [_serves_dict(r) for r in stored if r[0] == SERVES_TYPE]
     assert sorted(found, key=_route_file) == sorted(expected, key=_route_file)
 
@@ -404,7 +478,6 @@ def test_a21b_two_level_constant_path_is_refused_entirely(
     "name",
     [
         "p2_two_level",
-        "p2b_two_level_bound",
         "a18_init_rebound",
         "a19_init_from_views_only",
         "a20_three_levels",
@@ -416,7 +489,7 @@ def test_r2c2_shape_stays_unserved(observe: Callable[[str], Observed], name: str
     assert obs.plan == ()
 
 
-@pytest.mark.parametrize("name", ["p4_helper_reads", "p4b_helper_reads_bound"])
+@pytest.mark.parametrize("name", ["p4_helper_reads"])
 def test_r2c2_two_level_route_stays_unserved(observe: Callable[[str], Observed], name: str) -> None:
     obs = observe(name)
     assert "GET /u/two" not in served(obs)
@@ -531,12 +604,31 @@ def test_a17_wsgi_wrap_serves_one(observe: Callable[[str], Observed]) -> None:
 # -- R2c-1 G1: plain tests (not xfail) --------------------------------------------------------
 
 
-def test_p4b_helper_reads_bound_serves_one(observe: Callable[[str], Observed]) -> None:
+def test_p4b_helper_reads_bound_serves_one_and_the_two_level_route(
+    observe: Callable[[str], Observed],
+) -> None:
     obs = observe("p4b_helper_reads_bound")
-    assert served(obs) == ["GET /one"]
-    assert obs.serves == (global_edge("GET /one", [6, 6]),)
+    assert served(obs) == ["GET /one", "GET /u/two"]
+    assert obs.serves == (
+        global_edge("GET /one", [6, 6]),
+        global_edge("GET /u/two", [None, None], "pkg/users/views.py"),
+    )
     assert provenance(obs, "GET /one") == (6, 6)
+    assert provenance(obs, "GET /u/two") == (None, 6)
     assert root_paths(obs, "GET /one") == ["pkg/app.py"]
+    assert root_paths(obs, "GET /u/two") == ["pkg/app.py"]
+
+
+# -- R2c-2: the two-level child, served where both hops are proven ----------------------------
+
+
+def test_p2b_two_level_bound_serves_the_two_level_route(
+    observe: Callable[[str], Observed],
+) -> None:
+    obs = observe("p2b_two_level_bound")
+    assert obs.serves == (global_edge("GET /u/two", [None, None], "pkg/users/views.py"),)
+    assert provenance(obs, "GET /u/two") == (None, 6)
+    assert root_paths(obs, "GET /u/two") == ["pkg/app.py"]
 
 
 def test_a_helper_claim_is_recorded_only_when_it_has_something_to_record(
@@ -552,16 +644,36 @@ def test_a_helper_claim_is_recorded_only_when_it_has_something_to_record(
     ]
     assert len(p3) == 2
 
-    # P4: the helper records the one-level child only; the two-level one is not a mount.
+    # P4 (R2c-2): the helper records the one-level child and the two-level one, which states the
+    # head's import (module, head_import) and the attribute between (through); nothing is refused.
     p4 = helper_claims(tmp_path, "p4_helper_reads")
     (helper,) = [meta for _, fact, meta in p4 if fact == HELPER_ROLE]
     mounts = json.loads(helper["mounts"])
-    assert len(mounts) == 1
+    assert len(mounts) == 2
     assert (mounts[0]["module"], mounts[0]["name"]) == ("pkg.views", "bp")
-    assert "users.views" not in json.dumps(helper)
+    assert mounts[1] == {
+        "call": "register_blueprint",
+        "readable": "true",
+        "prefix": "null",
+        "module": "pkg",
+        "name": "bp",
+        "through": "views",
+        "head_import": "users",
+        "line": 11,
+        "end": 11,
+    }
+    assert json.loads(helper["refusals"]) == []
 
-    # P7: nothing recordable (a read and a two-level registration): no helper claim, no call claim.
-    assert helper_claims(tmp_path, "p7_helper_no_registration") == []
+    # P7 (R2c-2): a read and a two-level registration are recordable now: one helper claim and
+    # one call claim, in the application's file; the package's tables do not prove the child.
+    p7 = helper_claims(tmp_path, "p7_helper_no_registration")
+    assert [(path, fact) for path, fact, _ in p7 if fact == HELPER_ROLE] == [
+        ("pkg/app.py", HELPER_ROLE)
+    ]
+    assert [(path, fact) for path, fact, _ in p7 if fact == HELPER_CALL_ROLE] == [
+        ("pkg/app.py", HELPER_CALL_ROLE)
+    ]
+    assert len(p7) == 2
     assert served(observe("p7_helper_no_registration")) == []
 
 
