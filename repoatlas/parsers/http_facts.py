@@ -112,6 +112,16 @@ PYTHON_CLASS_ROUTE = "python-class-route"
 #: A router or blueprint mounted on an application or router -- imported, or mounted from
 #: inside an application factory -- with the prefix it is mounted at.
 PYTHON_MOUNT = "python-mount"
+#: A module-level function of a Python module that registers a blueprint or router on its
+#: application parameter, or hands that parameter to another such function (R2c-1): which
+#: parameter, the registrations (mounts, as :data:`PYTHON_MOUNT` states them, with the
+#: application left to the call) and the nested calls. Said only of a function with
+#: something to record.
+HELPER_ROLE = "python-helper"
+#: A call of such a function with an application the module or one of its factories proves
+#: (R2c-1): the function, the application and where the call stands. The global pass expands
+#: it into mounts of that application.
+HELPER_CALL_ROLE = "python-helper-call"
 #: A module's string constants that could be part of a path or a URL, for the routes and
 #: requests in other modules that import them.
 PYTHON_CONSTANTS = "python-constants"

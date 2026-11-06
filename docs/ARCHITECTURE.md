@@ -2827,6 +2827,62 @@ requirements, warnings, rows, counts, `routes_served` and `can_create` are the s
   assumes the index keeps one claim per item; a file with exactly that many claims is reported even if nothing was
   dropped.
 
+### Flask and FastAPI registration through a same-module helper (R2c-1)
+
+A Flask application factory often registers its blueprints through a function it calls with the application
+(`create_app` calls `register_blueprints(app)`, whose body does `app.register_blueprint(views.bp)`). R2c-1 reads that
+shape, in the same module only. The Python parser (version 29) records two claim roles beside the existing mount
+claims; the global pass (`repoatlas/graph/py_routes.py`) expands them before any chain is built, so a registration
+through a helper is a mount of the caller's application, under every rule a factory's own mount already meets.
+
+- **A helper** (`python-helper`) is a module-level, undecorated, synchronous `def` bound once in the module, with a
+  positional parameter `p` that nothing in it rebinds. Its recordable statements are its own top-level ones:
+  `p.register_blueprint(X, ...)` or `p.include_router(X, ...)` with `X` this module's own router or an import one
+  name or one attribute away (`views.bp`) or a name the helper's own top-level `import` or `from … import` binds
+  (bound from its own statement onward, in statement order: see the local-import bullet below), and read exactly as a
+  factory's registration is (prefix, readable or not), and
+  `G(p)` of another such helper. Anything else done with `p` (`app.config.get(...)`, `cors.init_app(app)`, a store to
+  `app.url_map.strict_slashes`) is allowed and ignored. A helper with nothing recordable emits no claim at all
+  (a claim only for a helper with a registration or a call of one that has), so a module's claims do not change.
+- **A call** (`python-helper-call`) is a top-level statement `H(app)` or `H(app=app)` of a module-level function,
+  where `app` is that function's local bound once to `Flask(...)`/`FastAPI(...)` before the call, or of the module,
+  where `app` is a module-level application bound once, constructed, and with the helper and every child it registers
+  bound, before the call. The argument must be the helper's own parameter by position or keyword.
+- **Expansion.** Each accepted call becomes the helper's registrations as mounts of the call's application, then those
+  of the helpers it hands the application to, breadth first, each helper once (a cycle ends where it returns), at
+  most 4 helpers from the call (`MAX_HELPER_DEPTH`) and 1,024 visits. The routes keep the rules of any factory mount:
+  an unreadable registration blocks its child; the roots are the application's own file, never the helper's.
+- **Refusals** (codes in `_CODES`): `python-helper-control-flow` (a call or registration inside a branch, loop, `with`,
+  `try`, nested function or any non-top-level position), `python-helper-argument` (`*args`/`**kwargs`, the application
+  at another position than the parameter, a child that is the helper's own parameter, or a name it binds other than by
+  a top-level import),
+  `python-helper-rebound-or-alias` (a registration on an alias of the parameter), `python-helper-shadowed` (the helper's
+  name bound in the calling function), `python-helper-before-construction`, `python-helper-before-binding` (the helper,
+  or a child, bound after a module-level call), `python-helper-chain-too-deep`, `python-helper-child-unsupported`
+  (`users.views.bp`, a call, a subscript) and `python-helper-unresolved` (a callee that is not a same-module helper).
+  A refusal adds no mount; it is a route's `route_codes` only when its router is mounted nowhere else. A refusal can
+  only be recorded where a claim exists: beside a call of a helper with something recordable, or in that helper's
+  claim. A helper with nothing recordable, and a call of a function that is no helper, leave no trace.
+- **Local imports in a helper (R2c-1).** A function-local import binds its name from its own statement onward, in
+  statement order. A registration above that import reads an unbound local at run time, so it is not recorded: no
+  mount, no claim, and the route stays `python-not-mounted`. The module-level binding of the same name is never used as
+  a fallback. Test: `tests/test_r2c1_local_import_order.py`.
+- **Inherited limit, not fixed.** Factories and module scope still read a function-local import placed after a
+  registration. For a factory, `_factories` passes the whole function body to the import table, so an import after the
+  registration is still read; for module scope, a module-level registration above a module-level import is still read.
+  Concrete cases: LA1 (factory), LA6 (factory with a module-level import) and LA7 (module scope). At run time such code
+  raises `UnboundLocalError` (factory) or `NameError` (module scope), so the served route is a false positive. This is
+  recorded technical debt, not fixed in R2c-1.
+- **Not modelled.** Imported helpers (R2c-1b), registrations on a child of a child (`users.views.bp`, R2c-2: two-level
+  children), and WSGI middleware or deployment-level path rewriting: an assignment to `app.wsgi_app`, or a dispatcher
+  mounting the application under a path, does not change the routes this reads (the app's URL map is read, not the
+  path a server forwards). For factories and module scope (not helpers, see the inherited limit above), a local import
+  is read wherever it stands in the body, so a registration placed before the import that binds its child is read
+  although Python would raise `UnboundLocalError` (factory) or `NameError` (module scope) there. Binding counts are
+  module-wide, so a module-level application whose name is also a
+  helper's parameter is no application (fixture P5x). Mutants H-M4 and H-M5 are equivalent only under this rule;
+  re-run them if scope-aware binding counts (R2d) are ever adopted.
+
 ### Refused HTTP requests: listed where the walk went, never followed
 
 > **Invariant.** A refused request is never a candidate, a step or an edge, and never changes which requests link. An

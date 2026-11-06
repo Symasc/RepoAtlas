@@ -108,7 +108,18 @@ from repoatlas.parsers.http_fastify import (
     HELPER_SHADOWED,
     RECEIVER_BEFORE_BINDING,
 )
-from repoatlas.parsers.http_python import _MAX_CLASS_DEPTH
+from repoatlas.parsers.http_python import (
+    _MAX_CLASS_DEPTH,
+    PY_HELPER_ARGUMENT,
+    PY_HELPER_BEFORE_BINDING,
+    PY_HELPER_BEFORE_CONSTRUCTION,
+    PY_HELPER_CHAIN_TOO_DEEP,
+    PY_HELPER_CHILD_UNSUPPORTED,
+    PY_HELPER_CONTROL_FLOW,
+    PY_HELPER_REBOUND_OR_ALIAS,
+    PY_HELPER_SHADOWED,
+    PY_HELPER_UNRESOLVED,
+)
 from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
 
 #: Bound notes one answer carries at most; the rest are counted in ``bound_notes_omitted``.
@@ -295,6 +306,19 @@ _CODES: Mapping[str, tuple[str, str, str, str, tuple[str, ...]]] = {
         BOUND_REACHED, RESOLVED, RESOLVED, UNPROVEN, BOUND_PYTHON_MOUNT_DEPTH
     ),
     "python-not-mounted": _row(REGISTRATION_UNPROVEN, RESOLVED, RESOLVED, UNPROVEN),
+    # R2c-1: a same-module helper that registers a router on the application it is handed, or a
+    # call of one, that was read and refused (never an edge)
+    PY_HELPER_CONTROL_FLOW: _row(REGISTRATION_UNPROVEN, RESOLVED, RESOLVED, UNPROVEN),
+    PY_HELPER_ARGUMENT: _row(REGISTRATION_UNPROVEN, RESOLVED, RESOLVED, UNPROVEN),
+    PY_HELPER_REBOUND_OR_ALIAS: _row(REGISTRATION_UNPROVEN, RESOLVED, RESOLVED, UNPROVEN),
+    PY_HELPER_SHADOWED: _row(REGISTRATION_UNPROVEN, RESOLVED, RESOLVED, UNPROVEN),
+    PY_HELPER_CHAIN_TOO_DEEP: _row(
+        BOUND_REACHED, RESOLVED, RESOLVED, UNPROVEN, BOUND_PYTHON_MOUNT_DEPTH
+    ),
+    PY_HELPER_BEFORE_CONSTRUCTION: _row(REGISTRATION_UNPROVEN, RESOLVED, RESOLVED, UNPROVEN),
+    PY_HELPER_BEFORE_BINDING: _row(REGISTRATION_UNPROVEN, RESOLVED, RESOLVED, UNPROVEN),
+    PY_HELPER_UNRESOLVED: _row(REGISTRATION_UNPROVEN, RESOLVED, RESOLVED, UNPROVEN),
+    PY_HELPER_CHILD_UNSUPPORTED: _row(REGISTRATION_UNPROVEN, RESOLVED, RESOLVED, UNPROVEN),
     "python-class-module-unresolved": _row(IDENTITY_UNRESOLVED, _L, UNRESOLVED, _NE),
     "python-class-not-offered": _row(IDENTITY_UNRESOLVED, _L, UNRESOLVED, _NE),
     "python-class-not-application": _row(IDENTITY_UNRESOLVED, _L, UNRESOLVED, _NE),
