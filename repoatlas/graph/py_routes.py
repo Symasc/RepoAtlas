@@ -13,6 +13,18 @@ side as a claim (:mod:`repoatlas.parsers.http_python`):
   paths of the applications that mount it);
 * ``python-mount`` -- an imported router mounted on an application or router, or any
   router mounted from inside an application factory;
+* ``python-helper`` and ``python-helper-call`` (R2c-1) -- a same-module function that
+  registers a blueprint or router on the application parameter it is handed, or hands it to
+  another such function, and a call of one with an application its module proves. Each call is
+  expanded here, before any chain is built, into the mounts of the application it names: the
+  helper's registrations, then those of the helpers it hands the application to, breadth first,
+  each helper once, at most :data:`MAX_HELPER_DEPTH` hops from the call and
+  :data:`MAX_HELPER_VISITS` helpers. A registration is read as a factory's is (a mount claim
+  whose owner is the call's application), so the rules below apply to it unchanged: an unreadable
+  one blocks its child. A refused call, or a helper beyond the depth, adds no mount; the code of
+  its refusal is a route's ``route_codes`` when the route's router is mounted nowhere else.
+  A two-level child (``through``, R2c-2) is a mount only when both hops are proven by export
+  tables; otherwise it adds no mount;
 * ``python-class`` -- a module-level subclass of FastAPI's or Flask's application, offered
   to the modules that build an application from it;
 * ``python-class-route`` -- a route on an application a module builds from a class it
@@ -71,7 +83,7 @@ script directory, so a repository's share of the plan is the plan of its claims 
 from __future__ import annotations
 
 import json
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -82,6 +94,8 @@ from repoatlas.models import http
 from repoatlas.models.parsing import EntityType
 from repoatlas.parsers.http_facts import (
     EXACT,
+    HELPER_CALL_ROLE,
+    HELPER_ROLE,
     PYTHON_CLASS,
     PYTHON_CLASS_ROUTE,
     PYTHON_CONSTANTS,
@@ -90,13 +104,23 @@ from repoatlas.parsers.http_facts import (
     PYTHON_ROUTE,
     PYTHON_SCRIPT,
 )
-from repoatlas.parsers.http_python import _MAX_CLASS_DEPTH, _path_like, flask_join
+from repoatlas.parsers.http_python import (
+    _MAX_CLASS_DEPTH,
+    PY_HELPER_CHAIN_TOO_DEEP,
+    _path_like,
+    flask_join,
+)
 from repoatlas.storage.protocols import EntityRecord, FileRow, UnresolvedRefRecord
 
 #: Routers nested in routers, counted from the application: deeper than anyone writes.
 MAX_DEPTH = 4
 #: Modules one imported constant is followed through: a composed constant may name another's.
 MAX_CONSTANT_HOPS = 4
+#: Helpers a call hands an application through, counted from the called one (1): deeper than
+#: anyone writes. A helper beyond it adds no mount (``python-helper-chain-too-deep``).
+MAX_HELPER_DEPTH = 4
+#: Helpers one call of a helper reaches, at most.
+MAX_HELPER_VISITS = 1024
 
 PROMOTED = "promoted"
 MODULE_UNRESOLVED = "the module it names does not resolve"
@@ -119,6 +143,8 @@ _FASTAPI_ROUTER = "fastapi-router"
 _FLASK_APP = "flask-app"
 _FLASK_BLUEPRINT = "flask-blueprint"
 _APPLICATIONS = frozenset({_FASTAPI_APP, _FLASK_APP})
+#: The registrations a helper's claim may carry, each with the kind of application it applies to.
+_HELPER_CALLS = frozenset({("register_blueprint", _FLASK_APP), ("include_router", _FASTAPI_APP)})
 _FAMILY = {
     _FASTAPI_APP: "fastapi",
     _FASTAPI_ROUTER: "fastapi",
@@ -128,6 +154,9 @@ _FAMILY = {
 _PACKAGE_FILES = ("__init__.py", "__init__.pyi")
 
 Key = tuple[int, str]
+#: A file's export table by file id (``None``: none stored or unreadable), for the two-level
+#: children (R2c-2) whose hops a package's own names must prove.
+ExportTables = Callable[[int], Mapping[str, object] | None]
 #: ``(file id, first line, last line, role)``: a claim that caused a refusal, for a reader to
 #: place it (R1 diagnostics). Never read by a decision.
 Place = tuple[int, int | None, int | None, str]
@@ -326,6 +355,9 @@ class _Imports:
             return target.file
         return self._own_package(origin, module)
 
+    def submodule(self, package: FileRow, name: str) -> FileRow | None:
+        return self._modules.submodule(package, name)
+
     def _script_directory(self, origin: FileRow) -> str | None:
         """The nearest directory at or above ``origin`` that holds a script."""
         scripts = self._layout(origin.repo_id).scripts
@@ -377,8 +409,13 @@ def plan_python_routes(
     modules: Callable[[], PythonModules],
     index: ResolutionIndex,
     by_id: Mapping[int, FileRow],
+    *,
+    tables: ExportTables | None = None,
 ) -> PythonRoutePlan:
-    """Serve every Python route claim a proven mount chain reaches. Writes nothing."""
+    """Serve every Python route claim a proven mount chain reaches. Writes nothing.
+
+    ``tables`` gives a file's export table, for the two-level children (R2c-2); without it
+    every two-level child is refused."""
     plan = PythonRoutePlan()
     claims = grouped.get(PYTHON_ROUTE, ())
     class_claims = grouped.get(PYTHON_CLASS_ROUTE, ())
@@ -418,19 +455,21 @@ def plan_python_routes(
     #: Where each blocked receiver was blocked: the mount claims (diagnostics only).
     blocked_at: dict[Key, list[Place]] = defaultdict(list)
     readable: list[tuple[Key, _Mount, Place]] = []
-    for claim in grouped.get(PYTHON_MOUNT, ()):
-        meta = _meta(claim)
-        origin = by_id.get(claim.file_id)
+
+    def add_mount(meta: Mapping[str, str], file_id: int, name: str, where: Place) -> None:
+        """One mount of ``name`` (a child of the module the mount stands in), as a mount claim
+        states it -- or a helper's registration, expanded for a call (R2c-1)."""
+        origin = by_id.get(file_id)
         if origin is None:
-            continue
-        child = _key(imports, origin, meta.get("module"), claim.target_key)
+            return
+        child = _child_key(imports, tables, origin, meta, name)
         if meta.get("call") == "mount" and (child is None or child not in receivers):
             # Identity not proven: any application of that name in this repository may be it.
-            blocked.update(applications.get((origin.repo_id, claim.target_key), ()))
-            for application in applications.get((origin.repo_id, claim.target_key), ()):
-                blocked_at[application].append(claim_place(claim, "mount"))
+            blocked.update(applications.get((origin.repo_id, name), ()))
+            for application in applications.get((origin.repo_id, name), ()):
+                blocked_at[application].append(where)
         if child is None:
-            continue
+            return
         mounted_at = _mount_path(meta)
         if (
             meta.get("call") == "mount"
@@ -440,20 +479,26 @@ def plan_python_routes(
             and receivers[child].kind == _FASTAPI_APP
         ):
             # Proven: a sub-application still (R1), served under the mount besides its own paths.
-            app_mounts[child].append(((claim.file_id, meta.get("owner", "")), mounted_at))
+            app_mounts[child].append(((file_id, meta.get("owner", "")), mounted_at))
             mounted_apps.add(child)
-            continue
+            return
         if meta.get("readable") != "true":
             blocked.add(child)
-            blocked_at[child].append(claim_place(claim, "mount"))
-            continue
+            blocked_at[child].append(where)
+            return
         mount = _Mount(
-            owner=(claim.file_id, meta.get("owner", "")),
+            owner=(file_id, meta.get("owner", "")),
             owner_kind=meta.get("owner_kind", ""),
             call=meta.get("call", ""),
             prefix=json.loads(meta.get("prefix", "null")),
         )
-        readable.append((child, mount, claim_place(claim, "mount")))
+        readable.append((child, mount, where))
+
+    for claim in grouped.get(PYTHON_MOUNT, ()):
+        add_mount(_meta(claim), claim.file_id, claim.target_key, claim_place(claim, "mount"))
+    # Each call of a helper, before any chain is built: its registrations are mounts of the
+    # application the call names. A refused one adds none; its children keep the code.
+    refused = _expand_helpers(grouped, imports, by_id, add_mount, tables)
     # An include or registration on a sub-application is unreadable, whatever module mounts it.
     # Decided against the sub-applications as every mount claim leaves them, so the claims'
     # order does not matter; the children it adds are routers, never applications.
@@ -472,6 +517,15 @@ def plan_python_routes(
             claim, imports, receivers, constants, composed, chains, by_id, trace
         )
         _record_facts(plan, claim, outcome, trace, blocked_at, _relative(claim) is not None)
+        if (
+            outcome == NOT_MOUNTED
+            and claim.id is not None
+            and trace.key is not None
+            and trace.key in refused
+            and claim.id not in plan.route_codes
+        ):
+            # Its router is registered by a helper call that was refused, or past the depth.
+            plan.route_codes[claim.id] = refused[trace.key]
         if claim.id is not None:
             plan.outcomes[claim.id] = outcome
         if outcome == PROMOTED:
@@ -532,6 +586,112 @@ def plan_python_routes(
     return plan
 
 
+@dataclass(frozen=True, slots=True)
+class _Helper:
+    """A same-module helper as its claim states it (R2c-1)."""
+
+    #: Its registrations, each a mount claim's meta without the owner, and the lines.
+    mounts: tuple[dict[str, object], ...]
+    #: The same-module helpers it hands the application to.
+    calls: tuple[str, ...]
+    #: What it refused: ``code``, ``line``, and the child (``module``, ``name``) when readable.
+    refusals: tuple[dict[str, object], ...]
+
+
+def _entries(raw: str | None) -> tuple[dict[str, object], ...]:
+    """The objects of a JSON list a helper claim carries; none for anything else."""
+    try:
+        loaded = json.loads(raw or "[]")
+    except ValueError:
+        return ()
+    if not isinstance(loaded, list):
+        return ()
+    return tuple(entry for entry in loaded if isinstance(entry, dict))
+
+
+def _helper_closure(helpers: Mapping[Key, _Helper], start: Key) -> list[tuple[Key, int]]:
+    """The helpers a call of ``start`` reaches, each once, with its hops from the call (``start``
+    is 1): breadth first, so a helper is met at its fewest. A cycle ends where it comes back; a
+    name that is no helper is not followed; at most :data:`MAX_HELPER_VISITS` are returned."""
+    found: list[tuple[Key, int]] = []
+    seen = {start}
+    queue = deque([(start, 1)])
+    while queue and len(found) < MAX_HELPER_VISITS:
+        key, depth = queue.popleft()
+        helper = helpers.get(key)
+        if helper is None:
+            continue
+        found.append((key, depth))
+        for callee in helper.calls:
+            target = (key[0], callee)
+            if target not in seen:
+                seen.add(target)
+                queue.append((target, depth + 1))
+    return found
+
+
+def _expand_helpers(
+    grouped: Mapping[str, Sequence[UnresolvedRefRecord]],
+    imports: _Imports,
+    by_id: Mapping[int, FileRow],
+    add_mount: Callable[[Mapping[str, str], int, str, Place], None],
+    tables: ExportTables | None,
+) -> dict[Key, str]:
+    """Hand every accepted helper call's registrations to ``add_mount``, as mounts of the
+    application the call names, in the module the call stands in.
+
+    A call that was refused when it was read, and a helper more than :data:`MAX_HELPER_DEPTH`
+    hops from the call, add nothing. The result is the code of the refusal for each child they
+    would have mounted (and for each child a helper itself refused with its child readable), for
+    a route whose router is mounted nowhere else.
+    """
+    helpers: dict[Key, _Helper] = {}
+    for claim in grouped.get(HELPER_ROLE, ()):
+        meta = _meta(claim)
+        helpers[(claim.file_id, claim.target_key)] = _Helper(
+            mounts=_entries(meta.get("mounts")),
+            calls=tuple(str(entry.get("callee", "")) for entry in _entries(meta.get("calls"))),
+            refusals=_entries(meta.get("refusals")),
+        )
+    refused: dict[Key, str] = {}
+    for call in grouped.get(HELPER_CALL_ROLE, ()):
+        origin = by_id.get(call.file_id)
+        if origin is None:
+            continue
+        meta = _meta(call)
+        owner, owner_kind = meta.get("owner", ""), meta.get("owner_kind", "")
+        refusal = meta.get("refusal")
+        for key, depth in _helper_closure(helpers, (call.file_id, call.target_key)):
+            helper = helpers[key]
+            code = refusal or (PY_HELPER_CHAIN_TOO_DEEP if depth > MAX_HELPER_DEPTH else None)
+            if code is None:
+                for found in helper.refusals:
+                    name = found.get("name")
+                    if not (isinstance(name, str) and name):
+                        continue
+                    fields = {str(k): v for k, v in found.items() if isinstance(v, str)}
+                    child = _child_key(imports, tables, origin, fields, name)
+                    if child is not None:
+                        refused.setdefault(child, str(found.get("code", "")))
+            for entry in helper.mounts:
+                fields = {str(k): str(v) for k, v in entry.items()}
+                name = fields.get("name", "")
+                if not name:
+                    continue
+                if code is not None:
+                    child = _child_key(imports, tables, origin, fields, name)
+                    if child is not None:
+                        refused.setdefault(child, code)
+                    continue
+                if not owner or (fields.get("call"), owner_kind) not in _HELPER_CALLS:
+                    continue
+                fields["owner"], fields["owner_kind"] = owner, owner_kind
+                if meta.get("readable") != "true":
+                    fields["readable"] = "false"
+                add_mount(fields, call.file_id, name, claim_place(call, "mount"))
+    return refused
+
+
 def _record_facts(
     plan: PythonRoutePlan,
     claim: UnresolvedRefRecord,
@@ -580,6 +740,67 @@ def _key(imports: _Imports, origin: FileRow, module: str | None, name: str) -> K
         return origin.file_id, name
     target = imports.resolve(origin, module)
     return (target.file_id, name) if target is not None else None
+
+
+def _child_key(
+    imports: _Imports,
+    tables: ExportTables | None,
+    origin: FileRow,
+    meta: Mapping[str, str],
+    name: str,
+) -> Key | None:
+    """The child a mount claim names. A two-level child (``through``: ``head.through.name``
+    after ``from module import head``) is the file two submodule hops down, only when each
+    hop is proven by the export table of the package it is taken from (R2c-2); else none."""
+    through = meta.get("through")
+    if through is None:
+        return _key(imports, origin, meta.get("module"), name)
+    module, head = meta.get("module"), meta.get("head_import")
+    if tables is None or not module or not head or not through:
+        return None
+    package = imports.resolve(origin, module)
+    first = _submodule_hop(imports, tables, package, head, unbound_ok=True) if package else None
+    second = _submodule_hop(imports, tables, first, through, unbound_ok=False) if first else None
+    return (second.file_id, name) if second is not None else None
+
+
+def _submodule_hop(
+    imports: _Imports,
+    tables: ExportTables,
+    package: FileRow,
+    attribute: str,
+    *,
+    unbound_ok: bool,
+) -> FileRow | None:
+    """The submodule ``attribute`` of ``package``, when the package's export table leaves its
+    name to the import system: never conditional; unbound (first hop only, and only without a
+    star import or a module ``__getattr__``) or bound by ``from . import attribute``."""
+    table = tables(package.file_id)
+    if not isinstance(table, Mapping):
+        return None
+    names = table.get("names")
+    if not isinstance(names, Mapping):
+        return None
+    conditional = table.get("conditional", [])
+    if not isinstance(conditional, list) or attribute in conditional:
+        return None
+    entry = names.get(attribute)
+    if entry is None:
+        if not unbound_ok or table.get("star") or table.get("getattr"):
+            return None
+    else:
+        if not (
+            isinstance(entry, list)
+            and len(entry) == 3
+            and entry[0] == "import"
+            and isinstance(entry[1], str)
+            and entry[2] == attribute
+        ):
+            return None
+        bound_from = imports.resolve(package, entry[1])
+        if bound_from is None or bound_from.file_id != package.file_id:
+            return None
+    return imports.submodule(package, attribute)
 
 
 def _relative(claim: UnresolvedRefRecord) -> str | None:
