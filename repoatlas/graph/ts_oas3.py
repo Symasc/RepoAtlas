@@ -51,6 +51,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
+from repoatlas.graph.impact import is_test_path
 from repoatlas.graph.py_routes import PendingRoute
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models import http
@@ -67,9 +68,11 @@ from repoatlas.parsers.ts_spec_paths import (
     SPEC_CWD_RELATIVE,
     SPEC_DYNAMIC,
     SPEC_IMPORT_UNRESOLVED,
+    SPEC_LAYOUT_AMBIGUOUS,
     SPEC_NOT_A_FILE,
     SPEC_NOT_INDEXED,
     SPEC_OUTSIDE_REPOSITORY,
+    SPEC_PARAMETER_TEST_ONLY,
     SPEC_PARAMETER_UNCALLED,
     SPEC_PARAMETER_UNSUPPORTED,
     _absolute,
@@ -85,11 +88,15 @@ CONTROLLERS_UNRESOLVED = "a controllers object resolves to no single handler obj
 NO_HANDLER = "no operation's handler name is a key of its controllers"
 
 #: The refusals that mean the path is read but names no document in the repository.
-_NOT_FOUND = frozenset({SPEC_OUTSIDE_REPOSITORY, SPEC_NOT_INDEXED})
+_NOT_FOUND = frozenset({SPEC_OUTSIDE_REPOSITORY, SPEC_NOT_INDEXED, SPEC_LAYOUT_AMBIGUOUS})
 
 Key = tuple[int, str]
 Resolve = Callable[[FileRow, Mapping[str, str]], UnresolvedRefRecord | None]
 Calls = Callable[[UnresolvedRefRecord, Mapping[str, str]], list[UnresolvedRefRecord]]
+#: The directories, besides its own, a file's ``__dirname`` is once built (tsconfig layouts).
+Layouts = Callable[[FileRow], Sequence[str]]
+#: One path read under each layout of its anchor, the source's first; or one refusal.
+Reading = tuple["str | _Refusal", ...]
 
 
 @dataclass(slots=True)
@@ -130,8 +137,12 @@ def plan_spec_routed(
     grouped: Mapping[str, Sequence[UnresolvedRefRecord]],
     index: ResolutionIndex,
     by_id: Mapping[int, FileRow],
+    layouts: Layouts | None = None,
 ) -> SpecRoutedPlan:
-    """Serve every operation a proven oas3-tools application routes. Writes nothing."""
+    """Serve every operation a proven oas3-tools application routes. Writes nothing.
+
+    ``layouts`` gives the build directories a file also runs from; without it, a file runs
+    where it stands."""
     plan = SpecRoutedPlan()
     apps = grouped.get(OAS3_APP, ())
     if not apps:
@@ -156,7 +167,7 @@ def plan_spec_routed(
         found = exports.get((target.file_id, ref.get("name", "")), []) if target else []
         return objects.get((target.file_id, found[0])) if target and len(found) == 1 else None
 
-    paths = _Paths(index, grouped, specs)
+    paths = _Paths(index, grouped, specs, layouts)
 
     #: ``(file id, local name)`` of a function → the calls of it in its own file; and file id
     #: of the module an imported call resolves to → those calls, with the name they import.
@@ -236,9 +247,11 @@ class _Paths:
         index: ResolutionIndex,
         grouped: Mapping[str, Sequence[UnresolvedRefRecord]],
         specs: Mapping[tuple[int, str], list[UnresolvedRefRecord]],
+        layouts: Layouts | None = None,
     ) -> None:
         self._index = index
         self._specs = specs
+        self._layouts = layouts
         #: File id → exported name → the string constant, and the path of a document.
         self._constants = self._table(grouped.get(TS_CONSTANTS, ()))
         self._offered = self._table(grouped.get(TS_PATH_CONSTANTS, ()))
@@ -252,46 +265,77 @@ class _Paths:
             found[claim.file_id].update(values)
         return found
 
-    def of_claim(self, origin: FileRow, meta: Mapping[str, str]) -> str | _Refusal:
+    def anchored(self, row: FileRow, segments: Sequence[str]) -> Reading:
+        """``segments`` joined to each directory ``row``'s ``__dirname`` may be, its own first."""
+        directories = [posixpath.dirname(row.rel_path)]
+        if self._layouts is not None:
+            directories.extend(self._layouts(row))
+        return tuple(_locate(directory, segments) for directory in dict.fromkeys(directories))
+
+    def of_claim(self, origin: FileRow, meta: Mapping[str, str]) -> Reading:
         """The path an application's claim states, relative to its own file."""
         if "spec" in meta:
-            return _locate(posixpath.dirname(origin.rel_path), [meta["spec"]])
+            return self.anchored(origin, [meta["spec"]])
         if "spec_parts" in meta:
             return self._parts(origin, json.loads(meta["spec_parts"]))
         if "spec_imported_path" in meta:
             names = json.loads(meta["spec_imported_path"])
             if isinstance(names, list) and len(names) == 1 and len(names[0]) == 3:
                 return self._imported(origin, str(names[0][1]), str(names[0][2]))
-            return _Refusal(SPEC_DYNAMIC)
-        return _Refusal(meta.get("spec_refused", SPEC_DYNAMIC))
+            return (_Refusal(SPEC_DYNAMIC),)
+        return (_Refusal(meta.get("spec_refused", SPEC_DYNAMIC)),)
 
-    def of_argument(self, caller: FileRow, entry: Mapping[str, object]) -> str | _Refusal:
+    def of_argument(self, caller: FileRow, entry: Mapping[str, object]) -> Reading:
         """The path one argument of a call states, relative to the caller's file."""
         if "spec" in entry:
-            return _locate(posixpath.dirname(caller.rel_path), [str(entry["spec"])])
+            return self.anchored(caller, [str(entry["spec"])])
         if "spec_parts" in entry:
             return self._parts(caller, entry["spec_parts"])
         if "refused" in entry:
-            return _Refusal(str(entry["refused"]))
-        return _Refusal(SPEC_DYNAMIC)
+            return (_Refusal(str(entry["refused"])),)
+        return (_Refusal(SPEC_DYNAMIC),)
 
-    def document(self, repo_id: int, path: str | _Refusal) -> UnresolvedRefRecord | _Refusal:
-        """The one OpenAPI document indexed at ``path`` in the repository."""
-        if isinstance(path, _Refusal):
-            return path
-        found = self._specs.get((repo_id, path), [])
-        return found[0] if len(found) == 1 else _Refusal(SPEC_NOT_INDEXED)
+    def of_segment(
+        self, factory: FileRow, parts: Sequence[str], entry: Mapping[str, object]
+    ) -> Reading:
+        """The string one argument hands a ``join`` in ``factory``, after its own ``parts``."""
+        if "segment" in entry:
+            return self.anchored(factory, [*parts, str(entry["segment"])])
+        if "spec" in entry or "spec_parts" in entry:
+            return (_Refusal(SPEC_ABSOLUTE),)  # an anchored path is absolute where it is joined
+        if "refused" in entry:
+            return (_Refusal(str(entry["refused"])),)
+        return (_Refusal(SPEC_DYNAMIC),)
+
+    def document(self, repo_id: int, reading: Reading) -> UnresolvedRefRecord | _Refusal:
+        """The one OpenAPI document indexed at the paths ``reading`` names. Two layouts naming
+        two documents name none; a reading naming none is ``spec-not-indexed`` when a layout
+        reads a path in the repository, else its source layout's refusal."""
+        found: dict[str, UnresolvedRefRecord] = {}
+        for path in reading:
+            if isinstance(path, str):
+                documents = self._specs.get((repo_id, path), [])
+                if len(documents) == 1:
+                    found[path] = documents[0]
+        if len(found) > 1:
+            return _Refusal(SPEC_LAYOUT_AMBIGUOUS)
+        if found:
+            return next(iter(found.values()))
+        if any(isinstance(path, str) for path in reading):
+            return _Refusal(SPEC_NOT_INDEXED)
+        first = reading[0]
+        return first if isinstance(first, _Refusal) else _Refusal(SPEC_NOT_INDEXED)
 
     def _module(self, origin: FileRow, specifier: str) -> FileRow | None:
         if not specifier.startswith("."):
             return None
         return self._index.resolve_module(origin, specifier, "node")
 
-    def _parts(self, origin: FileRow, parts: object) -> str | _Refusal:
+    def _parts(self, origin: FileRow, parts: object) -> Reading:
         """The segments after the file's own directory, each ``["t", text]`` or the string
         constant ``["r", specifier, name]`` names in the module it resolves to."""
         if not isinstance(parts, list) or not parts or parts[0] != ["dir"]:
-            return _Refusal(SPEC_DYNAMIC)
+            return (_Refusal(SPEC_DYNAMIC),)
         segments: list[str] = []
         for part in parts[1:]:
             if isinstance(part, list) and len(part) == 2 and part[0] == "t":
@@ -301,26 +345,26 @@ class _Paths:
                 known = self._constants.get(target.file_id, {}) if target else {}
                 value = known.get(str(part[2]))
                 if value is None:
-                    return _Refusal(SPEC_IMPORT_UNRESOLVED)
+                    return (_Refusal(SPEC_IMPORT_UNRESOLVED),)
                 segments.append(value)
             else:
-                return _Refusal(SPEC_DYNAMIC)
-        return _locate(posixpath.dirname(origin.rel_path), segments)
+                return (_Refusal(SPEC_DYNAMIC),)
+        return self.anchored(origin, segments)
 
-    def _imported(self, origin: FileRow, specifier: str, name: str) -> str | _Refusal:
+    def _imported(self, origin: FileRow, specifier: str, name: str) -> Reading:
         """The whole path is ``name``. A module offers it as the path of a document, anchored at
         its own file; a plain string it offers is a path the process opens from its working
         directory, which no source states."""
         target = self._module(origin, specifier)
         if target is None:
-            return _Refusal(SPEC_IMPORT_UNRESOLVED)
+            return (_Refusal(SPEC_IMPORT_UNRESOLVED),)
         offered = self._offered.get(target.file_id, {}).get(name)
         if offered is not None:
-            return _locate(posixpath.dirname(target.rel_path), [offered])
+            return self.anchored(target, [offered])
         plain = self._constants.get(target.file_id, {}).get(name)
         if plain is None:
-            return _Refusal(SPEC_IMPORT_UNRESOLVED)
-        return _Refusal(SPEC_ABSOLUTE if _absolute(plain) else SPEC_CWD_RELATIVE)
+            return (_Refusal(SPEC_IMPORT_UNRESOLVED),)
+        return (_Refusal(SPEC_ABSOLUTE if _absolute(plain) else SPEC_CWD_RELATIVE),)
 
 
 def _readings(
@@ -330,22 +374,30 @@ def _readings(
     paths: _Paths,
     reaching: Calls,
     by_id: Mapping[int, FileRow],
-) -> list[str | _Refusal]:
+) -> list[Reading]:
     """The path of each instance of an application: its own, or one for each call that reaches
-    the function it is the parameter of."""
+    the function it is the parameter of. A call in a test file is an instance only of a factory
+    that is itself in one: a harness does not say where the application finds its document."""
     if "spec_param" not in meta or "factory" not in meta:
         return [paths.of_claim(origin, meta)]
     position = int(meta["spec_param"]) if meta["spec_param"].isdigit() else -1
     calls = reaching(app, meta)
     if not calls:
-        return [_Refusal(SPEC_PARAMETER_UNCALLED)]
-    readings: list[str | _Refusal] = []
+        return [(_Refusal(SPEC_PARAMETER_UNCALLED),)]
+    if not is_test_path(origin.rel_path):
+        calls = [call for call in calls if not is_test_path(by_id[call.file_id].rel_path)]
+        if not calls:
+            return [(_Refusal(SPEC_PARAMETER_TEST_ONLY),)]
+    parts = json.loads(meta["spec_param_dir"]) if "spec_param_dir" in meta else None
+    readings: list[Reading] = []
     for call in calls:
         arguments = json.loads(_meta(call).get("arguments", "[]"))
-        if 0 <= position < len(arguments):
+        if not 0 <= position < len(arguments):
+            readings.append((_Refusal(SPEC_PARAMETER_UNSUPPORTED),))
+        elif parts is None:
             readings.append(paths.of_argument(by_id[call.file_id], arguments[position]))
         else:
-            readings.append(_Refusal(SPEC_PARAMETER_UNSUPPORTED))
+            readings.append(paths.of_segment(origin, parts, arguments[position]))
     return readings
 
 

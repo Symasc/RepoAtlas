@@ -399,6 +399,10 @@ START = "async function start() {\n  const app = Fastify();\n  await app.listen(
         "start().catch(console.error);",
         "await start().catch(console.error);",
         "void start().catch(onError);",
+        "if (require.main === module) { start().then(); }",
+        "if ((require.main === module)) { start().then(); }",
+        # G runs whenever the file is the main module, whatever the else branch does
+        "if (require.main === module) { start().then(); } else { module.exports = start; }",
     ],
 )
 def test_an_entry_function_the_top_level_calls_unconditionally_proves_its_application(
@@ -423,6 +427,29 @@ def test_an_entry_function_the_top_level_calls_unconditionally_proves_its_applic
         "",
         "if (process.env.RUN) { start(); }",
         "if (require.main === module) start();",
+        "if (require.main === module) start().then();",
+        "if (require?.main === module) { start().then(); }",
+        "if (require.main === module) { start().then(ready); }",
+        "if (module === require.main) { start().then(); }",
+        "if (require.main == module) { start().then(); }",
+        "if (require.main === module) { start().then(); report(); }",
+        "const require = {}; if (require.main === module) { start().then(); }",
+        "const module = {}; if (require.main === module) { start().then(); }",
+        "function require() {} if (require.main === module) { start().then(); }",
+        "let module = {}; if (require.main === module) { start().then(); }",
+        "if (require.main === exports) { start().then(); }",
+        "if (process.main === module) { start().then(); }",
+        "if (require.cache === module) { start().then(); }",
+        "if (require.main === module) { start().finally(); }",
+        "if (require.main === module) { start().catch(h).then(); }",
+        "if (require.main === module) { start(cfg).then(); }",
+        "if (require.main === module) { (start()).then(); }",
+        "if (require.main === module) { await start().then(); }",
+        "if (require.main === module) { start()?.then(); }",
+        "if (require.main === module) { start?.().then(); }",
+        "if (require.main === module) { app.start().then(); }",
+        "if (require.main === module) { (start().then()); }",
+        "if (require.main !== module) { start().then(); }",
         "process.env.RUN && start();",
         "setTimeout(() => start(), 0);",
         "process.on('ready', start);",
@@ -438,6 +465,26 @@ def test_an_entry_function_that_is_not_called_unconditionally_proves_nothing(cal
     assert claim.meta["status"] == REFUSED
     assert claim.meta["refusal"] == ENTRY_NOT_CALLED
     assert claim.meta["aliases"] == "[]"
+
+
+@pytest.mark.parametrize(
+    ("name", "status"),
+    [
+        ("a.js", PROVEN),
+        ("a.ts", PROVEN),
+        ("a.cjs", PROVEN),
+        ("a.cts", PROVEN),
+        ("a.mjs", REFUSED),
+        ("a.mts", REFUSED),
+    ],
+)
+def test_the_commonjs_guard_proves_nothing_in_an_es_module_file(name: str, status: str) -> None:
+    source = IMPORT + START + "if (require.main === module) { start().then(); }\n"
+    parsed = TypeScriptParser().parse(Path(name), source)
+    [claim] = [r for r in parsed.references if r.meta.get(PENDING_FACT) == FASTIFY_INSTANCE]
+    assert claim.meta["status"] == status
+    if status == REFUSED:
+        assert claim.meta["refusal"] == ENTRY_NOT_CALLED
 
 
 def test_an_entry_function_is_proven_by_any_one_unconditional_call() -> None:
@@ -465,6 +512,96 @@ def test_a_factory_is_no_entry_function() -> None:
 
 def test_a_module_level_application_is_not_an_instance() -> None:
     assert _instances(IMPORT + "const server = Fastify();\n") == []
+
+
+# -- the try block of an entry function -----------------------------------------------------
+
+INIT = "import { init } from './init';\n"
+GUARD = "if (require.main === module) { main().then(); }\n"
+HELD = "const server = make();\n"
+
+
+def _entry_source(body: str) -> str:
+    return INIT + IMPORT + MAKE + "async function main() {\n" + body + "}\n" + GUARD
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "try { const server = make(); init(server); } catch (e) { report(e); }\n",
+        "try { const server = make(); return init(server); } catch (e) {}\n",
+        "try { const server = make(); await init(server); } finally { done(); }\n",
+        "setup();\ntry { const server = make(); init(server); } catch (e) {}\n",
+    ],
+)
+def test_the_try_block_of_an_entry_function_is_on_its_straight_line(body: str) -> None:
+    source = _entry_source(body)
+    claim = _only(source)
+    assert claim.target_key == "main>server"
+    assert claim.meta["entry"] == "main"
+    assert claim.meta["status"] == PROVEN
+    [call] = _helpers(source)
+    assert call.meta["owner"] == "main>server"
+    assert call.meta["owner_kind"] == INSTANCE
+    assert "refusal" not in call.meta
+
+
+def test_an_entry_application_in_a_try_block_serves_its_traced_routes() -> None:
+    body = "  try {\n    const app = Fastify();\n    app.get('/x', h);\n  } catch (e) {}\n"
+    source = IMPORT + "async function main() {\n" + body + "}\n" + GUARD
+    claim = _only(source)
+    assert (claim.target_key, claim.meta["kind"], claim.meta["status"]) == (
+        "main>app",
+        ENTRY,
+        PROVEN,
+    )
+    [route] = _traced(source)
+    assert route.meta["scope"] == "main>app"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # the catch, a try nested in the block, a try in a condition, a condition in the block
+        HELD + "try { setup(); } catch (e) { init(server); }\n",
+        HELD + "try { try { init(server); } catch (e) {} } catch (e) {}\n",
+        HELD + "if (ready) { try { init(server); } catch (e) {} }\n",
+        HELD + "try { if (ready) { init(server); } } catch (e) {}\n",
+    ],
+)
+def test_a_call_off_the_try_block_of_an_entry_function_is_control_flow(body: str) -> None:
+    source = _entry_source(body)
+    assert _only(source).meta["status"] == PROVEN
+    [call] = _helpers(source)
+    assert call.meta["refusal"] == HELPER_CONTROL_FLOW
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if (ready) { try { const server = make(); init(server); } catch (e) {} }\n",
+        "try { try { const server = make(); init(server); } catch (e) {} } catch (e) {}\n",
+        "try { setup(); } catch (e) { const server = make(); init(server); }\n",
+    ],
+)
+def test_an_instance_off_the_try_block_of_an_entry_function_is_no_claim(body: str) -> None:
+    assert _instances(_entry_source(body)) == []
+
+
+def test_a_try_block_at_the_module_level_is_still_control_flow() -> None:
+    source = INIT + IMPORT + MAKE + HELD + "try {\n  init(server);\n} catch (e) {}\n"
+    assert _only(source).meta["status"] == PROVEN
+    [call] = _helpers(source)
+    assert call.meta["refusal"] == HELPER_CONTROL_FLOW
+
+
+def test_a_listen_awaited_in_the_try_block_comes_before_a_later_call() -> None:
+    body = (
+        "  try {\n    const server = make();\n    await server.listen();\n"
+        "    init(server);\n  } catch (e) {}\n"
+    )
+    [call] = _helpers(_entry_source(body))
+    assert call.meta["refusal"] == AFTER_LISTEN
 
 
 # -- receiver aliases --------------------------------------------------------------------
@@ -823,6 +960,85 @@ def test_a_file_without_fastify_registers_only_what_an_instance_registers() -> N
     assert registration.meta["owner_kind"] == INSTANCE
     assert _claims(source, FASTIFY_SCOPE) == []
     assert _claims(source, FASTIFY_ROUTE) == []
+
+
+# -- a file without fastify that forwards a plugin's server ---------------------------------
+
+FORWARD = (
+    "import { Server } from './server';\n"
+    "import { initUsers } from './users';\n"
+    "export function initAll(server: Server, deps: Deps) {\n"
+    "  initUsers(server, deps.users);\n"
+    "}\n"
+)
+
+
+def test_a_file_without_fastify_that_forwards_a_plugin_server_is_read_for_tracing() -> None:
+    assert _roles(FORWARD) & _FASTIFY_ROLES == {FASTIFY_HELPER_CALL, FASTIFY_TRACED_SCOPE}
+    [call] = _helpers(FORWARD)
+    assert call.target_key == "initUsers"
+    assert call.source_symbol == "initAll"
+    assert call.meta == {
+        PENDING_FACT: FASTIFY_HELPER_CALL,
+        "owner": "initAll",
+        "owner_kind": PLUGIN,
+        "receiver": "server",
+        "arg": "0",
+        "module": "./users",
+        "name": "initUsers",
+    }
+    [scope] = _claims(FORWARD, FASTIFY_TRACED_SCOPE)
+    assert scope.target_key == "initAll"
+    assert scope.meta == {
+        PENDING_FACT: FASTIFY_TRACED_SCOPE,
+        "kind": PLUGIN,
+        "exports": json.dumps([["initAll", False]]),
+        "receiver": "server",
+    }
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        USERS + "export const initAll = (server) => initUsers(server);\n",
+        USERS + "export default function (server) { initUsers(server); }\n",
+        USERS + "function initAll(server) { initUsers(server); }\nexport { initAll };\n",
+        "import * as users from './users';\n"
+        "export function initAll(server) { users.initUsers(server); }\n",
+        USERS + "export async function initAll(server) { await initUsers(server); }\n",
+    ],
+)
+def test_each_exported_forwarding_form_is_read(source: str) -> None:
+    [call] = _helpers(source)
+    assert call.meta["owner_kind"] == PLUGIN
+    assert "refusal" not in call.meta
+    assert len(_claims(source, FASTIFY_TRACED_SCOPE)) == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # not exported
+        USERS + "function initAll(server) { initUsers(server); }\n",
+        # a package's function, or one of this file
+        "import { initUsers } from 'some-package';\n"
+        "export function initAll(server) { initUsers(server); }\n",
+        "function initUsers(s) {}\nexport function initAll(server) { initUsers(server); }\n",
+        # not the first parameter, or not the first argument
+        USERS + "export function initAll(deps, server) { initUsers(server); }\n",
+        USERS + "export function initAll(server, deps) { initUsers(deps, server); }\n",
+        # off the straight line
+        USERS + "export function initAll(server) { if (ready) { initUsers(server); } }\n",
+        USERS + "export function initAll(server) { items.forEach(() => initUsers(server)); }\n",
+        USERS + "export function initAll(server) { try { initUsers(server); } catch (e) {} }\n",
+        # held in an object
+        USERS + "export function initAll(server) { initUsers({ server }); }\n",
+    ],
+)
+def test_a_file_without_fastify_that_forwards_nothing_records_no_fastify_claim(
+    source: str,
+) -> None:
+    assert _roles(source).isdisjoint(_FASTIFY_ROLES)
 
 
 # -- a name a function parameter shares with a module-level instance ------------------------

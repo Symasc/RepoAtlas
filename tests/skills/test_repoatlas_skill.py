@@ -21,6 +21,8 @@ thing, not that it goes on saying it this way.
 from __future__ import annotations
 
 import re
+import subprocess
+from pathlib import Path
 
 import pytest
 from repoatlas.mcp.tools import TOOLS, TOOLS_BY_NAME
@@ -64,6 +66,24 @@ def test_the_canonical_skill_exists_at_the_vendor_neutral_path() -> None:
     assert parts == ("skills", "repoatlas-code-trace", "SKILL.md"), parts
 
 
+def _tracked_paths(root: Path, vendors: tuple[str, ...]) -> set[str] | None:
+    """The vendor directories with at least one git-tracked file, or None without git."""
+    try:
+        listed = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--", *vendors],
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    tracked: set[str] = set()
+    for name in listed.decode().split("\0"):
+        head = name.split("/", 1)[0]
+        if head in vendors:
+            tracked.add(head)
+    return tracked
+
+
 def test_no_vendor_directory_holds_a_competing_copy() -> None:
     """§2 and §3: one source of behavioural truth, in no vendor's namespace.
 
@@ -72,8 +92,14 @@ def test_no_vendor_directory_holds_a_competing_copy() -> None:
     skills are not copies of each other: each is the only workflow for its task.
     """
     root = SKILL_PATH.parent.parent.parent
-    for vendor in (".claude", ".codex", ".cursor", ".windsurf", "anthropic", "openai"):
-        assert not (root / vendor).exists(), f"vendor-specific guidance directory: {vendor}"
+    vendors = (".claude", ".codex", ".cursor", ".windsurf", "anthropic", "openai")
+    # Only tracked files are this repository's guidance. A git-ignored local directory
+    # (a client's permissions file, say) is the user's state, not a competing copy.
+    # Outside a git checkout there is no tracked set, so the filesystem decides.
+    tracked = _tracked_paths(root, vendors)
+    for vendor in vendors:
+        present = (root / vendor).exists() if tracked is None else vendor in tracked
+        assert not present, f"vendor-specific guidance directory: {vendor}"
     # installed packages are not this repository's guidance (Playwright ships skills)
     copies = sorted(
         path

@@ -10,6 +10,8 @@ with what is refused), each relative to the file that states it, and answers wit
 * :class:`Parts` -- segments of which some are read from another module;
 * :class:`ImportedPath` -- the whole path is a name another module exports;
 * :class:`Param` -- the path is the function parameter at an index;
+* :class:`ParamSegment` -- the path is an anchored ``join`` whose last segment is that
+  parameter: each caller's string is joined to this file's directory, not the caller's;
 * :class:`Refused` -- a code that says why the source does not state a path. A
   refusal is a decision, never a guess: nothing here falls back to the process's
   working directory, to an environment setting's default, or to a name it cannot prove.
@@ -37,9 +39,11 @@ before its ``const`` runs is not its value.
 
 **A whole value** that is a named import from a relative module, or a plain parameter
 of a module-level function (no default, not optional, not a pattern), is answered with
-:class:`ImportedPath` or :class:`Param`, also through ``const`` aliases. Any other use
-is refused: as an anchor, as a segment of a template or ``+``, a parameter as a segment
-at all, or the parameter of a nested function.
+:class:`ImportedPath` or :class:`Param`, also through ``const`` aliases. Such a parameter is
+also read as the last argument of a ``join``/``resolve`` written directly in the call, after an
+anchor and literal segments (:class:`ParamSegment`). Any other use is refused: as an anchor, as
+a segment of a template or ``+``, a parameter as any other segment, through a ``const`` alias in
+a segment, or the parameter of a nested function.
 
 **Resolution is lexical** (:meth:`FetchWrappers.lookup`): a name resolves where it is
 bound, and only when that is its one binding there. Nothing is read from disk, and the
@@ -95,6 +99,10 @@ SPEC_PARAMETER_UNCALLED = "spec-parameter-uncalled"
 SPEC_OUTSIDE_REPOSITORY = "spec-outside-repository"
 SPEC_NOT_INDEXED = "spec-not-indexed"
 SPEC_NOT_A_FILE = "spec-not-a-file"
+#: A path the source and a tsconfig build layout read to two different indexed documents.
+SPEC_LAYOUT_AMBIGUOUS = "spec-layout-ambiguous"
+#: A factory only test files call: a test harness is no evidence of the application's own path.
+SPEC_PARAMETER_TEST_ONLY = "spec-parameter-test-only"
 
 # -- what is read -------------------------------------------------------------------------
 
@@ -130,13 +138,22 @@ class Param:
 
 
 @dataclass(frozen=True, slots=True)
+class ParamSegment:
+    """``join(ANCHOR, *parts, <parameter at index>)`` in ``function``, a module-level function."""
+
+    parts: tuple[str, ...]
+    index: int
+    function: Node
+
+
+@dataclass(frozen=True, slots=True)
 class Refused:
     """Why this source does not state a path: one of the ``SPEC_*`` codes."""
 
     code: str
 
 
-Result = Spec | Parts | ImportedPath | Param | Refused
+Result = Spec | Parts | ImportedPath | Param | ParamSegment | Refused
 
 #: A binding of a whole module: a namespace or default import, or ``require``.
 _MODULE = "*"
@@ -246,6 +263,9 @@ class SpecPathReader:
         whole = self._whole(node, 0)
         if whole is not None:
             return whole
+        tail = self._parameter_tail(node)
+        if tail is not None:
+            return tail
         found = self._path(node, 0, 0)
         if isinstance(found, Refused):
             return found
@@ -274,6 +294,33 @@ class SpecPathReader:
         if isinstance(value, (Refused, Global)):
             return None
         return self._whole(value, depth + 1)
+
+    def _parameter_tail(self, node: Node) -> ParamSegment | Refused | None:
+        """``join(ANCHOR, …literals, PARAM)`` written in the call, ``PARAM`` a plain parameter of
+        the module-level function holding it. ``None`` for anything else, which :meth:`_path`
+        reads (and refuses, for a parameter anywhere else)."""
+        node = operand(node)
+        if node.type != "call_expression":
+            return None
+        callee = node.child_by_field_name("function")
+        arguments = arguments_of(node)
+        if callee is None or arguments is None or len(arguments) < 2:
+            return None
+        if self._operation(operand(callee)) not in _JOINS:
+            return None
+        last = operand(arguments[-1])
+        if last.type != "identifier" or node_text(self._source, last) in _ANCHORS:
+            return None
+        found = self._binding(last)
+        if not isinstance(found, Parameter) or not self._plain(found):
+            return None
+        base = self._join(arguments[:-1], 0, 0)
+        if isinstance(base, Refused):
+            return base
+        if any(isinstance(part, Imported) for part in base.parts):
+            return Refused(SPEC_IMPORT_UNSUPPORTED)
+        parts = tuple(part for part in base.parts if isinstance(part, str) and part)
+        return ParamSegment(parts, found.index, found.function)
 
     # -- paths ---------------------------------------------------------------------------
 
