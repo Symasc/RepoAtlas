@@ -161,6 +161,39 @@ TRACE_GUARDED_MAIN = d("""
         }
 """)
 
+#: The entry builds the server inside a `try` and hands it, through a function of its own file,
+#: to a file that only forwards it and does not import Fastify.
+TRACE_TRIED_MAIN = d("""
+    import { createServer } from './server';
+    import { initializeForwarded } from './forward';
+
+    function runApi(server) {
+      initializeForwarded(server);
+    }
+
+    async function main() {
+      try {
+        const server = createServer();
+        return runApi(server);
+      } catch (error) {
+        process.exit(1);
+      }
+    }
+
+    if (require.main === module) {
+      main().then();
+    }
+""")
+
+FORWARD = d("""
+    import type { Server } from './server';
+    import { initializeUserRoutes } from './routes/users';
+
+    export function initializeForwarded(server: Server) {
+      initializeUserRoutes(server);
+    }
+""")
+
 PACKAGE = '{"name": "fixture"}\n'
 
 TRACE = {
@@ -790,6 +823,12 @@ def guarded_trace(workspace: Workspace, tmp_path: Path) -> Workspace:
 
 
 @pytest.fixture
+def tried_trace(workspace: Workspace, tmp_path: Path) -> Workspace:
+    files = {**TRACE, "src/main.ts": TRACE_TRIED_MAIN, "src/forward.ts": FORWARD}
+    return build(workspace, tmp_path, {"trace": files})
+
+
+@pytest.fixture
 def neg(workspace: Workspace, tmp_path: Path) -> Workspace:
     return build(workspace, tmp_path, {"neg": NEG})
 
@@ -818,6 +857,20 @@ def test_commonjs_guarded_entry_traces_the_same_routes_through_helpers(
         "src/main.ts": [PROVEN]
     }
     assert plan.chain_refusals == {}
+
+
+def test_an_entry_in_a_try_block_traces_routes_through_a_file_that_only_forwards(
+    tried_trace: Workspace,
+) -> None:
+    reached = {"src/routes/users.ts", "src/server.ts"}
+    assert _edges(tried_trace, "trace") == {edge for edge in TRACE_EDGES if edge[0] in reached}
+    plan, grouped, by_id = _plan(tried_trace)
+    assert _by_path(plan.instance_outcomes, grouped[FASTIFY_INSTANCE], by_id) == {
+        "src/main.ts": [PROVEN]
+    }
+    helpers = _by_path(plan.helper_outcomes, grouped[FASTIFY_HELPER_CALL], by_id)
+    assert helpers["src/main.ts"] == [HELPER_ACCEPTED] * 2
+    assert helpers["src/forward.ts"] == [HELPER_ACCEPTED]
 
 
 def test_trace_has_the_claims_the_prediction_counts(trace: Workspace) -> None:
