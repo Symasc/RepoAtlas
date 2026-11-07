@@ -153,7 +153,8 @@ def test_an_express_parameter_path_is_kept_as_a_literal_template() -> None:
         "const cache = new Map();\ncache.get('/hello');\nmap.get('/hello', 1);\n",
         'import express from "express-lite";\nconst app = express();\napp.get("/x", h);\n',
         'import * as express from "express";\nconst app = express();\napp.get("/x", h);\n',
-        'import express from "express";\nlet app = express();\napp.get("/x", h);\n',
+        # SUPERSEDED 2026-11-06 R2b-0 (user-approved): a proven 'let app' is served;
+        # see tests/test_http_typescript_r2b0.py (P2).
         EXPRESS + "app.get('/x', h);\nfunction wire(app) { return app; }\n",
         EXPRESS + "app.get(PATH, h);\n",
         EXPRESS + "app.get(`/u/${id}`, h);\n",
