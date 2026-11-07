@@ -2002,6 +2002,18 @@ Until the pass proves one, it stays a pending claim that records the declaration
     - A whole imported path is read from that module's `ts-path-constants`, anchored at the declaring file.
     - A one-level factory parameter: the factory is called in the same file or through one relative named import,
       and each call is anchored at the caller's file.
+    - A factory parameter that is the last segment of an anchored `join`/`resolve` written in the call: each
+      caller hands a string literal (or a `const` of one), joined to the factory's directory after the literal
+      segments before it. An anchored path handed there is refused as `spec-absolute`; a parameter anywhere
+      else in a path is still refused.
+    - A call in a test file (the change-impact convention, `is_test_path`) is an instance only of a factory in a
+      test file; a factory only test files call is `spec-parameter-test-only`.
+    - `__dirname` is the file's own directory, and also, for each `outDir`/`rootDir` pair declared by the
+      nearest tsconfig files that record `rootDir` or `outDir`, themselves or through a resolved `extends`,
+      the directory the file is compiled to; a config that records only module-resolution options (`baseUrl`,
+      `paths`, `include`) does not hide an enclosing pair. Exactly one indexed
+      document across those readings is the document; two are `spec-layout-ambiguous`. No pair, or a
+      `rootDir` that does not hold the file, leaves the source's directory alone.
     - Roots stay the module of the `expressAppConfig` call.
     - A refusal has a stable `spec-...` code under the unchanged `SPEC_UNREAD` / `SPEC_NOT_FOUND` headlines.
     - A document is never served because it exists or because something loads it: `swagger-ui-express`,
@@ -2009,8 +2021,9 @@ Until the pass proves one, it stays a pending claim that records the declaration
     - A limit: an operation's provider is listed at the handler object's file; the application module that
       exposes it and the call site that instantiates it are not shown.
   - The controllers are a handler object, or an object literal of spreads of handler objects, each declared in the
-    file or imported by name from a relative module; a later spread's key wins. A handler object is a module-level
-    `const`, bound once, whose every member is a function. A directory of controllers is not read.
+    file or imported from a relative module by name or as its default export; a later spread's key wins. A handler
+    object is a module-level `const`, bound once, whose every member is a function. A directory of controllers is
+    not read. A default-imported factory is still not followed.
   - Each operation is served at each root server's base path (the URL's path, one trailing slash dropped; none is
     the empty base) joined to its own path, by the handler object's `const`: composed, so no span. A server with
     `variables`, or a base with a placeholder or query, leaves the document unserved by code. The document still
@@ -2040,8 +2053,14 @@ Until the pass proves one, it stays a pending claim that records the declaration
       function, where `F` is a factory of the file, a name imported from a relative module, or the member of a
       relative namespace import; an `async` factory must be awaited;
     - an entry application is a `const x = Fastify()` at the top of a module-level function that is no factory, and
-      counts only where the file calls that function unconditionally at its top level (`G();`, `void G();`,
-      `await G();`, `G().catch(…)`);
+      counts where the file calls that function unconditionally at its top level (`G();`, `void G();`, `await G();`,
+      `G().catch(…)`), or as the only statement in `if (require.main === module) { G().then(); }` with neither
+      CommonJS global shadowed. That form is exact: `===` with `require.main` on the left and `module` on the
+      right, a bare module-level `G` called with no arguments, and `.then()` with no arguments and no `await`,
+      parentheses, optional chaining or `.catch(…)` around it. A guard with an `else` still proves `G`, since `G`
+      runs whenever the file is the main module. The guard is refused in a `.mjs` or `.mts` file (an ES module has
+      no `require`); a `.js` file made an ES module by a `"type": "module"` in its `package.json` is not told
+      apart, a known gap. Other conditionals do not prove an entry;
     - an alias is `const y = x` in the same scope after `x`, at most 4 hops from the instance or the entry. A
       receiver is recorded only when the file uses it: as the receiver of a route verb, `route`, `register`,
       `listen` or `ready`, or as an argument of a call of a function of the file or of a relative module.
@@ -2058,13 +2077,18 @@ Until the pass proves one, it stays a pending claim that records the declaration
     package's included) is recorded and refused with `fastify-helper-callee-unsupported`.
   - Straight-line rule. A route, registration or helper call on an instance, an entry or a factory's application
     counts only when its statement sits directly in that receiver's own body (`call;`, `await call;`, `void call;`,
-    `return call;` or `const r = [await] call;`). Uses in nested functions, callbacks, conditions, loops or `try`
-    blocks are no routes and no registrations, and a helper call there is refused with
-    `fastify-helper-control-flow`; a helper call after an awaited `listen` or `ready` on the receiver is refused
+    `return call;` or `const r = [await] call;`). An entry function's straight line also runs through the block
+    of each `try` directly in its body, where an instance or entry application may be declared too; never its
+    `catch` or `finally`, a nested `try`, or a `try` anywhere else. Uses in nested functions, callbacks,
+    conditions, loops or other `try` blocks are no routes and no registrations, and a helper call there is
+    refused with `fastify-helper-control-flow`; a helper call after an awaited `listen` or `ready` on the receiver is refused
     with `fastify-after-listen`. A plugin's server keeps its rule for routes and registrations (anywhere in its
     body); its helper calls need the straight line.
   - Routes on an instance, an entry or a factory's application are traced in every file; in a file without a
-    `fastify` import every route is traced. Traced routes are served only when a proven chain reaches them;
+    `fastify` import every route is traced. Such a file is read when it uses an instance, or when an exported
+    plugin function hands its own first parameter, as the first argument of a straight-line call, to a function
+    of a relative module (a file that only forwards a server, typed by a local alias). Traced routes are served
+    only when a proven chain reaches them;
     otherwise they are diagnostics, never provider rows. A registration made inside a plugin function of such a
     file is not read.
   - Chain. A route on a plugin, an instance or a factory is served under each chain of registrations and helper

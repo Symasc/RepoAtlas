@@ -27,7 +27,7 @@ from repoatlas.models.parsing import (
     ParsedSymbol,
     Severity,
 )
-from repoatlas.parsers.http_fastify import FastifyDeclarations
+from repoatlas.parsers.http_fastify import ES_MODULE_SUFFIXES, FastifyDeclarations
 from repoatlas.parsers.http_nestjs import NestDeclarations
 from repoatlas.parsers.http_oas3 import SpecRoutedApps
 from repoatlas.parsers.http_ts_injection import Injections
@@ -895,11 +895,18 @@ class TypeScriptParser:
     # 23: a NestFactory.create options argument that is a const bound once to an object
     #    literal, read only there and here, proves a root's prefix like an inline one (F4,
     #    repoatlas.parsers.http_nestjs).
-    # 24: an Express application or router bound once by a top-level ``let`` or ``var`` and used
+    # 24: an oas3-tools factory whose parameter is the last segment of an anchored join
+    #    (``spec_param_dir``), the string segment a call hands it, and a relative default
+    #    import as controllers (repoatlas.parsers.http_oas3).
+    # 25: the CommonJS direct-entry guard proves a Fastify entry application
+    #    (repoatlas.parsers.http_fastify).
+    # 26: a Fastify entry function's straight line runs through its top-level ``try`` blocks,
+    #    and a file without fastify that forwards a plugin's server is read for tracing.
+    # 27: an Express application or router bound once by a top-level ``let`` or ``var`` and used
     #    only after its statement, route paths and mount prefixes read through earlier top-level
     #    string constants (always composed), ``.route(path).<verb>(...)`` chains, and no receiver
     #    used before its declaration (R2b-0, repoatlas.parsers.http_typescript).
-    version = "24"
+    version = "27"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
@@ -930,7 +937,9 @@ class TypeScriptParser:
         http = TypeScriptHttp(source, tree.root_node)
         nest = NestDeclarations(source, tree.root_node, http.counts)
         wrappers = FetchWrappers(source, tree.root_node, http.counts)
-        fastify = FastifyDeclarations(source, tree.root_node, http.counts)
+        fastify = FastifyDeclarations(
+            source, tree.root_node, http.counts, es_module=path.suffix in ES_MODULE_SUFFIXES
+        )
         injections = Injections(source, tree.root_node, http.counts, wrappers)
         oas3 = SpecRoutedApps(source, tree.root_node, http.counts, wrappers)
         # Uses are proven by scoping, and a tree the grammar had to recover may have
