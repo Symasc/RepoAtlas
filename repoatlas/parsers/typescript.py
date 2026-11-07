@@ -895,7 +895,11 @@ class TypeScriptParser:
     # 23: a NestFactory.create options argument that is a const bound once to an object
     #    literal, read only there and here, proves a root's prefix like an inline one (F4,
     #    repoatlas.parsers.http_nestjs).
-    version = "23"
+    # 24: an Express application or router bound once by a top-level ``let`` or ``var`` and used
+    #    only after its statement, route paths and mount prefixes read through earlier top-level
+    #    string constants (always composed), ``.route(path).<verb>(...)`` chains, and no receiver
+    #    used before its declaration (R2b-0, repoatlas.parsers.http_typescript).
+    version = "24"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
