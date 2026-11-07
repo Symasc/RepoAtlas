@@ -2936,6 +2936,42 @@ The child is then the file `M/head/A` and `name` its router. `__all__` is never 
 - **Inherited limit.** Factories and module scope still read a local import placed after the registration, so LA1, LA6
   and LA7 apply to two-level children too.
 
+### Subclassed receivers and applications built in an entry function
+
+Python parser version 31 reads four more shapes. Each is a claim only the global pass decides
+(`repoatlas/graph/py_routes.py`), and each fails closed.
+
+- **Class bodies.** A subclass of `FastAPI`, `APIRouter`, `Flask` or `Blueprint` may declare private methods and
+  methods decorated by names or attributes only (`@property`, `@x.setter`, `@staticmethod`,
+  `@asynccontextmanager`). A call decorator, a special method, a private member the framework serves through
+  (`_method_route`, ...) and any name it registers or serves through are still refused.
+- **Own `__init__`.** Besides the exact `super().__init__(*args, **kwargs)`, an `__init__` is accepted when it calls
+  `super().__init__(...)` exactly once as a top-level statement, reads its instance only as `self.name` with no name the
+  framework serves through (so the instance is handed to nothing), and no binding or star import could change `super`.
+  For an application nothing more is asked: what it serves is never read from its construction. For a router or
+  blueprint (`init_fits`) at most one class of the chain has such an `__init__`, and it hands the base no path keyword
+  (`prefix`, `routes`, `route_class`, ...; `url_prefix`, `subdomain`, `url_defaults`), no starred or extra positional
+  argument, and reads its `**kwargs` only to hand them on, none of its own parameters taking a path keyword out. A
+  construction's keywords reach the base only through that `**kwargs` (`reaching_keywords`), so its prefix is read
+  from them, or is the framework's default.
+- **Offered across modules.** Every accepted subclass is a `python-class` claim, routers and blueprints included, with
+  its `__init__` facts. A class extending another module's class is one too (`kind` `imported`, `base_module`,
+  `base_class`). The pass follows a class from the module an importer names to the one that defines it through at most
+  `MAX_REEXPORT_HOPS` (2) unconditional `from .m import C` re-exports proven by export tables, and through classes
+  extending another module's, at most 3 classes in all. A route on a router or blueprint built from such a class
+  (`r = ManagedRouter()` in another module) is a router route: served where a mount chain reaches it, else
+  `python-not-mounted` and declared. A class whose `__init__` facts do not fit its kind is
+  `python-class-init-unproven`.
+- **Applications built in a function.** A function's application may be bound once per branch of one top-level `if`
+  with an `else` (`elif` included) or `match` whose last case is a bare `case _:`, each binding a top-level statement of
+  its branch and every other branch ending in `raise`. Its class may be the framework's, this module's, or one another
+  module defines (imported or extended here, escaping nowhere in the module). Classes other modules define travel as
+  `owner_classes` on the mount and helper-call claims; the pass reads those only when every class proves the same
+  application kind.
+- **Helper loops.** A helper's top-level `for child in CHILDREN: p.include_router(child)` over a literal list (a
+  display, or a name bound once to one that nothing reads but loops) is read as one registration per element, as a
+  factory's loop already is.
+
 ### Refused HTTP requests: listed where the walk went, never followed
 
 > **Invariant.** A refused request is never a candidate, a step or an edge, and never changes which requests link. An

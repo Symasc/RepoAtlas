@@ -88,20 +88,25 @@ at module level and has one base: ``fastapi.FastAPI``, ``fastapi.APIRouter``, ``
 or ``fastapi.APIRouter`` on ``import fastapi [as m]``), or a class of this kind defined earlier in
 the same module, at most three deep. An alias (``Base = APIRouter``), another module's class,
 ``fastapi.routing.APIRouter`` and a relative import are not followed, and a familiar name is never
-enough. No metaclass, keyword, type parameter or decorator; the class name bound once; a body of
-``pass``, a docstring and plain methods, none of which is a special method or one of the
-framework's registration members; and an ``__init__`` only when it is exactly
-``super().__init__(*args, **kwargs)``, in a module with no star import. The class name may only be
-called, be a base or stand in an annotation: any other read (``C.get = f``, ``alias = C``) could
-change it. Every refusal has an internal reason in ``class_refusals``, never stored. Only the same
-module's classes are followed here. An application subclass is offered to the global pass as a
-:data:`PYTHON_CLASS` claim; a module that builds an application from a class it imports --
+enough. No metaclass, keyword, type parameter or class decorator; the class name bound once; a body
+of ``pass``, a docstring and methods, none of which is a special method, a private member the
+framework serves through or one of its registration members, decorated by names or attributes only
+if at all; and an ``__init__`` that is exactly ``super().__init__(*args, **kwargs)``, or one that
+calls the base's once and touches nothing the framework serves through
+(:meth:`PythonHttp._custom_init`, held to :func:`init_fits` for a router or blueprint), in a module
+with no star import. The class
+name may only be called, be a base or stand in an annotation: any other read (``C.get = f``,
+``alias = C``) could change it. Every refusal has an internal reason in ``class_refusals``, never
+stored. Only the same module's classes are followed here. Every subclass is offered to the global
+pass as a :data:`PYTHON_CLASS` claim, with its ``__init__`` facts -- one extending another module's
+class too, naming that class; a module that builds a receiver from a class it imports --
 ``app = CustomApp()`` on ``from base import CustomApp``, or ``app = App()`` for a class ``App``
 that extends it, the import above the class or the construction, the imported name read only to
-extend or construct -- records the routes on that application as :data:`PYTHON_CLASS_ROUTE`
-claims, which the global pass serves when the defining module offers the class, total depth
-included. Such a class is kept in ``imported_subclasses`` and ``imported_class_refusals``, never
-in ``subclasses`` and ``class_refusals``.
+extend or construct -- records the routes on it as :data:`PYTHON_CLASS_ROUTE` claims, with what the
+construction hands the class, which the global pass serves when the defining module offers the
+class, total depth included: at the root of an application, or as a router's or blueprint's routes.
+Such a class is kept in ``imported_subclasses`` and ``imported_class_refusals``, never in
+``subclasses`` and ``class_refusals``.
 
 **A client object** -- ``requests.Session()``, ``httpx.Client(...)``, ``httpx.AsyncClient(...)`` --
 is followed only where its identity is lexical: bound by one ``name = C(...)`` or
@@ -124,7 +129,7 @@ from __future__ import annotations
 import ast
 import json
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -260,6 +265,38 @@ _ROUTING_MEMBERS = frozenset(
         "router",
     }
 )
+#: Private members the frameworks register or serve through: a subclass may not define them.
+_PRIVATE_MEMBERS = frozenset({"_method_route", "_check_setup_finished", "_merge_blueprint_funcs"})
+#: What a subclass's ``__init__`` may not read or set on its instance, and no property may be:
+#: what the framework registers or serves through.
+_SERVING_ATTRIBUTES = _ROUTING_MEMBERS | frozenset(
+    {
+        "redirect_slashes",
+        "default",
+        "middleware_stack",
+        "user_middleware",
+        "root_path",
+        "subdomain",
+        "url_defaults",
+        "static_folder",
+        "static_url_path",
+    }
+)
+#: The keywords of a router's or blueprint's constructor that change where its routes are served.
+_PATH_KEYWORDS = {
+    _FASTAPI_ROUTER: frozenset({"prefix", "routes", "route_class", "redirect_slashes", "default"}),
+    _FLASK_BLUEPRINT: frozenset({"url_prefix", "subdomain", "url_defaults"}),
+}
+#: The positional arguments a router's or blueprint's constructor takes before one changes a path.
+_PATH_POSITIONAL = {_FASTAPI_ROUTER: 0, _FLASK_BLUEPRINT: 5}
+#: The kind of application a mounting call is made on, when its class is not known here.
+_CALL_OWNERS = {
+    "include_router": _FASTAPI_APP,
+    "mount": _FASTAPI_APP,
+    "register_blueprint": _FLASK_APP,
+}
+#: The keyword a construction states a router's or blueprint's own prefix by.
+_PREFIX_KEYWORDS = {_FASTAPI_ROUTER: "prefix", _FLASK_BLUEPRINT: "url_prefix"}
 #: Why a module-level class derived from a constructor builds no receiver: internal, for tests
 #: and measurement.
 _MULTIPLE_BASES = "multiple-bases"
@@ -282,6 +319,8 @@ _IMPORTED_LATE = "imported-after-class"
 #: The kind in an ``_Origin`` whose base is a class another module defines: its kind is not
 #: known here.
 _IMPORTED = "imported"
+#: The kind a :data:`PYTHON_CLASS` claim states for a class whose base another module defines.
+IMPORTED_CLASS = "imported"
 #: What a base resolves to: its kind, its depth and (for a class of this module) its name.
 _Origin = tuple[str, int, str | None]
 
@@ -750,6 +789,9 @@ class _Subclass:
     line: int
     #: The class of this module it extends; ``None`` for a framework class.
     base: str | None
+    #: The own ``__init__`` of each class on the way that is no plain pass-through, nearest
+    #: first, as :meth:`PythonHttp._custom_init` states it.
+    inits: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -782,6 +824,8 @@ class _ImportedSubclass:
     line: int
     #: The class of this module it extends; ``None`` for the imported class itself.
     base: str | None
+    #: As :attr:`_Subclass.inits`, for the classes of this module only.
+    inits: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(slots=True)
@@ -798,6 +842,9 @@ class _ClassReceiver:
     via: str | None
     #: Cleared when it is mounted as a sub-application, which serves it somewhere else.
     usable: bool = True
+    #: What the construction hands the class: positional arguments, keywords and, for each
+    #: prefix keyword, the prefix it states (``None``: unreadable).
+    ctor: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -808,6 +855,20 @@ class _Imported:
     module: str
     #: The name taken from it; ``None`` for ``import module``, which binds the module.
     attribute: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Built:
+    """An application a function builds: bound once by its own top-level statement, or once in
+    each branch of one top-level ``if``/``match`` whose other branches raise."""
+
+    #: Its kind, when every class it may be built from is this module's or the framework's.
+    kind: str | None
+    #: The classes other modules define that it may be built from: ``module``, ``class``,
+    #: ``depth`` and ``init`` (this module's ``__init__`` facts), for the global pass.
+    classes: tuple[dict[str, str], ...]
+    #: The function's top-level statement that binds it.
+    index: int
 
 
 @dataclass(slots=True)
@@ -1425,6 +1486,45 @@ def _fastapi_prefix(prefix: str) -> bool:
     )
 
 
+def _names(value: object) -> set[str]:
+    return {str(item) for item in value} if isinstance(value, list) else set()
+
+
+def init_fits(kind: str, inits: Sequence[Mapping[str, object]]) -> bool:
+    """Whether the own ``__init__`` methods of a class chain leave where a receiver of ``kind``
+    serves to its construction, as the framework's class does.
+
+    An application's always do: what it serves is never read from its construction. A router's or
+    blueprint's do when there is one at most, which hands the base no path keyword, no starred
+    argument and no more positional ones than precede a path, and reads its ``**kwargs`` only to
+    hand them on, none of its own parameters taking a path keyword out of them.
+    """
+    if kind in _APPLICATIONS or not inits:
+        return True
+    if kind not in _PATH_KEYWORDS or len(inits) != 1:
+        return False
+    init = inits[0]
+    path = _PATH_KEYWORDS[kind]
+    if init.get("starred") or init.get("kwargs_read") or _names(init.get("keywords")) & path:
+        return False
+    if init.get("forwards") and _names(init.get("named")) & path:
+        return False
+    positional = init.get("positional")
+    return isinstance(positional, int) and positional <= _PATH_POSITIONAL[kind]
+
+
+def reaching_keywords(keywords: Iterable[str], inits: Sequence[Mapping[str, object]]) -> list[str]:
+    """The keywords of a construction that reach the framework's constructor through ``inits``
+    (which :func:`init_fits` accepted): all of them through no own ``__init__``; through one, those
+    its ``**kwargs`` hands on, none if it hands none."""
+    if not inits:
+        return list(keywords)
+    if not inits[0].get("forwards"):
+        return []
+    named = _names(inits[0].get("named"))
+    return [keyword for keyword in keywords if keyword not in named]
+
+
 def flask_join(prefix: str | None, rule: str) -> str | None:
     """A blueprint route under a URL prefix, where the result is unambiguous.
 
@@ -1747,6 +1847,55 @@ def _statement_calls(
             yield from _unrolled(call, elements)
 
 
+def _branches(statement: ast.stmt) -> list[list[ast.stmt]] | None:
+    """The branches of an ``if`` with an ``else`` (an ``elif`` chain read as one) or of a
+    ``match`` whose last case is a bare ``case _:``: exactly one of them runs."""
+    if isinstance(statement, ast.If):
+        branches: list[list[ast.stmt]] = []
+        current = statement
+        while True:
+            branches.append(current.body)
+            if not current.orelse:
+                return None
+            if len(current.orelse) == 1 and isinstance(current.orelse[0], ast.If):
+                current = current.orelse[0]
+                continue
+            branches.append(current.orelse)
+            return branches
+    match = getattr(ast, "Match", None)
+    if match is None or not isinstance(statement, match):
+        return None
+    cases = statement.cases
+    last = cases[-1].pattern if cases else None
+    if (
+        not isinstance(last, ast.MatchAs)
+        or last.pattern is not None
+        or last.name is not None
+        or cases[-1].guard is not None
+    ):
+        return None
+    return [case.body for case in cases]
+
+
+def _raises(branch: list[ast.stmt]) -> bool:
+    return bool(branch) and isinstance(branch[-1], ast.Raise)
+
+
+def _plainly_decorated(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Whether a method's decorators are names or attributes, none a call, and its name is no
+    member the framework serves through: what they bind under that name serves nothing."""
+    name = function.name
+    if name.startswith("__") or name in _PRIVATE_MEMBERS or name in _SERVING_ATTRIBUTES:
+        return False
+    for decorator in function.decorator_list:
+        node = decorator
+        while isinstance(node, ast.Attribute):
+            node = node.value
+        if not isinstance(node, ast.Name):
+            return False
+    return True
+
+
 def _mount_target(kind: str, call: ast.Call) -> ast.expr | None:
     """What an application's or router's mounting call mounts, or ``None``."""
     attribute = call.func.attr if isinstance(call.func, ast.Attribute) else ""
@@ -1955,6 +2104,11 @@ class PythonHttp:
         self.imported_class_refusals: dict[str, str] = {}
         #: Receiver name → the imported class (or subclass of one) it is constructed from.
         self._class_receivers: dict[str, _ClassReceiver] = {}
+        #: Class → the facts of its own ``__init__``, when that is read and no pass-through.
+        self._inits: dict[str, dict[str, object]] = {}
+        #: Imported class refs a function builds an application from → whether one escapes.
+        self._ref_escapes: dict[_ClassRef, bool] = {}
+        self._tree = tree
         counts, stars = _binding_counts(tree)
         #: Whether the module has a star import, which could rebind ``super``.
         self._stars = bool(stars)
@@ -2124,8 +2278,12 @@ class PythonHttp:
             if not isinstance(origin, tuple):
                 continue
             base = origin[2]
+            inits = self._chain_inits(node.name, self.subclasses[base].inits if base else ())
+            if not init_fits(origin[0], inits):
+                self.class_refusals[node.name] = _INIT_WITH_EFFECT
+                continue
             self.subclasses[node.name] = _Subclass(
-                origin[0], origin[1] + 1, _position(node), node.lineno, base
+                origin[0], origin[1] + 1, _position(node), node.lineno, base, inits
             )
             accepted.append(node.name)
         if not accepted:
@@ -2216,10 +2374,12 @@ class PythonHttp:
                 if ref is None or not self._imported_before(ref, _position(node)):
                     self.imported_class_refusals[node.name] = _IMPORTED_LATE
                     continue
+                inits = self._chain_inits(node.name, ())
             else:
                 ref = self.imported_subclasses[origin[2]].ref
+                inits = self._chain_inits(node.name, self.imported_subclasses[origin[2]].inits)
             self.imported_subclasses[node.name] = _ImportedSubclass(
-                ref, origin[1] + 1, _position(node), node.lineno, origin[2]
+                ref, origin[1] + 1, _position(node), node.lineno, origin[2], inits
             )
 
     def _derived_from_import(self, node: ast.ClassDef) -> bool:
@@ -2273,7 +2433,19 @@ class PythonHttp:
                 if found is None or not self._imported_before(found, at):
                     continue
                 receiver = _ClassReceiver(found, 0, statement.lineno, None)
+            receiver.ctor = self._construction(value, at)
             self._class_receivers[name] = receiver
+
+    def _construction(self, call: ast.Call, at: _Position) -> dict[str, object]:
+        """What a construction of a class another module defines hands it, for the global pass:
+        whether a router or blueprint it may be serves where its keywords say."""
+        keywords = _keywords(call)
+        prefixes: dict[str, str | None] = {}
+        for name in _PREFIX_KEYWORDS.values():
+            if name in keywords:
+                found = self._prefix_value(keywords[name], at)
+                prefixes[name] = found[0] if found is not None else None
+        return {"positional": len(call.args), "keywords": sorted(keywords), "prefixes": prefixes}
 
     def _imported_escapes(self, tree: ast.Module) -> None:
         """Drop what an imported class, or a class that extends one, could be changed through.
@@ -2287,29 +2459,7 @@ class PythonHttp:
             return
         refs = {found.ref for found in self.imported_subclasses.values()}
         refs.update(found.ref for found in self._class_receivers.values())
-        names = set(self.imported_subclasses) | {ref.local for ref in refs if ref.attribute is None}
-        attributes = {(ref.local, ref.attribute) for ref in refs if ref.attribute is not None}
-        modules = {ref.local for ref in refs if ref.attribute is not None}
-        # Any other local an import binds may be the module that holds such a class, spelled
-        # another way (``import base`` beside ``from base import C``): `base.C.get = f` changes
-        # it too. Held to the same rule for every class in play, by name.
-        others = set(self._imported) - names - modules
-        modules |= others
-        attributes |= {(alias, ref.name) for alias in others for ref in refs}
-        # A module reached by a dotted path, ``getattr`` or ``vars`` is not an alias this walk
-        # follows; the class is named instead, by attribute or by string, wherever it is read.
-        held = set(self.imported_subclasses) | {ref.name for ref in refs}
-        escaping = _escaping(
-            tree, names, frozenset(attributes), frozenset(modules), frozenset(held)
-        )
-
-        def escaped(ref: _ClassRef) -> bool:
-            return (
-                ref.spelled in escaping
-                or ref.local in escaping
-                or ref.name in escaping
-                or any(f"{alias}.{ref.name}" in escaping for alias in modules)
-            )
+        escaping, escaped = self._escaped_refs(refs)
 
         for name in list(self.imported_subclasses):
             found = self.imported_subclasses[name]
@@ -2326,6 +2476,36 @@ class PythonHttp:
             gone = receiver.via is not None and receiver.via not in self.imported_subclasses
             if gone or escaped(receiver.ref):
                 del self._class_receivers[name]
+
+    def _escaped_refs(self, refs: set[_ClassRef]) -> tuple[set[str], Callable[[_ClassRef], bool]]:
+        """The names :func:`_escaping` finds read other than to build or extend, with the
+        imported classes ``refs`` and this module's subclasses of them in play, and whether a ref
+        is one of them."""
+        names = set(self.imported_subclasses) | {ref.local for ref in refs if ref.attribute is None}
+        attributes = {(ref.local, ref.attribute) for ref in refs if ref.attribute is not None}
+        modules = {ref.local for ref in refs if ref.attribute is not None}
+        # Any other local an import binds may be the module that holds such a class, spelled
+        # another way (``import base`` beside ``from base import C``): `base.C.get = f` changes
+        # it too. Held to the same rule for every class in play, by name.
+        others = set(self._imported) - names - modules
+        modules |= others
+        attributes |= {(alias, ref.name) for alias in others for ref in refs}
+        # A module reached by a dotted path, ``getattr`` or ``vars`` is not an alias this walk
+        # follows; the class is named instead, by attribute or by string, wherever it is read.
+        held = set(self.imported_subclasses) | {ref.name for ref in refs}
+        escaping = _escaping(
+            self._tree, names, frozenset(attributes), frozenset(modules), frozenset(held)
+        )
+
+        def escaped(ref: _ClassRef) -> bool:
+            return (
+                ref.spelled in escaping
+                or ref.local in escaping
+                or ref.name in escaping
+                or any(f"{alias}.{ref.name}" in escaping for alias in modules)
+            )
+
+        return escaping, escaped
 
     def _class_refusal(self, node: ast.ClassDef, counts: Counter[str]) -> str | None:
         """Why a derived class builds no receiver, by the first rule it fails; else ``None``."""
@@ -2370,9 +2550,13 @@ class PythonHttp:
     def _body_refusal(self, node: ast.ClassDef) -> str | None:
         """Why a class body could change what the class registers or serves, else ``None``.
 
-        Only ``pass``, a docstring, ``...`` and plain methods are read. A method may not be
-        decorated, be a special method or a member the framework registers or serves through,
-        and ``__init__`` only passes its arguments on.
+        Only ``pass``, a docstring, ``...`` and methods are read. A method may not be a special
+        method, a private member the framework serves through or a member it registers or serves
+        through; it may be decorated only by names and attributes, never a call
+        (``@property``, ``@name.setter``, ``@staticmethod``, ``@asynccontextmanager``), and then
+        its name is not one the framework serves through either. ``__init__`` passes its
+        arguments on (:meth:`_passes_through`) or calls the base's once and touches nothing the
+        framework serves through (:meth:`_custom_init`).
         """
         for statement in node.body:
             if isinstance(statement, ast.Pass):
@@ -2386,15 +2570,115 @@ class PythonHttp:
             if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 return _CLASS_BODY_STATEMENT
             if statement.decorator_list:
-                return _DECORATED_MEMBER
+                if not _plainly_decorated(statement):
+                    return _DECORATED_MEMBER
+                continue
             if statement.name == "__init__":
-                if not self._passes_through(statement):
+                if self._passes_through(statement):
+                    continue
+                init = self._custom_init(statement)
+                if init is None:
                     return _INIT_WITH_EFFECT
-            elif statement.name.startswith("_"):
+                self._inits[node.name] = init
+            elif statement.name.startswith("__") or statement.name in _PRIVATE_MEMBERS:
                 return _SPECIAL_METHOD
             elif statement.name in _ROUTING_MEMBERS:
                 return _ROUTE_METHOD
         return None
+
+    def _chain_inits(
+        self, name: str, inherited: tuple[dict[str, object], ...]
+    ) -> tuple[dict[str, object], ...]:
+        own = self._inits.get(name)
+        return inherited if own is None else (own, *inherited)
+
+    def _custom_init(
+        self, function: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> dict[str, object] | None:
+        """The facts of an ``__init__`` that calls the base's once and touches nothing the
+        framework serves through, else ``None``.
+
+        Synchronous, with its instance as the first positional parameter, bound only so; exactly
+        one top-level ``super().__init__(...)`` and no other ``super``, which neither a binding nor
+        a star import of the module could change; the instance read only as ``self.name`` with no
+        name the framework serves through (:data:`_SERVING_ATTRIBUTES`), a special or a private
+        member of it, so it is handed to nothing. Anything else it does stays inside its body.
+        The facts say what reaches the base: the positional arguments it hands (and whether one is
+        starred), the keywords it names, whether it hands its own ``**kwargs`` on and reads them
+        otherwise, and its own parameters by name -- for :func:`init_fits`.
+        """
+        if self._counts["super"] or self._stars or not isinstance(function, ast.FunctionDef):
+            return None
+        arguments = function.args
+        positional = [*arguments.posonlyargs, *arguments.args]
+        if not positional:
+            return None
+        me = positional[0].arg
+        counts, _ = _binding_counts(function)
+        if counts[me] != 1:
+            return None
+        calls = [statement for statement in function.body if self._super_init(statement)]
+        supers = [node for node in ast.walk(function) if _is_name(node, "super")]
+        if len(calls) != 1 or len(supers) != 1:
+            return None
+        parents = {
+            id(child): parent
+            for parent in ast.walk(function)
+            for child in ast.iter_child_nodes(parent)
+        }
+        kwarg = arguments.kwarg.arg if arguments.kwarg is not None else None
+        call = calls[0].value
+        assert isinstance(call, ast.Call)
+        handed = {id(keyword.value) for keyword in call.keywords if keyword.arg is None}
+        kwargs_read = False
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Name):
+                continue
+            if node.id == me:
+                parent = parents.get(id(node))
+                if not (
+                    isinstance(parent, ast.Attribute)
+                    and parent.value is node
+                    and not parent.attr.startswith("__")
+                    and parent.attr not in _PRIVATE_MEMBERS
+                    and parent.attr not in _SERVING_ATTRIBUTES
+                ):
+                    return None
+            elif node.id == kwarg and id(node) not in handed:
+                kwargs_read = True
+        forwards = False
+        keywords: set[str] = set()
+        for keyword in call.keywords:
+            if keyword.arg is not None:
+                keywords.add(keyword.arg)
+            elif forwards or kwarg is None or not _is_name(keyword.value, kwarg):
+                return None
+            else:
+                forwards = True
+        named = {argument.arg for argument in [*positional[1:], *arguments.kwonlyargs]}
+        return {
+            "forwards": forwards,
+            "named": sorted(named),
+            "positional": sum(not isinstance(arg, ast.Starred) for arg in call.args),
+            "starred": any(isinstance(arg, ast.Starred) for arg in call.args),
+            "keywords": sorted(keywords),
+            "kwargs_read": kwargs_read,
+        }
+
+    @staticmethod
+    def _super_init(statement: ast.stmt) -> bool:
+        """``super().__init__(...)`` as a statement of its own."""
+        if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)):
+            return False
+        func = statement.value.func
+        return (
+            isinstance(func, ast.Attribute)
+            and func.attr == "__init__"
+            and isinstance(func.value, ast.Call)
+            and _is_name(func.value.func, "super")
+            and not func.value.args
+            and not func.value.keywords
+        )
 
     def _passes_through(self, function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
         """Whether ``function`` only hands its arguments to the base's ``__init__``.
@@ -2492,6 +2776,19 @@ class PythonHttp:
             kind = self._constructed_kind(value.func, at)
             if kind is None:
                 continue
+            subclass = (
+                self.subclasses.get(value.func.id) if isinstance(value.func, ast.Name) else None
+            )
+            if subclass is not None and subclass.inits:
+                reaching = set(reaching_keywords(_keywords(value), subclass.inits))
+                value = ast.copy_location(
+                    ast.Call(
+                        func=value.func,
+                        args=[],
+                        keywords=[k for k in value.keywords if k.arg in reaching],
+                    ),
+                    value,
+                )
             receiver = self._receiver(kind, value, at)
             if receiver is not None:
                 receiver.line = statement.lineno
@@ -2672,6 +2969,7 @@ class PythonHttp:
         child: dict[str, str],
         shadow: Counter[str] | None = None,
         sink: list[ParsedReference] | None = None,
+        owner_classes: tuple[dict[str, str], ...] = (),
     ) -> None:
         """A mount only the global pass can decide: of an imported router, or a factory's.
 
@@ -2688,6 +2986,8 @@ class PythonHttp:
 
         The claim is added to ``sink`` instead of ``_mount_claims`` when one is given: a
         helper's registration (:meth:`_helpers`), whose owner a call of the helper decides.
+        ``owner_classes`` are the classes other modules define the owner may be built from: the
+        global pass reads the mount only where each proves the owner's kind.
         """
         attribute = call.func.attr if isinstance(call.func, ast.Attribute) else ""
         readable = attribute in _MOUNT_CALLS and not _dynamic(call)
@@ -2729,6 +3029,8 @@ class PythonHttp:
             if found is not None and found[0] and _fastapi_prefix(found[0]):
                 mount_path = found[0]
         mounted_at = {"mount_prefix": json.dumps(mount_path)} if mount_path else {}
+        if owner_classes:
+            mounted_at["owner_classes"] = json.dumps(owner_classes, sort_keys=True)
         (self._mount_claims if sink is None else sink).append(
             pending_reference(
                 EdgeType.REFERENCES,
@@ -2763,19 +3065,7 @@ class PythonHttp:
             counts, _ = _binding_counts(function)
             imported = {name: found for name, found in self._imported.items() if not counts[name]}
             imported.update(_import_table(function.body, counts))
-            applications: dict[str, str] = {}
-            for statement in function.body:
-                if (
-                    isinstance(statement, ast.Assign)
-                    and len(statement.targets) == 1
-                    and isinstance(statement.targets[0], ast.Name)
-                    and isinstance(statement.value, ast.Call)
-                    and not _dynamic(statement.value)
-                    and counts[statement.targets[0].id] == 1
-                ):
-                    kind = self._constructed_kind(statement.value.func, None, counts)
-                    if kind in _APPLICATIONS:
-                        applications[statement.targets[0].id] = kind
+            built = self._function_applications(function, counts)
             lists = {name: found for name, found in self._lists.items() if not counts[name]}
             lists.update(_literal_lists(function.body, counts, function))
             for call in _statement_calls(
@@ -2784,13 +3074,16 @@ class PythonHttp:
                 if not isinstance(call.func, ast.Attribute):
                     continue
                 name = call.func.value.id if isinstance(call.func.value, ast.Name) else ""
-                kind = applications.get(name)
-                if kind is None:
+                application = built.get(name)
+                kind = None
+                if application is not None:
+                    kind = application.kind or _CALL_OWNERS.get(call.func.attr)
+                if application is None or kind is None:
                     continue
                 argument = _mount_target(kind, call)
                 mounts_application = kind == _FASTAPI_APP and call.func.attr == "mount"
                 if mounts_application and isinstance(argument, ast.Name):
-                    if argument.id in applications:
+                    if argument.id in built:
                         self._sub_owners.add(f"{function.name}.{argument.id}")
                     elif argument.id in self._receivers and not counts[argument.id]:
                         self._receivers[argument.id].usable = False
@@ -2810,7 +3103,120 @@ class PythonHttp:
                     if ref is None:
                         continue
                     child = {"module": ref[0], "name": ref[1]}
-                self._claim_mount(f"{function.name}.{name}", _Receiver(kind), call, child, counts)
+                self._claim_mount(
+                    f"{function.name}.{name}",
+                    _Receiver(kind),
+                    call,
+                    child,
+                    counts,
+                    owner_classes=application.classes,
+                )
+
+    def _function_applications(
+        self, function: ast.FunctionDef | ast.AsyncFunctionDef, counts: Counter[str]
+    ) -> dict[str, _Built]:
+        """The applications a function builds, by name.
+
+        A name bound once, by a top-level statement of the function, to a call of an application
+        class; or bound once in each branch of one top-level ``if`` with an ``else`` (``elif``
+        included) or ``match`` whose last case is a bare ``case _:``, each binding a top-level
+        statement of its branch, and every other branch ending in ``raise``. An application class
+        is the framework's or this module's (its kind known here), or one another module
+        defines -- imported, or extended by this module -- that the global pass must prove; the
+        name it is read through is bound by nothing in the function, and it escapes nowhere.
+        All the classes of this module a name may be built from are of one kind.
+        """
+        found: dict[str, _Built] = {}
+        for index, statement in enumerate(function.body):
+            bound = self._binding(statement)
+            if bound is not None:
+                name, value = bound
+                choice = self._application_choice(value, counts)
+                if counts[name] == 1 and choice is not None:
+                    built = self._built((choice,), index)
+                    if built is not None:
+                        found[name] = built
+                continue
+            branches = _branches(statement)
+            if branches is None:
+                continue
+            bindings: dict[str, list[ast.expr]] = defaultdict(list)
+            for branch in branches:
+                for inner in branch:
+                    named = self._binding(inner)
+                    if named is not None:
+                        bindings[named[0]].append(named[1])
+            for name, values in bindings.items():
+                binding = [
+                    sum(
+                        1
+                        for inner in branch
+                        if (named := self._binding(inner)) is not None and named[0] == name
+                    )
+                    for branch in branches
+                ]
+                if counts[name] != len(values) or any(
+                    count > 1 or (count == 0 and not _raises(branch))
+                    for count, branch in zip(binding, branches, strict=True)
+                ):
+                    continue
+                choices = [self._application_choice(value, counts) for value in values]
+                if any(choice is None for choice in choices):
+                    continue
+                built = self._built(tuple(c for c in choices if c is not None), index)
+                if built is not None:
+                    found[name] = built
+        return found
+
+    def _application_choice(
+        self, value: ast.expr, counts: Counter[str]
+    ) -> str | dict[str, str] | None:
+        """What a call in a function builds an application from: a kind, an imported class (as
+        the global pass reads one), or ``None`` when it is no application this can follow."""
+        if not isinstance(value, ast.Call) or _dynamic(value):
+            return None
+        func = value.func
+        kind = self._constructed_kind(func, None, counts)
+        if kind is not None:
+            return kind if kind in _APPLICATIONS else None
+        if isinstance(func, ast.Name) and func.id in self.imported_subclasses:
+            if counts[func.id]:
+                return None
+            subclass = self.imported_subclasses[func.id]
+            ref, depth, inits = subclass.ref, subclass.depth, subclass.inits
+        else:
+            found = self._imported_class(func)
+            if found is None or counts[found.local]:
+                return None
+            ref, depth, inits = found, 0, ()
+        if self._escapes(ref):
+            return None
+        chosen = {"module": ref.module, "class": ref.name, "depth": str(depth)}
+        if inits:
+            chosen["init"] = json.dumps(inits, sort_keys=True)
+        return chosen
+
+    @staticmethod
+    def _built(choices: tuple[str | dict[str, str], ...], index: int) -> _Built | None:
+        kinds = {choice for choice in choices if isinstance(choice, str)}
+        classes = tuple(choice for choice in choices if isinstance(choice, dict))
+        if len(kinds) > 1:
+            return None
+        kind = next(iter(kinds)) if kinds else None
+        if kind is not None and classes:
+            # The classes another module defines must prove this same kind.
+            classes = (*classes, {"kind": kind})
+            kind = None
+        return _Built(kind, classes, index)
+
+    def _escapes(self, ref: _ClassRef) -> bool:
+        """Whether an imported class a function builds from is read, anywhere in the module,
+        other than to build or extend it (:meth:`_imported_escapes`'s rule)."""
+        found = self._ref_escapes.get(ref)
+        if found is None:
+            found = self._escaped_refs({ref})[1](ref)
+            self._ref_escapes[ref] = found
+        return found
 
     # -- helpers: a same-module function that registers on the application it is handed ----
 
@@ -2928,6 +3334,8 @@ class PythonHttp:
         if not scans:
             return {}
         imported = {name: found for name, found in self._imported.items() if not counts[name]}
+        lists = {name: found for name, found in self._lists.items() if not counts[name]}
+        lists.update(_literal_lists(function.body, counts, function))
         aliases: dict[str, str] = {}
         for statement in function.body:
             if (
@@ -2969,8 +3377,49 @@ class PythonHttp:
             ):
                 self._helper_hand_over(named, named.func.id, scans, counts)
                 continue
+            if isinstance(statement, ast.For) and self._helper_loop(
+                statement, scans, aliases, counts, imported, definitions, lists
+            ):
+                continue
             self._helper_nested(statement, scans, aliases, counts, imported, definitions)
         return scans
+
+    def _helper_loop(
+        self,
+        loop: ast.For,
+        scans: dict[str, _HelperScan],
+        aliases: dict[str, str],
+        counts: Counter[str],
+        imported: dict[str, _Imported],
+        definitions: Mapping[str, ast.FunctionDef],
+        lists: dict[str, list[ast.expr]],
+    ) -> bool:
+        """``for child in children: p.include_router(child)`` as a top-level statement of a helper,
+        read as one registration per element, as :func:`_statement_calls` reads a factory's loop:
+        over a literal list, the loop variable bound by nothing else and the registration's first
+        argument. Any other statement of its body is read as a nested one. ``False`` for a loop
+        this does not unroll."""
+        if loop.orelse or not isinstance(loop.target, ast.Name) or counts[loop.target.id] != 1:
+            return False
+        elements = _loop_elements(loop.iter, lists)
+        if elements is None:
+            return False
+        for inner in loop.body:
+            call = _expression_call(inner)
+            if (
+                call is not None
+                and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.attr in _MOUNT_CALLS
+                and call.func.value.id in scans
+                and _loop_call_refusal(call, loop.target.id) is None
+            ):
+                receiver = call.func.value.id
+                for unrolled in _unrolled(call, elements):
+                    self._helper_registration(scans[receiver], receiver, unrolled, counts, imported)
+                continue
+            self._helper_nested(inner, scans, aliases, counts, imported, definitions)
+        return True
 
     def _helper_registration(
         self,
@@ -3115,11 +3564,21 @@ class PythonHttp:
 
     @staticmethod
     def _call_claim(
-        call: ast.Call, helper: str, owner: str, kind: str, scope: str, refusal: str | None
+        call: ast.Call,
+        helper: str,
+        owner: str,
+        kind: str,
+        scope: str,
+        refusal: str | None,
+        owner_classes: tuple[dict[str, str], ...] = (),
     ) -> ParsedReference:
         """A call of a recordable helper with an application: the helper, the application's
-        owner name (the key the global pass mounts under) and kind, and the refusal, if any."""
+        owner name (the key the global pass mounts under) and kind -- or the classes other modules
+        define it may be built from, which the global pass must prove one kind -- and the
+        refusal, if any."""
         refused: dict[str, str] = {} if refusal is None else {"refusal": refusal}
+        if owner_classes:
+            refused["owner_classes"] = json.dumps(owner_classes, sort_keys=True)
         return pending_reference(
             EdgeType.REFERENCES,
             EntityType.SYMBOL,
@@ -3134,34 +3593,14 @@ class PythonHttp:
             **refused,
         )
 
-    def _factory_applications(
-        self, function: ast.FunctionDef | ast.AsyncFunctionDef, counts: Counter[str]
-    ) -> dict[str, tuple[str, int]]:
-        """The applications a function constructs as its own top-level statements, each bound
-        once, as :meth:`_factories` reads them: ``name -> (kind, index of the statement)``."""
-        applications: dict[str, tuple[str, int]] = {}
-        for index, statement in enumerate(function.body):
-            if (
-                isinstance(statement, ast.Assign)
-                and len(statement.targets) == 1
-                and isinstance(statement.targets[0], ast.Name)
-                and isinstance(statement.value, ast.Call)
-                and not _dynamic(statement.value)
-                and counts[statement.targets[0].id] == 1
-            ):
-                kind = self._constructed_kind(statement.value.func, None, counts)
-                if kind in _APPLICATIONS:
-                    applications[statement.targets[0].id] = (kind, index)
-        return applications
-
     def _factory_helper_calls(
         self,
         function: ast.FunctionDef | ast.AsyncFunctionDef,
         chosen: Mapping[str, tuple[str, _HelperScan]],
     ) -> list[ParsedReference]:
-        """Calls of a recordable helper with an application the function constructs (R-6)."""
+        """Calls of a recordable helper with an application the function builds (R-6)."""
         counts, _ = _binding_counts(function)
-        applications = self._factory_applications(function, counts)
+        applications = self._function_applications(function, counts)
         if not applications:
             return []
         found: list[ParsedReference] = []
@@ -3175,13 +3614,22 @@ class PythonHttp:
                     continue
                 if counts[name]:
                     refusal = PY_HELPER_SHADOWED
-                elif refusal is None and app is not None and applications[app][1] > index:
+                elif refusal is None and app is not None and applications[app].index > index:
                     refusal = PY_HELPER_BEFORE_CONSTRUCTION
                 if app is None and len(applications) == 1:
                     app = next(iter(applications))
-                owner = f"{function.name}.{app}" if app is not None else ""
-                kind = applications[app][0] if app is not None else ""
-                found.append(self._call_claim(call, name, owner, kind, "factory", refusal))
+                built = applications[app] if app is not None else None
+                found.append(
+                    self._call_claim(
+                        call,
+                        name,
+                        f"{function.name}.{app}" if app is not None else "",
+                        (built.kind or "") if built is not None else "",
+                        "factory",
+                        refusal,
+                        built.classes if built is not None else (),
+                    )
+                )
                 continue
             for node in ast.walk(statement):
                 if (
@@ -3191,14 +3639,16 @@ class PythonHttp:
                 ):
                     passed = sorted({n for n in _argument_names(node) if n in applications})
                     if passed:
+                        built = applications[passed[0]]
                         found.append(
                             self._call_claim(
                                 node,
                                 node.func.id,
                                 f"{function.name}.{passed[0]}",
-                                applications[passed[0]][0],
+                                built.kind or "",
                                 "factory",
                                 PY_HELPER_CONTROL_FLOW,
+                                built.classes,
                             )
                         )
         return found
@@ -3783,7 +4233,11 @@ class PythonHttp:
             "class": built.ref.name,
             "depth": str(built.depth),
             "family": family[0],
+            "ctor": json.dumps(built.ctor, sort_keys=True),
         }
+        via = self.imported_subclasses.get(built.via) if built.via is not None else None
+        if via is not None and via.inits:
+            meta["init"] = json.dumps(via.inits, sort_keys=True)
         return _class_route_claim(
             name,
             meta,
@@ -3982,19 +4436,37 @@ class PythonHttp:
         found.extend(self._mount_claims)
         found.extend(self._helper_claims)
         for name, subclass in self.subclasses.items():
-            if subclass.kind in _APPLICATIONS:
-                found.append(
-                    pending_reference(
-                        EdgeType.REFERENCES,
-                        EntityType.SYMBOL,
-                        name,
-                        subclass.line,
-                        subclass.line,
-                        role=PYTHON_CLASS,
-                        kind=subclass.kind,
-                        depth=str(subclass.depth),
-                    )
+            inits = {"init": json.dumps(subclass.inits, sort_keys=True)} if subclass.inits else {}
+            found.append(
+                pending_reference(
+                    EdgeType.REFERENCES,
+                    EntityType.SYMBOL,
+                    name,
+                    subclass.line,
+                    subclass.line,
+                    role=PYTHON_CLASS,
+                    kind=subclass.kind,
+                    depth=str(subclass.depth),
+                    **inits,
                 )
+            )
+        for name, imported in self.imported_subclasses.items():
+            inits = {"init": json.dumps(imported.inits, sort_keys=True)} if imported.inits else {}
+            found.append(
+                pending_reference(
+                    EdgeType.REFERENCES,
+                    EntityType.SYMBOL,
+                    name,
+                    imported.line,
+                    imported.line,
+                    role=PYTHON_CLASS,
+                    kind=IMPORTED_CLASS,
+                    depth=str(imported.depth),
+                    base_module=imported.ref.module,
+                    base_class=imported.ref.name,
+                    **inits,
+                )
+            )
         if self._script is not None:
             found.append(
                 pending_reference(
