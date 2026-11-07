@@ -146,6 +146,21 @@ TRACE_MAIN = d("""
     server.listen({ port: 8080 });
 """)
 
+TRACE_GUARDED_MAIN = d("""
+        import { createServer } from './server';
+        import { initializeHandlers } from './handlers';
+
+        async function main() {
+            const server = createServer();
+            initializeHandlers(server);
+            await server.listen({ port: 8080 });
+        }
+
+        if (require.main === module) {
+            main().then();
+        }
+""")
+
 PACKAGE = '{"name": "fixture"}\n'
 
 TRACE = {
@@ -766,6 +781,15 @@ def trace(workspace: Workspace, tmp_path: Path) -> Workspace:
 
 
 @pytest.fixture
+def guarded_trace(workspace: Workspace, tmp_path: Path) -> Workspace:
+    return build(
+        workspace,
+        tmp_path,
+        {"trace": {**TRACE, "src/main.ts": TRACE_GUARDED_MAIN}},
+    )
+
+
+@pytest.fixture
 def neg(workspace: Workspace, tmp_path: Path) -> Workspace:
     return build(workspace, tmp_path, {"neg": NEG})
 
@@ -783,6 +807,17 @@ def test_trace_serves_exactly_six_edges_rooted_at_the_file_that_builds_the_serve
     assert _roots(trace, "trace") == {
         (path, route): {"src/main.ts"} for path, _handler, route, _line in TRACE_EDGES
     }
+
+
+def test_commonjs_guarded_entry_traces_the_same_routes_through_helpers(
+    guarded_trace: Workspace,
+) -> None:
+    assert _edges(guarded_trace, "trace") == TRACE_EDGES
+    plan, grouped, by_id = _plan(guarded_trace)
+    assert _by_path(plan.instance_outcomes, grouped[FASTIFY_INSTANCE], by_id) == {
+        "src/main.ts": [PROVEN]
+    }
+    assert plan.chain_refusals == {}
 
 
 def test_trace_has_the_claims_the_prediction_counts(trace: Workspace) -> None:
