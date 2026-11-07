@@ -2077,13 +2077,18 @@ Until the pass proves one, it stays a pending claim that records the declaration
     package's included) is recorded and refused with `fastify-helper-callee-unsupported`.
   - Straight-line rule. A route, registration or helper call on an instance, an entry or a factory's application
     counts only when its statement sits directly in that receiver's own body (`call;`, `await call;`, `void call;`,
-    `return call;` or `const r = [await] call;`). Uses in nested functions, callbacks, conditions, loops or `try`
-    blocks are no routes and no registrations, and a helper call there is refused with
-    `fastify-helper-control-flow`; a helper call after an awaited `listen` or `ready` on the receiver is refused
+    `return call;` or `const r = [await] call;`). An entry function's straight line also runs through the block
+    of each `try` directly in its body, where an instance or entry application may be declared too; never its
+    `catch` or `finally`, a nested `try`, or a `try` anywhere else. Uses in nested functions, callbacks,
+    conditions, loops or other `try` blocks are no routes and no registrations, and a helper call there is
+    refused with `fastify-helper-control-flow`; a helper call after an awaited `listen` or `ready` on the receiver is refused
     with `fastify-after-listen`. A plugin's server keeps its rule for routes and registrations (anywhere in its
     body); its helper calls need the straight line.
   - Routes on an instance, an entry or a factory's application are traced in every file; in a file without a
-    `fastify` import every route is traced. Traced routes are served only when a proven chain reaches them;
+    `fastify` import every route is traced. Such a file is read when it uses an instance, or when an exported
+    plugin function hands its own first parameter, as the first argument of a straight-line call, to a function
+    of a relative module (a file that only forwards a server, typed by a local alias). Traced routes are served
+    only when a proven chain reaches them;
     otherwise they are diagnostics, never provider rows. A registration made inside a plugin function of such a
     file is not read.
   - Chain. A route on a plugin, an instance or a factory is served under each chain of registrations and helper

@@ -900,7 +900,9 @@ class TypeScriptParser:
     #    import as controllers (repoatlas.parsers.http_oas3).
     # 25: the CommonJS direct-entry guard proves a Fastify entry application
     #    (repoatlas.parsers.http_fastify).
-    version = "25"
+    # 26: a Fastify entry function's straight line runs through its top-level ``try`` blocks,
+    #    and a file without fastify that forwards a plugin's server is read for tracing.
+    version = "26"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
