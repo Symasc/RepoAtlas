@@ -5,8 +5,9 @@ that builds an application from it -- ``from base import CustomApp`` then ``app 
 (form a), or ``class App(CustomApp)`` then ``app = App()`` (form b) -- records the routes on that
 application as claims of their own, which the global pass serves at the application's root when the
 defining module offers the class (at most three classes above the framework's, those of both
-modules together). Routers and blueprints as bases stay unserved: the claim is never a fact until
-then, and a class that is not proven is only a diagnostic (``PythonRoutePlan.class_unproven``),
+modules together). A router or blueprint built from an offered class is a router or blueprint, its
+routes served where a mount reaches it. The claim is never a fact until then, and a class that is
+not proven is only a diagnostic (``PythonRoutePlan.class_unproven``),
 never an outcome, never counted, never declared.
 
 Half of this file is what is refused. Every fixture is read from its syntax tree only, never
@@ -28,6 +29,7 @@ from repoatlas.graph.py_routes import (
     CLASS_NOT_OFFERED,
     CLASS_TOO_DEEP,
     MODULE_UNRESOLVED,
+    NOT_MOUNTED,
     PROMOTED,
     WRONG_KIND,
     PythonRoutePlan,
@@ -216,7 +218,7 @@ def test_a_chain_of_classes_in_the_importer_extends_the_imported_class() -> None
     assert built == ("base", "CustomApp", "2")
 
 
-def test_a_defining_module_offers_each_application_subclass_and_no_router() -> None:
+def test_a_defining_module_offers_each_subclass_of_every_kind() -> None:
     chain = lines(
         "from fastapi import APIRouter, FastAPI",
         "class A(FastAPI):",
@@ -227,13 +229,21 @@ def test_a_defining_module_offers_each_application_subclass_and_no_router() -> N
         "    pass",
     )
     offered = {c.target_key: (c.meta["kind"], c.meta["depth"]) for c in claims(chain, PYTHON_CLASS)}
-    assert offered == {"A": ("fastapi-app", "1"), "B": ("fastapi-app", "2")}
+    assert offered == {
+        "A": ("fastapi-app", "1"),
+        "B": ("fastapi-app", "2"),
+        "R": ("fastapi-router", "1"),
+    }
     assert {c.target_key: c.meta["kind"] for c in claims(FLASK_BASE, PYTHON_CLASS)} == {
         "CustomApp": "flask-app"
     }
-    assert claims(ROUTER_BASE, PYTHON_CLASS) == []
+    assert {c.target_key: c.meta["kind"] for c in claims(ROUTER_BASE, PYTHON_CLASS)} == {
+        "CustomRouter": "fastapi-router"
+    }
     blueprint = lines("from flask import Blueprint", "class P(Blueprint):", "    pass")
-    assert claims(blueprint, PYTHON_CLASS) == []
+    assert {c.target_key: c.meta["kind"] for c in claims(blueprint, PYTHON_CLASS)} == {
+        "P": "flask-blueprint"
+    }
 
 
 # -- what is not served, and why ---------------------------------------------------------------
@@ -253,12 +263,11 @@ NO_CLASS = module("from base import Missing", "app = Missing()", *USERS)
 @pytest.mark.parametrize(
     ("base", "app", "reason"),
     [
-        (ROUTER_BASE, ROUTER_APP, CLASS_NOT_OFFERED),
         (FASTAPI_BASE, FLASK_ROUTE_ON_FASTAPI, WRONG_KIND),
         (FASTAPI_BASE, NO_MODULE, MODULE_UNRESOLVED),
         (FASTAPI_BASE, NO_CLASS, CLASS_NOT_OFFERED),
     ],
-    ids=["router", "wrong-family", "module-unresolved", "class-missing"],
+    ids=["wrong-family", "module-unresolved", "class-missing"],
 )
 def test_a_class_nothing_proves_an_application_is_only_a_diagnostic(
     workspace: Workspace, tmp_path: Path, base: str, app: str, reason: str
@@ -274,6 +283,20 @@ def test_a_class_nothing_proves_an_application_is_only_a_diagnostic(
     kept = ReferenceLinker(indexed.knowledge).prepare_global().http
     assert claim_id not in kept.routes and claim_id not in kept.declared
     assert outcomes(indexed) == {}
+
+
+def test_a_route_on_a_router_built_from_an_offered_class_is_a_router_route(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    # Nothing includes the router: a declared route that is not mounted, as an APIRouter's is.
+    indexed = build(workspace, tmp_path, files(ROUTER_BASE, ROUTER_APP))
+    assert served(indexed) == set()
+    [claim_id] = class_claims(indexed).values()
+    plan = python_plan(indexed)
+    assert plan.class_unproven == {}
+    assert plan.outcomes == {claim_id: NOT_MOUNTED}
+    assert plan.declared == {claim_id: "GET /users"}
+    assert (plan.resolved, plan.unresolved) == (0, 1)
 
 
 IMPORT = "from base import CustomApp"
@@ -680,8 +703,7 @@ def test_a_promoted_class_route_is_listed_as_a_provider(
 def test_a_class_route_nothing_proves_is_no_provider_and_not_declared(
     workspace: Workspace, tmp_path: Path
 ) -> None:
-    app = module("from base import CustomRouter", "app = CustomRouter()", *USERS)
-    indexed = build(workspace, tmp_path, files(ROUTER_BASE, app))
+    indexed = build(workspace, tmp_path, files(FASTAPI_BASE, NO_CLASS))
     assert providers(indexed) == []
 
 
