@@ -106,9 +106,12 @@ CLASS_OUTCOMES = (
     py_routes.CLASS_NOT_OFFERED,
     py_routes.CLASS_NOT_AN_APPLICATION,
     py_routes.CLASS_TOO_DEEP,
+    py_routes.CLASS_INIT_UNPROVEN,
     py_routes.CLASS_NO_ROUTE,
     py_routes.WRONG_KIND,
     py_routes.CONSTANT_UNRESOLVED,
+    py_routes.UNREADABLE_MOUNT,
+    py_routes.NOT_MOUNTED,
 )
 FASTIFY_OUTCOMES = (
     ts_routes.NOT_DECLARED,
