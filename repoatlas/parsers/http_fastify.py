@@ -68,13 +68,16 @@ this file or of a relative module (``f(x)``, ``ns.f(x)`` on a relative namespace
 receivers on a straight line only: a route, a registration or a helper call on one counts
 when its statement sits directly in that receiver's own body (the module's, the entry
 function's or the factory's) as ``call;``, ``await call;``, ``void call;``, ``return call;`` or
-``const r = [await] call;``. The same use in a nested function, a callback, a condition, a
-loop or a ``try`` is no route and no registration, and a helper call there is recorded
-with the refusal :data:`HELPER_CONTROL_FLOW`. A plugin's first parameter keeps its rule for
-routes and registrations (anywhere in its body); its helper calls need the straight line. The
-module's own application (``const app = Fastify()``) keeps its routes and registrations as
-they were; a helper call that hands it on is recorded on the same straight line of the
-program, from the end of its declarator.
+``const r = [await] call;``. An entry function's straight line also runs through the block of
+each ``try`` directly in its body (never the ``catch`` or ``finally``): the block runs its
+statements in order, as the body does, and an instance or entry application may be declared
+there too. The same use in a nested function, a callback, a condition, a loop, a ``catch``, a
+nested ``try`` or a ``try`` anywhere else is no route and no registration, and a helper call
+there is recorded with the refusal :data:`HELPER_CONTROL_FLOW`. A plugin's first parameter keeps
+its rule for routes and registrations (anywhere in its body); its helper calls need the straight
+line. The module's own application (``const app = Fastify()``) keeps its routes and
+registrations as they were; a helper call that hands it on is recorded on the same straight
+line of the program, from the end of its declarator.
 
 A route on such a receiver is a :data:`~repoatlas.parsers.http_facts.FASTIFY_TRACED_ROUTE`
 claim -- never served here: the same ``method``, ``path`` and ``provenance`` as a
@@ -93,8 +96,10 @@ there is one, and ``refusal`` the first code that applies: :data:`HELPER_CONTROL
 receiver, and how deep a chain goes, are for the global pass.
 
 A file that imports neither ``fastify`` nor ``fastify-plugin`` is read only when it has an
-instance claim, and then records only the claims that trace a receiver -- instances, helper
-calls, traced routes and, for each plugin function they name, a
+instance claim, or when an exported plugin function hands its own first parameter on, as the
+first argument of a straight-line call, to a function of a relative module (a file that only
+passes a server along, typed by a local alias). It then records only the claims that trace a
+receiver -- instances, helper calls, traced routes and, for each plugin function they name, a
 :data:`~repoatlas.parsers.http_facts.FASTIFY_TRACED_SCOPE` claim (``kind``, ``exports``, and
 ``receiver``, the name of the function's first parameter) -- besides the registrations an
 instance makes. A route there is always a traced one, and a registration made on a plugin's
@@ -326,6 +331,34 @@ def _module_statements(root: Node) -> Iterator[Node]:
         yield statement
 
 
+def _straight_statements(body: Node) -> list[Node]:
+    """An entry function's top-level statements, each ``try`` directly in it replaced by the
+    statements of its block."""
+    found: list[Node] = []
+    for statement in body.named_children:
+        block = None
+        if statement.type == "try_statement":
+            block = statement.child_by_field_name("body")
+        if block is not None and block.type == "statement_block":
+            found.extend(block.named_children)
+        else:
+            found.append(statement)
+    return found
+
+
+def _tried_block(holder: Node, body: Node) -> bool:
+    """Whether ``holder`` is the block of a ``try`` that sits directly in ``body``."""
+    statement = holder.parent
+    if holder.type != "statement_block" or statement is None:
+        return False
+    if statement.type != "try_statement" or statement.parent is None:
+        return False
+    block = statement.child_by_field_name("body")
+    return (
+        block is not None and _key(block) == _key(holder) and _key(statement.parent) == _key(body)
+    )
+
+
 def _unwrapped(node: Node) -> tuple[Node, bool]:
     """``node`` without its parentheses, casts and ``await``, and whether it held an ``await``."""
     awaited = False
@@ -400,8 +433,9 @@ class FastifyDeclarations:
         self._alias_sites: dict[_Key | None, list[tuple[Node, Node, str]]] = {}
         self._alias_names: set[str] | None = None
         self._module_bound: Counter[str] | None = None
-        #: Where a body awaits ``x.listen(...)`` or ``x.ready(...)``: end byte and receiver name.
-        self._listens: dict[_Key, list[tuple[int, str]]] = {}
+        #: Where a body awaits ``x.listen(...)`` or ``x.ready(...)``: end byte and receiver name,
+        #: by the body and whether its ``try`` blocks were read.
+        self._listens: dict[tuple[_Key, bool], list[tuple[int, str]]] = {}
         #: The plugin scopes the claims of a traced file name, by the order they are named.
         self._touched: dict[_Key, _Scope] = {}
         self._helper_total = 0
@@ -411,8 +445,9 @@ class FastifyDeclarations:
         self._called = self._top_level_calls(root)
         self._instances = self._instance_claims(root)
         self._names = None
-        #: A file without fastify is read, for the M8 roles only, when it uses an instance.
-        self._traced = not self._reads and bool(self._instances)
+        #: A file without fastify is read, for the M8 roles only, when it uses an instance or
+        #: forwards a plugin's server to a relative module.
+        self._traced = not self._reads and (bool(self._instances) or self._forwards())
         if self._reads or self._traced:
             self._register_calls(root)
 
@@ -733,7 +768,7 @@ class FastifyDeclarations:
         if found is None:
             return None
         scope, held = found
-        if held is not None and not self._directly_in(at, held.body):
+        if held is not None and not self._directly_in(at, held.body, tried=bool(held.entry)):
             return None
         return scope
 
@@ -743,10 +778,11 @@ class FastifyDeclarations:
         operator = node.child_by_field_name("operator")
         return operator is not None and node_text(self._source, operator) == "void"
 
-    def _directly_in(self, call: Node, body: Node) -> bool:
+    def _directly_in(self, call: Node, body: Node, *, tried: bool = False) -> bool:
         """Whether the statement holding ``call`` sits in ``body`` itself, in a form that runs
         it whatever else happens: ``call;``, ``await call;``, ``void call;``, ``return call;``
-        or ``const r = [await] call;``. An arrow function's expression body is the call."""
+        or ``const r = [await] call;``. An arrow function's expression body is the call. With
+        ``tried``, the block of a ``try`` directly in ``body`` counts as ``body``."""
         node = call
         while True:
             parent = node.parent
@@ -782,7 +818,39 @@ class FastifyDeclarations:
         holder = parent.parent
         if holder is not None and holder.type == "export_statement":
             holder = holder.parent
-        return holder is not None and _key(holder) == _key(body)
+        if holder is None:
+            return False
+        return _key(holder) == _key(body) or (tried and _tried_block(holder, body))
+
+    def _forwards(self) -> bool:
+        """Whether an exported plugin function hands its own first parameter, as the first
+        argument of a straight-line call, to a function of a relative module."""
+        if not (self._imported or self._namespaces):
+            return False
+        for scope in self._scopes.values():
+            if scope.kind != PLUGIN or not scope.exports or scope.node is None:
+                continue
+            body = scope.node.child_by_field_name("body")
+            name = _first_parameter(self._source, scope.node)
+            if body is None or name is None:
+                continue
+            for node in walk(body):
+                if node.type != "call_expression":
+                    continue
+                arguments = _scanned(node)
+                callee = node.child_by_field_name("function")
+                if not arguments or callee is None:
+                    continue
+                first = _operand(arguments[0])
+                if first.type != "identifier" or node_text(self._source, first) != name:
+                    continue
+                found = self._resolve(first, name)
+                if found is None or found[0] is not scope or not self._directly_in(node, body):
+                    continue
+                reached = self._callee(callee)
+                if reached is not None and reached[1] is None and "module" in reached[0]:
+                    return True
+        return False
 
     # -- registrations -----------------------------------------------------------------
 
@@ -1164,7 +1232,7 @@ class FastifyDeclarations:
         body = node.child_by_field_name("body")
         if body is None or body.type != "statement_block":
             return
-        for statement in body.named_children:
+        for statement in _straight_statements(body):
             for declarator, name_node, value in self._const_declarators(statement):
                 self._claim(declarator, name_node, value, (name, function), found)
 
@@ -1356,7 +1424,7 @@ class FastifyDeclarations:
                 statements = list(_module_statements(self._program))
             else:
                 body = owner[1].node.child_by_field_name("body")
-                statements = list(body.named_children) if body is not None else []
+                statements = _straight_statements(body) if body is not None else []
             for statement in statements:
                 for later, name_node, value in self._const_declarators(statement):
                     origin, awaited = _unwrapped(value)
@@ -1891,7 +1959,8 @@ class FastifyDeclarations:
         """The first code, in the order of the claim's documentation, that stops a helper
         call from being trusted; ``None`` when none applies."""
         body = held.body if held is not None else self._function_body(scope)
-        if body is None or not self._directly_in(call, body):
+        tried = held is not None and bool(held.entry)
+        if body is None or not self._directly_in(call, body, tried=tried):
             return HELPER_CONTROL_FLOW
         if callee_refusal is not None:
             return callee_refusal
@@ -1903,7 +1972,7 @@ class FastifyDeclarations:
             if self._callee_early(call, target, held):
                 return CALLEE_BEFORE_BINDING
         names = set(held.ready) if held is not None else {name}
-        if self._listened(body, names, call):
+        if self._listened(body, names, call, tried=tried):
             return AFTER_LISTEN
         return None
 
@@ -1921,17 +1990,17 @@ class FastifyDeclarations:
             return False
         return function.ready > point
 
-    def _listened(self, body: Node, names: set[str], call: Node) -> bool:
+    def _listened(self, body: Node, names: set[str], call: Node, *, tried: bool = False) -> bool:
         """Whether ``body`` awaits ``x.listen(...)`` or ``x.ready(...)`` on one of ``names``
         before ``call``."""
-        key = _key(body)
+        key = (_key(body), tried)
         points = self._listens.get(key)
         if points is None:
             points = []
             if body.type == "program":
                 statements = list(_module_statements(body))
             elif body.type == "statement_block":
-                statements = list(body.named_children)
+                statements = _straight_statements(body) if tried else list(body.named_children)
             else:
                 statements = []
             for statement in statements:
