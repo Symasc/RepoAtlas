@@ -5,15 +5,20 @@ the rule matters even more: ``x.get("/hello")`` is a ``Map`` lookup, a cache
 read, an Express *settings getter* (``app.get("title")``) and a route
 declaration, and only the last is a fact about HTTP. So nothing is matched by
 method name. A receiver counts only when this file's own imports and top-level
-``const`` declarations prove what it is, and each such name is bound exactly
-once anywhere in the file:
+``const``, ``let`` or ``var`` declarations prove what it is, and each such name
+is bound exactly once anywhere in the file:
 
 * **Express** — ``express`` imported from ``"express"`` (default import or
   ``require``); ``const app = express()``; ``const router = express.Router()``
   or ``Router()`` from ``"express"``. A route is ``app.<method>(path, handler…)``
   with at least two arguments; one argument is the settings getter. A router's
   routes are recorded only under a mount this file proves
-  (``app.use("/api", router)``), composed from two places;
+  (``app.use("/api", router)``), composed from two places. A receiver used
+  before its declaration is refused outright, and a ``let`` or ``var`` receiver
+  registers routes only in top-level statements after its declaration.
+  ``app.route(path).<verb>(handler)`` chains are read link by link. A path or
+  mount prefix may also be spelled through earlier top-level string constants;
+  such a route is always composed, never exact;
 * **fetch** — the global ``fetch``, which is only global when this file binds no
   ``fetch`` of its own. Without an options object the method is GET. With one,
   the method is read only from a literal ``method`` in an object literal with no
@@ -96,6 +101,13 @@ _EXPRESS_APP = "express-app"
 _EXPRESS_ROUTER = "express-router"
 
 _MAX_STRING_DEPTH = 32
+#: How many constants a path may be spelled through, and how many links a
+#: ``.route(path).get(...).post(...)`` chain may have.
+_MAX_PATH_DEPTH = 4
+_MAX_CHAIN_LINKS = 32
+#: Bindings whose value can change or be read before they are set: a route
+#: registered on one counts only in a top-level statement after its declaration.
+_ORDERED_BINDINGS = frozenset({"let", "var"})
 
 #: ``(parent type, field)`` positions where an identifier *binds* a name.
 _BINDING_FIELDS = frozenset(
@@ -177,6 +189,17 @@ def _unwrap(node: Node) -> Node:
             break
         node = inner[0]
     return node
+
+
+def _same(left: Node | None, right: Node) -> bool:
+    """Whether two nodes are the same syntax node, compared by range and type."""
+    if left is None:
+        return False
+    return _node_key(left) == _node_key(right)
+
+
+def _node_key(node: Node) -> tuple[int, int, str]:
+    return node.start_byte, node.end_byte, node.type
 
 
 def _rooted(value: str) -> bool:
@@ -392,6 +415,9 @@ FUNCTION_NODES = frozenset(
     }
 )
 _DECLARED_FUNCTIONS = frozenset({"function_declaration", "generator_function_declaration"})
+#: Subtrees an early-use scan does not enter: a function body runs later, and an
+#: export list names a binding without reading it.
+_EARLY_USE_SKIP = FUNCTION_NODES | {"export_clause"}
 
 
 def scope_bindings(source: bytes, function: Node) -> Counter[str]:
@@ -449,6 +475,10 @@ class _Receiver:
     kind: str
     mounts: list[str] = field(default_factory=list)
     usable: bool = True
+    #: ``const``, ``let`` or ``var``, as the declaration spells it.
+    binding: str = "const"
+    #: The index of the declaring top-level statement.
+    declared_at: int = -1
 
 
 class TypeScriptHttp:
@@ -464,6 +494,10 @@ class TypeScriptHttp:
         self._router_factories: set[str] = set()
         self._axios: set[str] = set()
         self._receivers: dict[str, _Receiver] = {}
+        #: Top-level names bound once with a value: ``(statement index, value)``.
+        self._strings: dict[str, tuple[int, Node]] = {}
+        #: The index of each top-level statement, by its byte range.
+        self._statement_at: dict[tuple[int, int], int] = {}
         self._fetch = counts["fetch"] == 0
         # A client that turns absolute URLs into relative ones can be configured
         # from anywhere in the file; if it is, no axios URL here is trusted.
@@ -479,14 +513,41 @@ class TypeScriptHttp:
                 statements.extend(child for child in statement.children if child.is_named)
             else:
                 statements.append(statement)
-        for statement in statements:
+        for index, statement in enumerate(statements):
+            self._statement_at[(statement.start_byte, statement.end_byte)] = index
             if statement.type == "import_statement":
                 self._import(statement, counts)
-            elif statement.type == "lexical_declaration":
-                self._declaration(statement, counts)
-        for statement in statements:
+            elif statement.type in {"lexical_declaration", "variable_declaration"}:
+                self._declaration(statement, counts, index)
+        self._refuse_early_uses(statements)
+        for index, statement in enumerate(statements):
             if statement.type == "expression_statement":
-                self._mount(statement)
+                self._mount(statement, index)
+
+    def _refuse_early_uses(self, statements: list[Node]) -> None:
+        """Drop every receiver named by a top-level statement before its declaration.
+
+        A function body runs later and an export list reads nothing, so neither is
+        entered. This holds for ``const`` too: ``app.get(...)`` above ``const app =
+        express()`` is a temporal-dead-zone error, not a route.
+        """
+        if not self._receivers:
+            return
+        early: set[str] = set()
+        for index, statement in enumerate(statements):
+            stack = [statement]
+            while stack:
+                node = stack.pop()
+                if node.type in _EARLY_USE_SKIP:
+                    continue
+                if node.type in {"identifier", "shorthand_property_identifier"}:
+                    name = node_text(self._source, node)
+                    receiver = self._receivers.get(name)
+                    if receiver is not None and receiver.declared_at > index:
+                        early.add(name)
+                stack.extend(node.children)
+        for name in early:
+            del self._receivers[name]
 
     def _import(self, statement: Node, counts: Counter[str]) -> None:
         source_node = statement.child_by_field_name("source")
@@ -513,9 +574,13 @@ class TypeScriptHttp:
                     if node_text(self._source, imported) == "Router" and counts[local] == 1:
                         self._router_factories.add(local)
 
-    def _declaration(self, statement: Node, counts: Counter[str]) -> None:
-        kind = statement.child_by_field_name("kind")
-        if kind is None or node_text(self._source, kind) != "const":
+    def _declaration(self, statement: Node, counts: Counter[str], index: int) -> None:
+        if statement.type == "variable_declaration":
+            binding = "var"  # no kind field: the keyword is its own token
+        else:
+            kind = statement.child_by_field_name("kind")
+            binding = node_text(self._source, kind) if kind is not None else ""
+        if binding not in {"const", "let", "var"}:
             return
         for declarator in statement.children:
             if declarator.type != "variable_declarator":
@@ -525,7 +590,10 @@ class TypeScriptHttp:
             if name_node is None or name_node.type != "identifier" or value is None:
                 continue
             name = node_text(self._source, name_node)
-            if counts[name] != 1 or value.type != "call_expression":
+            if counts[name] != 1:
+                continue
+            self._strings[name] = (index, value)
+            if value.type != "call_expression":
                 continue
             callee = value.child_by_field_name("function")
             if callee is None:
@@ -541,12 +609,16 @@ class TypeScriptHttp:
                     )
                     if module == "express":
                         self._express.add(name)
-                    elif module == "axios":
+                    elif module == "axios" and binding == "const":
                         self._axios.add(name)
                 elif callee_name in self._express:
-                    self._receivers[name] = _Receiver(_EXPRESS_APP)
+                    self._receivers[name] = _Receiver(
+                        _EXPRESS_APP, binding=binding, declared_at=index
+                    )
                 elif callee_name in self._router_factories:
-                    self._receivers[name] = _Receiver(_EXPRESS_ROUTER)
+                    self._receivers[name] = _Receiver(
+                        _EXPRESS_ROUTER, binding=binding, declared_at=index
+                    )
             elif callee.type == "member_expression":
                 owner = callee.child_by_field_name("object")
                 prop = callee.child_by_field_name("property")
@@ -557,9 +629,11 @@ class TypeScriptHttp:
                     and node_text(self._source, owner) in self._express
                     and node_text(self._source, prop) == "Router"
                 ):
-                    self._receivers[name] = _Receiver(_EXPRESS_ROUTER)
+                    self._receivers[name] = _Receiver(
+                        _EXPRESS_ROUTER, binding=binding, declared_at=index
+                    )
 
-    def _mount(self, statement: Node) -> None:
+    def _mount(self, statement: Node, index: int) -> None:
         call = next((c for c in statement.children if c.type == "call_expression"), None)
         if call is None:
             return
@@ -571,7 +645,7 @@ class TypeScriptHttp:
         if owner_node is None or prop is None or owner_node.type != "identifier":
             return
         owner = self._receivers.get(node_text(self._source, owner_node))
-        if owner is None or node_text(self._source, prop) != "use":
+        if owner is None or node_text(self._source, prop) != "use" or owner.declared_at >= index:
             return
         arguments = _arguments(call) or []
         if not arguments:
@@ -583,6 +657,9 @@ class TypeScriptHttp:
         elif first.type == "identifier" and node_text(self._source, first) in self._receivers:
             # `app.use(router)`: no path argument, so it is mounted at the root.
             mounted = arguments
+        elif (prefix := self._path_value(first, index, 0)) is not None:
+            # A prefix spelled through earlier top-level string constants.
+            mounted = arguments[1:]
         else:
             # A path this cannot read — a variable, a call, a middleware that may
             # or may not be one. Whatever is mounted here is served somewhere
@@ -624,30 +701,200 @@ class TypeScriptHttp:
             return []
         owner = callee.child_by_field_name("object")
         prop = callee.child_by_field_name("property")
-        if owner is None or prop is None or owner.type != "identifier":
+        if owner is None or prop is None:
             return []
-        name, attribute = node_text(self._source, owner), node_text(self._source, prop)
+        attribute = node_text(self._source, prop)
+        if owner.type == "call_expression":
+            # `app.route("/x").get(h)`: a chain link, proven back to its root.
+            return self._chain_route(node, source_symbol) if attribute in _EXPRESS_VERBS else []
+        if owner.type != "identifier":
+            return []
+        name = node_text(self._source, owner)
         if name in self._axios and self._axios_trusted and attribute in _AXIOS_VERBS:
             return self._axios_call(node, attribute, source_symbol)
         receiver = self._receivers.get(name)
         if receiver is not None and receiver.usable and attribute in _EXPRESS_VERBS:
-            return self._route(node, receiver, _EXPRESS_VERBS[attribute], source_symbol)
+            at = self._registration_index(node)
+            if receiver.binding in _ORDERED_BINDINGS and (at is None or at <= receiver.declared_at):
+                return []
+            return self._route(node, receiver, _EXPRESS_VERBS[attribute], at, source_symbol)
         return []
 
+    def _registration_index(self, call: Node) -> int | None:
+        """The top-level statement index when ``call`` is that statement's expression.
+
+        The call counts when it is the statement's whole expression, or a link of a
+        member/call chain that is (``app.route("/x").get(h)``); inside a function, a
+        condition, a loop or any other expression it does not, and the answer is ``None``.
+        """
+        node = call
+        while True:
+            parent = node.parent
+            if parent is None:
+                return None
+            if parent.type == "member_expression":
+                child = parent.child_by_field_name("object")
+            elif parent.type == "call_expression":
+                child = parent.child_by_field_name("function")
+            else:
+                break
+            if not _same(child, node):
+                break
+            node = parent
+        if parent.type != "expression_statement":
+            return None
+        grandparent = parent.parent
+        if grandparent is None or grandparent.type != "program":
+            return None
+        return self._statement_at.get((parent.start_byte, parent.end_byte))
+
+    def _path_value(self, node: Node | None, at: int, depth: int) -> str | None:
+        """A path spelled through earlier top-level string constants, or ``None``.
+
+        ``at`` is the top-level statement the use sits in: a constant counts only when
+        it is bound once, at the top level, in a statement before it. Only string
+        literals, ``+`` and template substitutions are followed; a number, ``||``, a
+        call, a member read or an escape sequence is not a path this file can spell.
+        """
+        if node is None or depth > _MAX_PATH_DEPTH:
+            return None
+        literal = static_string(self._source, node)
+        if literal is not None:
+            return literal
+        if node.type == "identifier":
+            entry = self._strings.get(node_text(self._source, node))
+            if entry is None or entry[0] >= at:
+                return None
+            return self._path_value(entry[1], entry[0], depth + 1)
+        if node.type == "binary_expression":
+            operator = node.child_by_field_name("operator")
+            if operator is None or node_text(self._source, operator) != "+":
+                return None
+            left = self._path_value(node.child_by_field_name("left"), at, depth + 1)
+            if left is None:
+                return None
+            right = self._path_value(node.child_by_field_name("right"), at, depth + 1)
+            return None if right is None else left + right
+        if node.type == "template_string":
+            parts: list[str] = []
+            for child in node.children:
+                if child.type == "escape_sequence":
+                    return None
+                if child.type == "string_fragment":
+                    text = node_text(self._source, child)
+                    if "\\" in text:
+                        return None
+                    parts.append(text)
+                elif child.type == "template_substitution":
+                    inner = [c for c in child.named_children if c.type != "comment"]
+                    if len(inner) != 1:
+                        return None
+                    value = self._path_value(inner[0], at, depth + 1)
+                    if value is None:
+                        return None
+                    parts.append(value)
+            return "".join(parts)
+        return None
+
+    def _route_path(self, argument: Node, at: int | None) -> tuple[str | None, bool]:
+        """A route's path and whether it was composed from constants rather than written."""
+        path = static_string(self._source, argument)
+        if path is not None:
+            return path, False
+        if at is None:
+            return None, False
+        path = self._path_value(argument, at, 0)
+        if path is None or not path.startswith("/"):
+            return None, False
+        return path, True
+
     def _route(
-        self, node: Node, receiver: _Receiver, method: str, source_symbol: str | None
+        self,
+        node: Node,
+        receiver: _Receiver,
+        method: str,
+        at: int | None,
+        source_symbol: str | None,
     ) -> list[ParsedReference]:
         arguments = _arguments(node)
         # One argument is the settings getter, not a route.
         if arguments is None or len(arguments) < 2:
             return []
-        path = static_string(self._source, arguments[0])
+        path, composed_path = self._route_path(arguments[0], at)
         if path is None or any(char in _EXPRESS_PATTERN for char in path):
             return []
         start, _ = line_range(node)
         _, end = line_range(arguments[0])
+        return self._served(receiver, method, path, composed_path, start, end, source_symbol)
+
+    def _chain_route(self, node: Node, source_symbol: str | None) -> list[ParsedReference]:
+        """``<receiver>.route(path).<verb>(…)…``: one route for the verb link ``node``.
+
+        Every link back to the root must be a verb call with an argument; a link that
+        is anything else (``all``, ``use``) or has none stops the chain, and nothing
+        in it is a route. The root is ``route`` with exactly one argument on a proven
+        receiver.
+        """
+        link = node
+        root: Node | None = None
+        root_owner: Node | None = None
+        for _ in range(_MAX_CHAIN_LINKS):
+            if not _arguments(link):
+                return []
+            callee = link.child_by_field_name("function")
+            inner = callee.child_by_field_name("object") if callee is not None else None
+            if inner is None or inner.type != "call_expression":
+                return []
+            inner_callee = inner.child_by_field_name("function")
+            if inner_callee is None or inner_callee.type != "member_expression":
+                return []
+            inner_owner = inner_callee.child_by_field_name("object")
+            inner_prop = inner_callee.child_by_field_name("property")
+            if inner_owner is None or inner_prop is None:
+                return []
+            attribute = node_text(self._source, inner_prop)
+            if attribute in _EXPRESS_VERBS:
+                link = inner
+                continue
+            if attribute == "route" and inner_owner.type == "identifier":
+                root, root_owner = inner, inner_owner
+                break
+            return []
+        if root is None or root_owner is None:
+            return []
+        receiver = self._receivers.get(node_text(self._source, root_owner))
+        if receiver is None or not receiver.usable:
+            return []
+        at = self._registration_index(node)
+        if receiver.binding in _ORDERED_BINDINGS and (at is None or at <= receiver.declared_at):
+            return []
+        root_arguments = _arguments(root)
+        if root_arguments is None or len(root_arguments) != 1:
+            return []
+        path, composed_path = self._route_path(root_arguments[0], at)
+        if path is None or any(char in _EXPRESS_PATTERN for char in path):
+            return []
+        callee = node.child_by_field_name("function")
+        verb = callee.child_by_field_name("property") if callee is not None else None
+        if verb is None:
+            return []
+        method = _EXPRESS_VERBS[node_text(self._source, verb)]
+        start, _ = line_range(node)
+        end = max(line_range(root_arguments[0])[1], line_range(verb)[1])
+        return self._served(receiver, method, path, composed_path, start, end, source_symbol)
+
+    @staticmethod
+    def _served(
+        receiver: _Receiver,
+        method: str,
+        path: str,
+        composed_path: bool,
+        start: int,
+        end: int,
+        source_symbol: str | None,
+    ) -> list[ParsedReference]:
         if receiver.kind == _EXPRESS_APP:
-            served = [(http.route_path(path), False)]
+            served = [(http.route_path(path), composed_path)]
         else:
             served = [
                 (http.route_path(mount if path == "/" and mount else f"{mount}{path}"), True)
