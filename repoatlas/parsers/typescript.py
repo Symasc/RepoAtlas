@@ -902,7 +902,11 @@ class TypeScriptParser:
     #    (repoatlas.parsers.http_fastify).
     # 26: a Fastify entry function's straight line runs through its top-level ``try`` blocks,
     #    and a file without fastify that forwards a plugin's server is read for tracing.
-    version = "26"
+    # 27: an Express application or router bound once by a top-level ``let`` or ``var`` and used
+    #    only after its statement, route paths and mount prefixes read through earlier top-level
+    #    string constants (always composed), ``.route(path).<verb>(...)`` chains, and no receiver
+    #    used before its declaration (R2b-0, repoatlas.parsers.http_typescript).
+    version = "27"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
