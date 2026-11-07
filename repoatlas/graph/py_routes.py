@@ -106,9 +106,16 @@ from repoatlas.parsers.http_facts import (
 )
 from repoatlas.parsers.http_python import (
     _MAX_CLASS_DEPTH,
+    _PATH_KEYWORDS,
+    _PATH_POSITIONAL,
+    _PREFIX_KEYWORDS,
+    IMPORTED_CLASS,
     PY_HELPER_CHAIN_TOO_DEEP,
+    _fastapi_prefix,
     _path_like,
     flask_join,
+    init_fits,
+    reaching_keywords,
 )
 from repoatlas.storage.protocols import EntityRecord, FileRow, UnresolvedRefRecord
 
@@ -137,6 +144,9 @@ CLASS_NOT_OFFERED = "no application subclass of that name is offered there"
 CLASS_NOT_AN_APPLICATION = "the class it names does not build an application"
 CLASS_TOO_DEEP = "the class stands too many classes above the framework's"
 CLASS_NO_ROUTE = "the application's route is no route"
+CLASS_INIT_UNPROVEN = "an __init__ of the class may change where its routes are served"
+#: Re-exports followed from the module a class is imported from to the one that defines it.
+MAX_REEXPORT_HOPS = 2
 
 _FASTAPI_APP = "fastapi-app"
 _FASTAPI_ROUTER = "fastapi-router"
@@ -441,6 +451,24 @@ def plan_python_routes(
         offered = json.loads(meta.get("composed", "{}"))
         composed[claim.file_id] = {name: entry[0] for name, entry in offered.items()}
 
+    classes = _Classes(imports, tables, _offered_classes(grouped.get(PYTHON_CLASS, ())))
+    #: Class-route claim id → what its class proves, or why it proves nothing.
+    class_found: dict[int, _Resolved | str] = {}
+    #: Class-route claim id → the router or blueprint of its own module it stands on.
+    class_keys: dict[int, Key] = {}
+    for claim in class_claims:
+        origin = by_id.get(claim.file_id)
+        if claim.id is None or origin is None:
+            continue
+        meta = _meta(claim)
+        found = classes.built(origin, meta)
+        class_found[claim.id] = found
+        if isinstance(found, _Resolved) and found.kind in _PATH_KEYWORDS:
+            key = (claim.file_id, claim.target_key)
+            class_keys[claim.id] = key
+            if key not in receivers:
+                receivers[key] = _class_router(found.kind, found.inits, meta.get("ctor"))
+
     applications: dict[tuple[int, str], list[Key]] = defaultdict(list)
     for key, receiver in receivers.items():
         declared_in = by_id.get(key[0])
@@ -462,6 +490,9 @@ def plan_python_routes(
         origin = by_id.get(file_id)
         if origin is None:
             return
+        raw = meta.get("owner_classes")
+        if raw is not None and classes.owner_kind(origin, raw) != meta.get("owner_kind"):
+            return  # an owner no class proves the application it is said to be
         child = _child_key(imports, tables, origin, meta, name)
         if meta.get("call") == "mount" and (child is None or child not in receivers):
             # Identity not proven: any application of that name in this repository may be it.
@@ -498,7 +529,7 @@ def plan_python_routes(
         add_mount(_meta(claim), claim.file_id, claim.target_key, claim_place(claim, "mount"))
     # Each call of a helper, before any chain is built: its registrations are mounts of the
     # application the call names. A refused one adds none; its children keep the code.
-    refused = _expand_helpers(grouped, imports, by_id, add_mount, tables)
+    refused = _expand_helpers(grouped, imports, by_id, add_mount, tables, classes)
     # An include or registration on a sub-application is unreadable, whatever module mounts it.
     # Decided against the sub-applications as every mount claim leaves them, so the claims'
     # order does not matter; the children it adds are routers, never applications.
@@ -511,11 +542,15 @@ def plan_python_routes(
         mounts[child].append(mount)
 
     chains = _Chains(receivers, mounts, blocked, app_mounts)
-    for claim in claims:
-        trace = _Trace()
-        outcome, bodies, exact = _route(
-            claim, imports, receivers, constants, composed, chains, by_id, trace
-        )
+
+    def settle(
+        claim: UnresolvedRefRecord,
+        outcome: str,
+        bodies: list[str],
+        exact: dict[str, tuple[bool, frozenset[int]]],
+        trace: _Trace,
+    ) -> None:
+        """Record a route claim's outcome, as a router's or an application's route."""
         _record_facts(plan, claim, outcome, trace, blocked_at, _relative(claim) is not None)
         if (
             outcome == NOT_MOUNTED
@@ -546,19 +581,41 @@ def plan_python_routes(
                 )
             if claim.id is not None:
                 plan.promoted[claim.id] = tuple(bodies)
-            continue
+            return
         if outcome == SERVED_HERE:
-            continue
+            return
         plan.unresolved += 1
         relative = _relative(claim)
         if claim.id is not None and relative is not None:
             plan.declared[claim.id] = relative
 
-    classes = _offered_classes(grouped.get(PYTHON_CLASS, ()))
+    for claim in claims:
+        trace = _Trace()
+        outcome, bodies, exact = _route(
+            claim, imports, receivers, constants, composed, chains, by_id, trace
+        )
+        settle(claim, outcome, bodies, exact, trace)
+
     for claim in class_claims:
         trace = _Trace()
+        if claim.id is not None and claim.id in class_keys:
+            # A route on a router or blueprint built from a class another module offers.
+            outcome, bodies, exact = _route(
+                claim,
+                imports,
+                receivers,
+                constants,
+                composed,
+                chains,
+                by_id,
+                trace,
+                key=class_keys[claim.id],
+            )
+            settle(claim, outcome, bodies, exact, trace)
+            continue
+        found = class_found.get(claim.id, MODULE_UNRESOLVED) if claim.id is not None else ""
         outcome, bodies, exact = _class_route(
-            claim, imports, classes, constants, composed, by_id, trace
+            claim, found, imports, constants, composed, by_id, trace
         )
         _record_facts(plan, claim, outcome, trace, blocked_at, False)
         if outcome != PROMOTED:
@@ -636,6 +693,7 @@ def _expand_helpers(
     by_id: Mapping[int, FileRow],
     add_mount: Callable[[Mapping[str, str], int, str, Place], None],
     tables: ExportTables | None,
+    classes: _Classes | None = None,
 ) -> dict[Key, str]:
     """Hand every accepted helper call's registrations to ``add_mount``, as mounts of the
     application the call names, in the module the call stands in.
@@ -660,6 +718,10 @@ def _expand_helpers(
             continue
         meta = _meta(call)
         owner, owner_kind = meta.get("owner", ""), meta.get("owner_kind", "")
+        raw = meta.get("owner_classes")
+        if raw is not None:
+            # An application built from classes other modules define: their kind, if one.
+            owner_kind = (classes.owner_kind(origin, raw) if classes is not None else None) or ""
         refusal = meta.get("refusal")
         for key, depth in _helper_closure(helpers, (call.file_id, call.target_key)):
             helper = helpers[key]
@@ -724,15 +786,181 @@ def _record_facts(
             plan.resolved_routes[claim.id] = body
 
 
-def _offered_classes(claims: Sequence[UnresolvedRefRecord]) -> dict[Key, tuple[str, int]]:
-    """Each application subclass a module offers, by (its file, its name): kind and depth."""
-    offered: dict[Key, tuple[str, int]] = {}
+@dataclass(frozen=True, slots=True)
+class _Offered:
+    """A class a module offers (``python-class``)."""
+
+    #: The framework kind it stands on, or :data:`IMPORTED_CLASS` when ``base`` says.
+    kind: str
+    #: The module's own classes between it and ``base`` (or the framework's class).
+    depth: int
+    #: The own ``__init__`` facts of those classes, nearest first.
+    inits: tuple[Mapping[str, object], ...]
+    #: ``(module, class)`` another module defines that it extends, as the module imports it.
+    base: tuple[str, str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Resolved:
+    """What a class proves, down to the framework's: its kind, the classes between, and the own
+    ``__init__`` facts of each on the way."""
+
+    kind: str
+    depth: int
+    inits: tuple[Mapping[str, object], ...]
+
+
+def _init_list(raw: str | None) -> tuple[Mapping[str, object], ...]:
+    try:
+        loaded = json.loads(raw or "[]")
+    except ValueError:
+        return ()
+    if not isinstance(loaded, list):
+        return ()
+    return tuple(entry for entry in loaded if isinstance(entry, dict))
+
+
+def _offered_classes(claims: Sequence[UnresolvedRefRecord]) -> dict[Key, _Offered]:
+    """Each class a module offers, by (its file, its name)."""
+    offered: dict[Key, _Offered] = {}
     for claim in claims:
         meta = _meta(claim)
         depth = meta.get("depth", "")
-        if depth.isdigit():
-            offered[(claim.file_id, claim.target_key)] = (meta.get("kind", ""), int(depth))
+        if not depth.isdigit():
+            continue
+        kind = meta.get("kind", "")
+        base = None
+        if kind == IMPORTED_CLASS:
+            module, name = meta.get("base_module", ""), meta.get("base_class", "")
+            if not module or not name:
+                continue
+            base = (module, name)
+        offered[(claim.file_id, claim.target_key)] = _Offered(
+            kind, int(depth), _init_list(meta.get("init")), base
+        )
     return offered
+
+
+class _Classes:
+    """The classes modules offer, followed from where a module imports one to the framework's:
+    through at most :data:`MAX_REEXPORT_HOPS` re-exports (``from .base import C`` in a package,
+    proven by its export table) and through classes that extend another module's, at most
+    :data:`_MAX_CLASS_DEPTH` classes in all."""
+
+    def __init__(
+        self, imports: _Imports, tables: ExportTables | None, offered: Mapping[Key, _Offered]
+    ) -> None:
+        self._imports = imports
+        self._tables = tables
+        self._offered = offered
+
+    def resolve(self, origin: FileRow, module: str, name: str, spent: int = 0) -> _Resolved | str:
+        """What the class ``origin`` imports as ``module.name`` proves, or why it proves nothing:
+        :data:`MODULE_UNRESOLVED`, :data:`CLASS_NOT_OFFERED` or :data:`CLASS_TOO_DEEP`."""
+        target = self._imports.resolve(origin, module)
+        if target is None:
+            return MODULE_UNRESOLVED
+        found = self._offered.get((target.file_id, name))
+        hops = 0
+        while found is None and hops < MAX_REEXPORT_HOPS:
+            followed = self._reexport(target, name)
+            if followed is None:
+                break
+            target, name = followed
+            found = self._offered.get((target.file_id, name))
+            hops += 1
+        if found is None:
+            return CLASS_NOT_OFFERED
+        if spent + found.depth > _MAX_CLASS_DEPTH:
+            return CLASS_TOO_DEEP
+        if found.base is None:
+            return _Resolved(found.kind, found.depth, found.inits)
+        deeper = self.resolve(target, found.base[0], found.base[1], spent + found.depth)
+        if isinstance(deeper, str):
+            return deeper
+        return _Resolved(deeper.kind, found.depth + deeper.depth, found.inits + deeper.inits)
+
+    def _reexport(self, package: FileRow, name: str) -> tuple[FileRow, str] | None:
+        """The module and name a module's ``from module import name`` binds ``name`` to, when its
+        export table says it does so unconditionally."""
+        table = self._tables(package.file_id) if self._tables is not None else None
+        if not isinstance(table, Mapping):
+            return None
+        names = table.get("names")
+        conditional = table.get("conditional", [])
+        if not isinstance(names, Mapping) or not isinstance(conditional, list):
+            return None
+        entry = names.get(name)
+        if (
+            name in conditional
+            or not isinstance(entry, list)
+            or len(entry) != 3
+            or entry[0] != "import"
+            or not isinstance(entry[1], str)
+            or not entry[1]
+            or not isinstance(entry[2], str)
+        ):
+            return None
+        target = self._imports.resolve(package, entry[1])
+        if target is None or target.file_id == package.file_id:
+            return None
+        return target, entry[2]
+
+    def built(self, origin: FileRow, meta: Mapping[str, str]) -> _Resolved | str:
+        """What a claim's ``module``, ``class``, ``depth`` and ``init`` -- a class another module
+        defines, and the classes of ``origin`` above it -- prove, or why they prove nothing."""
+        found = self.resolve(origin, meta.get("module", ""), meta.get("class", ""))
+        if isinstance(found, str):
+            return found
+        here = meta.get("depth", "")
+        if not here.isdigit() or found.depth + int(here) > _MAX_CLASS_DEPTH:
+            return CLASS_TOO_DEEP
+        inits = _init_list(meta.get("init")) + found.inits
+        if not init_fits(found.kind, inits):
+            return CLASS_INIT_UNPROVEN
+        return _Resolved(found.kind, found.depth + int(here), inits)
+
+    def owner_kind(self, origin: FileRow, raw: str) -> str | None:
+        """The one application kind every class of an ``owner_classes`` list proves, else
+        ``None``."""
+        kinds: set[str] = set()
+        for entry in _init_list(raw):
+            if "kind" in entry:
+                kinds.add(str(entry["kind"]))
+                continue
+            found = self.built(origin, {str(k): str(v) for k, v in entry.items()})
+            if isinstance(found, str) or found.kind not in _APPLICATIONS:
+                return None
+            kinds.add(found.kind)
+        return next(iter(kinds)) if len(kinds) == 1 else None
+
+
+def _class_router(kind: str, inits: Sequence[Mapping[str, object]], raw: str | None) -> _Receiver:
+    """A router or blueprint built from a class another module defines, as its construction
+    (``ctor``) states it through the classes' own ``__init__``: usable only where the keywords
+    that reach the framework's constructor say where it serves."""
+    try:
+        ctor = json.loads(raw or "{}")
+    except ValueError:
+        ctor = None
+    if not isinstance(ctor, dict):
+        return _Receiver(kind, None, False, ())
+    positional = ctor.get("positional")
+    keywords = [str(name) for name in ctor.get("keywords", []) if isinstance(name, str)]
+    prefixes = ctor.get("prefixes") if isinstance(ctor.get("prefixes"), dict) else {}
+    usable = isinstance(positional, int) and (bool(inits) or positional <= _PATH_POSITIONAL[kind])
+    reaching = set(reaching_keywords(keywords, inits))
+    named = _PREFIX_KEYWORDS[kind]
+    if reaching & (_PATH_KEYWORDS[kind] - {named}):
+        usable = False
+    prefix: str | None = "" if kind == _FASTAPI_ROUTER else None
+    if named in reaching:
+        stated = prefixes.get(named)
+        if not isinstance(stated, str) or (kind == _FASTAPI_ROUTER and not _fastapi_prefix(stated)):
+            usable = False
+        else:
+            prefix = stated
+    return _Receiver(kind, prefix, usable, ())
 
 
 def _key(imports: _Imports, origin: FileRow, module: str | None, name: str) -> Key | None:
@@ -979,8 +1207,8 @@ def _constant_value(
 
 def _class_route(
     claim: UnresolvedRefRecord,
+    found: _Resolved | str,
     imports: _Imports,
-    offered: Mapping[Key, tuple[str, int]],
     constants: Mapping[int, Mapping[str, str]],
     composed: Mapping[int, Mapping[str, list[list[str]]]],
     by_id: Mapping[int, FileRow],
@@ -988,27 +1216,19 @@ def _class_route(
 ) -> tuple[str, list[str], dict[str, tuple[bool, frozenset[int]]]]:
     """A route on an application built from a class another module defines.
 
-    Served at the application's root, by the module that builds it, when the module the
-    class comes from resolves to one indexed file that offers it as an application subclass
-    and the classes above the framework's, there and here, are at most :data:`_MAX_CLASS_DEPTH`.
+    Served at the application's root, by the module that builds it, when ``found`` -- what
+    :meth:`_Classes.built` made of the class -- is an application of the route's family.
     Anything else leaves the route unserved, with the reason a diagnostic only.
     """
     meta = _meta(claim)
     origin = by_id.get(claim.file_id)
     if origin is None:
         return MODULE_UNRESOLVED, [], {}
-    target = imports.resolve(origin, meta.get("module", ""))
-    if target is None:
-        return MODULE_UNRESOLVED, [], {}
-    found = offered.get((target.file_id, meta.get("class", "")))
-    if found is None:
-        return CLASS_NOT_OFFERED, [], {}
-    kind, depth = found
+    if isinstance(found, str):
+        return found, [], {}
+    kind = found.kind
     if kind not in _APPLICATIONS:
         return CLASS_NOT_AN_APPLICATION, [], {}
-    here = meta.get("depth", "")
-    if not here.isdigit() or depth + int(here) > _MAX_CLASS_DEPTH:
-        return CLASS_TOO_DEEP, [], {}
     if meta.get("family", "") not in {"either", _FAMILY.get(kind)}:
         return WRONG_KIND, [], {}
     path = ""
@@ -1039,13 +1259,17 @@ def _route(
     chains: _Chains,
     by_id: Mapping[int, FileRow],
     trace: _Trace | None = None,
+    key: Key | None = None,
 ) -> tuple[str, list[str], dict[str, tuple[bool, frozenset[int]]]]:
+    """``key``: the receiver of the claim's own module it stands on, when the claim names none
+    (a route on a router built from a class another module defines)."""
     meta = _meta(claim)
     origin = by_id.get(claim.file_id)
     if origin is None:
         return MODULE_UNRESOLVED, [], {}
-    module = meta.get("module")
-    key = _key(imports, origin, module, meta.get("router", ""))
+    module = None if key is not None else meta.get("module")
+    if key is None:
+        key = _key(imports, origin, module, meta.get("router", ""))
     if key is None:
         return MODULE_UNRESOLVED, [], {}
     if trace is not None:

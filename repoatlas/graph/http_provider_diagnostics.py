@@ -33,6 +33,7 @@ from dataclasses import dataclass
 
 from repoatlas.graph.http_claims import _MAX_MODULES, HttpClaimPlan
 from repoatlas.graph.py_routes import (
+    CLASS_INIT_UNPROVEN,
     CLASS_NO_ROUTE,
     CLASS_NOT_AN_APPLICATION,
     CLASS_NOT_OFFERED,
@@ -323,6 +324,7 @@ _CODES: Mapping[str, tuple[str, str, str, str, tuple[str, ...]]] = {
     "python-class-not-offered": _row(IDENTITY_UNRESOLVED, _L, UNRESOLVED, _NE),
     "python-class-not-application": _row(IDENTITY_UNRESOLVED, _L, UNRESOLVED, _NE),
     "python-class-too-deep": _row(BOUND_REACHED, _L, UNRESOLVED, _NE, BOUND_PYTHON_CLASS_DEPTH),
+    "python-class-init-unproven": _row(IDENTITY_UNRESOLVED, _L, UNRESOLVED, _NE),
     "python-class-route-unreadable": _row(PATH_UNRESOLVED, UNRESOLVED, RESOLVED, _NE),
     # -- Fastify routes ---------------------------------------------------------------------
     "fastify-scope-not-declared": _row(IDENTITY_UNRESOLVED, _L, UNRESOLVED, _NE),
@@ -400,9 +402,12 @@ _PYTHON_CLASS_OUTCOMES = {
     CLASS_NOT_OFFERED: "python-class-not-offered",
     CLASS_NOT_AN_APPLICATION: "python-class-not-application",
     CLASS_TOO_DEEP: "python-class-too-deep",
+    CLASS_INIT_UNPROVEN: "python-class-init-unproven",
     CLASS_NO_ROUTE: "python-class-route-unreadable",
     WRONG_KIND: "python-receiver-kind-mismatch",
     CONSTANT_UNRESOLVED: "python-path-constant-unresolved",
+    UNREADABLE_MOUNT: "python-mount-unreadable",
+    NOT_MOUNTED: "python-not-mounted",
 }
 _FASTIFY_OUTCOMES = {
     FASTIFY_NOT_DECLARED: "fastify-scope-not-declared",
@@ -668,7 +673,12 @@ def diagnose(
 def _outcome(plan: HttpClaimPlan, claim_id: int, role: str) -> str | None:
     """The planner's reason a claim is not served, or ``None`` when it is served (or not ours)."""
     if role == PYTHON_CLASS_ROUTE:
-        return plan.class_unproven.get(claim_id)
+        unproven = plan.class_unproven.get(claim_id)
+        if unproven is not None:
+            return unproven
+        # A route on a router built from an offered class has a router's outcome.
+        outcome = plan.routes.get(claim_id)
+        return None if outcome is None or outcome == PROMOTED else outcome
     if role == FASTIFY_TRACED_ROUTE:
         return plan.traced_outcomes.get(claim_id)
     outcome = plan.routes.get(claim_id)

@@ -475,7 +475,12 @@ class PythonParser:
     #    the head's import (``module``, ``head_import``) and the attribute between (``through``);
     #    the global pass serves it only when the packages' export tables prove each step a
     #    submodule (R2c-2, repoatlas.parsers.http_python, repoatlas.graph.py_routes).
-    version = f"30+{interpreter_tag()}"
+    # 31: a subclass may declare properties, private methods and an ``__init__`` that calls the
+    #    base's once and touches nothing it serves through; router, blueprint and imported-base
+    #    subclasses are offered too; a function builds an application from an imported class or
+    #    once per branch of an exhaustive ``if``/``match``; a helper's loop over a literal list
+    #    is unrolled (repoatlas.parsers.http_python, repoatlas.graph.py_routes).
+    version = f"31+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:

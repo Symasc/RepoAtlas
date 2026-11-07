@@ -3,20 +3,22 @@
 ``class CustomRouter(APIRouter): pass`` then ``router = CustomRouter()`` constructs a router,
 exactly as ``APIRouter()`` does, when nothing in the class can change what it registers or serves:
 one base, which is the framework's own class as this module imports it or a class of this kind
-defined above it in the same module (at most three deep); no metaclass, keyword, decorator or type
-parameter; a name bound once; a body of ``pass``, a docstring and plain methods that are neither
-special nor a member the framework registers or serves through; and an ``__init__`` only when it is
-exactly
-``super().__init__(*args, **kwargs)``. A name that merely looks like a router is nothing.
+defined above it in the same module (at most three deep); no metaclass, keyword, class decorator or
+type parameter; a name bound once; a body of ``pass``, a docstring and methods that are neither
+special nor a member the framework registers or serves through, decorated by names alone if at all;
+and an ``__init__`` that is exactly ``super().__init__(*args, **kwargs)``, or one that calls the
+base's once and touches nothing the framework serves through (for a router or blueprint, handing it
+no path). A name that merely looks like a router is nothing.
 
 Half of this file is what is refused, and every refusal has an internal reason (``class_refusals``,
 never stored). The class is read from this module's syntax tree only, never imported or run
-(V1_SPEC §17). A subclass defined in one module and constructed in another serves nothing yet.
+(V1_SPEC §17). A subclass defined in one module and constructed in another is the global pass's.
 """
 
 from __future__ import annotations
 
 import ast
+import json
 import sys
 import textwrap
 from pathlib import Path
@@ -403,7 +405,6 @@ def test_a_router_that_adds_its_routes_at_construction_is_refused() -> None:
     "init",
     [
         'def __init__(self, *a, **k):\n    super().__init__(*a, prefix="/x", **k)',
-        "def __init__(self, **k):\n    super().__init__(**k)",
         "def __init__(self, *a, **k):\n    super(C, self).__init__(*a, **k)",
         "def __init__(self, *a, **k):\n    super().__init__(*a, **k)\n    self.x = 1",
         "def __init__(self, *a, **k):\n    pass",
@@ -416,7 +417,6 @@ def test_a_router_that_adds_its_routes_at_construction_is_refused() -> None:
     ],
     ids=[
         "keyword-added",
-        "no-vararg",
         "explicit-super",
         "second-statement",
         "no-call",
@@ -443,8 +443,9 @@ def test_an_init_that_does_more_than_pass_its_arguments_on_is_refused(init: str)
         "def __init__(self, *args: Any, **kwargs: Any) -> None:\n"
         "    super().__init__(*args, **kwargs)",
         "def __init__(this, *a, **k):\n    super().__init__(*a, **k)",
+        "def __init__(self, **k):\n    super().__init__(**k)",
     ],
-    ids=["bare", "docstring", "annotated", "renamed"],
+    ids=["bare", "docstring", "annotated", "renamed", "keywords-handed-on"],
 )
 def test_an_init_that_only_passes_its_arguments_on_is_accepted(init: str) -> None:
     source = routed(cls(init), 'C(prefix="/users")')
@@ -611,9 +612,10 @@ def test_a_construction_before_the_class_statement_is_no_receiver() -> None:
         ("route_class = X", "class-body-statement"),
         ("x: int", "class-body-statement"),
         ("@property\ndef prefix(self): ...", "decorated-member"),
-        ("@staticmethod\ndef helper(): ...", "decorated-member"),
+        ("@cached\ndef routes(self): ...", "decorated-member"),
+        ('@router.get("/x")\ndef helper(self): ...', "decorated-member"),
     ],
-    ids=["prefix", "route-class", "annotation", "property", "staticmethod"],
+    ids=["prefix", "route-class", "annotation", "property", "serving-name", "called"],
 )
 def test_a_class_body_that_could_change_what_it_serves_is_refused(row: str, reason: str) -> None:
     source = routed(cls(row))
@@ -625,6 +627,120 @@ def test_a_plain_documented_method_does_not_stop_the_class() -> None:
     source = routed(cls('"""A router."""', "def describe(self):\n    return 1", "..."))
     assert read(source).class_refusals == {}
     assert _served(source) == {"GET /users"}
+
+
+# -- an __init__ that keeps its own state, properties, private and plainly decorated methods --
+
+_MANAGED = (
+    "def __init__(self):",
+    '    """Keep the manager the routes read."""',
+    "    super().__init__()",
+    "    self._manager: Manager = None",
+    "@property",
+    "def manager(self):",
+    "    return self._manager",
+    "@manager.setter",
+    "def manager(self, value):",
+    "    self._manager = value",
+    "def _describe(self):",
+    "    return self._manager",
+    "@staticmethod",
+    "def helper(): ...",
+)
+
+
+def test_a_router_that_keeps_its_own_state_is_a_router() -> None:
+    source = routed(cls(*_MANAGED))
+    http = read(source)
+    assert "C" in http.subclasses
+    assert http.class_refusals == {}
+    [init] = http.subclasses["C"].inits
+    assert init == {
+        "forwards": False,
+        "named": [],
+        "positional": 0,
+        "starred": False,
+        "keywords": [],
+        "kwargs_read": False,
+    }
+    assert _served(source) == {"GET /users"}
+
+
+def test_an_init_that_hands_its_keywords_on_keeps_the_construction_prefix() -> None:
+    init = (
+        "def __init__(self, manager, **kwargs):",
+        "    super().__init__(**kwargs)",
+        "    self._manager = manager",
+    )
+    source = routed(cls(*init), 'C(None, prefix="/users")')
+    source = source.replace('@router.get("/users")', '@router.get("/me")')
+    assert _served(source) == {"GET /users/me"}
+
+
+@pytest.mark.parametrize(
+    "init",
+    [
+        "def __init__(self):\n    super().__init__()\n    self.prefix = '/x'",
+        "def __init__(self, other):\n    super().__init__()\n    self.include_router(other)",
+        "def __init__(self):\n    super().__init__()\n    register(self)",
+        "def __init__(self):\n    super().__init__()\n    self.__dict__['prefix'] = '/x'",
+        "def __init__(self):\n    super().__init__(prefix='/x')",
+        "def __init__(self, prefix, **k):\n    super().__init__(**k)",
+        "def __init__(self, **k):\n    k['prefix'] = '/x'\n    super().__init__(**k)",
+        "def __init__(self, *a):\n    super().__init__(*a)",
+        "def __init__(self):\n    super().__init__()\n    super().__init__()",
+        "def __init__(self, ready):\n    if ready:\n        super().__init__()",
+        "def __init__(self):\n    self = make()\n    super().__init__()",
+    ],
+    ids=[
+        "sets-prefix",
+        "registers",
+        "hands-itself-on",
+        "special-member",
+        "names-a-path",
+        "takes-a-path-keyword",
+        "changes-its-keywords",
+        "starred",
+        "twice",
+        "conditional",
+        "rebinds-itself",
+    ],
+)
+def test_an_init_that_could_change_where_a_router_serves_is_refused(init: str) -> None:
+    source = routed(cls(init))
+    assert read(source).class_refusals == {"C": "overridden-init-with-effect"}
+    nothing_built(source)
+
+
+def test_two_own_inits_on_a_router_chain_are_refused() -> None:
+    own = ("def __init__(self):", "    super().__init__()", "    self._x = 1")
+    source = routed(lines(cls(*own, name="A"), cls(*own, base="A")))
+    http = read(source)
+    assert "A" in http.subclasses
+    assert http.class_refusals == {"C": "overridden-init-with-effect"}
+    assert "router" not in receivers(source)
+    assert _served(source) == set()
+
+
+def test_an_application_whose_init_builds_its_own_arguments_is_an_application() -> None:
+    source = lines(
+        "from fastapi import Depends, FastAPI",
+        "class Api(FastAPI):",
+        "    def __init__(self, level=None, **kwargs):",
+        "        self._level = level",
+        '        extra = kwargs.pop("dependencies", [])',
+        "        super().__init__(dependencies=[*extra, Depends(self._check)], **kwargs)",
+        "    def _check(self):",
+        "        return self._level",
+        "app = Api()",
+        '@app.get("/health")',
+        "def health(): ...",
+    )
+    assert "Api" in read(source).subclasses
+    assert _served(source) == {"GET /health"}
+    [offered] = claims(source, "python-class")
+    assert offered.meta["kind"] == "fastapi-app"
+    assert json.loads(offered.meta["init"])[0]["kwargs_read"] is True
 
 
 def test_a_route_declared_in_a_class_body_is_never_read() -> None:
@@ -797,7 +913,7 @@ def test_a_subclass_router_is_served_through_another_module(
     assert outcomes(indexed)[("src/routes.py", "me", "GET /me")] == PROMOTED
 
 
-def test_a_subclass_defined_in_another_module_serves_nothing_yet(
+def test_a_router_class_defined_in_another_module_is_served_where_it_is_mounted(
     workspace: Workspace, tmp_path: Path
 ) -> None:
     base = d("""
@@ -820,7 +936,8 @@ def test_a_subclass_defined_in_another_module_serves_nothing_yet(
     files = {"svc": {"src/base.py": base, "src/routes.py": routes, "src/main.py": MAIN}}
     indexed = build(workspace, tmp_path, files)
     assert "CustomRouter" in read(base).subclasses
-    assert served(indexed) == set()
+    assert served(indexed) == {("svc", "src/routes.py", "get_users", "GET /api/users", None)}
+    # A route on a class receiver is a class-route claim, never a python-route one.
     assert [key for key in outcomes(indexed) if key[1] == "get_users"] == []
 
 
