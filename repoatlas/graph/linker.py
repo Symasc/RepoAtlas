@@ -119,6 +119,7 @@ from repoatlas.models.parsing import (
     EMBEDDED_DOCUMENT,
     ENUM_MEMBER,
     FIELD,
+    LOCAL_RECEIVER,
     EdgeType,
     EntityType,
     ParsedFile,
@@ -596,6 +597,9 @@ class ReferenceLinker:
 
         Every other kind — packages, paths, Salt targets, templates — is always
         recorded, because its target key names the target directly.
+
+        A reference whose leading name its own scope binds (``LOCAL_RECEIVER``) is not an
+        import's either: a parameter named like an imported function is the parameter.
         """
         if reference.target_kind not in {
             EntityType.SYMBOL,
@@ -603,6 +607,8 @@ class ReferenceLinker:
             EntityType.FUNCTION,
         }:
             return None
+        if reference.meta.get(LOCAL_RECEIVER):
+            return _NOT_CLAIMABLE
         root = reference.target_key.split(".", 1)[0]
         specifier = imported.get(root)
         return specifier if specifier is not None else _NOT_CLAIMABLE
@@ -1664,11 +1670,15 @@ def _imported_names(parsed: ParsedFile) -> dict[str, str]:
     cross-file symbol reference may later be resolved.
     """
     imported: dict[str, str] = {}
+    python = parsed.language == "Python"
     for reference in parsed.references:
         if reference.edge_type is not EdgeType.IMPORTS:
             continue
         specifier = reference.target_key
         meta = reference.meta
+        if python:
+            _bind_python_import(imported, specifier, meta)
+            continue
         for name in (meta.get("names") or "").split(","):
             if name.strip():
                 imported[name.strip()] = specifier
@@ -1683,6 +1693,26 @@ def _imported_names(parsed: ParsedFile) -> dict[str, str]:
         if tail:
             imported.setdefault(tail, specifier)
     return imported
+
+
+def _bind_python_import(imported: dict[str, str], specifier: str, meta: Mapping[str, str]) -> None:
+    """The names one Python import binds, and only those.
+
+    ``from a.b import c`` binds ``c`` and neither ``a`` nor ``b``; ``import a.b.c`` binds ``a``
+    and not ``c``; an alias binds the alias alone. A segment of the specifier is no binding:
+    reading it as one made a parameter or local that shares a module's name look imported.
+    """
+    if "level" in meta:
+        # ``from x import a, b``, and ``from . import a`` once per candidate submodule.
+        for name in (meta.get("names") or "").split(","):
+            if name.strip():
+                imported[name.strip()] = specifier
+        if meta.get("package") is not None:
+            imported[meta.get("alias") or specifier.lstrip(".")] = specifier
+    elif meta.get("alias"):
+        imported[meta["alias"]] = specifier
+    else:
+        imported.setdefault(specifier.split(".")[0], specifier)
 
 
 def _is_module_fact(claim: UnresolvedRefRecord) -> bool:

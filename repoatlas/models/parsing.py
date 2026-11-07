@@ -122,6 +122,12 @@ ENUM_MEMBER = "enum-member"
 #: name in that language ever resolves to it.
 EMBEDDED_DOCUMENT = "graphql-document"
 
+#: ``meta`` key of a symbol reference whose leading name the enclosing function, lambda,
+#: class body or comprehension binds itself (a parameter, an assignment, a loop variable):
+#: the receiver is that local, so no import of the same name can be what it names. Set by
+#: repoatlas.parsers.python; the linker records no import claim for such a reference.
+LOCAL_RECEIVER = "local_receiver"
+
 
 class EdgeDirection(StrEnum):
     """Which end of an edge the queried entity is required to sit on.
