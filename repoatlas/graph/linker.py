@@ -37,6 +37,7 @@ that gap published a knowledge base with no cross-repository graph at all while
 
 from __future__ import annotations
 
+import ast
 import functools
 import json
 from collections import defaultdict
@@ -814,7 +815,7 @@ class ReferenceLinker:
             languages: dict[int, str] = {}
             graphql_unknown_role = 0
             ordinary_unresolved = 0
-            python_reexports = None
+            python_uses = None
             if ledger is not None:
                 for fact in module_facts:
                     ledger.excluded(fact, MODULE_FACT)
@@ -913,16 +914,24 @@ class ReferenceLinker:
                     else None
                 )
                 if imported_name is not None:
-                    if python_reexports is None:
-                        python_reexports = python_use_resolver(self._knowledge, index, records)
+                    if python_uses is None:
+                        python_uses = python_use_resolver(self._knowledge, index, records)
                     edge = self._resolve_python_reexport(
                         claim,
                         origin,
                         index,
-                        python_reexports,
+                        python_uses,
                         _claim_meta(claim.meta_json),
                         imported_name,
                     )
+                if edge is None:
+                    value_use = _python_imported_value_member(claim, origin, siblings)
+                    if value_use is not None:
+                        if python_uses is None:
+                            python_uses = python_use_resolver(self._knowledge, index, records)
+                        edge = self._resolve_python_value_member(
+                            claim, origin, index, python_uses, value_use
+                        )
                 if edge is None:
                     unresolved += 1
                     ordinary_unresolved += 1
@@ -1557,6 +1566,72 @@ class ReferenceLinker:
             return None
         return self._edge(claim, origin, entity_id)
 
+    def _resolve_python_value_member(
+        self,
+        claim: UnresolvedRefRecord,
+        origin: FileRow,
+        index: ResolutionIndex,
+        resolver: PythonUseResolver,
+        value_use: Mapping[str, str],
+    ) -> EdgeRecord | None:
+        """Resolve one method directly declared by an annotated imported module value."""
+        if not resolver.has_import_binding(
+            origin, value_use["local"], value_use["module"], value_use["imported"]
+        ):
+            return None
+        resolved = resolver.resolve(origin, dict(value_use))
+        if resolved is None:
+            return None
+        value_id, value_resolution = resolved
+        if value_resolution.get(CROSSING):
+            return None
+        path, name = value_resolution.get("defined_at"), value_resolution.get("name")
+        if not isinstance(path, str) or not isinstance(name, str):
+            return None
+        value_file = index.files_by_repo.get(origin.repo_id, {}).get(path)
+        if value_file is None:
+            return None
+        values = [
+            symbol
+            for symbol in index.symbols_by_file.get(value_file.file_id, {}).get(name, [])
+            if symbol.entity_id == value_id
+            and symbol.type is EntityType.SYMBOL
+            and symbol.meta.get("kind") == "variable"
+        ]
+        if len(values) != 1:
+            return None
+        type_name = _python_annotation_class(values[0].meta.get("annotation"))
+        if type_name is None:
+            return None
+
+        definition = resolver.resolve_module_name(value_file, type_name)
+        if definition is None or definition.symbol_id is None:
+            return None
+        model = index.resolve_symbol(definition.file, definition.name or "")
+        if (
+            model is None
+            or model.entity_id != definition.symbol_id
+            or model.type is not EntityType.CLASS
+            or model.repo_id != origin.repo_id
+            or not model.qualified_name
+        ):
+            return None
+        member = value_use.get("member")
+        if not member:
+            return None
+        qualified = f"{model.qualified_name}.{member}"
+        methods = {
+            symbol.entity_id: symbol
+            for symbol in index.symbols_by_file.get(model.file_id, {}).get(qualified, [])
+            if symbol.qualified_name == qualified
+            and symbol.type is EntityType.METHOD
+            and symbol.repo_id == origin.repo_id
+            and symbol.meta.get("decorated") != "true"
+        }
+        if len(methods) != 1:
+            return None
+        return self._edge(claim, origin, next(iter(methods)))
+
     def _resolve_salt_state(
         self, claim: UnresolvedRefRecord, origin: FileRow, index: ResolutionIndex
     ) -> EdgeRecord | None:
@@ -1916,6 +1991,88 @@ def _python_imported_name(
         elif claim.target_key in (sibling_meta.get("names") or "").split(","):
             names.add(claim.target_key)
     return next(iter(names)) if len(names) == 1 else None
+
+
+def _python_imported_value_member(
+    claim: UnresolvedRefRecord, origin: FileRow, siblings: Sequence[UnresolvedRefRecord]
+) -> Mapping[str, str] | None:
+    """The unique imported-value use matching one direct member call."""
+    if claim.edge_type is not EdgeType.CALLS or claim.target_kind is not EntityType.SYMBOL:
+        return None
+    claim_meta = _claim_meta(claim.meta_json)
+    specifier = claim_meta.get("module")
+    if (
+        _flavor(origin, claim_meta) != "python"
+        or not specifier
+        or claim_meta.get("local_receiver") == "true"
+    ):
+        return None
+    local, separator, member = claim.target_key.partition(".")
+    if not separator or not local or not member or "." in member:
+        return None
+    matches: list[Mapping[str, str]] = []
+    for sibling in siblings:
+        if sibling.edge_type is not EdgeType.IMPORTS:
+            continue
+        meta = _claim_meta(sibling.meta_json)
+        if (
+            sibling.target_key != specifier
+            or "level" not in meta
+            or meta.get("package") is not None
+        ):
+            continue
+        names = (meta.get("names") or "").split(",")
+        aliases = {
+            imported: local_name
+            for pair in (meta.get("aliases") or "").split(",")
+            for imported, separator, local_name in [pair.partition(":")]
+            if separator and imported and local_name
+        }
+        imported = next((name for name in names if name and aliases.get(name, name) == local), None)
+        if imported is not None:
+            matches.append(
+                {
+                    "module": sibling.target_key,
+                    "binding": "import",
+                    "imported": imported,
+                    "local": local,
+                    "member": member,
+                    "use": "call",
+                    "form": "call",
+                }
+            )
+    distinct = {(meta.get("module"), meta.get("imported")): meta for meta in matches}
+    return next(iter(distinct.values())) if len(distinct) == 1 else None
+
+
+def _python_annotation_class(annotation: str | None) -> str | None:
+    """One explicit class name, optionally unioned with ``None``."""
+    if not annotation or len(annotation) > 1_000:
+        return None
+    try:
+        expression = ast.parse(annotation, mode="eval").body
+        if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
+            expression = ast.parse(expression.value, mode="eval").body
+    except (RecursionError, SyntaxError, ValueError):
+        return None
+    names: set[str] = set()
+    valid = True
+
+    def collect(node: ast.expr) -> None:
+        nonlocal valid
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            collect(node.left)
+            collect(node.right)
+        elif isinstance(node, ast.Name):
+            if node.id != "None":
+                names.add(node.id)
+        elif isinstance(node, ast.Constant) and node.value is None:
+            return
+        else:
+            valid = False
+
+    collect(expression)
+    return next(iter(names)) if valid and len(names) == 1 else None
 
 
 def _is_module_fact(claim: UnresolvedRefRecord) -> bool:

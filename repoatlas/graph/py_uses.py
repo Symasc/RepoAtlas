@@ -128,6 +128,26 @@ class PythonUseResolver(BoundedTrace):
             return self._refused(reason or "not-exported")
         return self._reached(target, meta, found, link)
 
+    def resolve_module_name(self, module: FileRow, name: str) -> UseDefinition | None:
+        """Resolve one name from this module's own export table."""
+        self._begin(module)
+        found, reason, _ = self._trace(module, name, frozenset(), 0)
+        if found is None:
+            self._refused(reason or "not-exported")
+        return found
+
+    def has_import_binding(
+        self, module: FileRow, local: str, specifier: str, imported: str
+    ) -> bool:
+        """Whether the module binds ``local`` to this one import, and nothing else."""
+        table = self._tables(module.file_id)
+        if table is None:
+            return False
+        binding = table.get("names", {}).get(local)
+        return binding == ["import", specifier, imported] and local not in table.get(
+            "conditional", ()
+        )
+
     def _reached(
         self,
         target: ModuleTarget,

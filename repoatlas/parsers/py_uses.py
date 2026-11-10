@@ -177,6 +177,8 @@ class Declaration:
     #: annotation (``type X[T]`` for an alias), never its value.
     kind: str
     signature: str
+    #: A variable's explicit annotation, retained separately for typed receiver lookup.
+    annotation: str | None = None
 
 
 @dataclass(slots=True)
@@ -452,6 +454,7 @@ class PythonUseAnalysis:
     def _declaration(self, name: str, statement: ast.stmt) -> Declaration:
         """The declaration ``statement`` makes of ``name``: its lines, kind and signature."""
         kind, signature = "variable", name
+        annotation = None
         if sys.version_info >= (3, 12) and isinstance(statement, ast.TypeAlias):
             kind, signature = "type-alias", f"type {name}{_type_params_text(statement)}"
         elif isinstance(statement, ast.AnnAssign):
@@ -459,12 +462,14 @@ class PythonUseAnalysis:
                 kind, signature = "type-alias", f"type {name}"
             else:
                 signature = f"{name}: {ast.unparse(statement.annotation)}"
+                annotation = ast.unparse(statement.annotation)
         return Declaration(
             name=name,
             line=statement.lineno,
             end_line=statement.end_lineno or statement.lineno,
             kind=kind,
             signature=signature,
+            annotation=annotation if kind == "variable" else None,
         )
 
     def _implementation(self, sites: list[_Site]) -> int | None:
