@@ -1671,6 +1671,7 @@ def _imported_names(parsed: ParsedFile) -> dict[str, str]:
     """
     imported: dict[str, str] = {}
     python = parsed.language == "Python"
+    script = parsed.language in {"TypeScript", "JavaScript"}
     for reference in parsed.references:
         if reference.edge_type is not EdgeType.IMPORTS:
             continue
@@ -1678,6 +1679,9 @@ def _imported_names(parsed: ParsedFile) -> dict[str, str]:
         meta = reference.meta
         if python:
             _bind_python_import(imported, specifier, meta)
+            continue
+        if script:
+            _bind_script_import(imported, specifier, meta)
             continue
         for name in (meta.get("names") or "").split(","):
             if name.strip():
@@ -1693,6 +1697,31 @@ def _imported_names(parsed: ParsedFile) -> dict[str, str]:
         if tail:
             imported.setdefault(tail, specifier)
     return imported
+
+
+def _bind_script_import(imported: dict[str, str], specifier: str, meta: Mapping[str, str]) -> None:
+    """The names one TypeScript or JavaScript import or ``require`` binds, and only those.
+
+    ``import a, { b, c as d } from "m"`` binds ``a`` and ``b``; ``const { e } = require("m")``
+    binds ``e``. A renamed import is left unbound, as it always was: the claim carries the
+    local name, and the module exports another. A re-export and a bare ``import "m"`` bind
+    nothing, and neither does any segment of the specifier: reading one as a binding made a
+    parameter or local that shares a module's file name look imported.
+    """
+    role = meta.get("role")
+    if role == "re-export":
+        return
+    if role == "dynamic":
+        for name in (meta.get("names") or "").split(","):
+            if name.strip():
+                imported[name.strip()] = specifier
+        return
+    for key in ("default", "namespace"):
+        if meta.get(key):
+            imported[meta[key]] = specifier
+    for pair in (meta.get("bindings") or "").split(","):
+        if pair and ":" not in pair:
+            imported[pair] = specifier
 
 
 def _bind_python_import(imported: dict[str, str], specifier: str, meta: Mapping[str, str]) -> None:
