@@ -49,15 +49,21 @@ def _decorator_name(node: ast.expr) -> str | None:
     if isinstance(node, ast.Name):
         return node.id
     if isinstance(node, ast.Attribute):
+        if isinstance(node.value, ast.Call):
+            return None
         base = _decorator_name(node.value)
-        return f"{base}.{node.attr}" if base else node.attr
+        return f"{base}.{node.attr}" if base else None
     if isinstance(node, ast.Call):
         return _decorator_name(node.func)
     return None
 
 
 def _call_name(node: ast.expr) -> str | None:
-    """Dotted callee name, e.g. ``os.getenv`` or ``load_config``."""
+    """Dotted callee name, e.g. ``os.getenv`` or ``load_config``.
+
+    A call whose receiver is another call (``factory().method()``) is not a member of the
+    factory's module. Its inner call is visited separately and keeps its own reference.
+    """
     return _decorator_name(node)
 
 
@@ -612,7 +618,9 @@ class PythonParser:
     #    comprehension binds itself is marked, so the linker records no import claim for it
     #    (``LOCAL_RECEIVER``); the bump re-parses files whose claims were recorded by name
     #    coincidence (repoatlas.graph.linker).
-    version = f"32+{interpreter_tag()}"
+    # 33: a method call or decorator on a call result is not flattened into a dotted name of
+    #    the original callee (``factory().method`` is not ``factory.method``).
+    version = f"33+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
