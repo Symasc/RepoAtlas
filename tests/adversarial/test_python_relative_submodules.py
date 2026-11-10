@@ -1,9 +1,10 @@
-"""``from . import helper`` names a module, not just its package (V1_SPEC §7.1).
+"""Imports from packages can name submodules as well as package attributes (V1_SPEC §7.1).
 
 Python writes one import two ways::
 
     from .helper import assist      # names the module
     from . import helper           # names the package, then the module in it
+    from pkg import helper         # names the package, then the module in it
 
 The second form is where ``ast`` puts nothing in ``ImportFrom.module``: the
 module being imported is in ``names``, alongside ordinary symbol imports it is
@@ -290,6 +291,17 @@ def test_a_deeper_level_keeps_all_of_its_dots() -> None:
     assert found["..app"]["level"] == "2"
 
 
+def test_an_absolute_fromlist_preserves_its_imported_names() -> None:
+    found = imports("from pkg.sub import helper\n")
+    assert set(found) == {"pkg.sub"}
+    assert found["pkg.sub"]["names"] == "helper"
+
+
+def test_an_absolute_alias_keeps_the_imported_module_identity() -> None:
+    found = imports("from pkg.sub import helper as h\n")
+    assert found["pkg.sub"]["aliases"] == "helper:h"
+
+
 def test_every_name_becomes_its_own_candidate() -> None:
     """§5: one fact per module. Keeping only the first was never on the table,
     but neither was concatenating them into one unresolvable key."""
@@ -311,14 +323,14 @@ def test_a_star_import_names_no_module() -> None:
     assert set(imports("from .. import *\n")) == {".."}
 
 
-def test_the_package_reference_drops_names_only_in_this_form() -> None:
+def test_implicit_relative_package_reference_drops_its_names() -> None:
     """``names`` on the package reference is what the linker uses to decide which
     local bindings came through which module. In this form they are not names
     *of* the package — they are the candidates — so leaving them there would
     point a later ``helper.assist()`` at ``__init__.py``."""
     assert "names" not in imports("from . import helper\n")["."]
-    assert imports("from .helper import X\n")[".helper"]["names"] == "X"
     assert imports("from pkg.sub import helper\n")["pkg.sub"]["names"] == "helper"
+    assert imports("from .helper import X\n")[".helper"]["names"] == "X"
 
 
 # == 4. the forms that already worked ========================================
@@ -354,6 +366,116 @@ def test_the_written_module_form_still_reaches_the_same_file(tmp_path: Path) -> 
     space = indexed(tmp_path, tree)
     try:
         assert importers_of(space, "demo", "pkg/sub/helper.py") == {("pkg/sub/worker.py", 1)}
+    finally:
+        space.close()
+
+
+def test_an_absolute_fromlist_submodule_gets_an_inbound_import_edge(
+    tmp_path: Path,
+) -> None:
+    tree = dict(PACKAGE)
+    tree["pkg/sub/worker.py"] = "from pkg.sub import helper\n"
+    space = indexed(tmp_path, tree)
+    try:
+        assert importers_of(space, "demo", "pkg/sub/helper.py") == {("pkg/sub/worker.py", 1)}
+        assert imported_files(space, "pkg/sub/worker.py") == {
+            "pkg/sub/__init__.py",
+            "pkg/sub/helper.py",
+        }
+    finally:
+        space.close()
+
+
+def test_a_call_through_an_aliased_absolute_submodule_resolves(tmp_path: Path) -> None:
+    tree = dict(PACKAGE)
+    tree["pkg/sub/worker.py"] = (
+        "from pkg.sub import helper as h\n\n\ndef work():\n    return h.assist()\n"
+    )
+    space = indexed(tmp_path, tree)
+    try:
+        calls = {
+            (row["dst_path"], row["dst_name"])
+            for row in rows(
+                space,
+                "SELECT df.rel_path AS dst_path, dst.name AS dst_name FROM edges e "
+                "JOIN entities dst ON dst.id = e.dst_id JOIN files df ON df.id = dst.file_id "
+                "WHERE e.type = 'CALLS' AND e.parser = 'linker:global'",
+            )
+        }
+        assert ("pkg/sub/helper.py", "assist") in calls
+    finally:
+        space.close()
+
+
+def test_an_absolute_package_attribute_is_not_fabricated_as_a_module(
+    tmp_path: Path,
+) -> None:
+    tree = dict(PACKAGE)
+    tree["pkg/sub/__init__.py"] = "CONSTANT = 3\n"
+    tree["pkg/sub/worker.py"] = "from pkg.sub import CONSTANT\n"
+    space = indexed(tmp_path, tree)
+    try:
+        assert imported_files(space, "pkg/sub/worker.py") == {"pkg/sub/__init__.py"}
+    finally:
+        space.close()
+
+
+def test_a_package_member_call_falls_back_when_its_submodule_is_absent(
+    tmp_path: Path,
+) -> None:
+    tree = dict(PACKAGE)
+    tree["pkg/sub/__init__.py"] = "def helper():\n    return 3\n"
+    del tree["pkg/sub/helper.py"]
+    tree["pkg/sub/worker.py"] = "from pkg.sub import helper\nhelper()\n"
+    space = indexed(tmp_path, tree)
+    try:
+        calls = {
+            (row["dst_path"], row["dst_name"])
+            for row in rows(
+                space,
+                "SELECT df.rel_path AS dst_path, dst.name AS dst_name FROM edges e "
+                "JOIN entities dst ON dst.id = e.dst_id JOIN files df ON df.id = dst.file_id "
+                "WHERE e.type = 'CALLS' AND e.parser = 'linker:global'",
+            )
+        }
+        assert ("pkg/sub/__init__.py", "helper") in calls
+    finally:
+        space.close()
+
+
+def test_an_import_from_a_module_still_resolves_its_member(tmp_path: Path) -> None:
+    space = indexed(
+        tmp_path,
+        {
+            "pkgmod.py": "def helper():\n    return 3\n",
+            "worker.py": "from pkgmod import helper\nhelper()\n",
+        },
+    )
+    try:
+        calls = {
+            (row["dst_path"], row["dst_name"])
+            for row in rows(
+                space,
+                "SELECT df.rel_path AS dst_path, dst.name AS dst_name FROM edges e "
+                "JOIN entities dst ON dst.id = e.dst_id JOIN files df ON df.id = dst.file_id "
+                "WHERE e.type = 'CALLS' AND e.parser = 'linker:global'",
+            )
+        }
+        assert ("pkgmod.py", "helper") in calls
+    finally:
+        space.close()
+
+
+def test_an_absolute_submodule_candidate_requires_a_package(tmp_path: Path) -> None:
+    space = indexed(
+        tmp_path,
+        {
+            "pkg/sub/helper.py": "def assist():\n    return 2\n",
+            "pkg/sub/worker.py": "from pkg.sub import helper\n",
+        },
+    )
+    try:
+        assert importers_of(space, "demo", "pkg/sub/helper.py") == set()
     finally:
         space.close()
 

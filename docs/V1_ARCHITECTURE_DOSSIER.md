@@ -579,7 +579,7 @@ The pass is **idempotent by construction**: it deletes every edge it previously 
 
 #### Three worked resolutions
 
-**A. Python import → file.** `from. import helper` in `pkg/main.py` produces two references. One targets `module:.` (interned immediately, plus a claim); the other targets `module:.helper` with `meta={"level":"1","package":"."}`. In the global pass `_resolve_module` reads `meta["package"]` and routes to `resolve_relative_submodule(origin, ".", "helper")`, which first resolves the package, checks its basename is an `__init__` file, and only then resolves `.helper`. Result: `IMPORTS → file:<slug>:pkg/helper.py` alongside the interned `module:.helper`. The absolute form `from pkg.sub import helper` takes the plain module path and resolves to `pkg/sub/__init__.py` only — a truthful but shorter edge.
+**A. Python import → file.** `from . import helper` in `pkg/main.py` produces two references. One targets `module:.` (interned immediately, plus a claim); the other targets `module:.helper` with `meta={"level":"1","package":"."}`. In the global pass `_resolve_module` reads `meta["package"]` and routes to `resolve_package_submodule(origin, ".", "helper")`, which first resolves the package, checks its basename is an `__init__` file, and only then resolves `.helper`. Result: `IMPORTS → file:<slug>:pkg/helper.py` alongside the interned `module:.helper`. The absolute form `from pkg.sub import helper` keeps one import claim for `pkg.sub` with the fromlist name. After that package import resolves, the linker checks whether `helper` is a child module; if so, it adds `IMPORTS → file:<slug>:pkg/sub/helper.py` alongside the package edge. Calls through the imported name use that same checked child when present and otherwise fall back to the package module, preserving package attributes.
 
 **B. Environment-variable chain.** `os.environ["SERVICE_HOST"]` in a Python file and `export SERVICE_HOST=…` in a Bash file both intern `env:SERVICE_HOST` during their own per-file transactions and attach `READS` and `EXPORTS` edges to it. No global work is needed — the interned key *is* the join. This is why two-hop expansion is the useful minimum: hop one reaches the hub, hop two reaches the files on the other side.
 
@@ -1439,7 +1439,7 @@ Decisions the V1 code cannot settle. Listed, not answered.
 | Parser output | `repoatlas/models/parsing.py` | `ParsedFile`, `ParsedSymbol`, `ParsedReference`, `EntityType`, `EdgeType`, `ParseDiagnostic` |
 | Entity keys | `repoatlas/graph/keys.py` | `repository_key`, `file_key`, `symbol_key`, `env_key`, `module_key`, `package_key`, `command_key`, `config_key`, `global_key` |
 | Linking | `repoatlas/graph/linker.py` | `ReferenceLinker.link_file`, `prepare_global`, `commit_global`, `_resolve_module`, `_plan_dependencies`, `GLOBAL_PARSER` |
-| Resolution index | `repoatlas/graph/resolution.py` | `ResolutionIndex.build`, `resolve_repo_relative_path`, `resolve_relative_submodule` |
+| Resolution index | `repoatlas/graph/resolution.py` | `ResolutionIndex.build`, `resolve_repo_relative_path`, `resolve_package_submodule` |
 | Chunking | `repoatlas/indexing/chunking.py` | `chunk_content`, `CHUNKING_VERSION` |
 | Storage protocols | `repoatlas/storage/protocols.py` | `RepositoryStore`, `FileStore`, `KnowledgeStore`, `DependencyStore`, `VectorIndex`, `SearchIndex`, and the record models |
 | Database lifecycle | `repoatlas/storage/sqlite/database.py` | `open_database`, `Database.transaction`, `_ensure_wal`, `_contention_reported`, `SCHEMA_VERSION`, `BUSY_TIMEOUT_MS` |
@@ -1465,4 +1465,3 @@ Decisions the V1 code cannot settle. Listed, not answered.
 ---
 
 *Read-only study of RepoAtlas at `c402463`. Nothing in the repository was modified. Claims marked **[VERIFIED]** were read in code or observed in test output; **[INFERRED]** marks a conclusion drawn from structure rather than stated anywhere; **[NOT PRESENT IN V1]** records an absence rather than proposing a replacement.*
-

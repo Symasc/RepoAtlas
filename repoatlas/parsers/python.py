@@ -260,28 +260,33 @@ class _Visitor(ast.NodeVisitor):
         as a string in ``meta``. ``pkg/sub/helper.py`` got no inbound import at
         all, and "who imports helper?" answered nothing.
 
-        So when ``module`` is absent and the level is relative, each imported name
-        is *also* emitted as a candidate module ``"." * level + name`` — the same
-        spelling ``from .helper import X`` already produces, which is what lets
-        the two ways of writing one import produce one set of facts.
+        For ``from . import helper``, where ``module`` is absent and the level is
+        relative, each imported name is also emitted as a candidate module. For
+        explicit fromlists, the linker checks whether each name is a submodule
+        only after it has proved that the written prefix is a package. Otherwise
+        symbol resolution falls back to the written prefix.
 
         **Candidate, not claim.** The parser cannot see the filesystem, so it
         cannot know whether ``helper`` is a submodule or a name that
         ``__init__.py`` happens to define. It says only "this could name a module
-        here"; :meth:`ResolutionIndex.resolve_relative_submodule` decides, and
+        here"; :meth:`ResolutionIndex.resolve_package_submodule` decides, and
         emits nothing when no such module exists. Unknown is a fine answer;
         inventing ``CONSTANT.py`` is not.
 
         The package reference itself is kept, because importing the package is
-        also what Python does. Its ``names`` are dropped in this form only: they
-        are no longer names *of* that module, they are the candidates above, and
-        leaving them would point a later ``helper.assist()`` at ``__init__.py``.
+        also what Python does. For the implicit relative form ``from . import
+        helper``, its ``names`` are omitted because they are all candidates.
+        Explicit fromlists retain their names as a fallback when the prefix is
+        a module rather than a package.
         """
         module = node.module or ""
         prefix = "." * node.level
         target = prefix + module
-        submodules = not module and bool(node.level)
+        submodule_candidates = not module and bool(node.level)
         if target:
+            aliases = ",".join(
+                f"{alias.name}:{alias.asname}" for alias in node.names if alias.asname
+            )
             self.references.append(
                 ParsedReference(
                     edge_type=EdgeType.IMPORTS,
@@ -292,11 +297,16 @@ class _Visitor(ast.NodeVisitor):
                     source_symbol=self._current_symbol,
                     meta={
                         "level": str(node.level),
-                        **({} if submodules else {"names": ",".join(a.name for a in node.names)}),
+                        **(
+                            {}
+                            if submodule_candidates and not module
+                            else {"names": ",".join(a.name for a in node.names)}
+                        ),
+                        **({"aliases": aliases} if aliases else {}),
                     },
                 )
             )
-        if submodules:
+        if submodule_candidates:
             for alias in node.names:
                 # `from . import *` binds whatever the package exports. There is
                 # no module named `*`, and treating one as named would be the
@@ -307,17 +317,16 @@ class _Visitor(ast.NodeVisitor):
                     ParsedReference(
                         edge_type=EdgeType.IMPORTS,
                         target_kind=EntityType.MODULE,
-                        target_key=prefix + alias.name,
+                        target_key=(f"{target}.{alias.name}" if module else prefix + alias.name),
                         line_start=node.lineno,
                         line_end=node.end_lineno or node.lineno,
                         source_symbol=self._current_symbol,
                         meta={
                             "level": str(node.level),
-                            # Read by the linker: resolve this only if `prefix`
-                            # really is a package. Without it, `from . import x`
-                            # in a file that is in no package at all would find
-                            # any `x.py` beside it.
-                            "package": prefix,
+                            # The linker accepts this only if the prefix resolves
+                            # to a package, never merely because a same-named file
+                            # exists beside the importer.
+                            "package": target,
                             **({"alias": alias.asname} if alias.asname else {}),
                         },
                     )
@@ -620,7 +629,9 @@ class PythonParser:
     #    coincidence (repoatlas.graph.linker).
     # 33: a method call or decorator on a call result is not flattened into a dotted name of
     #    the original callee (``factory().method`` is not ``factory.method``).
-    version = f"33+{interpreter_tag()}"
+    # 34: ``from package import name`` preserves the fromlist; the linker accepts the name as a
+    #    submodule only when the package and module exist in-repository.
+    version = f"34+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
