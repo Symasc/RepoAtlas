@@ -23,6 +23,13 @@ TOY_PY = {
         "    def get(self):\n"
         "        return 1\n"
     ),
+    "toy_app/values.py": (
+        "from .workers import OtherWorker, PropertyWorker, Worker\n"
+        "worker: Worker\n"
+        "untyped_worker = {}\n"
+        "ambiguous_worker: Worker | OtherWorker\n"
+        "property_worker: PropertyWorker\n"
+    ),
     "toy_app/dup.py": (
         "class A:\n"
         "    def run(self):\n"
@@ -34,7 +41,26 @@ TOY_PY = {
         "        return 2\n"
     ),
     "toy_app/audit.py": "def audit_action(fn):\n    return fn\n",
-    "toy_app/workers.py": "class BaseWorker:\n    pass\n",
+    "toy_app/workers.py": (
+        "class BaseWorker:\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "class Worker:\n"
+        "    def run(self):\n"
+        "        return 1\n"
+        "\n"
+        "\n"
+        "class OtherWorker:\n"
+        "    def run(self):\n"
+        "        return 2\n"
+        "\n"
+        "\n"
+        "class PropertyWorker:\n"
+        "    @property\n"
+        "    def run(self):\n"
+        "        return None\n"
+    ),
     "toy_app/main.py": (
         "import json\n"
         "import requests\n"
@@ -67,6 +93,33 @@ TOY_PY = {
         "        handlers = {}\n"
         "        handler = handlers[payload]\n"
         "        handler(payload)\n"
+        "\n"
+        "\n"
+        "from toy_app.values import (\n"
+        "    ambiguous_worker,\n"
+        "    property_worker as descriptor_worker,\n"
+        "    untyped_worker as dynamic_worker,\n"
+        "    worker as typed_worker,\n"
+        ")\n"
+        "\n"
+        "\n"
+        "def typed_value_use():\n"
+        "    typed_worker.run()\n"
+        "    dynamic_worker.run()\n"
+        "    ambiguous_worker.run()\n"
+        "    descriptor_worker.run()\n"
+        "\n"
+        "\n"
+        "def shadowed_value(typed_worker):\n"
+        "    typed_worker.run()\n"
+        "\n"
+        "\n"
+        "from toy_app.values import worker as rebound_worker\n"
+        "rebound_worker = {}\n"
+        "\n"
+        "\n"
+        "def rebound_value():\n"
+        "    rebound_worker.run()\n"
     ),
 }
 

@@ -338,6 +338,9 @@ class _Visitor(ast.NodeVisitor):
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         kind = EntityType.METHOD if self._in_class() else EntityType.FUNCTION
         qualified = self._qualified(node.name)
+        metadata = {"async": "true"} if isinstance(node, ast.AsyncFunctionDef) else {}
+        if kind is EntityType.METHOD and node.decorator_list:
+            metadata["decorated"] = "true"
         self.symbols.append(
             ParsedSymbol(
                 kind=kind,
@@ -347,7 +350,7 @@ class _Visitor(ast.NodeVisitor):
                 line_end=node.end_lineno or node.lineno,
                 signature=self._signature(node),
                 parent=self._current_symbol,
-                meta={"async": "true"} if isinstance(node, ast.AsyncFunctionDef) else {},
+                meta=metadata,
             )
         )
         for decorator in node.decorator_list:
@@ -631,7 +634,9 @@ class PythonParser:
     #    the original callee (``factory().method`` is not ``factory.method``).
     # 34: ``from package import name`` preserves the fromlist; the linker accepts the name as a
     #    submodule only when the package and module exist in-repository.
-    version = f"34+{interpreter_tag()}"
+    # 35: module values retain explicit annotations for direct receiver-method lookup; decorated
+    #    methods are marked so their binding semantics are not assumed.
+    version = f"35+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
@@ -685,7 +690,10 @@ class PythonParser:
                     line_start=value.line,
                     line_end=value.end_line,
                     signature=value.signature,
-                    meta={"kind": value.kind},
+                    meta={
+                        "kind": value.kind,
+                        **({"annotation": value.annotation} if value.annotation else {}),
+                    },
                 )
                 for value in analysis.declarations
             ]

@@ -1884,11 +1884,14 @@ ordinary         = linked + one classified outcome per claim that did not link
   stored as `<expression>`. `repoatlas decisions` lists them. **Impact never does**: `link_decisions_near` excludes the
   family, so an impact answer, its decision list and its omissions are what they were without it.
 - **Still not modelled here, by design.** A direct Python `from module import name` reference follows an unconditional
-  re-export only when the indexed export tables prove where that name leads; dynamic or conditional exports, star
-  re-exports, and members of imported values remain untraced. Other renamed or default imports are likewise
-  unsupported. The account reports the form it met rather than `external` or `target-not-found`. A call whose root
-  name the file never imported is not a claim at all, so it has no outcome; that parser coverage is a separate figure
-  from resolution.
+  re-export only when the indexed export tables prove where that name leads. A direct method call through an imported
+  module value is resolved only when its explicit annotation is one simple class name (optionally `T | None`) that
+  resolves to one in-repository class, and that class directly declares an undecorated method; inherited or decorated
+  methods, untyped or ambiguously/conditionally bound values, multi-member chains, dynamic or conditional exports,
+  and star re-exports remain untraced. Other import forms not covered by these rules remain unsupported.
+  The account reports the form it met rather than `external` or `target-not-found`. A call whose root name the file
+  never imported is not a claim at all, so it has no outcome; that parser coverage is a separate figure from
+  resolution.
 
 ### HTTP routes, deployments and endpoints
 

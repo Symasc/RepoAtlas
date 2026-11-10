@@ -65,6 +65,15 @@ def test_a_name_one_declaring_statement_binds_is_a_module_value() -> None:
     }
 
 
+def test_a_module_value_retains_its_explicit_type_annotation() -> None:
+    parsed = PythonParser().parse(
+        Path("m.py"),
+        "class Worker: ...\nworker: Worker | None = None\n",
+    )
+    [worker] = [symbol for symbol in parsed.symbols if symbol.name == "worker"]
+    assert worker.meta == {"kind": "variable", "annotation": "Worker | None"}
+
+
 def test_nothing_else_declares_one() -> None:
     """Unpacking, loop, with, except and walrus targets, del, attributes and subscripts."""
     source = (
