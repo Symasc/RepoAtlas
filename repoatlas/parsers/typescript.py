@@ -19,6 +19,7 @@ from repoatlas.models.parsing import (
     ENUM_MEMBER,
     FIELD,
     GRAMMAR_UNAVAILABLE,
+    LOCAL_RECEIVER,
     EdgeType,
     EntityType,
     ParsedFile,
@@ -102,6 +103,21 @@ _MEMBER_NAME = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 
 def _relative(specifier: str) -> bool:
     return specifier.startswith((".", "/"))
+
+
+def _callee_root(callee: Node) -> Node | None:
+    """The leftmost name of a callee: ``a`` in ``a.b.c``, ``a[k].b`` and ``a.b().c``."""
+    node: Node | None = callee
+    while node is not None and node.type != "identifier":
+        if node.type in {"member_expression", "subscript_expression"}:
+            node = node.child_by_field_name("object")
+        elif node.type == "call_expression":
+            node = node.child_by_field_name("function")
+        elif node.type in {*_TRANSPARENT, "non_null_expression"}:
+            node = next(iter(node.named_children), None)
+        else:
+            return None
+    return node
 
 
 class _Walker:
@@ -745,7 +761,42 @@ class _Walker:
                 line_start=start,
                 line_end=end,
                 source_symbol=self._current,
+                meta=self._receiver_meta(callee),
             )
+        )
+
+    def _receiver_meta(self, callee: Node) -> dict[str, str]:
+        """Marks a call whose leading name a parameter, local or loop variable binds: the
+        receiver is that local, so no import of the same name can be what it names."""
+        if self._uses is None:
+            return {}
+        root = _callee_root(callee)
+        if root is not None and (root.start_byte, root.end_byte) in self._uses.shadowed:
+            return {LOCAL_RECEIVER: "true"}
+        return {}
+
+    def _required_names(self, call: Node) -> str:
+        """The names ``const x = require("m")`` or ``const { a } = await import("m")`` binds
+        under the name the module exports: the module itself, or what is destructured from it.
+        A renamed property (``{ b: c }``) is left out, as a renamed import is."""
+        parent = call.parent
+        while parent is not None and parent.type in {
+            *_TRANSPARENT,
+            "await_expression",
+            "non_null_expression",
+        }:
+            parent = parent.parent
+        if parent is None or parent.type != "variable_declarator":
+            return ""
+        name = parent.child_by_field_name("name")
+        if name is None:
+            return ""
+        if name.type == "identifier":
+            return node_text(self._source, name)
+        return ",".join(
+            node_text(self._source, child)
+            for child in name.children
+            if child.type == "shorthand_property_identifier_pattern"
         )
 
     def _module_call(self, node: Node, start: int, end: int) -> None:
@@ -759,6 +810,7 @@ class _Walker:
             specifier = string_literal(self._source, argument)
             if specifier is None:
                 return
+            names = self._required_names(node)
             self.references.append(
                 ParsedReference(
                     edge_type=EdgeType.IMPORTS,
@@ -770,6 +822,7 @@ class _Walker:
                     meta={
                         "specifier": "relative" if _relative(specifier) else "package",
                         "role": "dynamic",
+                        **({"names": names} if names else {}),
                     },
                 )
             )
@@ -906,7 +959,10 @@ class TypeScriptParser:
     #    only after its statement, route paths and mount prefixes read through earlier top-level
     #    string constants (always composed), ``.route(path).<verb>(...)`` chains, and no receiver
     #    used before its declaration (R2b-0, repoatlas.parsers.http_typescript).
-    version = "27"
+    # 28: a ``const x = require("m")`` or ``await import("m")`` records the names it binds, and
+    #    a call whose leading name a parameter, local or loop variable shadows is marked
+    #    ``LOCAL_RECEIVER`` (repoatlas.parsers.ts_uses).
+    version = "28"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:

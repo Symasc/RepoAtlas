@@ -281,8 +281,9 @@ def test_a_frontend_call_through_a_service_container_stays_unresolved(index: Ind
         "WHERE f.rel_path = 'src/frontend.ts' AND u.edge_type = 'CALLS' "
         "AND target_key = 'services.clients.learning.createCourse'"
     ).fetchall()
-    # The call is kept as a claim through the file's own import, and stays one.
-    assert len(claim) == 1
+    # `services` is the local `const services = useServices()`, not the module `./services`
+    # whose file name it shares, so the call is no import's claim either.
+    assert claim == []
 
 
 def test_repository_scope_confines_a_hub_to_the_named_repository(index: Index) -> None:
