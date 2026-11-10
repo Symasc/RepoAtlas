@@ -62,6 +62,8 @@ TOY_PY = {
         "        codec_mod.store.get()\n"
         "        dup.run()\n"
         "        reexported(payload)\n"
+        "        from toy_app import reexported as public_parse\n"
+        "        public_parse(payload)\n"
         "        handlers = {}\n"
         "        handler = handlers[payload]\n"
         "        handler(payload)\n"

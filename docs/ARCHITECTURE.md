@@ -1883,10 +1883,12 @@ ordinary         = linked + one classified outcome per claim that did not link
   are counted in `open_rows_truncated`), chosen by place and not by id, and a callee that carries arguments or text is
   stored as `<expression>`. `repoatlas decisions` lists them. **Impact never does**: `link_decisions_near` excludes the
   family, so an impact answer, its decision list and its omissions are what they were without it.
-- **Not modelled here, by design.** Renamed imports, default imports, re-exports and the member of an imported value
-  are not traced by the ordinary rules, and the account says `unsupported` with the form it met rather than `external`
-  or `target-not-found`. A call whose root name the file never imported is not a claim at all, so it has no outcome;
-  that parser coverage is a separate figure from resolution.
+- **Still not modelled here, by design.** A direct Python `from module import name` reference follows an unconditional
+  re-export only when the indexed export tables prove where that name leads; dynamic or conditional exports, star
+  re-exports, and members of imported values remain untraced. Other renamed or default imports are likewise
+  unsupported. The account reports the form it met rather than `external` or `target-not-found`. A call whose root
+  name the file never imported is not a claim at all, so it has no outcome; that parser coverage is a separate figure
+  from resolution.
 
 ### HTTP routes, deployments and endpoints
 

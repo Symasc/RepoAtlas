@@ -85,8 +85,10 @@ from repoatlas.graph.ordinary_outcomes import (
     finish_accounting,
     summarize,
 )
+from repoatlas.graph.packages import CROSSING
 from repoatlas.graph.persistence import plan_persistence
 from repoatlas.graph.prisma_schema import plan_prisma, prisma_projects
+from repoatlas.graph.py_uses import PythonUseResolver
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
 from repoatlas.graph.salt_pillar import resolve_pillar_reads
 from repoatlas.graph.uses import table_from_meta, use_resolution
@@ -96,6 +98,7 @@ from repoatlas.graph.uses_link import (
     UsesScope,
     apply_uses,
     plan_uses,
+    python_use_resolver,
     stored_scope,
 )
 from repoatlas.graph.value_mappings import plan_value_mappings
@@ -811,6 +814,7 @@ class ReferenceLinker:
             languages: dict[int, str] = {}
             graphql_unknown_role = 0
             ordinary_unresolved = 0
+            python_reexports = None
             if ledger is not None:
                 for fact in module_facts:
                     ledger.excluded(fact, MODULE_FACT)
@@ -903,6 +907,22 @@ class ReferenceLinker:
                     continue
                 siblings = by_file.get(claim.file_id, [])
                 edge = self._resolve(claim, origin, index, siblings, modules)
+                imported_name = (
+                    _python_imported_name(claim, siblings, _claim_meta(claim.meta_json))
+                    if edge is None
+                    else None
+                )
+                if imported_name is not None:
+                    if python_reexports is None:
+                        python_reexports = python_use_resolver(self._knowledge, index, records)
+                    edge = self._resolve_python_reexport(
+                        claim,
+                        origin,
+                        index,
+                        python_reexports,
+                        _claim_meta(claim.meta_json),
+                        imported_name,
+                    )
                 if edge is None:
                     unresolved += 1
                     ordinary_unresolved += 1
@@ -1507,6 +1527,36 @@ class ReferenceLinker:
                     return target
         return None
 
+    def _resolve_python_reexport(
+        self,
+        claim: UnresolvedRefRecord,
+        origin: FileRow,
+        index: ResolutionIndex,
+        resolver: PythonUseResolver,
+        meta: Mapping[str, str],
+        imported_name: str,
+    ) -> EdgeRecord | None:
+        """Resolve a direct Python from-import reference through its proven export table."""
+        specifier = meta.get("module")
+        if not specifier:
+            return None
+        found = resolver.resolve(
+            origin, {"module": specifier, "binding": "import", "imported": imported_name}
+        )
+        if found is None:
+            return None
+        entity_id, resolution = found
+        if resolution.get(CROSSING) or not resolution.get("via"):
+            return None
+        path, name = resolution.get("defined_at"), resolution.get("name")
+        if not isinstance(path, str) or not isinstance(name, str):
+            return None
+        target = index.files_by_repo.get(origin.repo_id, {}).get(path)
+        symbol = index.resolve_symbol(target, name) if target is not None else None
+        if symbol is None or symbol.entity_id != entity_id:
+            return None
+        return self._edge(claim, origin, entity_id)
+
     def _resolve_salt_state(
         self, claim: UnresolvedRefRecord, origin: FileRow, index: ResolutionIndex
     ) -> EdgeRecord | None:
@@ -1838,6 +1888,34 @@ def _bind_python_import(
         imported[meta["alias"]] = _ImportedName(specifier)
     else:
         imported.setdefault(specifier.split(".")[0], _ImportedName(specifier))
+
+
+def _python_imported_name(
+    claim: UnresolvedRefRecord,
+    siblings: Sequence[UnresolvedRefRecord],
+    meta: Mapping[str, str],
+) -> str | None:
+    """The exported name bound to a direct Python from-import call, if unique."""
+    specifier = meta.get("module")
+    if not specifier or "." in claim.target_key:
+        return None
+    names: set[str] = set()
+    for sibling in siblings:
+        if sibling.edge_type is not EdgeType.IMPORTS or sibling.target_key != specifier:
+            continue
+        sibling_meta = _claim_meta(sibling.meta_json)
+        if "level" not in sibling_meta or sibling_meta.get("package") is not None:
+            continue
+        aliases: dict[str, str] = {}
+        for pair in (sibling_meta.get("aliases") or "").split(","):
+            imported, separator, local = pair.partition(":")
+            if separator and imported and local:
+                aliases[local] = imported
+        if claim.target_key in aliases:
+            names.add(aliases[claim.target_key])
+        elif claim.target_key in (sibling_meta.get("names") or "").split(","):
+            names.add(claim.target_key)
+    return next(iter(names)) if len(names) == 1 else None
 
 
 def _is_module_fact(claim: UnresolvedRefRecord) -> bool:
