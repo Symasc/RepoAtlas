@@ -233,15 +233,14 @@ class ResolutionIndex:
             ancestor = ancestor.parent
         return self._first_existing(origin.repo_id, bases, "python")
 
-    def resolve_relative_submodule(
+    def resolve_package_submodule(
         self, origin: FileRow, prefix: str, specifier: str
     ) -> FileRow | None:
-        """``from . import helper`` → ``pkg/sub/helper.py``, but only inside a package.
+        """Resolve a candidate imported from a package only inside that package.
 
-        The extra condition over :meth:`resolve_module` is ``prefix``: the dots
-        the import was written with must themselves resolve to a **package** —
-        an ``__init__.py`` — in this repository, before the name after them may
-        be read as a module in it.
+        The extra condition over :meth:`resolve_module` is ``prefix``: the
+        package prefix must resolve to a **package** — an ``__init__.py`` — in
+        this repository, before the name after it may be read as a module in it.
 
         That condition is doing real work, and it is the difference between
         restoring a missing edge and inventing one. Two cases it decides:
@@ -250,6 +249,9 @@ class ResolutionIndex:
           runtime that raises ``ImportError``; the module has no parent package
           to be relative to. Without the check, a ``helper.py`` sitting beside it
           would look like the answer.
+        * ``from pkg import helper`` when ``pkg`` does not resolve to an indexed
+          package. Without the check, any same-named module beneath the importer
+          could look like the answer.
         * ``from ... import x`` written with more dots than there is package
           above it. The prefix climbs out of the package and lands somewhere that
           is not one, so the name resolves to nothing rather than to whatever

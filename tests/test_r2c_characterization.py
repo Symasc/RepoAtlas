@@ -12,7 +12,7 @@ test read the same observations:
 * the R2c-2 deltas: the two-level child ``users.views.bp`` is served when both hops are proven by
   export tables (p2b, p4b: ``R2C2_SUPERSEDED``) and records one more mount claim
   (``R2C2_ADDED_CLAIMS``); the shapes whose proof fails (p2, a18, a19, a20) stay unserved. The
-  frozen goldens are not edited: every R2c-2 change is an explicit constant here.
+  edge goldens also include the proven Python package-submodule import edges added by PR 4.
 """
 
 from __future__ import annotations
@@ -410,9 +410,9 @@ def test_edges_golden_covers_every_shape() -> None:
     assert len(EDGES) == 33
 
 
-# Every edge of every type is compared and none is excluded: helper facts are claims, not edges,
-# so an edge of a type or target R2c-1 adds fails here. After G1 the only allowed additions are the
-# SUPERSEDED SERVES_HTTP_ROUTE edges (parser ``linker:global``), compared order-insensitively.
+# Every edge is compared against the golden, including the proven Python package-submodule imports.
+# After G1 the only additional edges allowed are the SUPERSEDED SERVES_HTTP_ROUTE edges (parser
+# ``linker:global``), compared order-insensitively.
 @pytest.mark.parametrize("name", sorted(EDGES))
 def test_all_edges_are_unchanged_by_the_helper_roles(tmp_path: Path, name: str) -> None:
     stored = stored_edges(tmp_path, name)

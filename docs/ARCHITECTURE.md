@@ -1775,32 +1775,32 @@ wrong edge but a **missing** one: `pkg/sub/helper.py` had no inbound `IMPORTS` a
 on this?" did not name the file that imports it.
 
 Restoring a missing edge is the direction that invites fabrication, because the names after
-`from . import` are not all modules — constants, functions and classes defined in `__init__.py` appear
-in exactly the same position and correspond to no file. So the two halves are split across the layers
-that can each answer their own half:
+`from . import` or `from pkg import` are not all modules — constants, functions and classes defined in
+`__init__.py` appear in exactly the same position and correspond to no file. So the two halves are split
+across the layers that can each answer their own half:
 
-* the **parser** proposes `"." * level + name` as a *candidate* — the same spelling `from .helper import X`
-  already produces, which is what makes the two ways of writing one import produce one set of facts. It
-  cannot see the filesystem, so it never claims the name is a module;
-* the **resolution index** decides, in `resolve_relative_submodule`, and emits an edge only when a
-  module of that name exists in that package.
+* the **parser** proposes `"." * level + name` for `from . import name` and preserves the fromlist
+  names for `from pkg import name`. It cannot see the filesystem, so it never claims a name is a module;
+* the **resolution index** decides, in `resolve_package_submodule`, and emits an edge only when the
+  prefix resolves to an indexed package and a module of that name exists in it. For an explicit fromlist,
+  this candidate is checked only after the package import itself is resolved.
 
-The package reference is kept alongside it, because `from . import helper` really does execute
-`__init__.py`. Both edges are true.
+The package reference is kept alongside the candidate, because both import forms also import the
+package. Both edges are true.
 
-One condition applies here that does not apply to the written form: **the dots must themselves resolve
-to a package.** `from . import helper` in a file that is in no package raises `ImportError` at runtime,
-and without the check a `helper.py` sitting beside it would look like the answer; `from ... import x`
-written with more dots than there is package above it would likewise land wherever the climb ended. An
-import that *names* its module is resolved as written — the package question is the author's. Here
-RepoAtlas is inferring that a name denotes a module, and an inference whose premise is unchecked is a
-guess. A package is identified by `__init__.py`; namespace packages are not recognized here or anywhere
-else in this file.
+For relative imports, **the dots must themselves resolve to a package.** `from . import helper` in a file
+that is in no package raises `ImportError` at runtime, and without the check a `helper.py` sitting beside
+it would look like the answer; `from ... import x` written with more dots than there is package above it
+would likewise land wherever the climb ended. For absolute imports, the written prefix must resolve to an
+indexed package. An import that *names* its module is resolved as written — the package question is the
+author's. Here RepoAtlas is inferring that a name denotes a module, and an inference whose premise is
+unchecked is a guess. A package is identified by `__init__.py`; namespace packages are not recognized
+here or anywhere else in this file.
 
-What is deliberately **not** resolved: `from . import CONSTANT` where only `__init__.py` defines
-`CONSTANT`, `from . import missing`, `from . import *` (there is no module named `*`), and the same
-name in another package or another repository. Unknown is an acceptable answer; a fabricated module is
-not.
+What is deliberately **not** resolved: `from . import CONSTANT` or `from pkg import CONSTANT` where only
+`__init__.py` defines `CONSTANT`, `from . import missing`, `from pkg import missing`, `from . import *`
+(there is no module named `*`), and the same name in another package or another repository. Unknown is
+an acceptable answer; a fabricated module is not.
 | declared package | interned `pkg:<ecosystem>:<name>`, plus a repository edge when exactly one managed repository provides that exact normalized name |
 
 Three rules hold across every row, and they are the trust rule in practice:
