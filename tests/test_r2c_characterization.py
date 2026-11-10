@@ -12,7 +12,8 @@ test read the same observations:
 * the R2c-2 deltas: the two-level child ``users.views.bp`` is served when both hops are proven by
   export tables (p2b, p4b: ``R2C2_SUPERSEDED``) and records one more mount claim
   (``R2C2_ADDED_CLAIMS``); the shapes whose proof fails (p2, a18, a19, a20) stay unserved. The
-  frozen goldens are not edited: every R2c-2 change is an explicit constant here.
+  frozen goldens are not edited: every R2c-2 change is an explicit constant here, and so are the
+  submodule IMPORTS edges PR #30 adds (``PR30_ADDED_IMPORTS``, ``PR30_ADDED_GUARD_IMPORTS``).
 """
 
 from __future__ import annotations
@@ -129,6 +130,121 @@ R2C2_ADDED_CLAIMS: dict[str, list[list[str]]] = {
 
 EDGES_PATH = Path(__file__).parent / "data" / "r2c_base_edges.json"
 EDGES: dict[str, list[list[str]]] = json.loads(EDGES_PATH.read_text(encoding="utf-8"))
+
+#: PR #30 (2026-11-10): ``from pkg import name`` records IMPORTS to the submodule when pkg is a
+#: regular package of the importer's project that binds no attribute ``name``. The measured delta
+#: over the frozen edge goldens: additions only, none removed. Per shape, the added file->file
+#: IMPORTS edges (parser ``linker:global``, confidence 1.0) as ``(src_rel, dst_rel, line)``.
+PR30_ADDED_IMPORTS: dict[str, list[tuple[str, str, int]]] = {
+    "p1_one_level": [("pkg/app.py", "pkg/views.py", 3)],
+    "p2_two_level": [("pkg/app.py", "pkg/users/__init__.py", 3)],
+    "p2b_two_level_bound": [("pkg/app.py", "pkg/users/__init__.py", 3)],
+    "p3_helper": [("pkg/app.py", "pkg/views.py", 3)],
+    "p4_helper_reads": [
+        ("pkg/app.py", "pkg/users/__init__.py", 3),
+        ("pkg/app.py", "pkg/views.py", 3),
+    ],
+    "p4b_helper_reads_bound": [
+        ("pkg/app.py", "pkg/users/__init__.py", 3),
+        ("pkg/app.py", "pkg/views.py", 3),
+    ],
+    "p5_module_helper": [("pkg/app.py", "pkg/views.py", 2)],
+    "p5x_param_named_app": [("pkg/app.py", "pkg/views.py", 2)],
+    "p6_outer_inner": [("pkg/app.py", "pkg/views.py", 2)],
+    "a1_conditional": [("pkg/app.py", "pkg/views.py", 2)],
+    "a2_dynamic": [("pkg/app.py", "pkg/views.py", 2)],
+    "a3_param_other": [("pkg/app.py", "pkg/views.py", 2)],
+    "a4_shadow": [("pkg/app.py", "pkg/views.py", 2)],
+    "a5_cycle": [("pkg/app.py", "pkg/views.py", 2)],
+    "a6_two_factories": [("pkg/app.py", "pkg/views.py", 2)],
+    "a8_url_prefix": [("pkg/app.py", "pkg/views_b.py", 2)],
+    "a9_alias": [("pkg/app.py", "pkg/views.py", 2)],
+    "a10_chain5": [("pkg/app.py", "pkg/views.py", 2)],
+    "a11_rebound_param": [("pkg/app.py", "pkg/views.py", 2)],
+    "a12_conditional_call": [("pkg/app.py", "pkg/views.py", 2)],
+    "a13_star_args": [("pkg/app.py", "pkg/views.py", 2)],
+    "a14_before_construction": [("pkg/app.py", "pkg/views.py", 2)],
+    "a15_imported_helper": [("pkg/setup.py", "pkg/views.py", 1)],
+    "a16_decorated_helper": [("pkg/app.py", "pkg/views.py", 2)],
+    "a17_wsgi_wrap": [("pkg/app.py", "pkg/views.py", 2)],
+    "a18_init_rebound": [("pkg/app.py", "pkg/users/__init__.py", 3)],
+    "a19_init_from_views_only": [("pkg/app.py", "pkg/users/__init__.py", 3)],
+    "a20_three_levels": [("pkg/app.py", "pkg/a/__init__.py", 2)],
+    "a21_constant_path": [
+        ("pkg/app.py", "pkg/vc.py", 2),
+        ("pkg/vc.py", "pkg/users/consts.py", 2),
+    ],
+    "a21b_two_level_constant_path": [
+        ("pkg/app.py", "pkg/vc2.py", 2),
+        ("pkg/vc2.py", "pkg/users/__init__.py", 2),
+    ],
+    "a22_positional_mismatch": [("pkg/app.py", "pkg/views.py", 2)],
+    "a23_call_before_child_bound": [("pkg/app.py", "pkg/views.py", 10)],
+}
+
+#: The same delta for the guard shapes (PR #30), same format.
+PR30_ADDED_GUARD_IMPORTS: dict[str, list[tuple[str, str, int]]] = {
+    "p7_helper_no_registration": [("pkg/app.py", "pkg/users/__init__.py", 2)],
+    "a25_conditional_helper_call": [("pkg/app.py", "pkg/views.py", 2)],
+    "a26_nested_registration": [("pkg/app.py", "pkg/views.py", 2)],
+    "a27_param_alias": [("pkg/app.py", "pkg/views.py", 2)],
+    "a28a_starred_call": [("pkg/app.py", "pkg/views.py", 2)],
+    "a28b_starred_tail": [("pkg/app.py", "pkg/views.py", 2)],
+    "a28c_double_star": [("pkg/app.py", "pkg/views.py", 2)],
+    "a29_param_child": [("pkg/app.py", "pkg/views.py", 2)],
+    "a30_helper_to_helper_position": [("pkg/app.py", "pkg/views.py", 2)],
+}
+
+
+def pr30_base_row(shape: str, src: str, dst: str, line: int) -> list[str]:
+    """A PR #30 IMPORTS edge as ``EDGES_SQL`` dumps it."""
+    return [
+        "IMPORTS",
+        "file",
+        f"file:{shape}:{src}",
+        "file",
+        f"file:{shape}:{dst}",
+        src,
+        dst,
+        str(line),
+        str(line),
+        "linker:global",
+        "None",
+        "1.0",
+    ]
+
+
+def pr30_guard_row(shape: str, src: str, dst: str, line: int) -> list[str]:
+    """A PR #30 IMPORTS edge as ``GUARD_EDGES_SQL`` dumps it (no entity types)."""
+    return [
+        "IMPORTS",
+        f"file:{shape}:{src}",
+        f"file:{shape}:{dst}",
+        src,
+        dst,
+        str(line),
+        str(line),
+        "linker:global",
+        "None",
+        "1.0",
+    ]
+
+
+def without_added_rows(
+    stored: list[list[str]],
+    added: list[tuple[str, str, int]],
+    shape: str,
+    build_row: Callable[[str, str, str, int], list[str]],
+) -> list[list[str]]:
+    """``stored`` minus the added rows, in the original order. Each added row must occur exactly
+    once in ``stored``; ONE occurrence of it is removed."""
+    remainder = list(stored)
+    for src, dst, line in added:
+        row = build_row(shape, src, dst, line)
+        assert stored.count(row) == 1, f"{shape}: {stored.count(row)} stored rows equal {row}"
+        remainder.remove(row)
+    return remainder
+
 
 #: Every stored edge of a repository, all types, as ``probe/edges_golden.py`` dumps them (same
 #: columns, same ORDER BY).
@@ -413,9 +529,12 @@ def test_edges_golden_covers_every_shape() -> None:
 # Every edge of every type is compared and none is excluded: helper facts are claims, not edges,
 # so an edge of a type or target R2c-1 adds fails here. After G1 the only allowed additions are the
 # SUPERSEDED SERVES_HTTP_ROUTE edges (parser ``linker:global``), compared order-insensitively.
+# PR #30 adds only the IMPORTS rows of PR30_ADDED_IMPORTS, each removed once before the comparisons.
 @pytest.mark.parametrize("name", sorted(EDGES))
 def test_all_edges_are_unchanged_by_the_helper_roles(tmp_path: Path, name: str) -> None:
-    stored = stored_edges(tmp_path, name)
+    stored = without_added_rows(
+        stored_edges(tmp_path, name), PR30_ADDED_IMPORTS.get(name, []), name, pr30_base_row
+    )
     if name not in SUPERSEDED:
         assert stored == EDGES[name]
         return
@@ -448,7 +567,23 @@ def test_guard_claims_are_unchanged_by_the_helper_roles(tmp_path: Path, name: st
 
 @pytest.mark.parametrize("name", sorted(GUARD_GOLDEN))
 def test_guard_edges_are_unchanged_by_the_helper_roles(tmp_path: Path, name: str) -> None:
-    assert guard_edges(tmp_path, name) == GUARD_GOLDEN[name]["edges"]
+    stored = without_added_rows(
+        guard_edges(tmp_path, name),
+        PR30_ADDED_GUARD_IMPORTS.get(name, []),
+        name,
+        pr30_guard_row,
+    )
+    assert stored == GUARD_GOLDEN[name]["edges"]
+
+
+def test_pr30_delta_is_only_submodule_imports() -> None:
+    for delta, shapes in ((PR30_ADDED_IMPORTS, EDGES), (PR30_ADDED_GUARD_IMPORTS, GUARD_SHAPES)):
+        for shape, added in delta.items():
+            assert shape in shapes, f"{shape}: not a known shape"
+            for src, dst, line in added:
+                assert src != dst, f"{shape}: {src} imports itself"
+                assert dst.endswith(".py"), f"{shape}: {dst} is not a Python file"
+                assert line > 0, f"{shape}: line {line}"
 
 
 # -- pins that hold now and after R2c-1 ------------------------------------------------------

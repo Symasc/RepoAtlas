@@ -18,6 +18,7 @@ from pathlib import Path
 from repoatlas.models.parsing import (
     ENUM_MEMBER,
     FIELD,
+    LOCAL_RECEIVER,
     PARSE_FAILED,
     SYNTAX_ERROR,
     EdgeType,
@@ -48,15 +49,21 @@ def _decorator_name(node: ast.expr) -> str | None:
     if isinstance(node, ast.Name):
         return node.id
     if isinstance(node, ast.Attribute):
+        if isinstance(node.value, ast.Call):
+            return None
         base = _decorator_name(node.value)
-        return f"{base}.{node.attr}" if base else node.attr
+        return f"{base}.{node.attr}" if base else None
     if isinstance(node, ast.Call):
         return _decorator_name(node.func)
     return None
 
 
 def _call_name(node: ast.expr) -> str | None:
-    """Dotted callee name, e.g. ``os.getenv`` or ``load_config``."""
+    """Dotted callee name, e.g. ``os.getenv`` or ``load_config``.
+
+    A call whose receiver is another call (``factory().method()``) is not a member of the
+    factory's module. Its inner call is visited separately and keeps its own reference.
+    """
     return _decorator_name(node)
 
 
@@ -66,6 +73,70 @@ def _string_value(node: ast.expr) -> str | None:
 
 #: Base classes whose class-level string assignments are members.
 _ENUM_BASES = frozenset({"Enum", "StrEnum", "IntEnum"})
+
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _bound_names(scope: ast.AST) -> dict[str, bool]:
+    """The names a function, lambda, class body or comprehension binds itself, each ``True``
+    when an import binds it.
+
+    Python gives a name to the whole scope when it is bound anywhere in it, so order does not
+    matter. A name both imported and assigned is reported imported: the receiver is then
+    unclear, and an import claim is the conservative answer. Nested scopes bind only their own
+    name here; ``global`` and ``nonlocal`` names belong to an outer scope.
+    """
+    names: dict[str, bool] = {}
+    outer: set[str] = set()
+
+    def bind(name: str, imported: bool = False) -> None:
+        names[name] = names.get(name, False) or imported
+
+    if isinstance(scope, _COMPREHENSIONS):
+        for generator in scope.generators:
+            for node in ast.walk(generator.target):
+                if isinstance(node, ast.Name):
+                    bind(node.id)
+        return names
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        arguments = scope.args
+        for argument in (
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+            arguments.vararg,
+            arguments.kwarg,
+        ):
+            if argument is not None:
+                bind(argument.arg)
+    body = scope.body  # type: ignore[attr-defined]
+    pending: list[ast.AST] = list(body) if isinstance(body, list) else [body]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bind(node.name)
+            continue
+        if isinstance(node, (ast.Lambda, *_COMPREHENSIONS)):
+            continue
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bind(alias.asname or alias.name.split(".")[0], True)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    bind(alias.asname or alias.name, True)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            outer.update(node.names)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bind(node.id)
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            bind(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bind(node.rest)
+        pending.extend(ast.iter_child_nodes(node))
+    for name in outer:
+        names.pop(name, None)
+    return names
 
 
 class _Visitor(ast.NodeVisitor):
@@ -80,6 +151,9 @@ class _Visitor(ast.NodeVisitor):
         #: value whose statement holds it owns it, once the module's values are known.
         self.module_reads: list[tuple[int, ast.expr]] = []
         self._scope: list[str] = []
+        #: The enclosing scopes below the module, innermost last: whether each is a class
+        #: body, and the names it binds (:func:`_bound_names`).
+        self._frames: list[tuple[bool, dict[str, bool]]] = []
 
     # -- scope helpers -------------------------------------------------------
 
@@ -93,6 +167,65 @@ class _Visitor(ast.NodeVisitor):
     @property
     def _current_symbol(self) -> str | None:
         return self._qualifier or None
+
+    def _receiver_meta(self, target_key: str) -> dict[str, str]:
+        """Marks a reference whose leading name is bound by the scope it is written in.
+
+        A class body is visible only to the statements written directly in it, never to the
+        functions it defines. A name bound only at module level is left unmarked: the linker
+        binds a name to an import by what the file imports, not by its own assignments.
+        """
+        root = target_key.split(".", 1)[0]
+        for position in range(len(self._frames) - 1, -1, -1):
+            is_class, names = self._frames[position]
+            if is_class and position != len(self._frames) - 1:
+                continue
+            imported = names.get(root)
+            if imported is not None:
+                return {} if imported else {LOCAL_RECEIVER: "true"}
+        return {}
+
+    def _visit_scope(self, node: ast.AST, *body: str, is_class: bool = False) -> None:
+        """Visit ``node``'s fields in their usual order, with its own names in scope only
+        while visiting the ``body`` fields: decorators, bases, defaults and annotations are
+        written in the enclosing scope."""
+        for field, value in ast.iter_fields(node):
+            inside = field in body
+            if inside:
+                self._frames.append((is_class, _bound_names(node)))
+            for item in value if isinstance(value, list) else [value]:
+                if isinstance(item, ast.AST):
+                    self.visit(item)
+            if inside:
+                self._frames.pop()
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self._visit_scope(node, "body")
+
+    def _visit_comprehension(
+        self, node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp
+    ) -> None:
+        """The elements and every condition see the loop variables; the first iterable is
+        evaluated in the enclosing scope."""
+        frame = (False, _bound_names(node))
+
+        def inside(part: ast.AST) -> None:
+            self._frames.append(frame)
+            self.visit(part)
+            self._frames.pop()
+
+        for element in (node.key, node.value) if isinstance(node, ast.DictComp) else (node.elt,):
+            inside(element)
+        for position, generator in enumerate(node.generators):
+            inside(generator.target)
+            if position:
+                inside(generator.iter)
+            else:
+                self.visit(generator.iter)
+            for condition in generator.ifs:
+                inside(condition)
+
+    visit_ListComp = visit_SetComp = visit_DictComp = visit_GeneratorExp = _visit_comprehension
 
     # -- imports -------------------------------------------------------------
 
@@ -127,28 +260,33 @@ class _Visitor(ast.NodeVisitor):
         as a string in ``meta``. ``pkg/sub/helper.py`` got no inbound import at
         all, and "who imports helper?" answered nothing.
 
-        So when ``module`` is absent and the level is relative, each imported name
-        is *also* emitted as a candidate module ``"." * level + name`` — the same
-        spelling ``from .helper import X`` already produces, which is what lets
-        the two ways of writing one import produce one set of facts.
+        For ``from . import helper``, where ``module`` is absent and the level is
+        relative, each imported name is also emitted as a candidate module. For
+        explicit fromlists, the linker checks whether each name is a submodule
+        only after it has proved that the written prefix is a package. Otherwise
+        symbol resolution falls back to the written prefix.
 
         **Candidate, not claim.** The parser cannot see the filesystem, so it
         cannot know whether ``helper`` is a submodule or a name that
         ``__init__.py`` happens to define. It says only "this could name a module
-        here"; :meth:`ResolutionIndex.resolve_relative_submodule` decides, and
+        here"; :meth:`ResolutionIndex.resolve_package_submodule` decides, and
         emits nothing when no such module exists. Unknown is a fine answer;
         inventing ``CONSTANT.py`` is not.
 
         The package reference itself is kept, because importing the package is
-        also what Python does. Its ``names`` are dropped in this form only: they
-        are no longer names *of* that module, they are the candidates above, and
-        leaving them would point a later ``helper.assist()`` at ``__init__.py``.
+        also what Python does. For the implicit relative form ``from . import
+        helper``, its ``names`` are omitted because they are all candidates.
+        Explicit fromlists retain their names as a fallback when the prefix is
+        a module rather than a package.
         """
         module = node.module or ""
         prefix = "." * node.level
         target = prefix + module
-        submodules = not module and bool(node.level)
+        submodule_candidates = not module and bool(node.level)
         if target:
+            aliases = ",".join(
+                f"{alias.name}:{alias.asname}" for alias in node.names if alias.asname
+            )
             self.references.append(
                 ParsedReference(
                     edge_type=EdgeType.IMPORTS,
@@ -159,11 +297,16 @@ class _Visitor(ast.NodeVisitor):
                     source_symbol=self._current_symbol,
                     meta={
                         "level": str(node.level),
-                        **({} if submodules else {"names": ",".join(a.name for a in node.names)}),
+                        **(
+                            {}
+                            if submodule_candidates
+                            else {"names": ",".join(a.name for a in node.names)}
+                        ),
+                        **({"aliases": aliases} if aliases else {}),
                     },
                 )
             )
-        if submodules:
+        if submodule_candidates:
             for alias in node.names:
                 # `from . import *` binds whatever the package exports. There is
                 # no module named `*`, and treating one as named would be the
@@ -174,17 +317,16 @@ class _Visitor(ast.NodeVisitor):
                     ParsedReference(
                         edge_type=EdgeType.IMPORTS,
                         target_kind=EntityType.MODULE,
-                        target_key=prefix + alias.name,
+                        target_key=(f"{target}.{alias.name}" if module else prefix + alias.name),
                         line_start=node.lineno,
                         line_end=node.end_lineno or node.lineno,
                         source_symbol=self._current_symbol,
                         meta={
                             "level": str(node.level),
-                            # Read by the linker: resolve this only if `prefix`
-                            # really is a package. Without it, `from . import x`
-                            # in a file that is in no package at all would find
-                            # any `x.py` beside it.
-                            "package": prefix,
+                            # The linker accepts this only if the prefix resolves
+                            # to a package, never merely because a same-named file
+                            # exists beside the importer.
+                            "package": target,
                             **({"alias": alias.asname} if alias.asname else {}),
                         },
                     )
@@ -196,6 +338,9 @@ class _Visitor(ast.NodeVisitor):
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         kind = EntityType.METHOD if self._in_class() else EntityType.FUNCTION
         qualified = self._qualified(node.name)
+        metadata = {"async": "true"} if isinstance(node, ast.AsyncFunctionDef) else {}
+        if kind is EntityType.METHOD and node.decorator_list:
+            metadata["decorated"] = "true"
         self.symbols.append(
             ParsedSymbol(
                 kind=kind,
@@ -205,7 +350,7 @@ class _Visitor(ast.NodeVisitor):
                 line_end=node.end_lineno or node.lineno,
                 signature=self._signature(node),
                 parent=self._current_symbol,
-                meta={"async": "true"} if isinstance(node, ast.AsyncFunctionDef) else {},
+                meta=metadata,
             )
         )
         for decorator in node.decorator_list:
@@ -219,7 +364,7 @@ class _Visitor(ast.NodeVisitor):
                         line_start=decorator.lineno,
                         line_end=decorator.end_lineno or decorator.lineno,
                         source_symbol=qualified,
-                        meta={"role": "decorator"},
+                        meta={"role": "decorator", **self._receiver_meta(name)},
                     )
                 )
         if self._http is not None and not self._scope:
@@ -227,7 +372,7 @@ class _Visitor(ast.NodeVisitor):
             # factory or a class names an application this module does not prove.
             self.references.extend(self._http.route_references(node, qualified))
         self._scope.append(node.name)
-        self.generic_visit(node)
+        self._visit_scope(node, "body")
         self._scope.pop()
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -265,11 +410,11 @@ class _Visitor(ast.NodeVisitor):
                         line_start=base.lineno,
                         line_end=base.end_lineno or base.lineno,
                         source_symbol=qualified,
-                        meta={"role": "base"},
+                        meta={"role": "base", **self._receiver_meta(name)},
                     )
                 )
         self._scope.append(node.name)
-        self.generic_visit(node)
+        self._visit_scope(node, "body", is_class=True)
         self._scope.pop()
 
     def _enum_members(self, node: ast.ClassDef, enum: str) -> None:
@@ -314,6 +459,7 @@ class _Visitor(ast.NodeVisitor):
                     line_start=node.lineno,
                     line_end=node.end_lineno or node.lineno,
                     source_symbol=self._current_symbol,
+                    meta=self._receiver_meta(name),
                 )
             )
             self._maybe_env_read(node, name)
@@ -480,7 +626,17 @@ class PythonParser:
     #    subclasses are offered too; a function builds an application from an imported class or
     #    once per branch of an exhaustive ``if``/``match``; a helper's loop over a literal list
     #    is unrolled (repoatlas.parsers.http_python, repoatlas.graph.py_routes).
-    version = f"31+{interpreter_tag()}"
+    # 32: a call, decorator or base whose leading name a function, lambda, class body or
+    #    comprehension binds itself is marked, so the linker records no import claim for it
+    #    (``LOCAL_RECEIVER``); the bump re-parses files whose claims were recorded by name
+    #    coincidence (repoatlas.graph.linker).
+    # 33: a method call or decorator on a call result is not flattened into a dotted name of
+    #    the original callee (``factory().method`` is not ``factory.method``).
+    # 34: ``from package import name`` preserves the fromlist; the linker accepts the name as a
+    #    submodule only when the package and module exist in-repository.
+    # 35: module values retain explicit annotations for direct receiver-method lookup; decorated
+    #    methods are marked so their binding semantics are not assumed.
+    version = f"35+{interpreter_tag()}"
     language = "Python"
 
     def supports(self, path: Path) -> bool:
@@ -534,7 +690,10 @@ class PythonParser:
                     line_start=value.line,
                     line_end=value.end_line,
                     signature=value.signature,
-                    meta={"kind": value.kind},
+                    meta={
+                        "kind": value.kind,
+                        **({"annotation": value.annotation} if value.annotation else {}),
+                    },
                 )
                 for value in analysis.declarations
             ]

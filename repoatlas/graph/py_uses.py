@@ -128,6 +128,42 @@ class PythonUseResolver(BoundedTrace):
             return self._refused(reason or "not-exported")
         return self._reached(target, meta, found, link)
 
+    def resolve_module_name(self, module: FileRow, name: str) -> UseDefinition | None:
+        """Resolve one name from this module's own export table."""
+        self._begin(module)
+        found, reason, _ = self._trace(module, name, frozenset(), 0)
+        if found is None:
+            self._refused(reason or "not-exported")
+        return found
+
+    def fromlist_submodule(self, origin: FileRow, spec: str, name: str) -> FileRow | None:
+        """The submodule ``from <spec> import <name>`` imports, if the package binds no ``name``.
+
+        Python looks for the attribute first and falls back to the submodule only when the
+        package has none: the package's export table must say ``not-exported``, uncut by a
+        cycle or a bound. A name it binds, a star or ``__getattr__`` that might, and a ``spec``
+        that is no package of the importer's own project all answer nothing."""
+        target = self._modules.resolve(origin, spec)
+        if isinstance(target, str):
+            return None
+        self._begin(origin)
+        found, reason, cut = self._trace(target.file, name, frozenset(), 0)
+        if found is not None or reason != "not-exported" or cut:
+            return None
+        return self._modules.submodule(target.file, name)
+
+    def has_import_binding(
+        self, module: FileRow, local: str, specifier: str, imported: str
+    ) -> bool:
+        """Whether the module binds ``local`` to this one import, and nothing else."""
+        table = self._tables(module.file_id)
+        if table is None:
+            return False
+        binding = table.get("names", {}).get(local)
+        return binding == ["import", specifier, imported] and local not in table.get(
+            "conditional", ()
+        )
+
     def _reached(
         self,
         target: ModuleTarget,

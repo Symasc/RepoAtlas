@@ -1775,32 +1775,34 @@ wrong edge but a **missing** one: `pkg/sub/helper.py` had no inbound `IMPORTS` a
 on this?" did not name the file that imports it.
 
 Restoring a missing edge is the direction that invites fabrication, because the names after
-`from . import` are not all modules — constants, functions and classes defined in `__init__.py` appear
-in exactly the same position and correspond to no file. So the two halves are split across the layers
-that can each answer their own half:
+`from . import` or `from pkg import` are not all modules — constants, functions and classes defined in
+`__init__.py` appear in exactly the same position and correspond to no file. So the two halves are split
+across the layers that can each answer their own half:
 
-* the **parser** proposes `"." * level + name` as a *candidate* — the same spelling `from .helper import X`
-  already produces, which is what makes the two ways of writing one import produce one set of facts. It
-  cannot see the filesystem, so it never claims the name is a module;
-* the **resolution index** decides, in `resolve_relative_submodule`, and emits an edge only when a
-  module of that name exists in that package.
+* the **parser** proposes `"." * level + name` for `from . import name` and preserves the fromlist
+  names for `from pkg import name`. It cannot see the filesystem, so it never claims a name is a module;
+* the **resolution index** decides relative candidates, and emits an edge only when the prefix
+  resolves to an indexed package and a module of that name exists in it. For an explicit absolute
+  fromlist, `PythonUseResolver.fromlist_submodule` decides: the package must be a regular package of
+  the importer's own project whose export table binds no such name, and the module is looked up
+  inside that package's directory only.
 
-The package reference is kept alongside it, because `from . import helper` really does execute
-`__init__.py`. Both edges are true.
+The package reference is kept alongside the candidate, because both import forms also import the
+package. Both edges are true.
 
-One condition applies here that does not apply to the written form: **the dots must themselves resolve
-to a package.** `from . import helper` in a file that is in no package raises `ImportError` at runtime,
-and without the check a `helper.py` sitting beside it would look like the answer; `from ... import x`
-written with more dots than there is package above it would likewise land wherever the climb ended. An
-import that *names* its module is resolved as written — the package question is the author's. Here
-RepoAtlas is inferring that a name denotes a module, and an inference whose premise is unchecked is a
-guess. A package is identified by `__init__.py`; namespace packages are not recognized here or anywhere
-else in this file.
+For relative imports, **the dots must themselves resolve to a package.** `from . import helper` in a file
+that is in no package raises `ImportError` at runtime, and without the check a `helper.py` sitting beside
+it would look like the answer; `from ... import x` written with more dots than there is package above it
+would likewise land wherever the climb ended. For absolute imports, the written prefix must resolve to an
+indexed package. An import that *names* its module is resolved as written — the package question is the
+author's. Here RepoAtlas is inferring that a name denotes a module, and an inference whose premise is
+unchecked is a guess. A package is identified by `__init__.py`; namespace packages are not recognized
+here or anywhere else in this file.
 
-What is deliberately **not** resolved: `from . import CONSTANT` where only `__init__.py` defines
-`CONSTANT`, `from . import missing`, `from . import *` (there is no module named `*`), and the same
-name in another package or another repository. Unknown is an acceptable answer; a fabricated module is
-not.
+What is deliberately **not** resolved: `from . import CONSTANT` or `from pkg import CONSTANT` where only
+`__init__.py` defines `CONSTANT`, `from . import missing`, `from pkg import missing`, `from . import *`
+(there is no module named `*`), and the same name in another package or another repository. Unknown is
+an acceptable answer; a fabricated module is not.
 | declared package | interned `pkg:<ecosystem>:<name>`, plus a repository edge when exactly one managed repository provides that exact normalized name |
 
 Three rules hold across every row, and they are the trust rule in practice:
@@ -1883,10 +1885,15 @@ ordinary         = linked + one classified outcome per claim that did not link
   are counted in `open_rows_truncated`), chosen by place and not by id, and a callee that carries arguments or text is
   stored as `<expression>`. `repoatlas decisions` lists them. **Impact never does**: `link_decisions_near` excludes the
   family, so an impact answer, its decision list and its omissions are what they were without it.
-- **Not modelled here, by design.** Renamed imports, default imports, re-exports and the member of an imported value
-  are not traced by the ordinary rules, and the account says `unsupported` with the form it met rather than `external`
-  or `target-not-found`. A call whose root name the file never imported is not a claim at all, so it has no outcome;
-  that parser coverage is a separate figure from resolution.
+- **Still not modelled here, by design.** A direct Python `from module import name` reference follows an unconditional
+  re-export only when the indexed export tables prove where that name leads. A direct method call through an imported
+  module value is resolved only when its explicit annotation is one simple class name (optionally `T | None`) that
+  resolves to one in-repository class, and that class directly declares an undecorated method; inherited or decorated
+  methods, untyped or ambiguously/conditionally bound values, multi-member chains, dynamic or conditional exports,
+  and star re-exports remain untraced. Other import forms not covered by these rules remain unsupported.
+  The account reports the form it met rather than `external` or `target-not-found`. A call whose root name the file
+  never imported is not a claim at all, so it has no outcome; that parser coverage is a separate figure from
+  resolution.
 
 ### HTTP routes, deployments and endpoints
 

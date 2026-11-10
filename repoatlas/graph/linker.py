@@ -37,6 +37,7 @@ that gap published a knowledge base with no cross-repository graph at all while
 
 from __future__ import annotations
 
+import ast
 import functools
 import json
 from collections import defaultdict
@@ -85,8 +86,10 @@ from repoatlas.graph.ordinary_outcomes import (
     finish_accounting,
     summarize,
 )
+from repoatlas.graph.packages import CROSSING
 from repoatlas.graph.persistence import plan_persistence
 from repoatlas.graph.prisma_schema import plan_prisma, prisma_projects
+from repoatlas.graph.py_uses import PythonUseResolver
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
 from repoatlas.graph.salt_pillar import resolve_pillar_reads
 from repoatlas.graph.uses import table_from_meta, use_resolution
@@ -96,6 +99,7 @@ from repoatlas.graph.uses_link import (
     UsesScope,
     apply_uses,
     plan_uses,
+    python_use_resolver,
     stored_scope,
 )
 from repoatlas.graph.value_mappings import plan_value_mappings
@@ -119,6 +123,7 @@ from repoatlas.models.parsing import (
     EMBEDDED_DOCUMENT,
     ENUM_MEMBER,
     FIELD,
+    LOCAL_RECEIVER,
     EdgeType,
     EntityType,
     ParsedFile,
@@ -195,6 +200,13 @@ class _NotClaimable:
 
 
 _NOT_CLAIMABLE = _NotClaimable()
+
+
+@dataclass(frozen=True, slots=True)
+class _ImportedName:
+    """The module an imported name comes through."""
+
+    module: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -572,10 +584,10 @@ class ReferenceLinker:
                 )
                 continue
 
-            module = self._claimable_via(reference, imported)
-            if not isinstance(module, _NotClaimable):
+            binding = self._claimable_via(reference, imported)
+            if not isinstance(binding, _NotClaimable):
                 claims.append(
-                    self._claim(repo_id, file_id, source_id, reference, parsed, module=module)
+                    self._claim(repo_id, file_id, source_id, reference, parsed, module=binding)
                 )
 
         self._knowledge.add_edges(edges)
@@ -584,8 +596,8 @@ class ReferenceLinker:
 
     @staticmethod
     def _claimable_via(
-        reference: ParsedReference, imported: dict[str, str]
-    ) -> str | _NotClaimable | None:
+        reference: ParsedReference, imported: dict[str, _ImportedName]
+    ) -> _ImportedName | _NotClaimable | None:
         """The module a symbol reference came through, or why it is not a claim.
 
         A symbol reference is recorded **only when this file imported that name**,
@@ -596,6 +608,9 @@ class ReferenceLinker:
 
         Every other kind — packages, paths, Salt targets, templates — is always
         recorded, because its target key names the target directly.
+
+        A reference whose leading name its own scope binds (``LOCAL_RECEIVER``) is not an
+        import's either: a parameter named like an imported function is the parameter.
         """
         if reference.target_kind not in {
             EntityType.SYMBOL,
@@ -603,9 +618,11 @@ class ReferenceLinker:
             EntityType.FUNCTION,
         }:
             return None
+        if reference.meta.get(LOCAL_RECEIVER):
+            return _NOT_CLAIMABLE
         root = reference.target_key.split(".", 1)[0]
-        specifier = imported.get(root)
-        return specifier if specifier is not None else _NOT_CLAIMABLE
+        binding = imported.get(root)
+        return binding if binding is not None else _NOT_CLAIMABLE
 
     def _claim(
         self,
@@ -615,11 +632,11 @@ class ReferenceLinker:
         reference: ParsedReference,
         parsed: ParsedFile,
         *,
-        module: str | None = None,
+        module: _ImportedName | None = None,
     ) -> UnresolvedRefRecord:
         meta = {**reference.meta, "parser": parsed.parser}
         if module is not None:
-            meta["module"] = module
+            meta["module"] = module.module
         return UnresolvedRefRecord(
             repo_id=repo_id,
             file_id=file_id,
@@ -798,6 +815,10 @@ class ReferenceLinker:
             languages: dict[int, str] = {}
             graphql_unknown_role = 0
             ordinary_unresolved = 0
+            # Built on the first Python claim that needs it, then shared by every later one.
+            lazy_uses = functools.cache(
+                lambda: python_use_resolver(self._knowledge, index, records)
+            )
             if ledger is not None:
                 for fact in module_facts:
                     ledger.excluded(fact, MODULE_FACT)
@@ -889,7 +910,28 @@ class ReferenceLinker:
                         ledger.linked(claim, language, PILLAR_READ)
                     continue
                 siblings = by_file.get(claim.file_id, [])
-                edge = self._resolve(claim, origin, index, siblings, modules)
+                edge = self._resolve(claim, origin, index, siblings, modules, lazy_uses)
+                imported_name = (
+                    _python_imported_name(claim, siblings, _claim_meta(claim.meta_json))
+                    if edge is None
+                    else None
+                )
+                if imported_name is not None:
+                    edge = self._resolve_python_reexport(
+                        claim,
+                        origin,
+                        index,
+                        lazy_uses(),
+                        siblings,
+                        _claim_meta(claim.meta_json),
+                        imported_name,
+                    )
+                if edge is None:
+                    value_use = _python_imported_value_member(claim, origin, siblings)
+                    if value_use is not None:
+                        edge = self._resolve_python_value_member(
+                            claim, origin, index, lazy_uses(), value_use
+                        )
                 if edge is None:
                     unresolved += 1
                     ordinary_unresolved += 1
@@ -908,6 +950,9 @@ class ReferenceLinker:
                 if ledger is not None:
                     ledger.linked(claim, language)
                 edges.append(edge)
+                edges.extend(
+                    self._resolve_python_fromlist_submodules(claim, origin, index, lazy_uses)
+                )
 
             # Part of resolving claims, not a phase of its own: the pass keeps its
             # three computing stages and the one that commits. Template calls are
@@ -1289,7 +1334,8 @@ class ReferenceLinker:
         origin: FileRow,
         index: ResolutionIndex,
         siblings: list[UnresolvedRefRecord],
-        modules: ModuleResolver | None = None,
+        modules: ModuleResolver | None,
+        uses: Callable[[], PythonUseResolver],
     ) -> EdgeRecord | None:
         meta = json.loads(claim.meta_json) if claim.meta_json else {}
         kind = claim.target_kind
@@ -1306,7 +1352,7 @@ class ReferenceLinker:
         if kind is EntityType.CONFIG:
             return self._resolve_config(claim, origin, index, siblings)
         if kind in {EntityType.SYMBOL, EntityType.CLASS, EntityType.FUNCTION}:
-            return self._resolve_symbol(claim, origin, index, meta)
+            return self._resolve_symbol(claim, origin, index, siblings, meta, uses)
         return None
 
     def _resolve_config(
@@ -1363,9 +1409,9 @@ class ReferenceLinker:
         package = meta.get("package")
         if package is not None:
             # A name the parser could only offer as a candidate: `helper` in
-            # `from . import helper`. It becomes an edge when a module of that
-            # name exists inside that package, and nothing otherwise.
-            target = index.resolve_relative_submodule(
+            # `from . import helper` or `from pkg import helper`. It becomes an
+            # edge only when the prefix is a package and the module exists there.
+            target = index.resolve_package_submodule(
                 origin, package, claim.target_key[len(package) :]
             )
         else:
@@ -1373,6 +1419,35 @@ class ReferenceLinker:
             if target is None and modules is not None and flavor == "node":
                 return self._configured_import(claim, origin, modules)
         return self._edge(claim, origin, target.file_entity_id) if target else None
+
+    def _resolve_python_fromlist_submodules(
+        self,
+        claim: UnresolvedRefRecord,
+        origin: FileRow,
+        index: ResolutionIndex,
+        uses: Callable[[], PythonUseResolver],
+    ) -> list[EdgeRecord]:
+        """Add file edges for fromlist names that resolve as submodules of a package.
+
+        A name is a submodule only when the package proves it does not bind that name itself
+        (:meth:`PythonUseResolver.fromlist_submodule`): an attribute shadows the module."""
+        if (
+            claim.edge_type is not EdgeType.IMPORTS
+            or claim.target_kind is not EntityType.MODULE
+            or _flavor(origin, _claim_meta(claim.meta_json)) != "python"
+        ):
+            return []
+        meta = _claim_meta(claim.meta_json)
+        if meta.get("package") is not None:
+            return []
+        edges: list[EdgeRecord] = []
+        for name in (meta.get("names") or "").split(","):
+            if not name.strip() or name.strip() == "*":
+                continue
+            target = uses().fromlist_submodule(origin, claim.target_key, name.strip())
+            if target is not None:
+                edges.append(self._edge(claim, origin, target.file_entity_id))
+        return edges
 
     def _configured_import(
         self, claim: UnresolvedRefRecord, origin: FileRow, modules: ModuleResolver
@@ -1406,19 +1481,189 @@ class ReferenceLinker:
         claim: UnresolvedRefRecord,
         origin: FileRow,
         index: ResolutionIndex,
+        siblings: list[UnresolvedRefRecord],
         meta: dict[str, str],
+        uses: Callable[[], PythonUseResolver],
     ) -> EdgeRecord | None:
         """A call whose name this file imported, resolved through the import graph."""
         specifier = meta.get("module")
         flavor = _flavor(origin, meta)
         if not specifier or flavor is None:
             return None
-        target_file = index.resolve_module(origin, specifier, flavor)
+        target_file = (
+            self._resolve_python_imported_submodule(claim, origin, index, siblings, specifier, uses)
+            if flavor == "python"
+            else None
+        )
+        if target_file is None:
+            target_file = index.resolve_module(origin, specifier, flavor)
         if target_file is None:
             return None
         name = claim.target_key.split(".")[-1]
+        if flavor == "python" and "." not in claim.target_key:
+            # A bare name is the local binding of a from-import: the module exports the name
+            # the statement imported, which `as` makes a different one. Two statements binding
+            # it to different names leave it unknown, and nothing is linked.
+            sources = _python_from_import_sources(claim.target_key, specifier, siblings)
+            if len(sources) > 1:
+                return None
+            if sources:
+                name = next(iter(sources))
         symbol = index.resolve_symbol(target_file, name)
         return self._edge(claim, origin, symbol.entity_id) if symbol else None
+
+    def _resolve_python_imported_submodule(
+        self,
+        claim: UnresolvedRefRecord,
+        origin: FileRow,
+        index: ResolutionIndex,
+        siblings: list[UnresolvedRefRecord],
+        specifier: str,
+        uses: Callable[[], PythonUseResolver],
+    ) -> FileRow | None:
+        """Resolve a fromlist name as a child module only when its package proves it."""
+        name = claim.target_key.split(".", 1)[0]
+        for sibling in siblings:
+            if (
+                sibling.edge_type is not EdgeType.IMPORTS
+                or sibling.target_kind is not EntityType.MODULE
+            ):
+                continue
+            sibling_meta = _claim_meta(sibling.meta_json)
+            if _flavor(origin, sibling_meta) != "python":
+                continue
+            package = sibling_meta.get("package")
+            if package is not None:
+                imported_name = sibling_meta.get("alias") or sibling.target_key[
+                    len(package) :
+                ].lstrip(".")
+                if imported_name == name:
+                    candidate = sibling.target_key[len(package) :]
+                    target = index.resolve_package_submodule(origin, package, candidate)
+                    if target is not None:
+                        return target
+                continue
+            if sibling.target_key != specifier or sibling_meta.get("level") is None:
+                continue
+            imported_name = name
+            for pair in (sibling_meta.get("aliases") or "").split(","):
+                source_name, separator, local_name = pair.partition(":")
+                if separator and local_name == name:
+                    imported_name = source_name
+                    break
+            if imported_name in (sibling_meta.get("names") or "").split(","):
+                target = uses().fromlist_submodule(origin, specifier, imported_name)
+                if target is not None:
+                    return target
+        return None
+
+    def _resolve_python_reexport(
+        self,
+        claim: UnresolvedRefRecord,
+        origin: FileRow,
+        index: ResolutionIndex,
+        resolver: PythonUseResolver,
+        siblings: Sequence[UnresolvedRefRecord],
+        meta: Mapping[str, str],
+        imported_name: str,
+    ) -> EdgeRecord | None:
+        """Resolve a direct Python from-import reference through its proven export table."""
+        specifier = meta.get("module")
+        if not specifier:
+            return None
+        # The file's own export table must bind the name to this one import: a name bound
+        # twice (a `try`/`except ImportError` pair) or conditionally is not this import's.
+        # The export table knows module-level imports only, so an import written in the
+        # call's own function is accepted when it is the file's only import of the name.
+        bound_at_module = resolver.has_import_binding(
+            origin, claim.target_key, specifier, imported_name
+        )
+        if not bound_at_module and not _python_scope_import(
+            claim, origin, siblings, specifier, imported_name
+        ):
+            return None
+        found = resolver.resolve(
+            origin, {"module": specifier, "binding": "import", "imported": imported_name}
+        )
+        if found is None:
+            return None
+        entity_id, resolution = found
+        if resolution.get(CROSSING) or not resolution.get("via"):
+            return None
+        path, name = resolution.get("defined_at"), resolution.get("name")
+        if not isinstance(path, str) or not isinstance(name, str):
+            return None
+        target = index.files_by_repo.get(origin.repo_id, {}).get(path)
+        symbol = index.resolve_symbol(target, name) if target is not None else None
+        if symbol is None or symbol.entity_id != entity_id:
+            return None
+        return self._edge(claim, origin, entity_id)
+
+    def _resolve_python_value_member(
+        self,
+        claim: UnresolvedRefRecord,
+        origin: FileRow,
+        index: ResolutionIndex,
+        resolver: PythonUseResolver,
+        value_use: Mapping[str, str],
+    ) -> EdgeRecord | None:
+        """Resolve one method directly declared by an annotated imported module value."""
+        if not resolver.has_import_binding(
+            origin, value_use["local"], value_use["module"], value_use["imported"]
+        ):
+            return None
+        resolved = resolver.resolve(origin, dict(value_use))
+        if resolved is None:
+            return None
+        value_id, value_resolution = resolved
+        if value_resolution.get(CROSSING):
+            return None
+        path, name = value_resolution.get("defined_at"), value_resolution.get("name")
+        if not isinstance(path, str) or not isinstance(name, str):
+            return None
+        value_file = index.files_by_repo.get(origin.repo_id, {}).get(path)
+        if value_file is None:
+            return None
+        values = [
+            symbol
+            for symbol in index.symbols_by_file.get(value_file.file_id, {}).get(name, [])
+            if symbol.entity_id == value_id
+            and symbol.type is EntityType.SYMBOL
+            and symbol.meta.get("kind") == "variable"
+        ]
+        if len(values) != 1:
+            return None
+        type_name = _python_annotation_class(values[0].meta.get("annotation"))
+        if type_name is None:
+            return None
+
+        definition = resolver.resolve_module_name(value_file, type_name)
+        if definition is None or definition.symbol_id is None:
+            return None
+        model = index.resolve_symbol(definition.file, definition.name or "")
+        if (
+            model is None
+            or model.entity_id != definition.symbol_id
+            or model.type is not EntityType.CLASS
+            or model.repo_id != origin.repo_id
+            or not model.qualified_name
+        ):
+            return None
+        member = value_use.get("member")
+        if not member:
+            return None
+        qualified = f"{model.qualified_name}.{member}"
+        methods = {
+            symbol.entity_id: symbol
+            for symbol in index.symbols_by_file.get(model.file_id, {}).get(qualified, [])
+            if symbol.qualified_name == qualified
+            and symbol.type is EntityType.METHOD
+            and symbol.repo_id == origin.repo_id
+            and symbol.meta.get("decorated") != "true"
+        }
+        if len(methods) != 1:
+            return None
+        return self._edge(claim, origin, next(iter(methods)))
 
     def _resolve_salt_state(
         self, claim: UnresolvedRefRecord, origin: FileRow, index: ResolutionIndex
@@ -1657,32 +1902,251 @@ def _role_of(meta_json: str) -> str | None:
     return role if isinstance(role, str) and role else None
 
 
-def _imported_names(parsed: ParsedFile) -> dict[str, str]:
+def _imported_names(parsed: ParsedFile) -> dict[str, _ImportedName]:
     """Local name → module specifier, from this file's own imports.
 
     This is the import graph as one file sees it, and the only basis on which a
     cross-file symbol reference may later be resolved.
     """
-    imported: dict[str, str] = {}
+    imported: dict[str, _ImportedName] = {}
+    python = parsed.language == "Python"
+    script = parsed.language in {"TypeScript", "JavaScript"}
     for reference in parsed.references:
         if reference.edge_type is not EdgeType.IMPORTS:
             continue
         specifier = reference.target_key
         meta = reference.meta
+        if python:
+            _bind_python_import(imported, specifier, meta)
+            continue
+        if script:
+            _bind_script_import(imported, specifier, meta)
+            continue
         for name in (meta.get("names") or "").split(","):
             if name.strip():
-                imported[name.strip()] = specifier
+                imported[name.strip()] = _ImportedName(specifier)
         alias = meta.get("alias")
         if alias:
-            imported[alias] = specifier
+            imported[alias] = _ImportedName(specifier)
         # ``import x.y`` binds ``x``; ``import fs from "node:fs"`` binds ``fs``.
         head = specifier.replace("/", ".").split(".")[0].lstrip(".")
         if head:
-            imported.setdefault(head, specifier)
+            imported.setdefault(head, _ImportedName(specifier))
         tail = specifier.replace("\\", "/").rstrip("/").split("/")[-1].split(".")[-1]
         if tail:
-            imported.setdefault(tail, specifier)
+            imported.setdefault(tail, _ImportedName(specifier))
     return imported
+
+
+def _bind_script_import(
+    imported: dict[str, _ImportedName], specifier: str, meta: Mapping[str, str]
+) -> None:
+    """The names one TypeScript or JavaScript import or ``require`` binds, and only those.
+
+    ``import a, { b, c as d } from "m"`` binds ``a`` and ``b``; ``const { e } = require("m")``
+    binds ``e``. A renamed import is left unbound, as it always was: the claim carries the
+    local name, and the module exports another. A re-export and a bare ``import "m"`` bind
+    nothing, and neither does any segment of the specifier: reading one as a binding made a
+    parameter or local that shares a module's file name look imported.
+    """
+    role = meta.get("role")
+    if role == "re-export":
+        return
+    if role == "dynamic":
+        for name in (meta.get("names") or "").split(","):
+            if name.strip():
+                imported[name.strip()] = _ImportedName(specifier)
+        return
+    for key in ("default", "namespace"):
+        if meta.get(key):
+            imported[meta[key]] = _ImportedName(specifier)
+    for pair in (meta.get("bindings") or "").split(","):
+        if pair and ":" not in pair:
+            imported[pair] = _ImportedName(specifier)
+
+
+def _bind_python_import(
+    imported: dict[str, _ImportedName], specifier: str, meta: Mapping[str, str]
+) -> None:
+    """The names one Python import binds, and only those.
+
+    ``from a.b import c`` binds ``c`` and neither ``a`` nor ``b``; ``import a.b.c`` binds ``a``
+    and not ``c``; an alias binds the alias alone. A segment of the specifier is no binding:
+    reading it as one made a parameter or local that shares a module's name look imported.
+    """
+    if "level" in meta:
+        # A candidate reference is emitted for each name in `from . import a`.
+        # Other fromlists keep their written module as the symbol-resolution base.
+        aliases: dict[str, str] = {}
+        for pair in (meta.get("aliases") or "").split(","):
+            imported_name, separator, local_name = pair.partition(":")
+            if separator and imported_name and local_name:
+                aliases[imported_name] = local_name
+        for name in (meta.get("names") or "").split(","):
+            if name.strip() and name.strip() not in aliases:
+                imported[name.strip()] = _ImportedName(specifier)
+        for local_name in aliases.values():
+            imported[local_name] = _ImportedName(specifier)
+        if meta.get("package") is not None:
+            package = meta["package"]
+            name = meta.get("alias") or specifier[len(package) :].lstrip(".")
+            if name:
+                imported[name] = _ImportedName(package)
+    elif meta.get("alias"):
+        imported[meta["alias"]] = _ImportedName(specifier)
+    else:
+        imported.setdefault(specifier.split(".")[0], _ImportedName(specifier))
+
+
+def _python_imported_name(
+    claim: UnresolvedRefRecord,
+    siblings: Sequence[UnresolvedRefRecord],
+    meta: Mapping[str, str],
+) -> str | None:
+    """The exported name bound to a direct Python from-import call, if unique."""
+    specifier = meta.get("module")
+    if not specifier or "." in claim.target_key:
+        return None
+    names = _python_from_import_sources(claim.target_key, specifier, siblings)
+    return next(iter(names)) if len(names) == 1 else None
+
+
+def _python_from_import_sources(
+    local: str, specifier: str, siblings: Sequence[UnresolvedRefRecord]
+) -> set[str]:
+    """The names ``from <specifier> import ...`` statements of this file bind to ``local``.
+
+    ``Client as BaseClient`` binds ``BaseClient`` to the exported ``Client``; a plain name binds
+    itself, unless another name was renamed to it or it was renamed away. More than one name
+    means the file binds ``local`` twice and no one of them is the answer.
+    """
+    sources: set[str] = set()
+    for sibling in siblings:
+        if sibling.edge_type is not EdgeType.IMPORTS or sibling.target_key != specifier:
+            continue
+        sibling_meta = _claim_meta(sibling.meta_json)
+        if "level" not in sibling_meta or sibling_meta.get("package") is not None:
+            continue
+        renamed: set[str] = set()
+        for pair in (sibling_meta.get("aliases") or "").split(","):
+            imported, separator, bound = pair.partition(":")
+            if separator and imported and bound:
+                renamed.add(imported)
+                if bound == local:
+                    sources.add(imported)
+        if local in (sibling_meta.get("names") or "").split(",") and local not in renamed:
+            sources.add(local)
+    return sources
+
+
+def _python_scope_import(
+    claim: UnresolvedRefRecord,
+    origin: FileRow,
+    siblings: Sequence[UnresolvedRefRecord],
+    specifier: str,
+    imported: str,
+) -> bool:
+    """An import in the call's own function scope that is the file's only import of the name."""
+    local = claim.target_key
+    binders: list[UnresolvedRefRecord] = []
+    for sibling in siblings:
+        if sibling.edge_type is not EdgeType.IMPORTS:
+            continue
+        bound: dict[str, _ImportedName] = {}
+        _bind_python_import(bound, sibling.target_key, _claim_meta(sibling.meta_json))
+        if local in bound:
+            binders.append(sibling)
+    if len(binders) != 1:
+        return False
+    binder = binders[0]
+    return (
+        binder.src_id == claim.src_id
+        and binder.src_id != origin.file_entity_id
+        and binder.target_key == specifier
+        and _python_from_import_sources(local, specifier, [binder]) == {imported}
+    )
+
+
+def _python_imported_value_member(
+    claim: UnresolvedRefRecord, origin: FileRow, siblings: Sequence[UnresolvedRefRecord]
+) -> Mapping[str, str] | None:
+    """The unique imported-value use matching one direct member call."""
+    if claim.edge_type is not EdgeType.CALLS or claim.target_kind is not EntityType.SYMBOL:
+        return None
+    claim_meta = _claim_meta(claim.meta_json)
+    specifier = claim_meta.get("module")
+    if (
+        _flavor(origin, claim_meta) != "python"
+        or not specifier
+        or claim_meta.get("local_receiver") == "true"
+    ):
+        return None
+    local, separator, member = claim.target_key.partition(".")
+    if not separator or not local or not member or "." in member:
+        return None
+    matches: list[Mapping[str, str]] = []
+    for sibling in siblings:
+        if sibling.edge_type is not EdgeType.IMPORTS:
+            continue
+        meta = _claim_meta(sibling.meta_json)
+        if (
+            sibling.target_key != specifier
+            or "level" not in meta
+            or meta.get("package") is not None
+        ):
+            continue
+        names = (meta.get("names") or "").split(",")
+        aliases = {
+            imported: local_name
+            for pair in (meta.get("aliases") or "").split(",")
+            for imported, separator, local_name in [pair.partition(":")]
+            if separator and imported and local_name
+        }
+        imported = next((name for name in names if name and aliases.get(name, name) == local), None)
+        if imported is not None:
+            matches.append(
+                {
+                    "module": sibling.target_key,
+                    "binding": "import",
+                    "imported": imported,
+                    "local": local,
+                    "member": member,
+                    "use": "call",
+                    "form": "call",
+                }
+            )
+    distinct = {(meta.get("module"), meta.get("imported")): meta for meta in matches}
+    return next(iter(distinct.values())) if len(distinct) == 1 else None
+
+
+def _python_annotation_class(annotation: str | None) -> str | None:
+    """One explicit class name, optionally unioned with ``None``."""
+    if not annotation or len(annotation) > 1_000:
+        return None
+    try:
+        expression = ast.parse(annotation, mode="eval").body
+        if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
+            expression = ast.parse(expression.value, mode="eval").body
+    except (RecursionError, SyntaxError, ValueError):
+        return None
+    names: set[str] = set()
+    valid = True
+
+    def collect(node: ast.expr) -> None:
+        nonlocal valid
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            collect(node.left)
+            collect(node.right)
+        elif isinstance(node, ast.Name):
+            if node.id != "None":
+                names.add(node.id)
+        elif isinstance(node, ast.Constant) and node.value is None:
+            return
+        else:
+            valid = False
+
+    collect(expression)
+    return next(iter(names)) if valid and len(names) == 1 else None
 
 
 def _is_module_fact(claim: UnresolvedRefRecord) -> bool:

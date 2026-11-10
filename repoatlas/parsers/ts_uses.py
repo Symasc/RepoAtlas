@@ -249,6 +249,9 @@ class UseAnalysis:
         self.sites: dict[tuple[int, int, str], UseSite] = {}
         #: Uses refused, by reason; measurement only.
         self.rejected: Counter[str] = Counter()
+        #: The (start byte, end byte) of each use of a module-scope name that a parameter,
+        #: local or loop variable of an enclosing scope shadows: that use is the local.
+        self.shadowed: set[tuple[int, int]] = set()
         self._depth: Counter[str] = Counter()
         #: Model-field members by the type name node they ride on (DF3b).
         self._members = field_members(source, root)
@@ -544,6 +547,7 @@ class UseAnalysis:
             return  # a local, a global, or a name this file never binds
         if self._depth[name]:
             self.rejected["shadowed"] += 1
+            self.shadowed.add((node.start_byte, node.end_byte))
             return
         if binding.kind == "none":
             self.rejected[binding.reason or "none"] += 1

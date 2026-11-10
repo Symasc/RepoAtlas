@@ -416,9 +416,9 @@ class Classifier:
         found = self._index.symbol_candidates(target, name)
         if len(found) > 1:
             return Decision(AMBIGUOUS, MULTIPLE_DECLARATIONS, "module-file", "symbols")
-        # Nothing declared under that name in the module the import names. Whether the name is
-        # renamed, default, re-exported, or the call is a member of an imported value is not
-        # traced by the ordinary rules, and that is all this says.
+        # Nothing declared under that name in the module the import names. The global linker
+        # already tried proven direct Python from-import re-exports; a member of an imported
+        # value, or a re-export that is not proven by that trace, stays unsupported.
         shape = RECEIVER_MEMBER if "." in claim.target_key else BINDING_FORM_UNTRACED
         return Decision(UNSUPPORTED, shape, "module-file", "symbols")
 

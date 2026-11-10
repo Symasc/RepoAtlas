@@ -281,11 +281,19 @@ def test_a_symbol_that_is_not_found_by_the_ordinary_rules_names_the_form_met(
         AMBIGUOUS,
         "multiple-declarations-in-module",
     )
-    # a name the module re-exports under another name: not traced by the ordinary rules
-    assert rows[("toy_app/main.py", "26", "CALLS:symbol:reexported")] == (
-        UNSUPPORTED,
-        "binding-form-untraced",
-    )
+    # a direct call through a proven Python re-export is linked by the global pass
+    assert ("toy_app/main.py", "26", "CALLS:symbol:reexported") not in rows
+    linked_to = corpus.database.execute(
+        """SELECT df.rel_path, d.name FROM edges e JOIN entities d ON d.id = e.dst_id
+           JOIN files df ON df.id = d.file_id
+           WHERE e.type = 'CALLS' AND e.line_start IN (26, 28)
+             AND e.file_id = (SELECT id FROM files WHERE rel_path = 'toy_app/main.py')
+           ORDER BY e.line_start"""
+    ).fetchall()
+    assert [(row[0], row[1]) for row in linked_to] == [
+        ("toy_app/codec.py", "parse_record"),
+        ("toy_app/codec.py", "parse_record"),
+    ]
     # a member of a namespace import the module does not declare
     assert rows[("src/index.ts", "17", "CALLS:symbol:ns.nothing")] == (
         UNSUPPORTED,
@@ -296,12 +304,38 @@ def test_a_symbol_that_is_not_found_by_the_ordinary_rules_names_the_form_met(
     assert not any(subject.endswith(":renamed") for _, _, subject in rows)
 
 
+def test_a_typed_imported_value_resolves_only_its_declared_class_method(
+    corpus: Workspace,
+) -> None:
+    linked = corpus.database.execute(
+        """
+        SELECT s.qualified_name, d.qualified_name
+        FROM edges e JOIN entities s ON s.id = e.src_id JOIN entities d ON d.id = e.dst_id
+        JOIN files sf ON sf.id = s.file_id JOIN files df ON df.id = d.file_id
+        WHERE e.type = 'CALLS' AND e.parser = 'linker:global'
+          AND sf.rel_path = 'toy_app/main.py'
+          AND s.qualified_name IN ('typed_value_use', 'shadowed_value', 'rebound_value')
+        """
+    ).fetchall()
+    assert [tuple(row) for row in linked] == [("typed_value_use", "Worker.run")]
+
+    rows = open_rows(corpus)
+    assert any(
+        path == "toy_app/main.py" and subject == "CALLS:symbol:dynamic_worker.run"
+        for path, _, subject in rows
+    )
+    assert any(
+        path == "toy_app/main.py" and subject == "CALLS:symbol:rebound_worker.run"
+        for path, _, subject in rows
+    )
+
+
 def test_what_the_ordinary_rules_link_is_counted_linked(corpus: Workspace) -> None:
     by = counts(corpus)
     assert by[("EXECUTES", "script", LINKED, "resolved")] == 1
     assert by[("SOURCES", "script", LINKED, "resolved")] == 1
     assert by[("REFERENCES", "class", LINKED, "resolved")] == 1
-    assert by[("CALLS", "symbol", LINKED, "resolved")] == 4
+    assert by[("CALLS", "symbol", LINKED, "resolved")] == 7
 
 
 # -- the account cannot change the graph, the planners or impact --------------------------

@@ -67,8 +67,8 @@ DOWNLOADERS = ("tree_sitter_language_pack", "tree_sitter_languages", "tree_sitte
 #: underneath a parser that stayed put.
 PARSER_FOR_PIN = {
     # 27: R2b-0 parser behaviour change; grammars unchanged.
-    ("tree-sitter-typescript", "0.23.2"): (TypeScriptParser, "27"),
-    ("tree-sitter-javascript", "0.25.0"): (TypeScriptParser, "27"),
+    ("tree-sitter-typescript", "0.23.2"): (TypeScriptParser, "29"),
+    ("tree-sitter-javascript", "0.25.0"): (TypeScriptParser, "29"),
     ("tree-sitter-bash", "0.25.1"): (BashParser, "2"),
 }
 
