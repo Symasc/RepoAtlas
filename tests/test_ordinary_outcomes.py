@@ -281,11 +281,19 @@ def test_a_symbol_that_is_not_found_by_the_ordinary_rules_names_the_form_met(
         AMBIGUOUS,
         "multiple-declarations-in-module",
     )
-    # a name the module re-exports under another name: not traced by the ordinary rules
-    assert rows[("toy_app/main.py", "26", "CALLS:symbol:reexported")] == (
-        UNSUPPORTED,
-        "binding-form-untraced",
-    )
+    # a direct call through a proven Python re-export is linked by the global pass
+    assert ("toy_app/main.py", "26", "CALLS:symbol:reexported") not in rows
+    linked_to = corpus.database.execute(
+        """SELECT df.rel_path, d.name FROM edges e JOIN entities d ON d.id = e.dst_id
+           JOIN files df ON df.id = d.file_id
+           WHERE e.type = 'CALLS' AND e.line_start IN (26, 28)
+             AND e.file_id = (SELECT id FROM files WHERE rel_path = 'toy_app/main.py')
+           ORDER BY e.line_start"""
+    ).fetchall()
+    assert [(row[0], row[1]) for row in linked_to] == [
+        ("toy_app/codec.py", "parse_record"),
+        ("toy_app/codec.py", "parse_record"),
+    ]
     # a member of a namespace import the module does not declare
     assert rows[("src/index.ts", "17", "CALLS:symbol:ns.nothing")] == (
         UNSUPPORTED,
@@ -301,7 +309,7 @@ def test_what_the_ordinary_rules_link_is_counted_linked(corpus: Workspace) -> No
     assert by[("EXECUTES", "script", LINKED, "resolved")] == 1
     assert by[("SOURCES", "script", LINKED, "resolved")] == 1
     assert by[("REFERENCES", "class", LINKED, "resolved")] == 1
-    assert by[("CALLS", "symbol", LINKED, "resolved")] == 4
+    assert by[("CALLS", "symbol", LINKED, "resolved")] == 6
 
 
 # -- the account cannot change the graph, the planners or impact --------------------------
