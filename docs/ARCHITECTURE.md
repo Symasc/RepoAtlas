@@ -1781,9 +1781,11 @@ across the layers that can each answer their own half:
 
 * the **parser** proposes `"." * level + name` for `from . import name` and preserves the fromlist
   names for `from pkg import name`. It cannot see the filesystem, so it never claims a name is a module;
-* the **resolution index** decides, in `resolve_package_submodule`, and emits an edge only when the
-  prefix resolves to an indexed package and a module of that name exists in it. For an explicit fromlist,
-  this candidate is checked only after the package import itself is resolved.
+* the **resolution index** decides relative candidates, and emits an edge only when the prefix
+  resolves to an indexed package and a module of that name exists in it. For an explicit absolute
+  fromlist, `PythonUseResolver.fromlist_submodule` decides: the package must be a regular package of
+  the importer's own project whose export table binds no such name, and the module is looked up
+  inside that package's directory only.
 
 The package reference is kept alongside the candidate, because both import forms also import the
 package. Both edges are true.
