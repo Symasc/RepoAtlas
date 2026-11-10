@@ -205,6 +205,31 @@ def imported_files(workspace: Workspace, rel_path: str) -> set[str]:
     }
 
 
+def calls_from(workspace: Workspace, caller: str) -> set[tuple[str, str]]:
+    """``(file, name)`` of every definition the function ``caller`` is linked to by ``CALLS``."""
+    return {
+        (row["dst_path"], row["dst_name"])
+        for row in rows(
+            workspace,
+            "SELECT df.rel_path AS dst_path, dst.name AS dst_name FROM edges e "
+            "JOIN entities src ON src.id = e.src_id "
+            "JOIN entities dst ON dst.id = e.dst_id JOIN files df ON df.id = dst.file_id "
+            "WHERE e.type = 'CALLS' AND src.name = ?",
+            (caller,),
+        )
+    }
+
+
+def calls_into(workspace: Workspace, rel_path: str) -> list[sqlite3.Row]:
+    """Every ``CALLS`` edge, from anywhere, whose target is defined in ``rel_path``."""
+    return rows(
+        workspace,
+        "SELECT e.id FROM edges e JOIN entities dst ON dst.id = e.dst_id "
+        "JOIN files df ON df.id = dst.file_id WHERE e.type = 'CALLS' AND df.rel_path = ?",
+        (rel_path,),
+    )
+
+
 @pytest.fixture
 def workspace(tmp_path: Path) -> Iterator[Workspace]:
     space = indexed(tmp_path, PACKAGE)
@@ -462,6 +487,53 @@ def test_an_import_from_a_module_still_resolves_its_member(tmp_path: Path) -> No
             )
         }
         assert ("pkgmod.py", "helper") in calls
+    finally:
+        space.close()
+
+
+def test_an_absolute_fromlist_submodule_must_be_inside_the_package_it_names(
+    tmp_path: Path,
+) -> None:
+    """``from pkg import helper`` names ``pkg/``'s own ``helper``, not any ``pkg/helper.py``.
+
+    ``svc/pkg/helper.py`` has the right tail and the wrong package: the only ``pkg`` the
+    absolute name resolves to is the root ``pkg/__init__.py``, which holds no ``helper``.
+    A suffix match would link the import and the call to an unrelated file.
+    """
+    space = indexed(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "svc/pkg/helper.py": "def assist():\n    return 1\n",
+            "svc/main.py": "from pkg import helper\n\n\ndef go():\n    return helper.assist()\n",
+        },
+    )
+    try:
+        assert importers_of(space, "demo", "svc/pkg/helper.py") == set()
+        assert calls_into(space, "svc/pkg/helper.py") == []
+    finally:
+        space.close()
+
+
+def test_a_package_attribute_shadows_a_same_named_submodule(tmp_path: Path) -> None:
+    """``__init__.py`` binds ``helper`` to a function, so ``from pkg import helper`` gets it.
+
+    Importing the attribute does not import ``pkg/helper.py``: the module is only the answer
+    when the package does not define the name. The call therefore goes where the attribute
+    points, and the same-named module gets neither the import nor the call.
+    """
+    space = indexed(
+        tmp_path,
+        {
+            "pkg/__init__.py": "from .impl import run as helper\n",
+            "pkg/impl.py": "def run():\n    return 1\n",
+            "pkg/helper.py": "def helper():\n    return 2\n",
+            "app.py": "from pkg import helper\n\n\ndef go():\n    return helper()\n",
+        },
+    )
+    try:
+        assert imported_files(space, "app.py") == {"pkg/__init__.py"}
+        assert calls_from(space, "go") == {("pkg/impl.py", "run")}
     finally:
         space.close()
 

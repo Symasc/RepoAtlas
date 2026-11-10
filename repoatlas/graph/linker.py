@@ -815,7 +815,10 @@ class ReferenceLinker:
             languages: dict[int, str] = {}
             graphql_unknown_role = 0
             ordinary_unresolved = 0
-            python_uses = None
+            # Built on the first Python claim that needs it, then shared by every later one.
+            lazy_uses = functools.cache(
+                lambda: python_use_resolver(self._knowledge, index, records)
+            )
             if ledger is not None:
                 for fact in module_facts:
                     ledger.excluded(fact, MODULE_FACT)
@@ -907,30 +910,27 @@ class ReferenceLinker:
                         ledger.linked(claim, language, PILLAR_READ)
                     continue
                 siblings = by_file.get(claim.file_id, [])
-                edge = self._resolve(claim, origin, index, siblings, modules)
+                edge = self._resolve(claim, origin, index, siblings, modules, lazy_uses)
                 imported_name = (
                     _python_imported_name(claim, siblings, _claim_meta(claim.meta_json))
                     if edge is None
                     else None
                 )
                 if imported_name is not None:
-                    if python_uses is None:
-                        python_uses = python_use_resolver(self._knowledge, index, records)
                     edge = self._resolve_python_reexport(
                         claim,
                         origin,
                         index,
-                        python_uses,
+                        lazy_uses(),
+                        siblings,
                         _claim_meta(claim.meta_json),
                         imported_name,
                     )
                 if edge is None:
                     value_use = _python_imported_value_member(claim, origin, siblings)
                     if value_use is not None:
-                        if python_uses is None:
-                            python_uses = python_use_resolver(self._knowledge, index, records)
                         edge = self._resolve_python_value_member(
-                            claim, origin, index, python_uses, value_use
+                            claim, origin, index, lazy_uses(), value_use
                         )
                 if edge is None:
                     unresolved += 1
@@ -950,7 +950,9 @@ class ReferenceLinker:
                 if ledger is not None:
                     ledger.linked(claim, language)
                 edges.append(edge)
-                edges.extend(self._resolve_python_fromlist_submodules(claim, origin, index))
+                edges.extend(
+                    self._resolve_python_fromlist_submodules(claim, origin, index, lazy_uses)
+                )
 
             # Part of resolving claims, not a phase of its own: the pass keeps its
             # three computing stages and the one that commits. Template calls are
@@ -1332,7 +1334,8 @@ class ReferenceLinker:
         origin: FileRow,
         index: ResolutionIndex,
         siblings: list[UnresolvedRefRecord],
-        modules: ModuleResolver | None = None,
+        modules: ModuleResolver | None,
+        uses: Callable[[], PythonUseResolver],
     ) -> EdgeRecord | None:
         meta = json.loads(claim.meta_json) if claim.meta_json else {}
         kind = claim.target_kind
@@ -1349,7 +1352,7 @@ class ReferenceLinker:
         if kind is EntityType.CONFIG:
             return self._resolve_config(claim, origin, index, siblings)
         if kind in {EntityType.SYMBOL, EntityType.CLASS, EntityType.FUNCTION}:
-            return self._resolve_symbol(claim, origin, index, siblings, meta)
+            return self._resolve_symbol(claim, origin, index, siblings, meta, uses)
         return None
 
     def _resolve_config(
@@ -1418,9 +1421,16 @@ class ReferenceLinker:
         return self._edge(claim, origin, target.file_entity_id) if target else None
 
     def _resolve_python_fromlist_submodules(
-        self, claim: UnresolvedRefRecord, origin: FileRow, index: ResolutionIndex
+        self,
+        claim: UnresolvedRefRecord,
+        origin: FileRow,
+        index: ResolutionIndex,
+        uses: Callable[[], PythonUseResolver],
     ) -> list[EdgeRecord]:
-        """Add file edges for fromlist names that resolve as submodules of a package."""
+        """Add file edges for fromlist names that resolve as submodules of a package.
+
+        A name is a submodule only when the package proves it does not bind that name itself
+        (:meth:`PythonUseResolver.fromlist_submodule`): an attribute shadows the module."""
         if (
             claim.edge_type is not EdgeType.IMPORTS
             or claim.target_kind is not EntityType.MODULE
@@ -1434,7 +1444,7 @@ class ReferenceLinker:
         for name in (meta.get("names") or "").split(","):
             if not name.strip() or name.strip() == "*":
                 continue
-            target = index.resolve_package_submodule(origin, claim.target_key, f".{name.strip()}")
+            target = uses().fromlist_submodule(origin, claim.target_key, name.strip())
             if target is not None:
                 edges.append(self._edge(claim, origin, target.file_entity_id))
         return edges
@@ -1473,6 +1483,7 @@ class ReferenceLinker:
         index: ResolutionIndex,
         siblings: list[UnresolvedRefRecord],
         meta: dict[str, str],
+        uses: Callable[[], PythonUseResolver],
     ) -> EdgeRecord | None:
         """A call whose name this file imported, resolved through the import graph."""
         specifier = meta.get("module")
@@ -1480,7 +1491,7 @@ class ReferenceLinker:
         if not specifier or flavor is None:
             return None
         target_file = (
-            self._resolve_python_imported_submodule(claim, origin, index, siblings, specifier)
+            self._resolve_python_imported_submodule(claim, origin, index, siblings, specifier, uses)
             if flavor == "python"
             else None
         )
@@ -1489,6 +1500,15 @@ class ReferenceLinker:
         if target_file is None:
             return None
         name = claim.target_key.split(".")[-1]
+        if flavor == "python" and "." not in claim.target_key:
+            # A bare name is the local binding of a from-import: the module exports the name
+            # the statement imported, which `as` makes a different one. Two statements binding
+            # it to different names leave it unknown, and nothing is linked.
+            sources = _python_from_import_sources(claim.target_key, specifier, siblings)
+            if len(sources) > 1:
+                return None
+            if sources:
+                name = next(iter(sources))
         symbol = index.resolve_symbol(target_file, name)
         return self._edge(claim, origin, symbol.entity_id) if symbol else None
 
@@ -1499,6 +1519,7 @@ class ReferenceLinker:
         index: ResolutionIndex,
         siblings: list[UnresolvedRefRecord],
         specifier: str,
+        uses: Callable[[], PythonUseResolver],
     ) -> FileRow | None:
         """Resolve a fromlist name as a child module only when its package proves it."""
         name = claim.target_key.split(".", 1)[0]
@@ -1531,7 +1552,7 @@ class ReferenceLinker:
                     imported_name = source_name
                     break
             if imported_name in (sibling_meta.get("names") or "").split(","):
-                target = index.resolve_package_submodule(origin, specifier, f".{imported_name}")
+                target = uses().fromlist_submodule(origin, specifier, imported_name)
                 if target is not None:
                     return target
         return None
@@ -1542,12 +1563,24 @@ class ReferenceLinker:
         origin: FileRow,
         index: ResolutionIndex,
         resolver: PythonUseResolver,
+        siblings: Sequence[UnresolvedRefRecord],
         meta: Mapping[str, str],
         imported_name: str,
     ) -> EdgeRecord | None:
         """Resolve a direct Python from-import reference through its proven export table."""
         specifier = meta.get("module")
         if not specifier:
+            return None
+        # The file's own export table must bind the name to this one import: a name bound
+        # twice (a `try`/`except ImportError` pair) or conditionally is not this import's.
+        # The export table knows module-level imports only, so an import written in the
+        # call's own function is accepted when it is the file's only import of the name.
+        bound_at_module = resolver.has_import_binding(
+            origin, claim.target_key, specifier, imported_name
+        )
+        if not bound_at_module and not _python_scope_import(
+            claim, origin, siblings, specifier, imported_name
+        ):
             return None
         found = resolver.resolve(
             origin, {"module": specifier, "binding": "import", "imported": imported_name}
@@ -1974,23 +2007,64 @@ def _python_imported_name(
     specifier = meta.get("module")
     if not specifier or "." in claim.target_key:
         return None
-    names: set[str] = set()
+    names = _python_from_import_sources(claim.target_key, specifier, siblings)
+    return next(iter(names)) if len(names) == 1 else None
+
+
+def _python_from_import_sources(
+    local: str, specifier: str, siblings: Sequence[UnresolvedRefRecord]
+) -> set[str]:
+    """The names ``from <specifier> import ...`` statements of this file bind to ``local``.
+
+    ``Client as BaseClient`` binds ``BaseClient`` to the exported ``Client``; a plain name binds
+    itself, unless another name was renamed to it or it was renamed away. More than one name
+    means the file binds ``local`` twice and no one of them is the answer.
+    """
+    sources: set[str] = set()
     for sibling in siblings:
         if sibling.edge_type is not EdgeType.IMPORTS or sibling.target_key != specifier:
             continue
         sibling_meta = _claim_meta(sibling.meta_json)
         if "level" not in sibling_meta or sibling_meta.get("package") is not None:
             continue
-        aliases: dict[str, str] = {}
+        renamed: set[str] = set()
         for pair in (sibling_meta.get("aliases") or "").split(","):
-            imported, separator, local = pair.partition(":")
-            if separator and imported and local:
-                aliases[local] = imported
-        if claim.target_key in aliases:
-            names.add(aliases[claim.target_key])
-        elif claim.target_key in (sibling_meta.get("names") or "").split(","):
-            names.add(claim.target_key)
-    return next(iter(names)) if len(names) == 1 else None
+            imported, separator, bound = pair.partition(":")
+            if separator and imported and bound:
+                renamed.add(imported)
+                if bound == local:
+                    sources.add(imported)
+        if local in (sibling_meta.get("names") or "").split(",") and local not in renamed:
+            sources.add(local)
+    return sources
+
+
+def _python_scope_import(
+    claim: UnresolvedRefRecord,
+    origin: FileRow,
+    siblings: Sequence[UnresolvedRefRecord],
+    specifier: str,
+    imported: str,
+) -> bool:
+    """An import in the call's own function scope that is the file's only import of the name."""
+    local = claim.target_key
+    binders: list[UnresolvedRefRecord] = []
+    for sibling in siblings:
+        if sibling.edge_type is not EdgeType.IMPORTS:
+            continue
+        bound: dict[str, _ImportedName] = {}
+        _bind_python_import(bound, sibling.target_key, _claim_meta(sibling.meta_json))
+        if local in bound:
+            binders.append(sibling)
+    if len(binders) != 1:
+        return False
+    binder = binders[0]
+    return (
+        binder.src_id == claim.src_id
+        and binder.src_id != origin.file_entity_id
+        and binder.target_key == specifier
+        and _python_from_import_sources(local, specifier, [binder]) == {imported}
+    )
 
 
 def _python_imported_value_member(

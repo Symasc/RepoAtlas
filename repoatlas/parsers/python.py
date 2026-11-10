@@ -299,7 +299,7 @@ class _Visitor(ast.NodeVisitor):
                         "level": str(node.level),
                         **(
                             {}
-                            if submodule_candidates and not module
+                            if submodule_candidates
                             else {"names": ",".join(a.name for a in node.names)}
                         ),
                         **({"aliases": aliases} if aliases else {}),

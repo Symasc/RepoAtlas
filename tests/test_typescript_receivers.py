@@ -108,7 +108,20 @@ export function imported() {
 }
 """
 
-FILES = {"imports.ts": IMPORTS, "shadows.ts": SHADOWS, "log_file.ts": "export const logger = 1;"}
+#: ``save`` is imported inside ``load`` only; ``apply`` takes its own ``save``. An import made in
+#: one function's scope binds no name for the file, so neither call may claim ``./store``.
+FUNCTION_LOCAL = """\
+export async function load(){ const { save } = await import("./store"); save(); }
+export function apply(save: () => void){ save(); }
+"""
+
+FILES = {
+    "imports.ts": IMPORTS,
+    "shadows.ts": SHADOWS,
+    "log_file.ts": "export const logger = 1;",
+    "dyn.ts": FUNCTION_LOCAL,
+    "store.ts": "export function save(){ return 1; }\n",
+}
 
 
 @pytest.fixture
@@ -142,6 +155,13 @@ def test_an_import_binds_the_names_it_introduces_and_no_segment_of_its_path(
     # `ns_file`, `lib_file` and `node` are segments of a specifier, bound by no import. A
     # renamed import (`read`) and a renamed destructured property (`shut`) are not traced.
     assert claimed == {"fs.go", "stat.go", "open.go", "ns.go", "lib.go"}
+
+
+def test_a_function_local_import_binds_no_name_for_the_file(indexed: Workspace) -> None:
+    # `apply`'s `save` is its own parameter, and `load`'s is a binding of `load` alone, so
+    # neither claims the module. That `load`'s own call is also lost is accepted: a missed
+    # link is better than a false one.
+    assert call_claims(indexed, "dyn.ts") == []
 
 
 def test_only_the_function_that_does_not_shadow_an_import_claims_it(indexed: Workspace) -> None:

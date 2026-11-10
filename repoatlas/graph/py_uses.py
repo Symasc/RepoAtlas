@@ -136,6 +136,22 @@ class PythonUseResolver(BoundedTrace):
             self._refused(reason or "not-exported")
         return found
 
+    def fromlist_submodule(self, origin: FileRow, spec: str, name: str) -> FileRow | None:
+        """The submodule ``from <spec> import <name>`` imports, if the package binds no ``name``.
+
+        Python looks for the attribute first and falls back to the submodule only when the
+        package has none: the package's export table must say ``not-exported``, uncut by a
+        cycle or a bound. A name it binds, a star or ``__getattr__`` that might, and a ``spec``
+        that is no package of the importer's own project all answer nothing."""
+        target = self._modules.resolve(origin, spec)
+        if isinstance(target, str):
+            return None
+        self._begin(origin)
+        found, reason, cut = self._trace(target.file, name, frozenset(), 0)
+        if found is not None or reason != "not-exported" or cut:
+            return None
+        return self._modules.submodule(target.file, name)
+
     def has_import_binding(
         self, module: FileRow, local: str, specifier: str, imported: str
     ) -> bool:

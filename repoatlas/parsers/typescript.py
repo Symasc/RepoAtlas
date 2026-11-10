@@ -788,6 +788,13 @@ class _Walker:
             parent = parent.parent
         if parent is None or parent.type != "variable_declarator":
             return ""
+        # A binding made inside a function, block or class body is that scope's alone: only a
+        # declaration of the module's own top level (`const x`, `export const x`) is the file's.
+        scope = parent.parent.parent if parent.parent is not None else None
+        if scope is not None and scope.type == "export_statement":
+            scope = scope.parent
+        if scope is None or scope.type != "program":
+            return ""
         name = parent.child_by_field_name("name")
         if name is None:
             return ""
@@ -962,7 +969,9 @@ class TypeScriptParser:
     # 28: a ``const x = require("m")`` or ``await import("m")`` records the names it binds, and
     #    a call whose leading name a parameter, local or loop variable shadows is marked
     #    ``LOCAL_RECEIVER`` (repoatlas.parsers.ts_uses).
-    version = "28"
+    # 29: a ``require("m")`` or ``await import("m")`` binds names for the file only when its
+    #    declaration is at the module's top level; inside a function or block it binds none.
+    version = "29"
     language = "TypeScript"
 
     def supports(self, path: Path) -> bool:
