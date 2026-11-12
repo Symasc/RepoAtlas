@@ -1,15 +1,16 @@
-"""``USES`` is added beside the graph, never into it: search answers exactly as before.
+"""``USES`` edges are never automatically expanded by search or relationships.
 
 Declaration-level uses outnumber every other relationship, and ordinary search must
-not change because they exist. That holds by construction, and these tests hold the
-construction:
+not expand through them. These tests hold that construction:
 
-* indexing with and without them yields the same facts in every other table and edge
-  type, so nothing that existed before was changed to make room for them;
+* removing only ``USES`` edges leaves every other fact unchanged;
 * search, and ``relationships`` asked for no edge type, answer byte for byte the same;
 * ``USES`` is nameable, never expanded automatically, and never crosses a repository;
 * every query that reads edges is either typed or reviewed here, so no future query
   can take them in by forgetting a type filter.
+
+Ordinary calls and references may read the recorded use claims when resolving a
+binding; these tests vary the resulting edges, not the claims.
 """
 
 from __future__ import annotations
@@ -73,13 +74,9 @@ QUESTIONS = (
 )
 
 
-def _no_uses(*_: object) -> list[object]:
-    return []
-
-
 @pytest.fixture
-def pair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Workspace, Workspace]]:
-    """The same repositories indexed twice: as shipped, and with ``USES`` switched off."""
+def pair(tmp_path: Path) -> Iterator[tuple[Workspace, Workspace]]:
+    """The same graph with and without its ``USES`` edges."""
     opened = []
 
     def index(tag: str) -> Workspace:
@@ -93,8 +90,9 @@ def pair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Work
         return build(workspace, tmp_path / tag, {"symbols": SYMBOLS, "app": APP})
 
     with_uses = index("with")
-    monkeypatch.setattr("repoatlas.parsers.typescript.use_references", _no_uses)
     without = index("without")
+    with without.database.transaction() as conn:
+        conn.execute("DELETE FROM edges WHERE type = 'USES'")
     yield with_uses, without
     for workspace in opened:
         workspace.close()
@@ -148,14 +146,11 @@ def test_uses_were_actually_indexed(pair: tuple[Workspace, Workspace]) -> None:
     assert without.database.execute(count).fetchone()[0] == 0
 
 
-def test_every_other_fact_is_unchanged(pair: tuple[Workspace, Workspace]) -> None:
+def test_removing_uses_edges_leaves_other_facts_unchanged(
+    pair: tuple[Workspace, Workspace],
+) -> None:
     with_uses, without = pair
     assert _without_uses(fact_snapshot(with_uses)) == _without_uses(fact_snapshot(without))
-    # and the edges USES added carry no resolution or producer another edge uses
-    for workspace in (with_uses, without):
-        assert not workspace.database.execute(
-            "SELECT 1 FROM edges WHERE type != 'USES' AND resolution LIKE '%\"use\":%'"
-        ).fetchall()
 
 
 def test_search_answers_byte_for_byte_the_same(pair: tuple[Workspace, Workspace]) -> None:

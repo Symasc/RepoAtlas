@@ -83,18 +83,18 @@ RELATIONSHIP_DEFAULT_EDGES = (*EXPANSION_EDGES, EdgeType.CALLS_HTTP_HANDLER)
 #: expands through them.
 #:
 #: Being nameable is not being reachable across a boundary. ``CALLS`` and ``USES``
-#: are deliberately absent from :data:`CROSS_REPOSITORY_EDGES` below, so an explicit
-#: request still cannot follow one out of its repository.
+#: are deliberately absent from :data:`CROSS_REPOSITORY_EDGES` below. An explicit
+#: relationships request may follow a ``CALLS`` edge across only on its own package
+#: evidence; a same-named symbol is never enough.
 RELATIONSHIP_EDGES = (*RELATIONSHIP_DEFAULT_EDGES, EdgeType.CALLS, EdgeType.USES)
 
 #: Edge types a traversal may follow **out of one repository into another**.
 #:
 #: Every one of these is produced by the linker's global pass from an exact match
 #: — a resolved package name, path, import, or explicitly mapped Salt pillar — so
-#: a cross-repository answer always has a structural reason (V1_SPEC §9). A `CALLS`
-#: or `DEFINES` edge is deliberately absent: those are meaningful within a
-#: repository but would let a traversal wander between repositories on nothing
-#: stronger than a shared symbol name.
+#: a cross-repository answer always has a structural reason (V1_SPEC §9). ``CALLS``
+#: is absent from this unconditional set; explicit relationships and impact allow
+#: it only on package evidence. ``DEFINES`` never crosses.
 CROSS_REPOSITORY_EDGES = frozenset(
     {
         EdgeType.DEPENDS_ON,
@@ -196,6 +196,7 @@ def walk(
     edge_types: Sequence[EdgeType] = EXPANSION_EDGES,
     direction: EdgeDirection = EdgeDirection.ANY,
     crossing_edges: frozenset[EdgeType] = CROSS_REPOSITORY_EDGES,
+    evidenced_edges: frozenset[EdgeType] = frozenset(),
     containment: bool = False,
     order: NeighborOrder = NeighborOrder.CONFIDENCE,
     home_repo_id: int | None = None,
@@ -213,11 +214,9 @@ def walk(
     reads it.
 
     ``crossing_edges`` is the set permitted to leave a repository. Every member of
-    the default is produced by the linker's global pass from an exact match, so a
-    cross-repository answer always has a structural reason (V1_SPEC §9). Passing
-    an empty set confines the walk to one repository; passing a *wider* set is not
-    offered, because the restriction is what keeps a traversal from wandering
-    between repositories on nothing stronger than a shared symbol name.
+    the default is produced by the linker's global pass from an exact match.
+    ``evidenced_edges`` admits a crossing only when that particular edge records
+    package evidence. Empty sets confine direct edges to their repositories.
 
     ``containment`` admits :data:`CONTAINMENT_EDGES` as visible structural context
     around the **seeds only**, and only that. It is a deliberately bounded one-hop
@@ -287,7 +286,9 @@ def walk(
             edges = edges[:want]
         next_frontier: list[int] = []
         for edge in edges:
-            if edge.crosses_repositories and edge.type not in crossing_edges:
+            if edge.crosses_repositories and not (
+                edge.type in crossing_edges or (edge.type in evidenced_edges and edge.evidenced)
+            ):
                 continue
 
             if edge.src_id in frontier_set:

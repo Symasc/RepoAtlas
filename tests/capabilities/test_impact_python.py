@@ -1,4 +1,4 @@
-"""P18: a change to a Python declaration reaches its users, and theirs, through ``USES``.
+"""P18: a change to a Python declaration reaches its users, and theirs.
 
 No Python-specific impact code exists: the walk follows the edges the Python resolver
 wrote exactly as it follows TypeScript's (repoatlas.graph.impact).
@@ -34,7 +34,7 @@ def test_p18_the_walk_reaches_the_consumer_and_the_test_that_calls_it(pyfix: Wor
     [test] = [c for c in response.tests if c.entity == "sym:pyfix:tests/test_consumer.py:test_p2:2"]
     assert (test.distance, test.step.edge, test.step.use, test.from_) == (
         2,
-        "USES",
+        "CALLS",
         "call",
         consumer.id,
     )

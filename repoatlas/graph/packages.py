@@ -1,4 +1,4 @@
-"""Package links: an import that names a package another repository provides (``USES`` only).
+"""Package links: an import that names a package another repository provides.
 
 A bare specifier that resolves inside its own repository is the import graph's
 business (:mod:`repoatlas.graph.modules`). One that does not may still name source
@@ -66,7 +66,7 @@ from repoatlas.models.dependencies import DependencyRecord
 from repoatlas.parsers.module_facts import MODULE_RESOLUTION
 from repoatlas.storage.protocols import FileRow, UnresolvedRefRecord
 
-#: The ``basis`` a ``USES`` edge's resolution records when a package link proved it.
+#: The ``basis`` an edge's resolution records when a package link proved it.
 PACKAGE_BASIS = "package"
 #: The resolution key holding a crossing's evidence; the impact walk crosses on nothing else.
 CROSSING = "crossing"

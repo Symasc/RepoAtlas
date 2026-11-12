@@ -1,7 +1,7 @@
 """Workspaces and oracles for the topology capability tests.
 
 The linked corpus is the cross-repository one impact is tested on: package
-crossings (``USES`` with recorded evidence), manifest dependencies the linker
+crossings with recorded evidence, manifest dependencies the linker
 resolved (``DEPENDS_ON``), an ambiguous publisher, and one HTTP caller-to-handler
 pair. Every oracle here reads the index directly, with its own statement of
 which edge types are which kind, so a change to the capability's classification

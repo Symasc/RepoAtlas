@@ -26,8 +26,9 @@ candidate's predecessors rank before it.
 **Confinement.** A walk has a home repository: the seed's, else the context's. It leaves
 it only by a direct edge of a crossing type (:data:`CROSS_REPOSITORY_EDGES`), or by an
 edge of a family that crosses on evidence (:attr:`Family.crosses`) and records that
-evidence itself -- a ``USES`` edge a package link proved (:mod:`repoatlas.graph.packages`),
-a ``CALLS_HTTP_HANDLER`` edge an HTTP join proved (:mod:`repoatlas.graph.http_crossings`),
+evidence itself -- a ``USES`` or ``CALLS`` edge a package link proved
+(:mod:`repoatlas.graph.packages`), a ``CALLS_HTTP_HANDLER`` edge an HTTP join proved
+(:mod:`repoatlas.graph.http_crossings`),
 a ``CONFIGURES`` edge from a deployment's effective setter to a reader in the image DF2 proved
 it runs (:mod:`repoatlas.graph.deployment_env`) -- and never through a shared node: the same
 environment variable read in two repositories does not join them. A crossing moves the
@@ -167,7 +168,9 @@ class Family:
 FAMILIES: tuple[Family, ...] = (
     Family("uses", EdgeType.USES, IN, ImpactRole.DEPENDENT, Tier.EXACT, "uses", crosses="package"),
     Family("references", EdgeType.REFERENCES, IN, ImpactRole.DEPENDENT, Tier.EXACT, "references"),
-    Family("calls", EdgeType.CALLS, IN, ImpactRole.DEPENDENT, Tier.EXACT, "calls"),
+    Family(
+        "calls", EdgeType.CALLS, IN, ImpactRole.DEPENDENT, Tier.EXACT, "calls", crosses="package"
+    ),
     Family("reads", EdgeType.READS, IN, ImpactRole.DEPENDENT, Tier.EXACT, "reads"),
     # A deployment's setter configures a reader: outward from the setter, and inward to it as
     # a leaf. Across repositories only on a deployment_env record (DF3a); Salt's and a

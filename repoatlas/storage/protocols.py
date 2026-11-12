@@ -458,6 +458,7 @@ class NeighborEdge(BaseModel):
 #: here never crosses on evidence.
 EVIDENCE_PATHS: dict[EdgeType, str] = {
     EdgeType.USES: "$.crossing.package",
+    EdgeType.CALLS: "$.crossing.package",
     EdgeType.CALLS_HTTP_HANDLER: "$.http.provider",
     # A deployment's effective setter to a reader in the image DF2 proved it runs (DF3a).
     EdgeType.CONFIGURES: "$.deployment_env.built_by",

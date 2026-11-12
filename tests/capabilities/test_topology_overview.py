@@ -57,7 +57,11 @@ def test_kinds_are_never_merged(linked: Workspace) -> None:
         assert sum(count.count for count in link.types) == link.count
     by_pair = {(link.source, link.target, link.kind): link for link in response.links}
     # one pair, two claims: the code that uses the package, and the manifest declaring it
-    assert by_pair[("app", "contracts", LinkKind.OBSERVED)].count == 6
+    observed = by_pair[("app", "contracts", LinkKind.OBSERVED)]
+    assert {str(count.type): count.count for count in observed.types} == {
+        "IMPORTS": 4,
+        "USES": 6,
+    }
     assert by_pair[("app", "contracts", LinkKind.DEPENDENCY)].count == 1
     # a caller reaching a handler by route is HTTP, and only HTTP
     http = by_pair[("http-web", "http-api", LinkKind.HTTP)]

@@ -1,11 +1,10 @@
-"""Following a use of an imported name to the declaration it names (``USES`` only).
+"""Following a use of an imported name to the declaration it names.
 
 A use through an import (:mod:`repoatlas.parsers.ts_uses`) carries the module it came
 from and the name that module exports. The declaration is wherever that name leads,
-through however many re-exporting files. This is the resolution the ``USES`` edge
-relies on, and nothing else reads it: the ``IMPORTS``, ``REFERENCES`` and ``CALLS``
-edges keep :meth:`~repoatlas.graph.modules.ModuleResolver.definition` exactly as it
-was, so no existing edge changes.
+through however many re-exporting files. ``USES`` edges rely on this resolution; the
+global linker also uses it for an ordinary reference whose matching use proves its
+binding, and for static exports of imported names.
 
 It reads each file's own export table, and follows what that trace cannot:
 
@@ -44,7 +43,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from repoatlas.graph.modules import MAX_REEXPORT_HOPS, MAX_TRACE_STEPS, ModuleResolver
+from repoatlas.graph.modules import MAX_REEXPORT_HOPS, MAX_TRACE_STEPS, ModuleResolver, ModuleTarget
 from repoatlas.graph.packages import CROSSING, PACKAGE_BASIS, PackageLink, PackageLinks
 from repoatlas.graph.resolution import ResolutionIndex
 from repoatlas.models.parsing import EntityType
@@ -194,7 +193,7 @@ class BoundedTrace:
 
 
 class UseResolver(BoundedTrace):
-    """Resolves the TypeScript and JavaScript ``USES`` claims of one global pass."""
+    """Resolves TypeScript and JavaScript uses of imported names in one global pass."""
 
     def __init__(
         self,
@@ -211,17 +210,12 @@ class UseResolver(BoundedTrace):
     def resolve(self, origin: FileRow, meta: dict[str, str]) -> tuple[int, dict[str, Any]] | None:
         """The used entity's id and how it was reached, or ``None`` with the reason counted."""
         specifier = meta.get("module") or ""
-        target = self._modules.resolve(origin, specifier)
-        link: PackageLink | None = None
-        if target is None:
-            found = self._links.resolve(origin, specifier) if self._links is not None else None
-            if not isinstance(found, PackageLink):
-                # A specifier that is no package at all keeps v1's reason.
-                refused = found not in (None, "relative", "not-a-package")
-                why = self._refusal(origin, specifier, found) if refused else "specifier"
-                self.unresolved[why] += 1
-                return None
-            link = found
+        found = self.module_target(origin, specifier)
+        if isinstance(found, str):
+            self.unresolved[found] += 1
+            return None
+        target = found if isinstance(found, ModuleTarget) else None
+        link = found if isinstance(found, PackageLink) else None
         module = target.file if target is not None else link.file if link is not None else None
         assert module is not None
         name = meta.get("imported")
@@ -255,6 +249,20 @@ class UseResolver(BoundedTrace):
             fields["namespace"] = True
             entity = definition.file.file_entity_id
         return entity, fields
+
+    def module_target(self, origin: FileRow, specifier: str) -> ModuleTarget | PackageLink | str:
+        """Resolve a module locally or through the importer's proven package link."""
+        target = self._modules.resolve(origin, specifier)
+        if target is not None:
+            return target
+        found = self._links.resolve(origin, specifier) if self._links is not None else None
+        if isinstance(found, PackageLink):
+            return found
+        return (
+            self._refusal(origin, specifier, found)
+            if found not in (None, "relative", "not-a-package")
+            else "specifier"
+        )
 
     def _refusal(self, origin: FileRow, specifier: str, found: str | None) -> str:
         """``package:<why>``; for a package ``origin``'s own repository provides, what its

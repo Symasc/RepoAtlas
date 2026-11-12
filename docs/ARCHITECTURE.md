@@ -1646,7 +1646,7 @@ enum reaches the value enum itself: the walk never climbs from a member back to 
 **Impact.** `POLICY` was `impact/4` here: the `generates` family (formerly `generates-graphql`) admits
 `prisma_migrate` evidence, and `maps-to` is new. It is `impact/5` from DF3a's configuration crossings, `impact/6`
 from DF3b's model fields, `impact/7` from DF3c's refused HTTP requests, and `impact/8` from DF3d's deployment
-context (§5).
+context (§5). `impact/9` also follows a cross-repository `CALLS` edge on its own package evidence.
 
 ### What an impact answer says about evidence and refusals
 
@@ -1713,8 +1713,8 @@ resolves every use: a first index, a database from before this stage, a run that
 | environment variable, module, command, config key | interned as a global entity in the per-file pass |
 | symbol defined in the same file | resolved directly in the per-file pass |
 | symbol defined in another file | resolved **only through an import this file actually wrote** |
-| module specifier | resolved to a file: Python dotted and relative, TS/JS relative with index resolution |
-| TS/JS bare module specifier (`@/api/client`, `@acme/shapes`) | an `IMPORTS` edge to **one** indexed file of the importing repository, when `ModuleResolver` (the resolution the declaration uses read) maps it: a tsconfig `paths` or `baseUrl` mapping, or a member of the importer's own workspace, read from indexed facts. The edge records how in `resolution` (`basis`, `specifier`, the mapping). A duplicate workspace provider, entry fields that lead to different files, an alias into an unindexed or out-of-repository target, a declaration naming another source, or a name only another repository provides resolves to nothing. Calls, references and exports through such an import are not changed |
+| module specifier | resolved to a file: Python dotted and relative, TS/JS relative with index resolution. A proven Python project root or dependency takes precedence over a conflicting legacy lookup; when no stronger target is found, the existing repository-local lookup remains |
+| TS/JS bare module specifier (`@/api/client`, `@acme/shapes`) | an `IMPORTS` edge to one indexed file when a tsconfig `paths`/`baseUrl` mapping, a workspace member, or a declared package's proven provider resolves it. The edge records how in `resolution`. Duplicate providers, conflicting entries, unindexed aliases, and declarations naming another source remain unresolved. Calls, references and static exports can follow the same binding trace |
 | Python `from . import x` | `x` is a *candidate* module in the package the dots name; an edge only when that package and that module both exist |
 | script / file path | joined against the referencing file's directory, then matched to a managed repository — including paths that climb out of one repository into another |
 | Salt `include:` | dotted state path → `x/y.sls` or `x/y/init.sls` |
@@ -1722,6 +1722,7 @@ resolves every use: a first index, a database from before this stage, a run that
 | Salt master roots / `top.sls` | indexed root declarations and literal environment/target/SLS mappings |
 | `salt://` source | unique matching managed path, at reduced confidence |
 | `pillar[...]` key | a unique config key in the consumer's direct includes or its explicitly mapped Salt pillar roots |
+| declared package | interned `pkg:<ecosystem>:<name>`, plus a repository edge when exactly one managed repository provides that exact normalized name |
 
 Cross-repository pillar resolution requires a Salt installation association. An indexed master config supplies
 `file_roots` and `pillar_roots`; a root whose absolute path is inside a managed repository is mapped by exact path.
@@ -1783,9 +1784,10 @@ across the layers that can each answer their own half:
   names for `from pkg import name`. It cannot see the filesystem, so it never claims a name is a module;
 * the **resolution index** decides relative candidates, and emits an edge only when the prefix
   resolves to an indexed package and a module of that name exists in it. For an explicit absolute
-  fromlist, `PythonUseResolver.fromlist_submodule` decides: the package must be a regular package of
-  the importer's own project whose export table binds no such name, and the module is looked up
-  inside that package's directory only.
+  fromlist, `PythonUseResolver.fromlist_submodule` decides: the package must be a regular package whose
+  export table binds no such name, and the module is looked up inside that package's directory only.
+  A package in another project additionally needs a proven dependency, and the child must resolve to
+  the same provider.
 
 The package reference is kept alongside the candidate, because both import forms also import the
 package. Both edges are true.
@@ -1801,9 +1803,8 @@ here or anywhere else in this file.
 
 What is deliberately **not** resolved: `from . import CONSTANT` or `from pkg import CONSTANT` where only
 `__init__.py` defines `CONSTANT`, `from . import missing`, `from pkg import missing`, `from . import *`
-(there is no module named `*`), and the same name in another package or another repository. Unknown is
-an acceptable answer; a fabricated module is not.
-| declared package | interned `pkg:<ecosystem>:<name>`, plus a repository edge when exactly one managed repository provides that exact normalized name |
+(there is no module named `*`), and the same name in a different or unproven package. Unknown is an
+acceptable answer; a fabricated module is not.
 
 Three rules hold across every row, and they are the trust rule in practice:
 
@@ -1819,20 +1820,18 @@ Three rules hold across every row, and they are the trust rule in practice:
 Everything unresolved stays in `unresolved_refs` rather than being discarded, so adding `common-lib` to the managed
 set later retroactively creates the `python-service DEPENDS_ON common-lib` edge without reparsing `python-service`.
 
-**Symbol and module resolution are within one repository.** The two rows above describe what the linker does inside
-a repository; neither crosses a repository boundary. `from common_lib.settings import load_config` in
-`python-service` and `import { loadConfig } from "@company/common"` in `ts-service` both stay in `unresolved_refs`,
-even when `common-lib` is managed and does define that name. V1 therefore relates the two repositories at package
-granularity — `repo:python-service DEPENDS_ON repo:common-lib`, from the manifest — and never at symbol
-granularity.
+**Cross-repository imports and symbols.** The global pass may resolve a Python or TS/JS import to another
+repository only through the same package evidence used by declaration uses: the consumer's declaration, a unique
+provider or an explicit source pin, and an indexed entry. A Python provider must actually ship the import name;
+distribution names are not assumed to be import names. A call or reference newly resolved through that provider
+also needs a matching recorded use that proves the binding and destination. Crossings record the package,
+declaration, provider, entry and import line. Ambiguous providers, failed pins and untraced bindings do not gain
+edges from name equality.
 
-This is a deliberate boundary rather than an oversight: resolving a bare package specifier to a file needs the
-ecosystem's own module-resolution rules (`node_modules` layout and `exports` maps, `sys.path` and installed
-distributions, gem paths), and guessing at them would produce exactly the "similar name, assumed relationship" edge
-V1_SPEC §9 forbids. The safe half of the guarantee holds and is tested: a cross-repository reference never resolves
-to a *wrong* same-named definition. The missing half is recall, not correctness — "which repository provides
-`load_config`?" is answered at package level and by retrieval, not by an `IMPORTS` edge. Closing it is V2 work and
-needs a real resolver per ecosystem (§14).
+An explicit `relationships` request may follow a cross-repository `CALLS` edge only with `cross_repository` and
+the edge's own package evidence; change impact follows it on the same evidence. Automatic search expansion still
+does not follow `CALLS`. The index does not execute `sys.path` changes or infer installed distributions, so a
+source-backed link is not a guarantee of runtime import behavior.
 
 ---
 
@@ -1860,10 +1859,9 @@ ordinary         = linked + one classified outcome per claim that did not link
 - **Outcomes** (`linked`, `external`, `not-indexed`, `target-not-found`, `dynamic`, `ambiguous`, `unsupported`,
   `evidence-unreadable`, `trace-bound`) each carry a closed *subreason*. `external` needs evidence: the standard
   library (the interpreter's module list, or Node's fixed core list), or a package the claim's repository **declares**
-  and no managed repository **provides**. A name nobody declares is `unsupported`, never external, because the ordinary
-  lookup does not read Python project layouts (and, for calls, tsconfig `paths` or workspaces), so "nothing found" is
-  not "nothing there". A package another managed repository provides is `unsupported:cross-repository-provider`: the
-  ordinary rules never cross repositories. A bare TS/JS **import** the resolver refuses says why: a duplicate
+  and no managed repository **provides**. A name nobody declares is `unsupported`, never external: "nothing found"
+  is not "nothing there". `unsupported:cross-repository-provider` means a provider exists but the ordinary claim
+  could not be proven through it. A bare TS/JS **import** the resolver refuses says why: a duplicate
   workspace provider and conflicting entry fields are `ambiguous`, an alias or package entry with no indexed target is
   `target-not-found`, and a declaration naming another source is `unsupported`.
 - **`linked` means a source relationship.** Every `IMPORTS` claim also has an edge to an interned module node, a fact
@@ -1886,7 +1884,9 @@ ordinary         = linked + one classified outcome per claim that did not link
   stored as `<expression>`. `repoatlas decisions` lists them. **Impact never does**: `link_decisions_near` excludes the
   family, so an impact answer, its decision list and its omissions are what they were without it.
 - **Still not modelled here, by design.** A direct Python `from module import name` reference follows an unconditional
-  re-export only when the indexed export tables prove where that name leads. A direct method call through an imported
+  re-export only when the indexed export tables prove where that name leads. An ordinary call or reference may use a
+  matching declaration-use trace, but not a namespace-only result, an unproven receiver or a non-callable call target.
+  A direct method call through an imported
   module value is resolved only when its explicit annotation is one simple class name (optionally `T | None`) that
   resolves to one in-repository class, and that class directly declares an undecorated method; inherited or decorated
   methods, untyped or ambiguously/conditionally bound values, multi-member chains, dynamic or conditional exports,

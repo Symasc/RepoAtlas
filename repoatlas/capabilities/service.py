@@ -1009,6 +1009,9 @@ class CapabilityService:
                         crossing_edges=(
                             RELATIONSHIP_CROSSING_EDGES if request.cross_repository else frozenset()
                         ),
+                        evidenced_edges=(
+                            frozenset({EdgeType.CALLS}) if request.cross_repository else frozenset()
+                        ),
                         containment=request.include_containment,
                         # The cut is the answer here, so it falls on the
                         # repositories' own facts rather than on insertion order.

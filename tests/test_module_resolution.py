@@ -2,12 +2,11 @@
 
 :class:`~repoatlas.graph.modules.ModuleResolver` answers one question from indexed
 facts: which file a specifier names. It serves declaration uses and package links, and the
-global pass's ``IMPORTS`` edges for bare specifiers a configuration names. The reference and
-call edges are resolved exactly as before, and the last tests here pin both.
+global pass's imports and imported bindings for specifiers a configuration names.
 
 One pnpm monorepo carries every shape resolution has to get right, and three more
-repositories check that a package name never resolves into another repository. Each
-test asserts both what resolves and what must not.
+repositories check that a package name without a proven provider stays local. Each test
+asserts both what resolves and what must not.
 """
 
 from __future__ import annotations
@@ -349,7 +348,7 @@ def test_the_resolver_reads_indexed_facts_never_the_working_tree(
     assert target.file.rel_path == "apps/web/src/api/client.ts"
 
 
-# --- the import graph is resolved exactly as before ----------------------------
+# --- ordinary import and call edges ------------------------------------------
 
 
 def global_edges(workspace: Workspace, path: str) -> set[tuple[Any, ...]]:
@@ -418,20 +417,16 @@ def test_what_cannot_be_resolved_to_one_file_gets_no_import_edge(indexed: Worksp
     assert import_edges(indexed, "src/main.ts") == set()
 
 
-def test_no_ordinary_edge_other_than_imports_gains_a_resolution_or_a_target(
-    indexed: Workspace,
-) -> None:
-    """Calls, references and exports keep exactly the resolution they had: this change adds
-    file-level imports, and nothing else of the ordinary graph moves."""
-    recorded = indexed.database.execute(
-        "SELECT DISTINCT type FROM edges WHERE resolution IS NOT NULL AND type != 'USES'"
-    ).fetchall()
-    assert {row[0] for row in recorded} == {"IMPORTS"}
-    for path in (APP, "apps/use/src/use.ts", "apps/web/src/legacy/use.ts"):
-        assert {row[0] for row in global_edges(indexed, path)} <= {"IMPORTS"}
+def test_ordinary_calls_follow_the_proven_workspace_binding(indexed: Workspace) -> None:
+    calls = {
+        (line, fields["basis"], fields["local"], target)
+        for kind, line, resolution, target in global_edges(indexed, APP)
+        if kind == "CALLS" and resolution and (fields := json.loads(resolution))
+    }
+    assert calls == {(23, "workspace-package", "circleArea", "packages/shapes/src/circle.ts")}
 
 
-def test_an_import_edge_never_leaves_the_importing_repository(indexed: Workspace) -> None:
+def test_an_import_without_a_proven_provider_stays_in_its_repository(indexed: Workspace) -> None:
     crossing = indexed.database.execute(
         """
         SELECT COUNT(*) FROM edges e

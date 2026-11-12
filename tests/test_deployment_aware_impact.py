@@ -272,7 +272,7 @@ def test_skips_are_neither_candidates_refusals_nor_truncation(corpus: Workspace)
     }
     assert response.omitted.by_unit == {}
     assert not [d for d in response.decisions if d.family == "http"]
-    assert response.summary.policy == "impact/8"
+    assert response.summary.policy == "impact/9"
 
 
 # -- links, services and packages -----------------------------------------------------------

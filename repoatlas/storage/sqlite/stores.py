@@ -1763,6 +1763,9 @@ class SqliteKnowledgeStore:
             f"""
             SELECT e.src_id, e.dst_id, e.type, e.confidence, e.file_id,
                    e.line_start, e.line_end, e.parser,
+                   CASE WHEN e.type = 'CALLS' AND json_valid(e.resolution)
+                        THEN json_extract(e.resolution, '$.crossing.package') IS NOT NULL
+                        ELSE 0 END AS evidenced,
                    src.repo_id AS src_repo_id, dst.repo_id AS dst_repo_id
             FROM edges e
             JOIN entities src ON src.id = e.src_id
@@ -1785,6 +1788,7 @@ class SqliteKnowledgeStore:
                 line_start=row["line_start"],
                 line_end=row["line_end"],
                 parser=row["parser"],
+                evidenced=bool(row["evidenced"]),
             )
             for row in rows
         ]

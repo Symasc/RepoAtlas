@@ -35,7 +35,7 @@ import os
 import re
 import sys
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Final
@@ -204,12 +204,14 @@ class Classifier:
         records: Sequence[DependencyRecord],
         module_facts: Sequence[UnresolvedRefRecord],
         modules: ModuleResolver | None = None,
+        resolved_module: Callable[[FileRow, str, str], FileRow | None] | None = None,
     ) -> None:
         self._index = index
         self._module_facts = module_facts
         #: The resolver the link pass resolved imports with (so its refusals are the ones
         #: explained); built from the same facts when the caller has none.
         self._modules = modules
+        self._resolved_module = resolved_module
         #: (repo_id, ecosystem, normalized name) of every package a repository declares, and
         #: the repositories that provide each (ecosystem, normalized name).
         self._declared: set[tuple[int, str, str]] = set()
@@ -408,7 +410,12 @@ class Classifier:
             return Decision(UNSUPPORTED, LANGUAGE_NOT_MODELED, "importing-file", "extension")
         where = (origin.repo_id, origin.rel_path.rpartition("/")[0], specifier, flavor)
         if where not in self._targets:
-            self._targets[where] = self._index.resolve_module(origin, specifier, flavor)
+            resolved = (
+                self._resolved_module(origin, specifier, flavor)
+                if self._resolved_module is not None
+                else None
+            )
+            self._targets[where] = resolved or self._index.resolve_module(origin, specifier, flavor)
         target = self._targets[where]
         if target is None:
             return self._module(origin, specifier, flavor)

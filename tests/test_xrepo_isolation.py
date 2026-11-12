@@ -1,9 +1,9 @@
-"""Cross-repository ``USES`` edges are the impact walk's alone: no other tool sees them.
+"""Cross-repository ``USES`` edges are the impact walk's alone.
 
-A package link adds facts beside the graph, not into it. Search never expands through
-``USES``, so it answers byte for byte as it did before links existed; and an explicit
-``relationships`` request for ``USES``, even one that asks to cross repositories, is
-confined to what ``CROSS_REPOSITORY_EDGES`` lets cross -- which ``USES`` is not.
+Package links also resolve ordinary imports and references; isolate their ``USES``
+edges to verify that search never expands through those edges. An explicit
+``relationships`` request for ``USES``, even one that asks to cross repositories,
+is confined to what ``CROSS_REPOSITORY_EDGES`` lets cross -- which ``USES`` is not.
 """
 
 from __future__ import annotations
@@ -39,13 +39,9 @@ QUESTIONS = (
 )
 
 
-def _never_linked(*_: object) -> str:
-    return "provider-absent"
-
-
 @pytest.fixture
-def pair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Workspace, Workspace]]:
-    """The XR repositories indexed twice: as shipped, and with package links switched off."""
+def pair(tmp_path: Path) -> Iterator[tuple[Workspace, Workspace]]:
+    """The same graph with and without cross-repository ``USES`` edges."""
     opened = []
 
     def index(tag: str) -> Workspace:
@@ -59,8 +55,16 @@ def pair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Work
         return build(workspace, tmp_path / tag, LINKING)
 
     linked = index("linked")
-    monkeypatch.setattr("repoatlas.graph.packages.PackageLinks.resolve", _never_linked)
     unlinked = index("unlinked")
+    with unlinked.database.transaction() as conn:
+        conn.execute(
+            """
+            DELETE FROM edges WHERE type = 'USES' AND EXISTS (
+              SELECT 1 FROM entities s JOIN entities d ON d.id = edges.dst_id
+              WHERE s.id = edges.src_id AND s.repo_id != d.repo_id
+            )
+            """
+        )
     yield linked, unlinked
     for workspace in opened:
         workspace.close()
