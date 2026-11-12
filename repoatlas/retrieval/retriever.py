@@ -128,6 +128,8 @@ class Retriever:
         quote_signatures: bool = False,
         confined: bool = False,
         path_prefix: str | None = None,
+        cross_repository: bool = False,
+        count_withheld: bool = False,
     ) -> RetrievalOutcome:
         """The funnel: one pass, and everything that pass decided.
 
@@ -151,6 +153,16 @@ class Retriever:
         ``relationships`` and ``dependencies`` already enforce. V1's own scope is a
         bias (ARCHITECTURE.md §10), its second pass is untouched, and it passes
         nothing here.
+
+        ``cross_repository`` lets graph expansion also follow the imports, references
+        and calls that a package link proves into another repository. Off, the
+        default, expansion follows only the cross-repository links it followed before
+        package links existed (manifest dependencies, paths, generated code), so a
+        package-proven code link never changes what search returns unless it is asked
+        for. V1 passes nothing here. ``count_withheld`` has the walk count the
+        package-proven crossings it did not follow, into
+        :attr:`~repoatlas.models.retrieval.RetrievalOutcome.withheld_crossings`; the
+        count never influences the evidence.
 
         ``path_prefix`` narrows every scope searched to one normalized
         repository-relative file or directory. It is handed to each stage's own
@@ -278,8 +290,13 @@ class Retriever:
         self._settle_crowded(proofs, _reported_terms(analysis), scopes, path_prefix=path_prefix)
         term_matches = _term_matches(analysis, proofs)
 
-        graph, visited = self._stage_graph(
-            entity_ids, stages, home_repo_id=home_repo_id, path_prefix=path_prefix
+        graph, visited, withheld = self._stage_graph(
+            entity_ids,
+            stages,
+            home_repo_id=home_repo_id,
+            path_prefix=path_prefix,
+            cross_repository=cross_repository,
+            count_withheld=count_withheld,
         )
         if graph:
             ranked_lists.append(graph)
@@ -301,6 +318,7 @@ class Retriever:
                 suppression=suppressed,
                 seed_entity_ids=tuple(entity_ids),
                 term_matches=term_matches,
+                withheld_crossings=withheld,
             )
 
         with Stopwatch("fuse", candidates_in=incoming) as watch:
@@ -377,6 +395,7 @@ class Retriever:
             suppression=suppressed,
             seed_entity_ids=tuple(entity_ids),
             term_matches=term_matches,
+            withheld_crossings=withheld,
         )
 
     # -- stages --------------------------------------------------------------
@@ -974,15 +993,21 @@ class Retriever:
         *,
         home_repo_id: int | None = None,
         path_prefix: str | None = None,
-    ) -> tuple[list[EvidenceCandidate], int]:
+        cross_repository: bool = False,
+        count_withheld: bool = False,
+    ) -> tuple[list[EvidenceCandidate], int, int]:
         with Stopwatch("graph", candidates_in=len(entity_ids)) as watch:
-            candidates, visited = self._expand(
-                entity_ids, home_repo_id=home_repo_id, path_prefix=path_prefix
+            candidates, visited, withheld = self._expand(
+                entity_ids,
+                home_repo_id=home_repo_id,
+                path_prefix=path_prefix,
+                cross_repository=cross_repository,
+                count_withheld=count_withheld,
             )
             watch.candidates_out = len(candidates)
             watch.detail = f"{visited} node(s) over {self._limits.graph_hops} hop(s)"
         stages.append(_recorded(watch))
-        return candidates, visited
+        return candidates, visited, withheld
 
     def _expand(
         self,
@@ -990,13 +1015,17 @@ class Retriever:
         *,
         home_repo_id: int | None = None,
         path_prefix: str | None = None,
-    ) -> tuple[list[EvidenceCandidate], int]:
+        cross_repository: bool = False,
+        count_withheld: bool = False,
+    ) -> tuple[list[EvidenceCandidate], int, int]:
         """Bounded traversal from matched entities (ARCHITECTURE.md §10 stage 4).
 
         The walk itself is :func:`repoatlas.graph.traversal.expand_from_seeds`,
         which owns the edge whitelist and the cross-repository rule. What remains
         here is turning what it reached into candidates — and preserving the order
         it reached them in, because that order is the proximity signal fusion reads.
+        The third value is the number of package-proven crossings the walk withheld,
+        counted only when asked for.
         """
         walk = expand_from_seeds(
             self._knowledge,
@@ -1005,12 +1034,15 @@ class Retriever:
             fanout=self._limits.graph_fanout,
             seed_limit=self._limits.graph_seeds,
             home_repo_id=home_repo_id,
+            package_crossings=cross_repository,
+            count_withheld=count_withheld,
         )
         if not walk.reached:
-            return [], walk.visited
+            return [], walk.visited, walk.withheld
         return (
             self._knowledge_candidates(walk.reached, walk.reasons, path_prefix=path_prefix),
             walk.visited,
+            walk.withheld,
         )
 
     def _knowledge_candidates(

@@ -1714,7 +1714,7 @@ resolves every use: a first index, a database from before this stage, a run that
 | symbol defined in the same file | resolved directly in the per-file pass |
 | symbol defined in another file | resolved **only through an import this file actually wrote** |
 | module specifier | resolved to a file: Python dotted and relative, TS/JS relative with index resolution. A proven Python project root or dependency takes precedence over a conflicting legacy lookup; when no stronger target is found, the existing repository-local lookup remains |
-| TS/JS bare module specifier (`@/api/client`, `@acme/shapes`) | an `IMPORTS` edge to one indexed file when a tsconfig `paths`/`baseUrl` mapping, a workspace member, or a declared package's proven provider resolves it. The edge records how in `resolution`. Duplicate providers, conflicting entries, unindexed aliases, and declarations naming another source remain unresolved. Calls, references and static exports can follow the same binding trace |
+| TS/JS bare module specifier (`@/api/client`, `@acme/shapes`) | an `IMPORTS` edge to one indexed file when a tsconfig `paths`/`baseUrl` mapping, a workspace member, or a declared package's proven provider resolves it. The edge records how in `resolution`. Duplicate providers, conflicting entries, unindexed aliases, and declarations naming another source remain unresolved. Calls and static exports can follow the same binding trace |
 | Python `from . import x` | `x` is a *candidate* module in the package the dots name; an edge only when that package and that module both exist |
 | script / file path | joined against the referencing file's directory, then matched to a managed repository — including paths that climb out of one repository into another |
 | Salt `include:` | dotted state path → `x/y.sls` or `x/y/init.sls` |
@@ -1822,15 +1822,34 @@ set later retroactively creates the `python-service DEPENDS_ON common-lib` edge 
 
 **Cross-repository imports and symbols.** The global pass may resolve a Python or TS/JS import to another
 repository only through the same package evidence used by declaration uses: the consumer's declaration, a unique
-provider or an explicit source pin, and an indexed entry. A Python provider must actually ship the import name;
-distribution names are not assumed to be import names. A call or reference newly resolved through that provider
-also needs a matching recorded use that proves the binding and destination. Crossings record the package,
-declaration, provider, entry and import line. Ambiguous providers, failed pins and untraced bindings do not gain
-edges from name equality.
+provider or an explicit source pin, and an indexed entry. A Python provider must actually ship the import name,
+read from its files and never from its distribution name, with one exception stated below. A call, reference or
+static export newly resolved through that provider also needs a matching recorded use that proves the binding and
+destination.
+Crossings record the package, declaration, provider, entry and import line. Ambiguous providers, failed pins and
+untraced bindings do not gain edges from name equality.
 
-An explicit `relationships` request may follow a cross-repository `CALLS` edge only with `cross_repository` and
-the edge's own package evidence; change impact follows it on the same evidence. Automatic search expansion still
-does not follow `CALLS`. The index does not execute `sys.path` changes or infer installed distributions, so a
+**The one exception: the legacy requirements convention.** A repository that states nothing about packaging has
+no distribution name and ships nothing by metadata, so for the `requirements.txt` repositories that predate
+`pyproject.toml` an import may join such a repository (`PythonPackageLinks._legacy`, merged as P3a) when all of
+this holds: the importer's repository is metadata-less itself; a root requirement of the importer — in the root
+`requirements.txt` or a file its `-r` lines reach — has a *legacy key* equal to the import's top-level name (ASCII
+lowercase with `_` turned into `-`, and nothing else: it is not PEP 503, so `.` is not folded and
+`beautifulsoup4` does not name `bs4`); no indexed manifest provides that requirement's distribution; and exactly
+one *other* metadata-less repository holds the module in its own root, with no other unclaimed holder. The crossing
+records `resolved_by: requirements-legacy` with the requirement, the file that states it and the file that holds
+the module, and the edge's basis is `python-requirements-legacy`. A shared name alone, a directory beside another
+and a distribution name that differs from the import name never join. This is the only place a requirement's
+spelling stands in for an import name.
+
+A package-proven import, reference or call is a stored fact and can be followed or not; **it is followed only
+when asked.** Search follows a package-proven `IMPORTS` or `REFERENCES` edge only with `cross_repository` in
+`scope: global`, an explicit `relationships` request follows an `IMPORTS`, `REFERENCES` or `CALLS` edge only with
+`cross_repository`, and change impact follows the same links on their own evidence without being asked (it crosses
+`IMPORTS` and `REFERENCES` by edge type and `CALLS` on its package evidence). The decision is the edge's own
+package evidence (`$.crossing.package`), never its type alone: an `IMPORTS` or `REFERENCES` edge that records none
+(a manifest, path or generated-code crossing) is followed exactly as before. Automatic search expansion still does
+not follow `CALLS`. The index does not execute `sys.path` changes or infer installed distributions, so a
 source-backed link is not a guarantee of runtime import behavior.
 
 ---
@@ -4403,6 +4422,29 @@ pass from an exact match — so a cross-repository answer always has a structura
 entity is labelled with the edge that reached it, because the reader asked about a relationship, not about what the
 file happens to declare.
 
+**A package-proven crossing is followed only when asked.** A package link (§5) writes `IMPORTS`, `REFERENCES` and
+`CALLS` edges between repositories and records its proof in the edge's resolution (`$.crossing.package`). Those
+types were crossing types before package links existed, and a type alone would now carry search across every one:
+`walk` therefore decides by the edge's own evidence. A crossing that records package evidence is followed only if
+its type is in `evidenced_edges` (`PACKAGE_CROSSING_EDGES`: `IMPORTS`, `REFERENCES`, `CALLS`; never `USES` or
+`EXPORTS`); one that records none follows the `crossing_edges` rule as it always has, so manifest dependencies,
+paths, generated code and shared nodes cross exactly as before. Search passes the set only with
+`cross_repository` in `scope: global`, a relationships request passes it only with `cross_repository`, and the
+change-impact walk, which has its own query and crosses package-proven links by design, is not affected. The rule is
+also written into the neighbour query, so a withheld edge never uses up a place in the per-hop fan-out bound: with
+the filter after the cut, a seed holding more package crossings than the fan-out would show the walk only the
+edges it then discards. Left off, search answers as it did before package links existed.
+
+**What search says it did not follow.** A response that did not ask for `cross_repository` carries
+`withheld_crossings`, the number of distinct package-proven crossings the walk did not follow, or null when there
+were none. It counts stored edges of an admitted type, in the direction walked, that touch a node the walk expanded
+at some hop and record package evidence, once each by edge id however many hops reach them; a node reached only at
+the last hop is not expanded, so its crossings are outside the count. It is one extra indexed query per expanded
+hop, never feeds ranking, and is a count of indexed links rather than a judgement of relevance. It is reported under
+`scope: repository` too, where the home-repository rule would block the crossing anyway: the hint then tells the
+caller to ask again with `scope: global` and `cross_repository`. The compact presentation omits it when null; the
+full one writes `null`.
+
 A relationships walk with `cross_repository` off is confined to the target's repository **through shared nodes as
 well**. The crossing rule above sees an edge whose two ends belong to different repositories, and an edge onto
 `env:SERVICE_HOST` or an HTTP node has a repository at one end only — so two such edges in a row left the repository
@@ -4442,7 +4484,10 @@ run: the second, unscoped pass is dropped and expansion is given the repository 
 stays reachable and nothing on the far side of one is followed. Nothing about ranking, fusion or deduplication
 differs between the two; one pass happens or it does not. Crossing from a capability call is asked for, by
 `scope: global` or by `relationships(cross_repository=true)`, and the handle that leads across still comes back
-from a confined search — a hub belongs to no repository, so no repository's boundary hides it.
+from a confined search — a hub belongs to no repository, so no repository's boundary hides it. A crossing that a
+package link proves (§5) is asked for twice over: `search` follows it only with `scope: global` **and**
+`cross_repository`, and `cross_repository` with `scope: repository` is refused as `INVALID_REQUEST`, because a
+repository scope is a boundary and a flag that quietly did nothing would say otherwise.
 
 Reciprocal-rank fusion is chosen over score normalization because BM25 ranks, literal-match scores and graph
 distances are not commensurable, and RRF needs no per-source calibration to combine them stably.
@@ -5227,6 +5272,7 @@ to the old one --- the reasoning that turned out to be wrong is the part worth k
 | An unreadable file counts as changed | Let the `OSError` propagate | A file can stop being readable between one sync and the next for entirely ordinary reasons. Aborting the whole run over one of them leaves every other repository's facts stale, which is the failure §9 exists to prevent |
 | Transparent command wrappers are unwrapped in Bash | Record the wrapper as the command executed | `env LOG_LEVEL=debug ./notify.sh` executes `notify.sh`; recording `EXECUTES cmd:env` is true of the text and useless about the system. Unwrapping stops at the first flag the wrapper is not known to pass through, and `sudo` is excluded entirely because its flags consume arguments (§7 of V1_SPEC) |
 | Cross-repository references resolve at package granularity only | Resolve a bare package specifier to a file in the providing repository | Doing it correctly needs each ecosystem's own resolution rules (`node_modules` and `exports`, `sys.path`, gem paths); doing it approximately produces the assumed-relationship edge V1_SPEC §9 forbids. The safe half — never resolving to a wrong same-named definition — holds today; the missing half is recall, and it is a V2 resolver (§5) |
+| Package-proven cross-repository imports, references and calls; search follows them only when asked, and reports how many it withheld | Follow them automatically, or never resolve them | A package link (§5) proves them exactly, so they stay as facts — `relationships` and change impact use them. But bounded expansion from every exact hit that also followed them would change what plain search returns, spend its fan-out on them, and look like relevance; so `search` needs `cross_repository` in `scope: global`, and says how many links it left out (`withheld_crossings`) so an agent can ask again instead of guessing that something is missing (§10) |
 | File identity retrieved as its own stage | Return the existing file *entity* from the symbol stage | The symbol stage found the file entity and then dropped it, because its candidate builder requires a line range. Making file identity a stage of its own keeps that constraint honest and gives path matching (`src/config.py`, `service/values.yaml`) a home that entity names cannot provide (§10) |
 | `EvidenceCandidate` line numbers are `int \| None` | Cite line 1 for a file-level match | The renderer wanting a number is not evidence that a line was examined. A synthesized `:1` is a fabrication in the one section built to be trusted, so the schema changed rather than the invariant (§10, §11) |
 | Duplicate basenames returned as multiple candidates | Pick the closest to the primary repository | Three files named `config.py` is a fact about the repository set. Picking one is RepoAtlas answering a question the repositories leave open; ranking by path specificity says which is most likely without discarding the others (§10) |

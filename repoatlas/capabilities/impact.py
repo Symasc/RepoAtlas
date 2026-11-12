@@ -96,7 +96,9 @@ from repoatlas.storage.protocols import (
 #: where the walk went, each ``at`` or (hypothetically) ``toward``; none is ever followed (DF3c).
 #: 8: a configuration crossing's deployments go with the path, and an HTTP link is followed under
 #: them only through one of them; links not followed are counted, never listed (DF3d).
-#: 9: a call crosses into another repository on its package link's evidence.
+#: 9: a call crosses into another repository on its package link's evidence. (A package-proven
+#: import or reference crosses by its edge type, as those types always have here; search follows
+#: the same links only when asked, and does not change this policy.)
 POLICY = "impact/9"
 
 #: Entity types a change is a *key* change for: they name a value, not code.

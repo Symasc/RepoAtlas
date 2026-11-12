@@ -2962,6 +2962,10 @@ export interface StageTiming {
 export interface SearchRequest {
   budget?: EvidenceBudget;
   context: CapabilityContext;
+  /**
+   * Also follow, from exact matches, imports and references that a package link proves into another repository. Requires `scope: global`. Off by default: search follows only the cross-repository links it always has (manifest dependencies, paths, generated code), never a package-proven code link. repoatlas_impact follows those links without this.
+   */
+  cross_repository?: boolean;
   depth?: FreshnessDepth;
   include_trace?: boolean;
   investigation_id?: string | null;
@@ -2997,6 +3001,10 @@ export interface SearchResponse {
   terms?: TermMatch[];
   trace?: RetrievalTrace | null;
   truncated?: boolean;
+  /**
+   * How many imports and references that a package link proves into other repositories this search did not follow, among the links touching the nodes it expanded: a count of indexed links, not a judgement of relevance. Absent or null when none were withheld or cross_repository was set. To follow them, repeat the search with scope global and cross_repository true.
+   */
+  withheld_crossings?: number | null;
   within_path?: string | null;
 }
 /**

@@ -1636,7 +1636,11 @@ class ReferenceLinker:
         python: Callable[[], PythonUseResolver],
         script: Callable[[], UseResolver],
     ) -> EdgeRecord | None:
-        """Resolve an ordinary claim only when a matching declaration use proves its target."""
+        """Resolve an ordinary claim only when a matching declaration use proves its target.
+
+        A use that reached its declaration only as the receiver of a longer chain (``form``
+        ``receiver``) proves no call of it and no reference to it: neither a ``CALLS`` nor a
+        ``REFERENCES`` claim resolves through it."""
         if claim.edge_type not in {EdgeType.CALLS, EdgeType.REFERENCES, EdgeType.EXPORTS}:
             return None
         if claim.target_kind not in {EntityType.SYMBOL, EntityType.CLASS, EntityType.FUNCTION}:
@@ -1693,10 +1697,17 @@ class ReferenceLinker:
                 symbol.meta.get("kind") in USES_ONLY_KINDS
             ):
                 continue
+            if fields.get("form") == "receiver" and claim.edge_type in {
+                EdgeType.CALLS,
+                EdgeType.REFERENCES,
+            }:
+                # The chain stopped at the declaration the name reached (`Outer.Inner` ->
+                # `Outer`): the use is of that declaration as the receiver of the rest, which
+                # is not a reference to the declaration itself.
+                continue
             if claim.edge_type is EdgeType.CALLS and (
                 symbol.type not in {EntityType.FUNCTION, EntityType.CLASS}
                 or fields.get("use", "call") != "call"
-                or fields.get("form") == "receiver"
             ):
                 continue
             crossing = fields.get(CROSSING)

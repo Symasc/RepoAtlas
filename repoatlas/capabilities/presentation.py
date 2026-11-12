@@ -109,6 +109,7 @@ def compact_search(response: SearchResponse) -> CompactSearchResponse:
         ),
         ledger=response.ledger,
         trace=response.trace,
+        withheld_crossings=response.withheld_crossings,
     )
 
 

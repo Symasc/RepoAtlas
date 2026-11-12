@@ -34,13 +34,14 @@ and match are the whole of the public strength vocabulary.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from repoatlas.compat import StrEnum
 from repoatlas.models.capability import (
     PRESENTATION_DESCRIPTION,
     AppliedBudget,
     CapabilityContext,
+    CapabilityScope,
     EvidenceBudget,
     Presentation,
 )
@@ -115,10 +116,32 @@ class SearchRequest(BaseModel):
             "one to obtain those handles."
         ),
     )
+    #: Whether graph expansion also follows package-proven links into other repositories.
+    #: Published with a description because an agent chooses it from the schema; the
+    #: default keeps search to the cross-repository links it has always followed.
+    cross_repository: bool = Field(
+        default=False,
+        description=(
+            "Also follow, from exact matches, imports and references that a package "
+            "link proves into another repository. Requires `scope: global`. Off by "
+            "default: search follows only the cross-repository links it always has "
+            "(manifest dependencies, paths, generated code), never a package-proven "
+            "code link. repoatlas_impact follows those links without this."
+        ),
+    )
     #: How the response is written out. The capability runs identically either way.
     presentation: Presentation = Field(
         default=Presentation.FULL, description=PRESENTATION_DESCRIPTION
     )
+
+    @model_validator(mode="after")
+    def _cross_repository_needs_global_scope(self) -> SearchRequest:
+        """A repository scope is a boundary; asking to cross it is refused, not ignored."""
+        if self.cross_repository and self.context.scope is CapabilityScope.REPOSITORY:
+            raise ValueError(
+                "cross_repository requires scope: global; a repository scope is a boundary"
+            )
+        return self
 
     @field_validator("question")
     @classmethod
@@ -222,3 +245,16 @@ class SearchResponse(BaseModel):
     #: :class:`~repoatlas.models.retrieval.TermMatch`. Words the question merely used
     #: are not listed.
     terms: tuple[TermMatch, ...] = ()
+    #: How many package-proven links into other repositories this search did not
+    #: follow. ``None`` when the request asked for ``cross_repository`` or there was
+    #: none to report, so a response with nothing withheld reads as it always did.
+    withheld_crossings: int | None = Field(
+        default=None,
+        description=(
+            "How many imports and references that a package link proves into other "
+            "repositories this search did not follow, among the links touching the "
+            "nodes it expanded: a count of indexed links, not a judgement of relevance. "
+            "Absent or null when none were withheld or cross_repository was set. To "
+            "follow them, repeat the search with scope global and cross_repository true."
+        ),
+    )

@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -1716,6 +1716,7 @@ class SqliteKnowledgeStore:
         limit: int = 200,
         direction: EdgeDirection = EdgeDirection.ANY,
         order: NeighborOrder = NeighborOrder.CONFIDENCE,
+        package_crossings: Collection[EdgeType] | None = None,
     ) -> list[NeighborEdge]:
         """One hop out of ``entity_ids``, with both endpoints' repositories.
 
@@ -1731,6 +1732,12 @@ class SqliteKnowledgeStore:
         retrieval has always received; :attr:`~NeighborOrder.NATURAL` sorts on the
         endpoints' own keys instead, for a caller whose answer *is* the cut rather
         than a stage that is about to fuse everything anyway.
+
+        ``package_crossings`` names the types whose edges may join two repositories on
+        package evidence. Given (even empty), an edge that crosses repositories and
+        records that evidence is left out in SQL unless its type is named, so it never
+        uses up a place under ``limit``: a cut that fell on edges the caller then
+        discards would hide the edges it keeps. ``None`` adds no clause.
         """
         if not entity_ids:
             return []
@@ -1749,6 +1756,21 @@ class SqliteKnowledgeStore:
             type_placeholders = ",".join("?" * len(edge_types))
             type_clause = f" AND e.type IN ({type_placeholders})"
             params.extend(str(t) for t in edge_types)
+        package_clause = ""
+        if package_crossings is not None:
+            followed = ""
+            if package_crossings:
+                followed = f" OR e.type IN ({','.join('?' * len(package_crossings))})"
+                params.extend(str(t) for t in sorted(package_crossings, key=str))
+            # A CASE and not a bare AND/NOT: the resolution is parsed only for an edge
+            # that crosses repositories, and a NULL or invalid one never reaches
+            # json_extract.
+            package_clause = (
+                " AND CASE WHEN src.repo_id IS NOT NULL AND dst.repo_id IS NOT NULL"
+                " AND src.repo_id != dst.repo_id AND json_valid(e.resolution)"
+                " THEN json_extract(e.resolution, '$.crossing.package') IS NULL"
+                f"{followed} ELSE 1 END"
+            )
         params.append(limit)
         # Ordered on the endpoints' natural keys, or on the confidence the funnel
         # reads as proximity. Which one is chosen decides which edges survive the
@@ -1763,14 +1785,14 @@ class SqliteKnowledgeStore:
             f"""
             SELECT e.src_id, e.dst_id, e.type, e.confidence, e.file_id,
                    e.line_start, e.line_end, e.parser,
-                   CASE WHEN e.type = 'CALLS' AND json_valid(e.resolution)
+                   CASE WHEN json_valid(e.resolution)
                         THEN json_extract(e.resolution, '$.crossing.package') IS NOT NULL
                         ELSE 0 END AS evidenced,
                    src.repo_id AS src_repo_id, dst.repo_id AS dst_repo_id
             FROM edges e
             JOIN entities src ON src.id = e.src_id
             JOIN entities dst ON dst.id = e.dst_id
-            WHERE {id_clause}{type_clause}
+            WHERE {id_clause}{type_clause}{package_clause}
             ORDER BY {order_clause}
             LIMIT ?
             """,  # noqa: S608 - placeholders are generated counts, values are bound
@@ -1792,6 +1814,59 @@ class SqliteKnowledgeStore:
             )
             for row in rows
         ]
+
+    def package_crossing_ids(
+        self,
+        entity_ids: Sequence[int],
+        edge_types: Sequence[EdgeType],
+        direction: EdgeDirection,
+        admitted: Collection[EdgeType],
+    ) -> list[int]:
+        """The ids of the package-proven crossings a hop out of ``entity_ids`` withholds.
+
+        An edge counts when it touches ``entity_ids`` in ``direction``, has one of
+        ``edge_types``, joins two different repositories, records package evidence
+        (``$.crossing.package``) and has a type that is not in ``admitted``: exactly the
+        edges :meth:`expand_neighbors` leaves out when given the same ``admitted`` as
+        ``package_crossings``. Sorted by id; no cap, since a caller counts them. An
+        empty ``edge_types`` admits no type, so nothing is counted.
+        """
+        if not entity_ids or not edge_types:
+            return []
+        placeholders = ",".join("?" * len(entity_ids))
+        if direction is EdgeDirection.OUT:
+            id_clause = f"e.src_id IN ({placeholders})"
+            params: list[object] = [*entity_ids]
+        elif direction is EdgeDirection.IN:
+            id_clause = f"e.dst_id IN ({placeholders})"
+            params = [*entity_ids]
+        else:
+            id_clause = f"(e.src_id IN ({placeholders}) OR e.dst_id IN ({placeholders}))"
+            params = [*entity_ids, *entity_ids]
+        type_clause = f" AND e.type IN ({','.join('?' * len(edge_types))})"
+        params.extend(str(t) for t in edge_types)
+        admitted_clause = ""
+        if admitted:
+            admitted_clause = f" AND e.type NOT IN ({','.join('?' * len(admitted))})"
+            params.extend(str(t) for t in sorted(admitted, key=str))
+        # The same CASE as expand_neighbors: the resolution is parsed only for an edge
+        # that crosses repositories.
+        rows = self._db.execute(
+            f"""
+            SELECT e.id
+            FROM edges e
+            JOIN entities src ON src.id = e.src_id
+            JOIN entities dst ON dst.id = e.dst_id
+            WHERE {id_clause}{type_clause}{admitted_clause}
+              AND CASE WHEN src.repo_id IS NOT NULL AND dst.repo_id IS NOT NULL
+                            AND src.repo_id != dst.repo_id AND json_valid(e.resolution)
+                       THEN json_extract(e.resolution, '$.crossing.package') IS NOT NULL
+                       ELSE 0 END
+            ORDER BY e.id
+            """,  # noqa: S608 - placeholders are generated counts, values are bound
+            tuple(params),
+        ).fetchall()
+        return [int(row["id"]) for row in rows]
 
     def count_keys_with_prefix(
         self,

@@ -7,7 +7,7 @@ so the backend can be replaced without touching a caller.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import NamedTuple, Protocol
@@ -435,8 +435,9 @@ class NeighborEdge(BaseModel):
     line_start: int | None = None
     line_end: int | None = None
     parser: str | None = None
-    #: The edge records the package evidence that lets it join two repositories
-    #: (:data:`repoatlas.graph.packages.CROSSING`).
+    #: The edge records package evidence (``$.crossing.package``, written by a package
+    #: link; :data:`repoatlas.graph.packages.CROSSING`) -- of any type. Whether that
+    #: lets it join two repositories is the caller's rule for its type.
     evidenced: bool = False
 
     def other(self, entity_id: int) -> int:
@@ -478,6 +479,9 @@ class Confinement(BaseModel):
     one of those repositories or to none, whatever else admits it. :meth:`admits` is
     the rule in Python; the bounded neighbour queries render the same rule as SQL, so
     a count or a page is exact *after* confinement rather than cut before it.
+
+    ``walk`` states its rule differently: it withholds a package-evidenced crossing
+    unless its type is named in ``evidenced``, while impact admits crossings by type.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -683,7 +687,15 @@ class KnowledgeStore(Protocol):
         limit: int,
         direction: EdgeDirection = EdgeDirection.ANY,
         order: NeighborOrder = NeighborOrder.CONFIDENCE,
+        package_crossings: Collection[EdgeType] | None = None,
     ) -> list[NeighborEdge]: ...
+    def package_crossing_ids(
+        self,
+        entity_ids: Sequence[int],
+        edge_types: Sequence[EdgeType],
+        direction: EdgeDirection,
+        admitted: Collection[EdgeType],
+    ) -> list[int]: ...
     def count_keys_with_prefix(
         self,
         prefix: str,

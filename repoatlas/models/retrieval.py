@@ -150,3 +150,8 @@ class RetrievalOutcome(BaseModel):
     #: it alone is a term's own exact file or entity lookup, asked when a lookup
     #: shared with other terms filled its limit before that term matched.
     term_matches: tuple[TermMatch, ...] = ()
+    #: How many distinct package-proven cross-repository links graph expansion did not
+    #: follow, when the run was asked to count them (``count_withheld``); ``0`` when it
+    #: was not. A count of stored edges touching the nodes it expanded, never a ranking
+    #: input.
+    withheld_crossings: int = 0

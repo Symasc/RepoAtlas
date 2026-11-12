@@ -207,7 +207,8 @@ class RelationshipsRequest(BaseModel):
     #: Whether the walk may leave the repository it is about — directly, or through
     #: a shared node such as an environment variable or an HTTP operation that
     #: other repositories also touch. Even when true, only the edge types the
-    #: shared policy allows to cross may join two repositories directly. The
+    #: shared policy allows to cross may join two repositories directly, and a
+    #: package-proven import, reference or call is followed only with it. The
     #: repository it is about is the target's own; a target that is itself a shared
     #: node belongs to none, and then it is the one the context names — so a walk
     #: rooted at a hub under ``scope: repository`` stays in that repository, and

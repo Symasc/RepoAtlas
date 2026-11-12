@@ -203,7 +203,7 @@ def test_ordinary_python_imports_and_calls_follow_proven_project_and_provider(
             (repo, SERVICE, "CALLS", 5, "provider", "src/internal_fixture/models.py", "make"),
             (repo, SERVICE, "CALLS", 7, "provider", "src/internal_fixture/models.py", "make"),
         }
-        assert expected <= found.keys()
+        assert {k for k in found if k[0] == repo and k[4] != repo} == expected
         for key in expected:
             crossing = json.loads(found[key])["crossing"]
             assert crossing["package"] == "pypi:internal-fixture"
