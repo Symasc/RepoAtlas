@@ -450,7 +450,10 @@ def test_a_found_file_reads_its_references_into_another_repository(api: Serving)
     assert "investigation_id" not in lines
     assert CAN_EDIT in {d["key"] for d in lines["declarations"]}
     crossing = [r for r in lines["references"] if r["target"]["repository_slug"] == "contracts"]
-    assert crossing and all(r["source"] == CAN_EDIT for r in crossing)
+    assert {(r["type"], r["source"]) for r in crossing} == {
+        ("IMPORTS", "file:app:src/policy.ts"),
+        ("USES", CAN_EDIT),
+    }
 
 
 def test_a_found_name_is_a_seed_impact_traces(api: Serving) -> None:

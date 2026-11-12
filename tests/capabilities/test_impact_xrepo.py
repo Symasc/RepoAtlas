@@ -20,6 +20,8 @@ from repoatlas.config.settings import Settings
 from repoatlas.graph.impact import FAMILIES
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.impact import ImpactCandidate, ImpactRequest, ImpactResponse, ImpactRole
+from repoatlas.models.parsing import EdgeType
+from repoatlas.models.relationships import RelationshipDirection, RelationshipsRequest
 from repoatlas.services.workspace import Workspace, open_workspace
 from tests.deployment_env_corpus import BUILDER, SHIPPER
 from tests.impact_corpus import HTTP_API, HTTP_WEB, build, verify_steps
@@ -124,18 +126,29 @@ def test_n6_an_edge_joining_repositories_without_its_evidence_is_never_followed(
         [(dst,)] = database.execute(
             "SELECT id FROM entities WHERE key = ?", (COURSE_ROLE,)
         ).fetchall()
-        # a use that names its package but not the evidence that crosses to it
+        # A use and a call that name no evidence for crossing.
         resolution = json.dumps({"basis": "package", "use": "value"}, sort_keys=True)
         with database.transaction() as conn:
-            conn.execute(
-                "INSERT INTO edges (src_id, dst_id, type, confidence, repo_id, file_id,"
-                " line_start, line_end, parser, resolution)"
-                " VALUES (?, ?, 'USES', 1.0, ?, ?, 2, 2, 'linker:global', ?)",
-                (src, dst, repo_id, file_id, resolution),
-            )
+            for kind in ("USES", "CALLS"):
+                conn.execute(
+                    "INSERT INTO edges (src_id, dst_id, type, confidence, repo_id, file_id,"
+                    " line_start, line_end, parser, resolution)"
+                    " VALUES (?, ?, ?, 1.0, ?, ?, 2, 2, 'linker:global', ?)",
+                    (src, dst, kind, repo_id, file_id, resolution),
+                )
         response = impact(workspace, COURSE_ROLE)
         assert planted not in by_entity(response)
         assert CAN_EDIT in by_entity(response)  # the evidenced crossing still is
+        calls = CapabilityService(workspace).relationships(
+            RelationshipsRequest(
+                context=GLOBAL,
+                target=COURSE_ROLE,
+                edge_types=(EdgeType.CALLS,),
+                direction=RelationshipDirection.INCOMING,
+                cross_repository=True,
+            )
+        )
+        assert planted not in {edge.source.key for edge in calls.edges}
     finally:
         workspace.close()
 
@@ -151,6 +164,17 @@ CONFIGURED = ("CONFIGURES", SETTER, READER)
 #: a request never flow back; a configuration's setter is reached back only as what sets it.
 CROSSING_CASES = {
     "uses": (COURSE_ROLE, CAN_EDIT, ImpactRole.DEPENDENT, ("USES", CAN_EDIT, COURSE_ROLE), None),
+    "calls": (
+        "sym:built:src/params.ts:encodeParams:1",
+        "sym:app:src/built-use.ts:request:2",
+        ImpactRole.DEPENDENT,
+        (
+            "CALLS",
+            "sym:app:src/built-use.ts:request:2",
+            "sym:built:src/params.ts:encodeParams:1",
+        ),
+        None,
+    ),
     "http": (
         "sym:http-api:app.py:get_item:9",
         "sym:http-web:client.py:load_item:4",
@@ -279,7 +303,7 @@ def test_xr1_the_answer_says_how_the_change_crossed_and_where_to_read_it(
     assert all(
         c.step.crossing is None for c in (*response.candidates, *response.tests) if c.distance > 1
     )
-    assert response.summary.policy == "impact/8"
+    assert response.summary.policy == "impact/9"
 
 
 def test_xr2_every_name_on_the_way_is_in_the_answer(indexed: Workspace) -> None:

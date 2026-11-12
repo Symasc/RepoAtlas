@@ -306,7 +306,7 @@ def test_a_reached_handler_lists_the_refusals_that_would_reach_it_as_hypothetica
 ) -> None:
     built = build(workspace, tmp_path, unbound())
     response = impact(built, key(built, "devices", "get_item"))
-    assert response.summary.policy == "impact/8"
+    assert response.summary.policy == "impact/9"
     # with no release, every host the Ingress gives is a pattern tied to the one application;
     # plain http matches none
     assert http(response) == [

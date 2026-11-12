@@ -85,15 +85,16 @@ def test_another_repository_is_listed_only_on_the_linker_s_evidence(indexed: Wor
             consumers=(1,),
         ),
     )
-    # the package link names the exact consumer across repositories (it was left
-    # unresolved, and unclaimed, until a use could follow the package into ``lib``)
+    # the package link names the exact consumer and proves its call across repositories
     [consumer] = response.candidates
     assert consumer.id == 1
     assert (consumer.entity, consumer.repository, consumer.step.edge) == (
         "sym:app:src/view.ts:view:2",
         "app",
-        "USES",
+        "CALLS",
     )
+    assert consumer.step.crossing is not None
+    assert consumer.step.crossing.package == "npm:@acme/lib"
 
 
 def test_a_name_two_repositories_provide_joins_neither(indexed: Workspace) -> None:

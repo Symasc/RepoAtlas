@@ -111,7 +111,11 @@ SEARCH = ToolSpec(
         "the whole repository. Set within_path to search one directory or file of the "
         "repository, and presentation to compact to receive the same evidence with "
         "repeated metadata written once. Set source_preview true to receive bounded "
-        "indexed source around matching lines, with omitted spans made explicit."
+        "indexed source around matching lines, with omitted spans made explicit. In "
+        "global scope, set cross_repository true to also follow imports and references "
+        "a package link proves into another repository. When search did not follow "
+        "links a package proves into other repositories, withheld_crossings says how "
+        "many; repeat with scope global and cross_repository true to follow them."
     ),
     request=SearchRequest,
     capability="search",

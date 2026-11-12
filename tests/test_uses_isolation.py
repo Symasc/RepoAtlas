@@ -1,24 +1,29 @@
-"""``USES`` is added beside the graph, never into it: search answers exactly as before.
+"""``USES`` edges are never automatically expanded by search or relationships.
 
 Declaration-level uses outnumber every other relationship, and ordinary search must
-not change because they exist. That holds by construction, and these tests hold the
-construction:
+not expand through them. These tests hold that construction:
 
-* indexing with and without them yields the same facts in every other table and edge
-  type, so nothing that existed before was changed to make room for them;
-* search, and ``relationships`` asked for no edge type, answer byte for byte the same;
+* the recorded use claims add only the ordinary edges they trace, each with its trace,
+  and every difference in the link account is exactly those edges;
+* with the ``USES`` edges removed, search, and ``relationships`` asked for no edge type,
+  answer byte for byte the same;
 * ``USES`` is nameable, never expanded automatically, and never crosses a repository;
 * every query that reads edges is either typed or reviewed here, so no future query
   can take them in by forgetting a type filter.
+
+Ordinary calls, references and exports may read the recorded use claims when resolving a
+binding (``ReferenceLinker._resolve_via_use``), so the claims are varied in the first test
+(``claims_pair``) and the resulting edges are varied in the others (``pair``).
 """
 
 from __future__ import annotations
 
 import ast
 import json
+from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from repoatlas.capabilities.presentation import present
@@ -26,9 +31,23 @@ from repoatlas.capabilities.service import CapabilityService
 from repoatlas.config.settings import Settings
 from repoatlas.graph.traversal import CROSS_REPOSITORY_EDGES, EXPANSION_EDGES, RELATIONSHIP_EDGES
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
+from repoatlas.models.ordinary_outcomes import (
+    EXCLUDED_PREFIX,
+    LEGACY_ORDINARY,
+    LEGACY_UNRESOLVED,
+    LEGACY_USES_REMAINDER,
+    LINKED,
+    ORDINARY_FAMILY,
+    ORDINARY_LINKED,
+    ORDINARY_NOT_LINKED,
+    STANDING_CLAIMS,
+    USES_ROWS,
+    USES_STAGE,
+)
 from repoatlas.models.parsing import EdgeType
 from repoatlas.models.relationships import RelationshipDirection, RelationshipsRequest
 from repoatlas.models.search import SearchRequest
+from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace
 from tests.conftest import fact_snapshot
 from tests.impact_corpus import SYMBOLS, build
@@ -73,55 +92,49 @@ QUESTIONS = (
 )
 
 
-def _no_uses(*_: object) -> list[object]:
-    return []
+def _index(opened: list[Workspace], tmp_path: Path, tag: str, classify: bool = False) -> Workspace:
+    """Index the corpus; ``classify`` also runs the link pass that writes the ordinary account."""
+    settings = Settings.model_validate(
+        {
+            "storage": {"database": str(tmp_path / tag / "atlas.db")},
+        }
+    )
+    workspace = open_workspace(settings=settings, require_root=False)
+    opened.append(workspace)
+    build(workspace, tmp_path / tag, {"symbols": SYMBOLS, "app": APP})
+    if classify:
+        sync(workspace, workspace.resolver().resolve(tmp_path / tag / "repos"), classify=True)
+    return workspace
 
 
 @pytest.fixture
-def pair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Workspace, Workspace]]:
-    """The same repositories indexed twice: as shipped, and with ``USES`` switched off."""
-    opened = []
-
-    def index(tag: str) -> Workspace:
-        settings = Settings.model_validate(
-            {
-                "storage": {"database": str(tmp_path / tag / "atlas.db")},
-            }
-        )
-        workspace = open_workspace(settings=settings, require_root=False)
-        opened.append(workspace)
-        return build(workspace, tmp_path / tag, {"symbols": SYMBOLS, "app": APP})
-
-    with_uses = index("with")
-    monkeypatch.setattr("repoatlas.parsers.typescript.use_references", _no_uses)
-    without = index("without")
+def pair(tmp_path: Path) -> Iterator[tuple[Workspace, Workspace]]:
+    """The same graph with and without its ``USES`` edges."""
+    opened: list[Workspace] = []
+    with_uses = _index(opened, tmp_path, "with")
+    without = _index(opened, tmp_path, "without")
+    with without.database.transaction() as conn:
+        conn.execute("DELETE FROM edges WHERE type = 'USES'")
     yield with_uses, without
     for workspace in opened:
         workspace.close()
 
 
-#: The accounting figures that count the USES stage: its rows and what it left open. Every
-#: other figure of the ordinary-claim account is about claims the stage never sees.
-_USES_FIGURES = frozenset(
-    {
-        "standing_claims",
-        "uses_rows",
-        "excluded:uses-stage",
-        "legacy_unresolved",
-        "legacy_uses_remainder",
-    }
-)
+@pytest.fixture
+def claims_pair(tmp_path: Path) -> Iterator[tuple[Workspace, Workspace]]:
+    """The same files indexed with the recorded use claims and without any.
 
-
-def _without_uses(snapshot: dict[str, Any]) -> dict[str, Any]:
-    return {
-        **snapshot,
-        "edges": [row for row in snapshot["edges"] if row[0] != "USES"],
-        "unresolved_refs": [row for row in snapshot["unresolved_refs"] if row[2] != "USES"],
-        "ordinary_accounting": [
-            row for row in snapshot["ordinary_accounting"] if row[0] not in _USES_FIGURES
-        ],
-    }
+    The second is built with the TypeScript parser's ``use_references`` returning
+    nothing, so no ``USES`` claim exists to resolve and none can inform an ordinary one.
+    """
+    opened: list[Workspace] = []
+    with_claims = _index(opened, tmp_path, "claims", classify=True)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("repoatlas.parsers.typescript.use_references", lambda *args, **kwargs: [])
+        without = _index(opened, tmp_path, "no-claims", classify=True)
+    yield with_claims, without
+    for workspace in opened:
+        workspace.close()
 
 
 #: What differs between two builds of the same facts: when each was built, and the
@@ -148,14 +161,130 @@ def test_uses_were_actually_indexed(pair: tuple[Workspace, Workspace]) -> None:
     assert without.database.execute(count).fetchone()[0] == 0
 
 
-def test_every_other_fact_is_unchanged(pair: tuple[Workspace, Workspace]) -> None:
-    with_uses, without = pair
-    assert _without_uses(fact_snapshot(with_uses)) == _without_uses(fact_snapshot(without))
-    # and the edges USES added carry no resolution or producer another edge uses
-    for workspace in (with_uses, without):
-        assert not workspace.database.execute(
-            "SELECT 1 FROM edges WHERE type != 'USES' AND resolution LIKE '%\"use\":%'"
-        ).fetchall()
+#: One stored edge: type, source key, target key, line, asserting file, parser, resolution,
+#: and the slug of the repository it is recorded in.
+_EdgeRow = tuple[str, str, str, int | None, str, str, str, str]
+
+
+def _ordinary_edges(workspace: Workspace) -> Counter[_EdgeRow]:
+    """Every stored edge but a ``USES`` one, counted by what identifies it."""
+    rows = workspace.database.execute(
+        "SELECT e.type, s.key, d.key, e.line_start, COALESCE(f.rel_path, ''), "
+        "COALESCE(e.parser, ''), COALESCE(e.resolution, ''), COALESCE(r.slug, '') "
+        "FROM edges e JOIN entities s ON s.id = e.src_id JOIN entities d ON d.id = e.dst_id "
+        "LEFT JOIN files f ON f.id = e.file_id LEFT JOIN repositories r ON r.id = e.repo_id "
+        "WHERE e.type != 'USES'"
+    ).fetchall()
+    return Counter(cast(_EdgeRow, tuple(row)) for row in rows)
+
+
+def _traced(resolution: str) -> bool:
+    """Whether a resolution record is a use's: it names how the name was used."""
+    return bool(resolution) and "use" in json.loads(resolution)
+
+
+def _table(snapshot: dict[str, object], name: str) -> list[tuple[Any, ...]]:
+    """One table of a ``fact_snapshot``, as rows."""
+    return cast(list[tuple[Any, ...]], snapshot[name])
+
+
+def _claims(rows: list[tuple[Any, ...]], outcome: str | None = None) -> Counter[tuple[str, str]]:
+    """Claims by (repository, edge type) over the rows of ``ordinary_outcomes``, optionally
+    only those of one outcome."""
+    counted: Counter[tuple[str, str]] = Counter()
+    for slug, _language, edge_type, _kind, row_outcome, _subreason, claims in rows:
+        if outcome is None or row_outcome == outcome:
+            counted[(slug, edge_type)] += claims
+    return counted
+
+
+def test_use_claims_only_add_traced_edges(claims_pair: tuple[Workspace, Workspace]) -> None:
+    """The recorded use claims are the only thing that differs, and what they add is
+    exactly the ordinary edges they trace.
+
+    ``W+`` is the index with the claims, ``W-`` the same files without. Everything the
+    claims cannot touch is equal. A claim ``W-`` leaves open and ``W+`` links is an edge
+    in ``W+ - W-``, and each such edge is a call, reference or export that names its use in
+    its resolution; the account of ordinary claims differs by those edges and by the
+    ``USES`` stage's own figures, and by nothing else.
+    """
+    with_claims, without = claims_pair
+    plus, minus = fact_snapshot(with_claims), fact_snapshot(without)
+
+    # Untouched: what was indexed, and what was claimed that is not a use.
+    for table in ("repositories", "files", "entities", "dependencies", "chunks"):
+        assert plus[table] == minus[table], table
+    claims_plus, claims_minus = _table(plus, "unresolved_refs"), _table(minus, "unresolved_refs")
+    assert any(row[2] == "USES" for row in claims_plus)
+    assert not any(row[2] == "USES" for row in claims_minus)
+    assert [r for r in claims_plus if r[2] != "USES"] == [r for r in claims_minus if r[2] != "USES"]
+
+    # Edges: the claims only add, and what they add is traced.
+    plus_edges, minus_edges = _ordinary_edges(with_claims), _ordinary_edges(without)
+    assert not minus_edges - plus_edges
+    added = plus_edges - minus_edges
+    assert added, "the claims linked nothing: the test would pass on any build"
+    for edge_type, _src, _dst, _line, _path, _parser, resolution, _slug in added:
+        assert edge_type in {"CALLS", "REFERENCES", "EXPORTS"}, edge_type
+        assert _traced(resolution), (edge_type, resolution)
+    traced = Counter({row: n for row, n in plus_edges.items() if _traced(row[6])})
+    assert traced == added
+    gained = sum(added.values())
+
+    # Outcomes: the same claims in total, and the linked ones rise by the added edges.
+    outcomes_plus = _table(plus, "ordinary_outcomes")
+    outcomes_minus = _table(minus, "ordinary_outcomes")
+    account_plus = dict(_table(plus, "ordinary_accounting"))
+    account_minus = dict(_table(minus, "ordinary_accounting"))
+    # Not vacuous: the ledger exists only when the link pass ran classified.
+    assert _claims(outcomes_minus, LINKED), "no account written: build not classified"
+    assert account_plus and account_minus
+    assert any(r[0] == ORDINARY_FAMILY for r in _table(minus, "link_decisions"))
+    assert _claims(outcomes_plus) == _claims(outcomes_minus)
+    added_by_site: Counter[tuple[str, str]] = Counter()
+    for row, count in added.items():
+        added_by_site[(row[7], row[0])] += count
+    assert _claims(outcomes_plus, LINKED) == _claims(outcomes_minus, LINKED) + added_by_site
+    assert sorted(r for r in outcomes_plus if r[4] == "excluded") == sorted(
+        r for r in outcomes_minus if r[4] == "excluded"
+    )
+
+    # The account: every figure equal but the ones the added edges and the USES stage own.
+    uses_rows = account_plus[USES_ROWS]
+    remainder = account_plus[LEGACY_USES_REMAINDER]
+    assert uses_rows > 0
+    assert account_minus[USES_ROWS] == 0 and account_minus[LEGACY_USES_REMAINDER] == 0
+    assert account_plus == {
+        **account_minus,
+        # claims that linked, and so no longer stand open
+        ORDINARY_LINKED: account_minus[ORDINARY_LINKED] + gained,
+        ORDINARY_NOT_LINKED: account_minus[ORDINARY_NOT_LINKED] - gained,
+        LEGACY_ORDINARY: account_minus[LEGACY_ORDINARY] - gained,
+        # the USES stage: its claims, and what it left open
+        STANDING_CLAIMS: account_minus[STANDING_CLAIMS] + uses_rows,
+        USES_ROWS: uses_rows,
+        f"{EXCLUDED_PREFIX}{USES_STAGE}": uses_rows,
+        LEGACY_USES_REMAINDER: remainder,
+        LEGACY_UNRESOLVED: account_minus[LEGACY_UNRESOLVED] - gained + remainder,
+    }
+
+    # Decisions: every open site `W+` reports `W-` reports too, and the ones only `W-`
+    # reports are ordinary sites of an edge the claims added.
+    def sites(snapshot: dict[str, object]) -> Counter[tuple[Any, ...]]:
+        # without the evidence column, whose count of claims a shared site may change
+        return Counter(
+            (r[0], r[1], r[2], r[4], r[5], r[6], r[7], r[8])
+            for r in _table(snapshot, "link_decisions")
+        )
+
+    reported_plus, reported_minus = sites(plus), sites(minus)
+    assert not reported_plus - reported_minus
+    closed = reported_minus - reported_plus
+    added_sites = {(row[7], row[4], row[3], row[0]) for row in added}
+    for family, subject, _decision, slug, path, line, _end, _src in closed:
+        assert family == ORDINARY_FAMILY
+        assert (slug, path, line, subject.split(":")[0]) in added_sites, subject
+    assert sum(closed.values()) <= gained
 
 
 def test_search_answers_byte_for_byte_the_same(pair: tuple[Workspace, Workspace]) -> None:
@@ -232,6 +361,10 @@ REVIEWED_EDGE_READS = {
     "count_use_edges": "typed: USES, counted for the sync report's totals",
     "use_consumers_landing_in": "typed: USES, which files' uses land in a file being rewritten",
     "list_uses_targets": "typed: USES, the declarations a typed mapping or comparison uses",
+    "package_crossing_ids": (
+        "typed by its caller: ids of package-proven crossings a walk withheld; "
+        "counted, never an answer"
+    ),
 }
 
 

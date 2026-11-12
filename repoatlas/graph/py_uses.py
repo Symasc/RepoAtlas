@@ -1,4 +1,4 @@
-"""Following a Python use of an imported name to the declaration it names (``USES`` only).
+"""Following a Python use of an imported name to the declaration it names.
 
 A use (:mod:`repoatlas.parsers.py_uses`) carries the module its binding imports, the name
 it imports from there, and the attribute chain it reaches through. The module is resolved
@@ -84,7 +84,7 @@ class _Star:
 
 
 class PythonUseResolver(BoundedTrace):
-    """Resolves the Python ``USES`` claims of one global pass."""
+    """Resolves Python uses of imported names in one global pass."""
 
     def __init__(
         self,
@@ -105,28 +105,34 @@ class PythonUseResolver(BoundedTrace):
         if meta.get("binding") == "star":
             return self._star(origin, meta)
         spec = meta.get("module") or ""
-        target = self._modules.resolve(origin, spec)
-        link: PythonLink | None = None
-        if isinstance(target, str) and target in _LINKABLE and self._links is not None:
-            found = self._links.resolve(origin, spec)
-            if isinstance(found, PythonLink):
-                target, link = found.target, found
-            elif found is not None:
-                return self._refused(found)
-        if isinstance(target, str):
-            return self._refused(target)
+        found = self.module_target(origin, spec)
+        if isinstance(found, str):
+            return self._refused(found)
+        link = found if isinstance(found, PythonLink) else None
+        target = found.target if isinstance(found, PythonLink) else found
         self._begin(origin)
         binding = meta.get("binding")
         imported = meta.get("imported")
         if binding == "import" and imported:
-            found, reason = self._from_import(target.file, imported, frozenset(), 0)
+            definition, reason = self._from_import(target.file, imported, frozenset(), 0)
         elif binding == "namespace":
-            found, reason = UseDefinition(target.file, None, None), None
+            definition, reason = UseDefinition(target.file, None, None), None
         else:
             return self._refused("no-name")
-        if found is None:
+        if definition is None:
             return self._refused(reason or "not-exported")
-        return self._reached(target, meta, found, link)
+        return self._reached(target, meta, definition, link)
+
+    def module_target(self, origin: FileRow, spec: str) -> ModuleTarget | PythonLink | str:
+        """Resolve a module in the importing project or through its proven dependency."""
+        target = self._modules.resolve(origin, spec)
+        if isinstance(target, str) and target in _LINKABLE and self._links is not None:
+            found = self._links.resolve(origin, spec)
+            if isinstance(found, PythonLink):
+                return found
+            if found is not None:
+                return found
+        return target
 
     def resolve_module_name(self, module: FileRow, name: str) -> UseDefinition | None:
         """Resolve one name from this module's own export table."""
@@ -146,11 +152,28 @@ class PythonUseResolver(BoundedTrace):
         target = self._modules.resolve(origin, spec)
         if isinstance(target, str):
             return None
+        return self._unbound_submodule(origin, target.file, name)
+
+    def provider_submodule(self, origin: FileRow, spec: str, name: str) -> PythonLink | None:
+        """A fromlist submodule of a proven provider, with the submodule's own evidence."""
+        target = self.module_target(origin, spec)
+        if not isinstance(target, PythonLink):
+            return None
+        submodule = self._unbound_submodule(origin, target.target.file, name)
+        if submodule is None:
+            return None
+        child_spec = f"{spec}{'' if spec.endswith('.') else '.'}{name}"
+        child = self.module_target(origin, child_spec)
+        if not isinstance(child, PythonLink) or child.target.file.file_id != submodule.file_id:
+            return None
+        return child
+
+    def _unbound_submodule(self, origin: FileRow, module: FileRow, name: str) -> FileRow | None:
         self._begin(origin)
-        found, reason, cut = self._trace(target.file, name, frozenset(), 0)
+        found, reason, cut = self._trace(module, name, frozenset(), 0)
         if found is not None or reason != "not-exported" or cut:
             return None
-        return self._modules.submodule(target.file, name)
+        return self._modules.submodule(module, name)
 
     def has_import_binding(
         self, module: FileRow, local: str, specifier: str, imported: str

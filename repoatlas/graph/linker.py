@@ -77,7 +77,7 @@ from repoatlas.graph.http_crossings import (
 from repoatlas.graph.http_scopes import FileScope, ScopeSymbol
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
 from repoatlas.graph.link_exposures import plan_link_exposures, plan_scoped_exposures
-from repoatlas.graph.modules import ModuleResolver, declared_constraints
+from repoatlas.graph.modules import ModuleResolver, ModuleTarget, declared_constraints
 from repoatlas.graph.ordinary_outcomes import (
     Classifier,
     Decision,
@@ -86,21 +86,25 @@ from repoatlas.graph.ordinary_outcomes import (
     finish_accounting,
     summarize,
 )
-from repoatlas.graph.packages import CROSSING
+from repoatlas.graph.packages import CROSSING, PACKAGE_BASIS, PackageLink
 from repoatlas.graph.persistence import plan_persistence
 from repoatlas.graph.prisma_schema import plan_prisma, prisma_projects
+from repoatlas.graph.py_packages import PythonLink
 from repoatlas.graph.py_uses import PythonUseResolver
 from repoatlas.graph.resolution import ResolutionIndex, flavor_for
 from repoatlas.graph.salt_pillar import resolve_pillar_reads
-from repoatlas.graph.uses import table_from_meta, use_resolution
+from repoatlas.graph.uses import UseResolver, table_from_meta, use_resolution
 from repoatlas.graph.uses_link import (
     UsesChangeLog,
     UsesPlan,
     UsesScope,
+    _bound_names,
+    _import_line,
     apply_uses,
     plan_uses,
     python_use_resolver,
     stored_scope,
+    use_resolver,
 )
 from repoatlas.graph.value_mappings import plan_value_mappings
 from repoatlas.models import http
@@ -124,6 +128,8 @@ from repoatlas.models.parsing import (
     ENUM_MEMBER,
     FIELD,
     LOCAL_RECEIVER,
+    USES_EXPORT_TABLE,
+    USES_ONLY_KINDS,
     EdgeType,
     EntityType,
     ParsedFile,
@@ -811,7 +817,6 @@ class ReferenceLinker:
                 index, module_facts, declared=declared_constraints(index, records)
             )
             ledger = OutcomeLedger() if classify else None
-            classifier = Classifier(index, records, module_facts, modules) if classify else None
             languages: dict[int, str] = {}
             graphql_unknown_role = 0
             ordinary_unresolved = 0
@@ -819,6 +824,42 @@ class ReferenceLinker:
             lazy_uses = functools.cache(
                 lambda: python_use_resolver(self._knowledge, index, records)
             )
+            lazy_script_uses = functools.cache(
+                lambda: use_resolver(self._knowledge, index, records)
+            )
+            symbols_by_id = functools.cache(
+                lambda: {symbol.entity_id: symbol for symbol in symbols}
+            )
+
+            def resolved_module(origin: FileRow, specifier: str, flavor: str) -> FileRow | None:
+                if flavor == "python":
+                    target = lazy_uses().module_target(origin, specifier)
+                    if isinstance(target, PythonLink):
+                        return target.target.file
+                else:
+                    target = lazy_script_uses().module_target(origin, specifier)
+                    if isinstance(target, PackageLink):
+                        return target.file
+                return target.file if isinstance(target, ModuleTarget) else None
+
+            classifier = (
+                Classifier(index, records, module_facts, modules, resolved_module)
+                if classify
+                else None
+            )
+
+            @functools.cache
+            def file_uses(file_id: int) -> dict[tuple[int, str, str], list[dict[str, str]]]:
+                found: dict[tuple[int, str, str], list[dict[str, str]]] = {}
+                for use in self._knowledge.list_use_claims([file_id]):
+                    if use.edge_type is not EdgeType.USES or use.target_key == USES_EXPORT_TABLE:
+                        continue
+                    meta = json.loads(use.meta_json) if use.meta_json else {}
+                    specifier = meta.get("module")
+                    if specifier:
+                        found.setdefault((use.src_id, use.target_key, specifier), []).append(meta)
+                return found
+
             if ledger is not None:
                 for fact in module_facts:
                     ledger.excluded(fact, MODULE_FACT)
@@ -910,7 +951,9 @@ class ReferenceLinker:
                         ledger.linked(claim, language, PILLAR_READ)
                     continue
                 siblings = by_file.get(claim.file_id, [])
-                edge = self._resolve(claim, origin, index, siblings, modules, lazy_uses)
+                edge = self._resolve(
+                    claim, origin, index, siblings, modules, lazy_uses, lazy_script_uses
+                )
                 imported_name = (
                     _python_imported_name(claim, siblings, _claim_meta(claim.meta_json))
                     if edge is None
@@ -932,6 +975,16 @@ class ReferenceLinker:
                         edge = self._resolve_python_value_member(
                             claim, origin, index, lazy_uses(), value_use
                         )
+                if edge is None:
+                    edge = self._resolve_via_use(
+                        claim,
+                        origin,
+                        siblings,
+                        file_uses,
+                        symbols_by_id,
+                        lazy_uses,
+                        lazy_script_uses,
+                    )
                 if edge is None:
                     unresolved += 1
                     ordinary_unresolved += 1
@@ -1336,12 +1389,13 @@ class ReferenceLinker:
         siblings: list[UnresolvedRefRecord],
         modules: ModuleResolver | None,
         uses: Callable[[], PythonUseResolver],
+        script_uses: Callable[[], UseResolver],
     ) -> EdgeRecord | None:
         meta = json.loads(claim.meta_json) if claim.meta_json else {}
         kind = claim.target_kind
 
         if kind is EntityType.MODULE:
-            return self._resolve_module(claim, origin, index, meta, modules)
+            return self._resolve_module(claim, origin, index, meta, modules, uses, script_uses)
         if kind in _PATH_KINDS:
             target = index.resolve_repo_relative_path(origin, claim.target_key)
             return self._edge(claim, origin, target.file_entity_id) if target else None
@@ -1402,6 +1456,8 @@ class ReferenceLinker:
         index: ResolutionIndex,
         meta: dict[str, str],
         modules: ModuleResolver | None = None,
+        uses: Callable[[], PythonUseResolver] | None = None,
+        script_uses: Callable[[], UseResolver] | None = None,
     ) -> EdgeRecord | None:
         flavor = _flavor(origin, meta)
         if flavor is None:
@@ -1416,8 +1472,27 @@ class ReferenceLinker:
             )
         else:
             target = index.resolve_module(origin, claim.target_key, flavor)
+            if flavor == "python" and claim.edge_type is EdgeType.IMPORTS and uses is not None:
+                found = uses().module_target(origin, claim.target_key)
+                if isinstance(found, PythonLink):
+                    return self._module_edge(claim, origin, found.target, found.crossing)
+                if isinstance(found, ModuleTarget) and (
+                    target is None or found.file.file_id != target.file_id
+                ):
+                    return self._module_edge(claim, origin, found)
             if target is None and modules is not None and flavor == "node":
-                return self._configured_import(claim, origin, modules)
+                configured = self._configured_import(claim, origin, modules)
+                if configured is not None:
+                    return configured
+                if claim.edge_type is EdgeType.IMPORTS and script_uses is not None:
+                    found = script_uses().module_target(origin, claim.target_key)
+                    if isinstance(found, PackageLink):
+                        return self._module_edge(
+                            claim,
+                            origin,
+                            ModuleTarget(found.file, PACKAGE_BASIS),
+                            found.crossing,
+                        )
         return self._edge(claim, origin, target.file_entity_id) if target else None
 
     def _resolve_python_fromlist_submodules(
@@ -1447,7 +1522,36 @@ class ReferenceLinker:
             target = uses().fromlist_submodule(origin, claim.target_key, name.strip())
             if target is not None:
                 edges.append(self._edge(claim, origin, target.file_entity_id))
+                continue
+            provider = uses().provider_submodule(origin, claim.target_key, name.strip())
+            if provider is not None:
+                edge = self._module_edge(claim, origin, provider.target, provider.crossing)
+                if edge is not None:
+                    edges.append(edge)
         return edges
+
+    def _module_edge(
+        self,
+        claim: UnresolvedRefRecord,
+        origin: FileRow,
+        target: ModuleTarget,
+        crossing: Mapping[str, object] | None = None,
+    ) -> EdgeRecord | None:
+        if target.file.repo_id != origin.repo_id and not crossing:
+            return None
+        resolution: dict[str, object] = {
+            "basis": target.basis,
+            "specifier": claim.target_key,
+            **dict(target.detail),
+        }
+        if crossing:
+            resolution[CROSSING] = {**crossing, "imported_at": claim.line_start}
+        return self._edge(
+            claim,
+            origin,
+            target.file.file_entity_id,
+            resolution=json.dumps(resolution, sort_keys=True, separators=(",", ":")),
+        )
 
     def _configured_import(
         self, claim: UnresolvedRefRecord, origin: FileRow, modules: ModuleResolver
@@ -1490,6 +1594,16 @@ class ReferenceLinker:
         flavor = _flavor(origin, meta)
         if not specifier or flavor is None:
             return None
+        if flavor == "python":
+            proven = uses().module_target(origin, specifier)
+            proven_target = proven.target if isinstance(proven, PythonLink) else proven
+            legacy = index.resolve_module(origin, specifier, flavor)
+            if (
+                isinstance(proven_target, ModuleTarget)
+                and legacy is not None
+                and proven_target.file.file_id != legacy.file_id
+            ):
+                return None
         target_file = (
             self._resolve_python_imported_submodule(claim, origin, index, siblings, specifier, uses)
             if flavor == "python"
@@ -1511,6 +1625,104 @@ class ReferenceLinker:
                 name = next(iter(sources))
         symbol = index.resolve_symbol(target_file, name)
         return self._edge(claim, origin, symbol.entity_id) if symbol else None
+
+    def _resolve_via_use(
+        self,
+        claim: UnresolvedRefRecord,
+        origin: FileRow,
+        siblings: Sequence[UnresolvedRefRecord],
+        file_uses: Callable[[int], dict[tuple[int, str, str], list[dict[str, str]]]],
+        symbols: Callable[[], dict[int, SymbolRow]],
+        python: Callable[[], PythonUseResolver],
+        script: Callable[[], UseResolver],
+    ) -> EdgeRecord | None:
+        """Resolve an ordinary claim only when a matching declaration use proves its target.
+
+        A use that reached its declaration only as the receiver of a longer chain (``form``
+        ``receiver``) proves no call of it and no reference to it: neither a ``CALLS`` nor a
+        ``REFERENCES`` claim resolves through it."""
+        if claim.edge_type not in {EdgeType.CALLS, EdgeType.REFERENCES, EdgeType.EXPORTS}:
+            return None
+        if claim.target_kind not in {EntityType.SYMBOL, EntityType.CLASS, EntityType.FUNCTION}:
+            return None
+        meta = _claim_meta(claim.meta_json)
+        specifier, flavor = meta.get("module"), _flavor(origin, meta)
+        if not specifier or flavor not in {"node", "python"}:
+            return None
+        resolver = python() if flavor == "python" else script()
+        if isinstance(resolver.module_target(origin, specifier), str):
+            return None
+        if claim.edge_type is EdgeType.EXPORTS:
+            if flavor != "node":
+                return None
+            binders = [
+                (sibling.target_key, imported)
+                for sibling in siblings
+                if sibling.edge_type is EdgeType.IMPORTS
+                and (binding := _claim_meta(sibling.meta_json)).get("role")
+                not in {"re-export", "dynamic"}
+                for local, imported in _bound_names(dict(binding))
+                if local == claim.target_key
+            ]
+            if len(binders) != 1 or binders[0][0] != specifier or binders[0][1] is None:
+                return None
+            candidates = [
+                {
+                    "module": specifier,
+                    "binding": "import",
+                    "local": claim.target_key,
+                    "imported": binders[0][1],
+                    "use": "value",
+                    "form": "export",
+                }
+            ]
+        else:
+            candidates = file_uses(origin.file_id).get(
+                (claim.src_id, claim.target_key, specifier), []
+            )
+        reached: dict[int, str] = {}
+        for use in candidates:
+            if claim.edge_type is EdgeType.CALLS and (
+                use.get("use") != "call" or use.get("type_only") == "true"
+            ):
+                continue
+            found = resolver.resolve(origin, use)
+            if found is None:
+                continue
+            entity_id, fields = found
+            symbol = symbols().get(entity_id)
+            if symbol is None or fields.get("namespace"):
+                continue
+            if claim.edge_type in {EdgeType.CALLS, EdgeType.REFERENCES} and (
+                symbol.meta.get("kind") in USES_ONLY_KINDS
+            ):
+                continue
+            if fields.get("form") == "receiver" and claim.edge_type in {
+                EdgeType.CALLS,
+                EdgeType.REFERENCES,
+            }:
+                # The chain stopped at the declaration the name reached (`Outer.Inner` ->
+                # `Outer`): the use is of that declaration as the receiver of the rest, which
+                # is not a reference to the declaration itself.
+                continue
+            if claim.edge_type is EdgeType.CALLS and (
+                symbol.type not in {EntityType.FUNCTION, EntityType.CLASS}
+                or fields.get("use", "call") != "call"
+            ):
+                continue
+            crossing = fields.get(CROSSING)
+            if symbol.repo_id != origin.repo_id:
+                if not isinstance(crossing, dict) or not crossing.get("package"):
+                    continue
+                line = _import_line(siblings, use)
+                if line is None:
+                    continue
+                fields[CROSSING] = {**crossing, "imported_at": line}
+            reached.setdefault(entity_id, use_resolution(use, **fields))
+        if len(reached) != 1:
+            return None
+        entity_id, resolution = next(iter(reached.items()))
+        return self._edge(claim, origin, entity_id, resolution=resolution)
 
     def _resolve_python_imported_submodule(
         self,

@@ -1,4 +1,4 @@
-"""Python package links: an import of a module another Python project provides (``USES`` only).
+"""Python package links: an import of a module another Python project provides.
 
 Within its own project a Python import resolves against the project's own roots
 (:mod:`repoatlas.graph.py_modules`), and there it stops: sitting in the same Git

@@ -223,16 +223,10 @@ def test_calls_is_not_a_crossing_edge() -> None:
     assert EdgeType.CALLS not in CROSS_REPOSITORY_EDGES
 
 
-def test_a_planted_cross_repository_call_never_leaves_its_repository(
+def test_an_unproven_cross_repository_call_never_leaves_its_repository(
     initialized: Workspace,
 ) -> None:
-    """The indexer produces no cross-repository CALLS edge, so one is planted.
-
-    That is the point: a call is resolved through an import the calling file made,
-    within its own repository. If the policy ever let one cross, a shared symbol
-    name would become a route between repositories — and enabling explicit
-    traversal must not be the change that opens it.
-    """
+    """An edge without package evidence must not become a cross-repository route."""
     source, _ = _a_calls_edge(initialized)
     initialized.database.execute(
         "INSERT INTO edges (src_id, dst_id, type, confidence, parser) VALUES (?, ?, ?, 1.0, ?)",

@@ -1,11 +1,10 @@
-"""Ordinary ``IMPORTS`` edges for bare specifiers a configuration names (Stage 3-B).
+"""Ordinary imports and bindings resolved through configuration and package evidence.
 
 An ``IMPORTS`` claim whose specifier is not a relative path is linked to a file only when the
-resolver the declaration uses use (:class:`~repoatlas.graph.modules.ModuleResolver`) leads to
-**one** indexed file of the importing repository, from indexed facts alone. These tests pin the
-positive cases next to every way that proof can fail: a duplicate workspace provider, conflicting
-entry conditions, an alias into an unindexed target or out of the repository, a declaration naming
-another source, and a name only another repository provides. A coincidental name is never enough.
+resolver finds one indexed local file or a declared, unique provider. These tests pin the
+positive cases next to ways that proof can fail: a duplicate provider, conflicting entry
+conditions, an alias into an unindexed target or out of the repository, and a declaration naming
+another source. A coincidental name is never enough.
 
 Every name here is invented.
 """
@@ -161,9 +160,7 @@ def test_a_configured_specifier_with_one_target_in_its_own_repository_is_linked(
         (12, "a third-party package"),
     ],
 )
-def test_what_is_not_one_file_of_the_importing_repository_gets_no_edge(
-    indexed: Workspace, line: int, why: str
-) -> None:
+def test_unproven_imports_get_no_edge(indexed: Workspace, line: int, why: str) -> None:
     assert line not in imported(indexed), why
 
 
@@ -194,7 +191,7 @@ def test_each_refusal_is_explained_by_the_evidence_that_refused_it(tmp_path: Pat
         workspace.close()
 
 
-def test_calls_references_and_uses_are_untouched_by_the_new_imports(indexed: Workspace) -> None:
+def test_imports_do_not_create_unrelated_resolved_edges(indexed: Workspace) -> None:
     kinds = indexed.database.execute(
         "SELECT DISTINCT type FROM edges WHERE parser = 'linker:global' AND resolution IS NOT NULL"
         " AND type != 'USES'"
@@ -260,3 +257,151 @@ def test_a_target_in_another_repository_is_refused_even_if_a_resolver_returned_o
     )
     linker = ReferenceLinker(indexed.knowledge, indexed.dependencies)
     assert linker._configured_import(claim, origin, Stub()) is None  # type: ignore[arg-type]
+
+
+def test_configured_aliases_and_workspace_packages_resolve_calls_and_exports(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    site = {
+        **SITE,
+        "apps/web/src/logic.ts": (
+            "export function compute() {}\nexport const value = { run() {} };\n"
+        ),
+        "packages/lib/src/index.ts": "export function run() {}\n",
+        "apps/web/src/dynamic.ts": (
+            'const { compute } = await import("@/logic");\nexport { compute };\n'
+        ),
+        MAIN: (
+            'import { compute, value } from "@/logic";\n'  # 1
+            'import { run } from "@toy/lib";\n'  # 2
+            'import * as utils from "@/logic";\n'  # 3
+            "export { compute as publicCompute };\n"  # 4
+            "export function start() {\n"  # 5
+            "  compute();\n"  # 6
+            "  compute();\n"  # 7
+            "  run();\n"  # 8
+            "  utils.compute();\n"  # 9
+            "  value.run();\n"  # 10: a method of a value, not the imported run
+            "}\n"
+            "export function shadow(compute: () => void) {\n"
+            "  compute();\n"  # 13: the parameter, not the import
+            "}\n"
+        ),
+    }
+    indexed = build(workspace, tmp_path, {"site": site, "outside": OUTSIDE})
+    rows = indexed.database.execute(
+        """
+        SELECT e.type, e.line_start, df.rel_path, d.qualified_name, e.resolution
+        FROM edges e JOIN entities d ON d.id = e.dst_id
+        JOIN files df ON df.id = d.file_id JOIN files sf ON sf.id = e.file_id
+        WHERE sf.rel_path = ? AND e.parser = 'linker:global'
+          AND e.type IN ('CALLS', 'EXPORTS')
+        """,
+        (MAIN,),
+    ).fetchall()
+    found = {(row[0], row[1], row[2], row[3]) for row in rows}
+    assert found == {
+        ("EXPORTS", 4, "apps/web/src/logic.ts", "compute"),
+        ("CALLS", 6, "apps/web/src/logic.ts", "compute"),
+        ("CALLS", 7, "apps/web/src/logic.ts", "compute"),
+        ("CALLS", 8, "packages/lib/src/index.ts", "run"),
+        ("CALLS", 9, "apps/web/src/logic.ts", "compute"),
+    }
+    assert {json.loads(row[4])["basis"] for row in rows} == {
+        "tsconfig-paths",
+        "workspace-package",
+    }
+    dynamic_export = indexed.database.execute(
+        """
+        SELECT COUNT(*) FROM edges e JOIN files sf ON sf.id = e.file_id
+        JOIN entities d ON d.id = e.dst_id JOIN files df ON df.id = d.file_id
+        WHERE sf.rel_path = 'apps/web/src/dynamic.ts' AND e.type = 'EXPORTS'
+          AND df.rel_path = 'apps/web/src/logic.ts'
+        """
+    ).fetchone()[0]
+    assert dynamic_export == 0
+    sync(indexed, indexed.resolver().resolve(tmp_path / "repos"), classify=True)
+    [decision] = [
+        row
+        for row in indexed.knowledge.list_link_decisions(family="ordinary")
+        if row.path == MAIN and row.line_start == 10 and row.subject == "CALLS:symbol:value.run"
+    ]
+    assert json.loads(decision.evidence_json)["subreason"] == "receiver-member"
+
+
+@pytest.mark.parametrize(
+    ("declared", "duplicate", "linked"),
+    [(True, False, True), (False, False, False), (True, True, False)],
+)
+def test_cross_repository_imports_and_calls_require_a_unique_declared_provider(
+    workspace: Workspace, tmp_path: Path, declared: bool, duplicate: bool, linked: bool
+) -> None:
+    site = {
+        **SITE,
+        "apps/web/package.json": json.dumps(
+            {"dependencies": {"@toy/provided-elsewhere": "^1.0.0"} if declared else {}}
+        ),
+        MAIN: (
+            'import { elsewhere } from "@toy/provided-elsewhere";\n'
+            "export function run() { elsewhere(); }\n"
+        ),
+    }
+    provider = {**OUTSIDE, "index.ts": "export function elsewhere() {}\n"}
+    repos = {"site": site, "outside": provider}
+    if duplicate:
+        repos["duplicate"] = provider
+    indexed = build(workspace, tmp_path, repos)
+    rows = indexed.database.execute(
+        """
+        SELECT e.type, e.line_start, df.rel_path, e.resolution FROM edges e
+        JOIN files sf ON sf.id = e.file_id JOIN repositories sr ON sr.id = sf.repo_id
+        JOIN entities d ON d.id = e.dst_id JOIN files df ON df.id = d.file_id
+        JOIN repositories dr ON dr.id = df.repo_id
+        WHERE sr.slug = 'site' AND sf.rel_path = ? AND dr.slug != 'site'
+          AND e.parser = 'linker:global' AND e.type IN ('IMPORTS', 'CALLS')
+        """,
+        (MAIN,),
+    ).fetchall()
+    if not linked:
+        assert not rows
+        return
+    assert {(row[0], row[1], row[2]) for row in rows} == {
+        ("IMPORTS", 1, "index.ts"),
+        ("CALLS", 2, "index.ts"),
+    }
+    for row in rows:
+        crossing = json.loads(row[3])["crossing"]
+        assert crossing["package"] == "npm:@toy/provided-elsewhere"
+        assert crossing["provider"] == "outside"
+        assert crossing["imported_at"] == 1
+
+
+def test_alias_call_tracks_configuration_changes_on_incremental_sync(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    site = {
+        **SITE,
+        "apps/web/src/logic.ts": "export function compute() {}\n",
+        MAIN: 'import { compute } from "@/logic";\nexport function run() { compute(); }\n',
+    }
+    indexed = build(workspace, tmp_path, {"site": site, "outside": OUTSIDE})
+
+    def calls() -> list[str]:
+        return [
+            row[0]
+            for row in indexed.database.execute(
+                """
+                SELECT df.rel_path FROM edges e JOIN entities d ON d.id = e.dst_id
+                JOIN files df ON df.id = d.file_id JOIN files sf ON sf.id = e.file_id
+                WHERE sf.rel_path = ? AND e.type = 'CALLS' AND e.parser = 'linker:global'
+                """,
+                (MAIN,),
+            ).fetchall()
+        ]
+
+    assert calls() == ["apps/web/src/logic.ts"]
+    root = tmp_path / "repos"
+    edit(root, "site", "apps/web/tsconfig.json", '{"compilerOptions":{"paths":{}}}\n')
+    sync(indexed, indexed.resolver().resolve(root))
+    assert calls() == []
+    assert_equals_fresh(indexed, indexed.settings, root, tmp_path, "alias-call-removed")

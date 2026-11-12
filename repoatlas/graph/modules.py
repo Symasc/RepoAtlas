@@ -4,10 +4,8 @@ A relative specifier names a file by its text. A bare one -- ``@acme/contracts``
 ``@/api/client`` -- names a file only through configuration, and this module reads
 that configuration from the facts recorded when it was indexed
 (:mod:`repoatlas.parsers.module_facts`), never from the working tree. It resolves
-the uses a declaration makes of imported names, and the bare specifier of an ``IMPORTS``
-claim (one edge to the one file it names, in the importer's own repository); the
-reference and call edges the global pass writes are resolved exactly as they were
-before this module existed. It reads:
+the uses a declaration makes of imported names, ordinary imports, and the imported
+bindings the global pass traces for calls, references and static exports. It reads:
 
 * **tsconfig path aliases**: the ``tsconfig.json`` (or ``jsconfig.json``) nearest the
   importing file, with ``extends`` followed inside the repository; ``paths`` is
@@ -35,9 +33,9 @@ work, not this module's; it is bounded by :data:`MAX_REEXPORT_HOPS` and
 Everything :meth:`ModuleResolver.resolve` answers is repository-local by construction:
 every map is keyed by the importing file's repository, and a path that climbs out of
 its repository resolves to nothing. A same-named package in another repository is a
-dependency fact (``DEPENDS_ON``), never an import target of these edges. Only the
-package link that ``USES`` alone reads (:mod:`repoatlas.graph.packages`) enters another
-repository's package, through :meth:`ModuleResolver.package_entry`.
+dependency fact (``DEPENDS_ON``), never a target of this resolver. Only a proven
+package link (:mod:`repoatlas.graph.packages`) enters another repository's package,
+through :meth:`ModuleResolver.package_entry`.
 
 **Build output.** A package usually names its entry in build output that is not in
 the repository (``exports: ./dist/index.mjs``), whether it is published or a workspace

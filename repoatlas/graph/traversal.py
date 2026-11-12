@@ -83,18 +83,18 @@ RELATIONSHIP_DEFAULT_EDGES = (*EXPANSION_EDGES, EdgeType.CALLS_HTTP_HANDLER)
 #: expands through them.
 #:
 #: Being nameable is not being reachable across a boundary. ``CALLS`` and ``USES``
-#: are deliberately absent from :data:`CROSS_REPOSITORY_EDGES` below, so an explicit
-#: request still cannot follow one out of its repository.
+#: are deliberately absent from :data:`CROSS_REPOSITORY_EDGES` below. An explicit
+#: relationships request may follow a ``CALLS`` edge across only on its own package
+#: evidence; a same-named symbol is never enough.
 RELATIONSHIP_EDGES = (*RELATIONSHIP_DEFAULT_EDGES, EdgeType.CALLS, EdgeType.USES)
 
 #: Edge types a traversal may follow **out of one repository into another**.
 #:
 #: Every one of these is produced by the linker's global pass from an exact match
 #: — a resolved package name, path, import, or explicitly mapped Salt pillar — so
-#: a cross-repository answer always has a structural reason (V1_SPEC §9). A `CALLS`
-#: or `DEFINES` edge is deliberately absent: those are meaningful within a
-#: repository but would let a traversal wander between repositories on nothing
-#: stronger than a shared symbol name.
+#: a cross-repository answer always has a structural reason (V1_SPEC §9). ``CALLS``
+#: is absent from this unconditional set; explicit relationships and impact allow
+#: it only on package evidence. ``DEFINES`` never crosses.
 CROSS_REPOSITORY_EDGES = frozenset(
     {
         EdgeType.DEPENDS_ON,
@@ -113,6 +113,18 @@ CROSS_REPOSITORY_EDGES = frozenset(
 #: (:mod:`repoatlas.graph.impact`): inward, on that evidence, and never from a file
 #: that does not change whole.
 RELATIONSHIP_CROSSING_EDGES = CROSS_REPOSITORY_EDGES | {EdgeType.CALLS_HTTP_HANDLER}
+
+#: Edge types that may join two repositories **on package evidence**, and are followed
+#: only when the caller asks.
+#:
+#: A package link (:mod:`repoatlas.graph.packages`) records the proof for a crossing in
+#: the edge's own resolution (``$.crossing.package``). An edge of one of these types that
+#: carries it is withheld by :func:`walk` unless the caller names the type in
+#: ``evidenced_edges``; the same type without that evidence follows the rule for
+#: :data:`CROSS_REPOSITORY_EDGES` as it always has. ``USES`` and ``EXPORTS`` are
+#: deliberately absent: a ``USES`` edge crosses only in the change-impact walk, and an
+#: ``EXPORTS`` edge is never followed across a boundary.
+PACKAGE_CROSSING_EDGES = frozenset({EdgeType.IMPORTS, EdgeType.REFERENCES, EdgeType.CALLS})
 
 
 #: Structural edges: what declares or contains what.
@@ -168,6 +180,10 @@ class WalkResult:
     #: "this is as much of it as was allowed", which a caller reporting
     #: completeness has to be able to tell apart.
     bounded: bool = False
+    #: How many distinct package-proven crossings the walk did not follow, among the
+    #: edges that touch a node it expanded (see ``count_withheld`` in :func:`walk`).
+    #: Zero unless counting was asked for.
+    withheld: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +200,8 @@ class TraversalResult:
     reasons: dict[int, str] = field(default_factory=dict)
     #: Every node the walk touched, seeds included. The cost of the traversal.
     visited: int = 0
+    #: Package-proven crossings the walk withheld; see :attr:`WalkResult.withheld`.
+    withheld: int = 0
 
 
 def walk(
@@ -196,9 +214,11 @@ def walk(
     edge_types: Sequence[EdgeType] = EXPANSION_EDGES,
     direction: EdgeDirection = EdgeDirection.ANY,
     crossing_edges: frozenset[EdgeType] = CROSS_REPOSITORY_EDGES,
+    evidenced_edges: frozenset[EdgeType] = frozenset(),
     containment: bool = False,
     order: NeighborOrder = NeighborOrder.CONFIDENCE,
     home_repo_id: int | None = None,
+    count_withheld: bool = False,
 ) -> WalkResult:
     """The one bounded walk. Everything that traverses this graph comes through here.
 
@@ -213,11 +233,23 @@ def walk(
     reads it.
 
     ``crossing_edges`` is the set permitted to leave a repository. Every member of
-    the default is produced by the linker's global pass from an exact match, so a
-    cross-repository answer always has a structural reason (V1_SPEC §9). Passing
-    an empty set confines the walk to one repository; passing a *wider* set is not
-    offered, because the restriction is what keeps a traversal from wandering
-    between repositories on nothing stronger than a shared symbol name.
+    the default is produced by the linker's global pass from an exact match.
+    ``evidenced_edges`` governs the crossings that record package evidence
+    (``$.crossing.package``): such an edge is followed only if its type is in
+    ``evidenced_edges``, whatever ``crossing_edges`` says, and a crossing without that
+    evidence only if its type is in ``crossing_edges``. Empty sets confine direct
+    edges to their repositories; with ``evidenced_edges`` empty (the default) a
+    package-proven crossing is never followed. The rule is applied in the neighbour
+    query as well, so a withheld edge never uses up a place under the per-hop fan-out
+    bound.
+
+    ``count_withheld`` additionally counts, in :attr:`WalkResult.withheld`, the distinct
+    package-proven crossings that were withheld because their type is not in
+    ``evidenced_edges``: edges of an admitted type, in the direction walked, touching a
+    node the walk expanded at some hop. Nodes reached only at the last hop are not
+    expanded, so their crossings are not counted. Home-repository confinement does not
+    change the count. One extra indexed query per expanded hop; the count never
+    influences the walk.
 
     ``containment`` admits :data:`CONTAINMENT_EDGES` as visible structural context
     around the **seeds only**, and only that. It is a deliberately bounded one-hop
@@ -264,6 +296,7 @@ def walk(
     reached: list[int] = []
     reasons: dict[int, str] = {}
     bounded = False
+    withheld: set[int] = set()
 
     for hop in range(max(0, hops)):
         if not frontier:
@@ -281,14 +314,21 @@ def walk(
             limit=want + 1,
             direction=direction,
             order=order,
+            package_crossings=evidenced_edges,
         )
+        if count_withheld:
+            withheld.update(
+                knowledge.package_crossing_ids(frontier, admitted, direction, evidenced_edges)
+            )
         if len(edges) > want:
             bounded = True
             edges = edges[:want]
         next_frontier: list[int] = []
         for edge in edges:
-            if edge.crosses_repositories and edge.type not in crossing_edges:
-                continue
+            if edge.crosses_repositories:
+                allowed = evidenced_edges if edge.evidenced else crossing_edges
+                if edge.type not in allowed:
+                    continue
 
             if edge.src_id in frontier_set:
                 from_id, to_id, outgoing = edge.src_id, edge.dst_id, True
@@ -334,7 +374,12 @@ def walk(
         frontier = next_frontier
 
     return WalkResult(
-        steps=steps, reached=reached, reasons=reasons, visited=len(visited), bounded=bounded
+        steps=steps,
+        reached=reached,
+        reasons=reasons,
+        visited=len(visited),
+        bounded=bounded,
+        withheld=len(withheld),
     )
 
 
@@ -346,6 +391,8 @@ def expand_from_seeds(
     fanout: int,
     seed_limit: int,
     home_repo_id: int | None = None,
+    package_crossings: bool = False,
+    count_withheld: bool = False,
 ) -> TraversalResult:
     """The nodes a bounded walk reaches, in the order it reaches them.
 
@@ -358,8 +405,26 @@ def expand_from_seeds(
     request: the shared node stays reachable and nothing on the far side of one is
     followed. ``None`` — V1's own expansion, which has no repository to stay in —
     confines nothing, and is what this has always done.
+
+    ``package_crossings`` also follows the imports, references and calls that a package
+    link proves into another repository (:data:`PACKAGE_CROSSING_EDGES`). Off, the
+    default, none is followed and the answer is the one this walk gave before package
+    links wrote any. ``count_withheld`` counts the ones not followed in
+    :attr:`TraversalResult.withheld`; see :func:`walk`.
     """
     result = walk(
-        knowledge, seeds, hops=hops, fanout=fanout, seed_limit=seed_limit, home_repo_id=home_repo_id
+        knowledge,
+        seeds,
+        hops=hops,
+        fanout=fanout,
+        seed_limit=seed_limit,
+        home_repo_id=home_repo_id,
+        evidenced_edges=PACKAGE_CROSSING_EDGES if package_crossings else frozenset(),
+        count_withheld=count_withheld,
     )
-    return TraversalResult(reached=result.reached, reasons=result.reasons, visited=result.visited)
+    return TraversalResult(
+        reached=result.reached,
+        reasons=result.reasons,
+        visited=result.visited,
+        withheld=result.withheld,
+    )

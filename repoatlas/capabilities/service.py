@@ -208,7 +208,13 @@ from repoatlas.graph.impact import ImpactWalk
 from repoatlas.graph.keys import is_positional
 from repoatlas.graph.release_values import CONTAINER_ARTIFACT
 from repoatlas.graph.service_declarations import classifications, classified_text, origin_of_url
-from repoatlas.graph.traversal import RELATIONSHIP_CROSSING_EDGES, WalkResult, WalkStep, walk
+from repoatlas.graph.traversal import (
+    PACKAGE_CROSSING_EDGES,
+    RELATIONSHIP_CROSSING_EDGES,
+    WalkResult,
+    WalkStep,
+    walk,
+)
 from repoatlas.graph.units import package_directories, unit_of
 from repoatlas.grounding import NAMED_REFERENCE, GroundingReport, ground_answer
 from repoatlas.indexing.chunking import chunk_hash
@@ -811,6 +817,12 @@ class CapabilityService:
                         # cross_repository.
                         confined=True,
                         path_prefix=path_prefix,
+                        # Expansion never follows a package-proven code link unless
+                        # the request asks (validated to need `scope: global`); when
+                        # it does not ask, the links it left out are counted, so the
+                        # response can say how many.
+                        cross_repository=request.cross_repository,
+                        count_withheld=not request.cross_repository,
                     )
                     line_cache: dict[tuple[str, str], dict[int, str]] = {}
                     by_slug = {repo.slug: repo for repo in resolution.repositories}
@@ -1008,6 +1020,9 @@ class CapabilityService:
                         direction=EDGE_DIRECTIONS[request.direction],
                         crossing_edges=(
                             RELATIONSHIP_CROSSING_EDGES if request.cross_repository else frozenset()
+                        ),
+                        evidenced_edges=(
+                            PACKAGE_CROSSING_EDGES if request.cross_repository else frozenset()
                         ),
                         containment=request.include_containment,
                         # The cut is the answer here, so it falls on the
@@ -3260,6 +3275,11 @@ class CapabilityService:
             ledger=session.ledger.summary(),
             within_path=path_prefix,
             terms=outcome.term_matches,
+            withheld_crossings=(
+                outcome.withheld_crossings
+                if not request.cross_repository and outcome.withheld_crossings > 0
+                else None
+            ),
         )
 
     def _seed_handles(

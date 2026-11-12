@@ -141,6 +141,9 @@ class CompactSearchResponse(BaseModel):
     freshness: CompactFreshness
     ledger: LedgerSummary
     trace: RetrievalTrace | None = None
+    #: The full response's ``withheld_crossings``; omitted when null, like every
+    #: null field here.
+    withheld_crossings: int | None = None
 
 
 class CompactInspectResponse(BaseModel):

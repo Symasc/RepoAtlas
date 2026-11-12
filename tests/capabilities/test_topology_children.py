@@ -110,7 +110,10 @@ def test_a_file_lists_its_declarations_in_source_order(linked: Workspace) -> Non
         (link.child, link.peer.repository)
         for link in crossing.links
         if link.peer.kind is PeerKind.REPOSITORY
-    } == {("sym:app:src/policy.ts:canEdit:2", "contracts")}
+    } == {
+        ("src/policy.ts", "contracts"),
+        ("sym:app:src/policy.ts:canEdit:2", "contracts"),
+    }
 
 
 def test_a_link_between_two_children_is_counted_once_from_its_source(linked: Workspace) -> None:

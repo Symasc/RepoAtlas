@@ -220,25 +220,30 @@ def test_a_name_nobody_declares_is_never_external(corpus: Workspace) -> None:
     )
 
 
-def test_a_package_a_managed_repository_provides_is_not_external(corpus: Workspace) -> None:
+def test_proven_workspace_and_cross_repository_packages_are_linked(corpus: Workspace) -> None:
     rows = open_rows(corpus)
-    # declared by toy-web and provided by toy-shared: the ordinary rules never cross
-    # repositories, and that is a different statement from "outside the index"
-    assert rows[("src/index.ts", "9", "IMPORTS:module:toy-shared")] == (
-        UNSUPPORTED,
-        "cross-repository-provider",
-    )
-    assert rows[("src/index.ts", "22", "CALLS:symbol:shared")][1] == "cross-repository-provider"
-    # a member of the repository's own workspace: the import is linked to its entry now, so it
-    # has no open row; the call through it is still not traced by the ordinary rules
-    assert ("src/index.ts", "8", "IMPORTS:module:@toy/codec") not in rows
-    assert rows[("src/index.ts", "21", "CALLS:symbol:parse")][1] == "workspace-package"
+    for key in (
+        ("src/index.ts", "8", "IMPORTS:module:@toy/codec"),
+        ("src/index.ts", "9", "IMPORTS:module:toy-shared"),
+        ("src/index.ts", "21", "CALLS:symbol:parse"),
+        ("src/index.ts", "22", "CALLS:symbol:shared"),
+    ):
+        assert key not in rows
+    crossing = corpus.database.execute(
+        """
+        SELECT e.type, e.resolution FROM edges e
+        JOIN files f ON f.id = e.file_id JOIN entities d ON d.id = e.dst_id
+        JOIN repositories r ON r.id = d.repo_id
+        WHERE f.rel_path = 'src/index.ts' AND r.slug = 'toy-shared'
+          AND e.parser = 'linker:global' AND e.type IN ('IMPORTS', 'CALLS')
+        ORDER BY e.type
+        """
+    ).fetchall()
+    assert [row[0] for row in crossing] == ["CALLS", "IMPORTS"]
+    assert all(json.loads(row[1])["crossing"]["package"] == "npm:toy-shared" for row in crossing)
 
 
-def test_a_configured_alias_import_is_linked_and_its_calls_are_still_named(
-    corpus: Workspace,
-) -> None:
-    """Imports read tsconfig ``paths`` (Stage 3-B); the call lookup still does not, and says so."""
+def test_a_configured_alias_import_is_linked(corpus: Workspace) -> None:
     assert ("src/index.ts", "4", "IMPORTS:module:@/lib/x") not in open_rows(corpus)
     by = counts(corpus)
     assert ("IMPORTS", "module", UNSUPPORTED, "configured-alias") not in by
@@ -335,7 +340,7 @@ def test_what_the_ordinary_rules_link_is_counted_linked(corpus: Workspace) -> No
     assert by[("EXECUTES", "script", LINKED, "resolved")] == 1
     assert by[("SOURCES", "script", LINKED, "resolved")] == 1
     assert by[("REFERENCES", "class", LINKED, "resolved")] == 1
-    assert by[("CALLS", "symbol", LINKED, "resolved")] == 7
+    assert by[("CALLS", "symbol", LINKED, "resolved")] == 9
 
 
 # -- the account cannot change the graph, the planners or impact --------------------------
