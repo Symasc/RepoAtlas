@@ -174,6 +174,22 @@ describe("the overview", () => {
     expect(graph.edges).toEqual([]);
     expect(graph.independent).toHaveLength(4);
   });
+
+  it("draws an inclusion as its own family, carrying where it is stated and what it pins", () => {
+    const inclusion = {
+      format: "gitmodules",
+      path: "modules/api",
+      declared_at: "web/.gitmodules:1",
+      method: "path" as const,
+      revision: "abc1234",
+      in_sync: true,
+    };
+    const graph = buildOverview(repositories, [{ ...link("submodule", "web", "api"), inclusions: [inclusion] }]);
+    expect(graph.edges.map((e) => [e.id, e.link.family, e.link.inclusions])).toEqual([
+      ["submodule:web->api", "submodule", [inclusion]],
+    ]);
+    expect(graph.independent.map((r) => r.slug)).toEqual(["lib", "alone"]);
+  });
 });
 
 describe("the constellation", () => {

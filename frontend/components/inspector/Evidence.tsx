@@ -15,6 +15,25 @@ import { Quiet } from "./Inspector";
 import classes from "./Inspector.module.css";
 import { DecisionEvidence } from "./Requests";
 
+const INCLUSION_FORMAT: Record<string, string> = {
+  gitmodules: "Git submodule",
+  "git-subrepo": "git-subrepo",
+  vcstool: "vcstool .repos",
+  west: "west manifest",
+  "repo-manifest": "repo manifest",
+};
+
+const INCLUSION_METHOD: Record<string, string> = {
+  path: "found by its checkout path",
+  remote: "found by its remote",
+  declared: "declared by you",
+};
+
+/** A commit shortened as git shortens one; a branch or tag as written. */
+function shortPin(pin: string): string {
+  return /^[0-9a-f]{40,64}$/i.test(pin) ? pin.slice(0, 10) : pin;
+}
+
 export interface LineSpan {
   start: number;
   end: number;
@@ -51,7 +70,14 @@ export function Evidence({
       <div className={classes.evidenceHead}>
         <LineGlyph family={link.family} width={20} />
         <span className={classes.evidenceTitle}>
-          {direction === "outgoing" ? "Uses" : "Used by"} <strong>{partner.label}</strong>
+          {link.family === "submodule"
+            ? direction === "outgoing"
+              ? "Includes"
+              : "Included by"
+            : direction === "outgoing"
+              ? "Uses"
+              : "Used by"}{" "}
+          <strong>{partner.label}</strong>
         </span>
         <span className={classes.familyCount}>{plural(link.count, "relationship")}</span>
       </div>
@@ -65,6 +91,31 @@ export function Evidence({
         </p>
       )}
       {link.packages.length > 0 && <p className={classes.typeLine}>Packages: {link.packages.join(", ")}</p>}
+      {(link.inclusions ?? []).length > 0 && (
+        <ul className={classes.inclusions} aria-label="Inclusions">
+          {link.inclusions!.map((inclusion) => (
+            <li key={`${inclusion.declared_at}:${inclusion.path}`}>
+              <span className={classes.mono}>{inclusion.path}</span> · {INCLUSION_FORMAT[inclusion.format] ?? inclusion.format}{" "}
+              · {INCLUSION_METHOD[inclusion.method]}
+              <br />
+              <span className={classes.mono}>{inclusion.declared_at}</span>
+              {inclusion.revision && (
+                <>
+                  <br />
+                  Pinned at <span className={classes.mono}>{shortPin(inclusion.revision)}</span>
+                  {inclusion.in_sync === true && " · checkout matches"}
+                  {inclusion.in_sync === false && (
+                    <>
+                      {" "}
+                      · checkout at <span className={classes.mono}>{shortPin(inclusion.head ?? "")}</span>
+                    </>
+                  )}
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
       {refs.length === 0 ? (
         <Quiet>The index keeps no example of this link to show.</Quiet>
       ) : (

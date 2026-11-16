@@ -2,6 +2,7 @@ import type {
   ChildEntry,
   ChildLink,
   EdgeTypeCount,
+  InclusionLink,
   LinkKind,
   RepositoryLink,
   TopologyChildrenResponse,
@@ -32,8 +33,8 @@ export interface Box {
  * (environment variables, config keys) told apart from code. Families are never
  * summed into one line.
  */
-export type Family = "code" | "http" | "dependency" | "config";
-export const FAMILIES: readonly Family[] = ["code", "http", "dependency", "config"];
+export type Family = "code" | "http" | "dependency" | "config" | "submodule";
+export const FAMILIES: readonly Family[] = ["code", "http", "dependency", "config", "submodule"];
 export type FamilyCounts = Partial<Record<Family, number>>;
 
 const CONFIG_ENTITIES: ReadonlySet<string> = new Set(["env_var", "config"]);
@@ -46,6 +47,7 @@ export function familyOf(
 ): Family {
   if (kind === "http") return "http";
   if (kind === "dependency") return "dependency";
+  if (kind === "submodule") return "submodule";
   if (entityType && CONFIG_ENTITIES.has(entityType)) return "config";
   if (types.length > 0 && types.every((t) => CONFIG_EDGES.has(t.type))) return "config";
   return "code";
@@ -57,9 +59,17 @@ export function familyOf(
  * uses of another, or something structural); every other family is one
  * relationship of its own.
  */
-export type Relation = "imports" | "calls" | "uses" | "other" | "http" | "dependency" | "config";
+export type Relation =
+  | "imports"
+  | "calls"
+  | "uses"
+  | "other"
+  | "http"
+  | "dependency"
+  | "config"
+  | "submodule";
 export const CODE_RELATIONS = ["imports", "calls", "uses", "other"] as const satisfies readonly Relation[];
-export const RELATIONS: readonly Relation[] = [...CODE_RELATIONS, "http", "dependency", "config"];
+export const RELATIONS: readonly Relation[] = [...CODE_RELATIONS, "http", "dependency", "config", "submodule"];
 
 const RELATION_OF_TYPE: Readonly<Record<string, Relation>> = {
   IMPORTS: "imports",
@@ -76,7 +86,9 @@ const RELATION_OF_TYPE: Readonly<Record<string, Relation>> = {
 
 /** The family a relationship belongs to, which picks its line's pattern. */
 export function familyOfRelation(relation: Relation): Family {
-  return relation === "http" || relation === "dependency" || relation === "config" ? relation : "code";
+  return relation === "http" || relation === "dependency" || relation === "config" || relation === "submodule"
+    ? relation
+    : "code";
 }
 
 /** The relationship one edge type is, within its family. */
@@ -114,6 +126,8 @@ export interface LinkData {
   packages: string[];
   /** Up to a few exact edge references, to read the lines behind the link. */
   examples: string[];
+  /** On a submodule link: each inclusion, where it is stated and what it pins. */
+  inclusions?: InclusionLink[];
   /** What the line says instead of its count: how a trace's step reads. */
   label?: string;
 }
@@ -187,7 +201,7 @@ export interface Partner {
   path?: string;
 }
 
-const FAMILY_ORDER: Record<Family, number> = { code: 0, http: 1, dependency: 2, config: 3 };
+const FAMILY_ORDER: Record<Family, number> = { code: 0, http: 1, dependency: 2, config: 3, submodule: 4 };
 
 /** Strongest first within a family, families in reading order. */
 function byStrength(a: Connection, b: Connection): number {
@@ -245,6 +259,7 @@ export function buildOverview(
     const source = repositoryId(link.source);
     const target = repositoryId(link.target);
     const data = linkOf(link, familyOf(link.kind, null, link.types ?? []), (link.packages ?? []).map((p) => p.name));
+    if (link.inclusions?.length) data.inclusions = link.inclusions.map((i) => ({ ...i }));
     edges.push({ id, source, target, link: data });
     const name = (slug: string) => known.get(slug)!.name;
     push(connections, source, {

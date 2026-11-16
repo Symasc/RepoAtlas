@@ -9,6 +9,8 @@ export function Totals({
   crossing,
   unresolved,
   onOpenConnections,
+  unlinkedSubmodules,
+  onOpenSubmodules,
 }: {
   repositories: RepositoryModel[];
   /** Relationships whose ends sit in two repositories; null until known. */
@@ -17,6 +19,10 @@ export function Totals({
   unresolved?: number | null;
   /** Opens the HTTP connections worklist. */
   onOpenConnections?: () => void;
+  /** Inclusions no indexed repository was linked to; null until known. */
+  unlinkedSubmodules?: number | null;
+  /** Opens the unlinked submodules worklist. */
+  onOpenSubmodules?: () => void;
 }) {
   const sum = totals(repositories);
   const figures: { label: string; value: number | null }[] = [
@@ -44,6 +50,16 @@ export function Totals({
             </button>
           </dt>
           <dd>{unresolved == null ? "…" : formatCount(unresolved)}</dd>
+        </div>
+      )}
+      {onOpenSubmodules && (unlinkedSubmodules ?? 0) > 0 && (
+        <div className={classes.figure}>
+          <dt>
+            <button type="button" className={classes.figureAction} onClick={onOpenSubmodules}>
+              unlinked submodules
+            </button>
+          </dt>
+          <dd>{formatCount(unlinkedSubmodules ?? 0)}</dd>
         </div>
       )}
     </dl>
