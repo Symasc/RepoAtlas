@@ -18,7 +18,15 @@ from typing import Protocol
 
 #: The global link pass's stages, in the order a run reaches them
 #: (:meth:`repoatlas.graph.linker.ReferenceLinker.prepare_global`, then the swap).
-LINK_STAGES: tuple[str, ...] = ("index", "resolve", "uses", "persistence", "dependencies", "swap")
+LINK_STAGES: tuple[str, ...] = (
+    "index",
+    "resolve",
+    "uses",
+    "persistence",
+    "dependencies",
+    "inclusions",
+    "swap",
+)
 
 
 class SyncProgress(Protocol):

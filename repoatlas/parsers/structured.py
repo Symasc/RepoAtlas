@@ -42,6 +42,7 @@ from repoatlas.parsers.deploy_targets import ingress_target_references, values_t
 from repoatlas.parsers.graphql_artifacts import package_script_references
 from repoatlas.parsers.graphql_codegen import codegen_references
 from repoatlas.parsers.http_openapi import MAX_OPERATIONS, specification_references
+from repoatlas.parsers.inclusions import west_references
 from repoatlas.parsers.marks import diagnostic_line, node_span
 from repoatlas.parsers.module_facts import module_facts
 
@@ -171,7 +172,9 @@ class StructuredParser:
     #     reached, and a chart's values.yaml records its literal listen-ports annotations
     #     (deployment targets, repoatlas.parsers.deploy_targets).
     # 15: an Ingress's TLS hosts written as a flow sequence (``hosts: [a, b]``) are read.
-    version = "15"
+    # 16: a west manifest records the repositories its projects include
+    #     (repoatlas.parsers.inclusions).
+    version = "16"
     language = "YAML"
 
     def supports(self, path: Path) -> bool:
@@ -239,6 +242,7 @@ class StructuredParser:
             *generation,
             *package_script_references(posix, documents),
             *dashboard_references(posix, documents),
+            *(west_references(documents) if language == "YAML" else ()),
         ]
 
         # ``splitlines()`` deliberately: this array is indexed by PyYAML marks and

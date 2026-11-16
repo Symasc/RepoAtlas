@@ -94,6 +94,11 @@ class Repository(BaseModel):
     last_indexed_head: str | None = None
     last_indexed_dirty: bool | None = None
     last_sync_status: SyncStatus = SyncStatus.NEVER
+    #: The identities of the repository's remotes, ``origin`` first
+    #: (:func:`repoatlas.gitstate.config.normalize_git_url`). Never a URL as written.
+    remotes: tuple[str, ...] = ()
+    #: ``(path, commit)`` for each submodule path the repository's index pins.
+    gitlinks: tuple[tuple[str, str], ...] = ()
 
 
 class FileState(BaseModel):

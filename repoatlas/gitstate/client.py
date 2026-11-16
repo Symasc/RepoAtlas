@@ -251,6 +251,21 @@ class GitClient:
             warnings=tuple(line for line in result.stderr.splitlines() if line.strip()),
         )
 
+    def gitlinks(self, repo_path: Path) -> dict[str, str] | None:
+        """The commit each submodule path is pinned at, from the index (mode 160000).
+
+        ``ls-files --stage`` reads the index and nothing else, so no filter can run.
+        ``None`` when git cannot answer; empty when the repository pins nothing.
+        """
+        staged = self._run(repo_path, "ls-files", "--stage", "-z")
+        if not staged.ok:
+            return None
+        return {
+            rel_path: sha
+            for mode, sha, rel_path in _parse_index_entries(staged.stdout)
+            if mode == _MODE_GITLINK
+        }
+
 
 def _parse_index_entries(raw: str) -> list[tuple[str, str, str]]:
     """``ls-files --stage -z`` output as ``(mode, blob_sha, rel_path)``.

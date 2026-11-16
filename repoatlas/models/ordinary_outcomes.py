@@ -193,9 +193,12 @@ DEPLOYMENT_FACT: Final = "deployment-fact"
 PERSISTENCE_PLANNER: Final = "persistence-planner"
 HTTP_PLANNER: Final = "http-planner"
 USES_STAGE: Final = "uses-stage"
+#: A repository inclusion, decided by its own stage (repoatlas.graph.inclusions).
+INCLUSION_PLANNER: Final = "inclusion-planner"
 
 EXCLUSIONS: Final = frozenset(
     {
+        INCLUSION_PLANNER,
         MODULE_FACT,
         SALT_MAPPING,
         GRAPHQL_PLANNER,

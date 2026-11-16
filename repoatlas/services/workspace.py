@@ -20,6 +20,7 @@ from repoatlas.parsers.registry import ParserRegistry
 from repoatlas.retrieval.retriever import RetrievalLimits, Retriever
 from repoatlas.storage.sqlite.database import Database, open_database
 from repoatlas.storage.sqlite.deployment_links import SqliteDeploymentLinkStore
+from repoatlas.storage.sqlite.inclusion_declarations import SqliteInclusionDeclarationStore
 from repoatlas.storage.sqlite.search import SqliteSearchIndex
 from repoatlas.storage.sqlite.service_declarations import SqliteServiceDeclarationStore
 from repoatlas.storage.sqlite.stores import (
@@ -49,6 +50,9 @@ class Workspace:
     #: What users state about external services, redirects and permitted callbacks. Also written
     #: only by a person: a sync never reads or writes it.
     service_declarations: SqliteServiceDeclarationStore
+    #: Which indexed repository an inclusion is, where its path and remotes do not settle it.
+    #: Written only by a person; the global pass reads it as a fallback, never writes it.
+    inclusion_declarations: SqliteInclusionDeclarationStore
     search: SqliteSearchIndex
     registry: ParserRegistry
     dependency_registry: DependencyRegistry
@@ -117,6 +121,7 @@ def open_workspace(*, settings: Settings | None = None, require_root: bool = Tru
         dependencies=SqliteDependencyStore(database),
         deployment_links=SqliteDeploymentLinkStore(database),
         service_declarations=SqliteServiceDeclarationStore(database),
+        inclusion_declarations=SqliteInclusionDeclarationStore(database),
         search=SqliteSearchIndex(database),
         registry=ParserRegistry(),
         dependency_registry=DependencyRegistry(),

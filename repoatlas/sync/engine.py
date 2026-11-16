@@ -50,6 +50,7 @@ from repoatlas.containment import ContentStatus, FileContent, RepositoryBoundary
 from repoatlas.dependencies.registry import DependencyRegistry
 from repoatlas.discovery.languages import detect_language, is_lockfile, is_manifest
 from repoatlas.gitstate.client import GitClient
+from repoatlas.gitstate.remotes import read_remotes
 from repoatlas.graph.keys import file_key, repository_key, symbol_key
 from repoatlas.graph.linker import GLOBAL_PARSER, GlobalLinkResult, ReferenceLinker
 from repoatlas.graph.py_requirements import REQUIREMENTS_FACTS, ROOT, reach, requirements_meta
@@ -359,6 +360,9 @@ class SyncEngine:
             languages=sorted(languages),
             manifests=sorted(manifests),
             lockfiles=sorted(lockfiles),
+        )
+        self._repositories.update_origin(
+            repo_id, remotes=read_remotes(repo_path), gitlinks=self._git.gitlinks(repo_path)
         )
 
         completion = SyncCompletion(
