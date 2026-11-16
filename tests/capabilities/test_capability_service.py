@@ -315,6 +315,10 @@ def test_the_public_callable_surface_is_only_the_intended_operations() -> None:
         "service_declaration_update",
         "service_declaration_delete",
         "service_declaration_history",
+        # inclusion declarations: which repository a submodule is (local API only)
+        "inclusion_declarations",
+        "inclusion_declaration_create",
+        "inclusion_declaration_delete",
         # topology: shipped for the local API, deliberately not an agent tool
         "topology_overview",
         "topology_children",

@@ -50,8 +50,8 @@ EXPANSION_EDGES = (
     EdgeType.CALLS_HTTP_ENDPOINT,
 )
 
-#: Edge types a relationships request walks when it names none: the expansion set
-#: and ``CALLS_HTTP_HANDLER``.
+#: Edge types a relationships request walks when it names none: the expansion set,
+#: ``CALLS_HTTP_HANDLER`` and ``INCLUDES_REPOSITORY``.
 #:
 #: A handler link joins a caller to the one handler a source-backed chain proves it
 #: reaches (:mod:`repoatlas.graph.http_crossings`), and asking what a request or a
@@ -59,7 +59,16 @@ EXPANSION_EDGES = (
 #: directly, so it leaves one only under ``cross_repository``
 #: (:data:`RELATIONSHIP_CROSSING_EDGES`). It is not in :data:`EXPANSION_EDGES`:
 #: search expands exactly as it did before links existed.
-RELATIONSHIP_DEFAULT_EDGES = (*EXPANSION_EDGES, EdgeType.CALLS_HTTP_HANDLER)
+#:
+#: An inclusion joins a repository's declaring file (``.gitmodules``, a manifest) to the
+#: repository it includes (:mod:`repoatlas.graph.inclusions`), on the same terms: asking
+#: what a repository is connected to is asking for it, and it leaves a repository only
+#: under ``cross_repository``.
+RELATIONSHIP_DEFAULT_EDGES = (
+    *EXPANSION_EDGES,
+    EdgeType.CALLS_HTTP_HANDLER,
+    EdgeType.INCLUDES_REPOSITORY,
+)
 
 #: Edge types an **explicit** relationship request may name.
 #:
@@ -107,12 +116,17 @@ CROSS_REPOSITORY_EDGES = frozenset(
 )
 
 #: Edge types a relationships request with ``cross_repository`` may follow out of
-#: one repository into another: :data:`CROSS_REPOSITORY_EDGES` and
-#: ``CALLS_HTTP_HANDLER``, which the HTTP join emits only for a chain of hops the
-#: source proves, each exact. The change-impact walk keeps its own rule for it
-#: (:mod:`repoatlas.graph.impact`): inward, on that evidence, and never from a file
-#: that does not change whole.
-RELATIONSHIP_CROSSING_EDGES = CROSS_REPOSITORY_EDGES | {EdgeType.CALLS_HTTP_HANDLER}
+#: one repository into another: :data:`CROSS_REPOSITORY_EDGES`, ``CALLS_HTTP_HANDLER``,
+#: which the HTTP join emits only for a chain of hops the source proves, each exact,
+#: and ``INCLUDES_REPOSITORY``, which the inclusion pass emits only when a checkout
+#: path, a single remote or a user's declaration names the repository. The change-impact
+#: walk keeps its own rule for handler links (:mod:`repoatlas.graph.impact`): inward, on
+#: their evidence, and never from a file that does not change whole; it lists inclusions
+#: in a section of their own.
+RELATIONSHIP_CROSSING_EDGES = CROSS_REPOSITORY_EDGES | {
+    EdgeType.CALLS_HTTP_HANDLER,
+    EdgeType.INCLUDES_REPOSITORY,
+}
 
 #: Edge types that may join two repositories **on package evidence**, and are followed
 #: only when the caller asks.

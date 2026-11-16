@@ -428,8 +428,10 @@ def links_export(
         Path | None, typer.Argument(help="Where to write them; standard output if omitted.")
     ] = None,
 ) -> None:
-    """Write every deployment link, of every repository, as JSON."""
+    """Write every deployment link, of every repository, as JSON, with the external service
+    and inclusion declarations."""
     from repoatlas.models.deployment_targets import ExportedLink, LinksExport
+    from repoatlas.models.inclusions import InclusionDeclarationFields
 
     workspace = _open()
     try:
@@ -459,6 +461,13 @@ def links_export(
                 for declaration in workspace.service_declarations.list_all("external_service")
             ]
             or None,
+            inclusion_declarations=[
+                InclusionDeclarationFields(
+                    repository=d.repository, file=d.file, path=d.path, target=d.target
+                )
+                for d in workspace.inclusion_declarations.list_all()
+            ]
+            or None,
         )
         # Stored, but the file has no place for them: said below, never silently dropped.
         unexported = len(workspace.service_declarations.list_all("redirect")) + len(
@@ -482,11 +491,18 @@ def links_export(
             "the file.",
             err=True,
         )
+    inclusions = exported.inclusion_declarations or []
+    if inclusions:
+        typer.echo(
+            "Note: the file holds inclusion declarations; an older RepoAtlas will refuse the file.",
+            err=True,
+        )
     if file is None:
         typer.echo(text)
     else:
         file.write_text(text + "\n", encoding="utf-8")
         also = f" and {len(services)} external service(s)" if services else ""
+        also += f" and {len(inclusions)} inclusion declaration(s)" if inclusions else ""
         typer.echo(f"Wrote {len(exported.links)} link(s){also} to {file}", err=True)
     if unexported:
         typer.echo(
@@ -575,6 +591,11 @@ def links_import(
     workspace = _open()
     added = skipped = 0
     try:
+        if exported.inclusion_declarations:
+            # Keyed by the entry they settle: one stated again is kept, another target replaces it.
+            for declaration in exported.inclusion_declarations:
+                workspace.inclusion_declarations.create(declaration, via="import")
+            typer.echo(f"Recorded {len(exported.inclusion_declarations)} inclusion declaration(s).")
         if declared:
             new_services = _import_services(workspace, services)
             typer.echo(

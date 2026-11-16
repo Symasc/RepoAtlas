@@ -104,6 +104,20 @@ class SqliteTopologyStore:
         ).fetchall()
         return [StoredEdge.model_validate(dict(row)) for row in rows]
 
+    def stored_edges_to(self, dst_ids: Sequence[int], edge_type: EdgeType) -> list[StoredEdge]:
+        """Every stored edge of one type arriving at these entities (``idx_edges_dst``)."""
+        if not dst_ids:
+            return []
+        rows = self._db.execute(
+            f"""
+            {_STORED_EDGE_SELECT}
+            WHERE e.dst_id IN ({_placeholders(dst_ids)}) AND e.type = ?
+            ORDER BY e.id
+            """,
+            (*dst_ids, str(edge_type)),
+        ).fetchall()
+        return [StoredEdge.model_validate(dict(row)) for row in rows]
+
     def stored_edges_from(self, src_ids: Sequence[int], edge_type: EdgeType) -> list[StoredEdge]:
         """Every stored edge of one type leaving these entities (``idx_edges_src``)."""
         if not src_ids:

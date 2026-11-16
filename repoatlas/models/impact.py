@@ -542,6 +542,31 @@ class PackageImpact(BaseModel):
     subpaths: tuple[str, ...] = ()
 
 
+class InclusionImpact(BaseModel):
+    """A repository that includes the one the change lives in. Coarse.
+
+    It includes the changed repository at a path (a submodule, a workspace manifest's
+    project), so it sees the change when its pin moves to a commit holding it. What in it
+    uses the included code is not traced through the inclusion: read it from the path.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: The including repository's slug.
+    repository: str
+    #: The changed repository, which it includes.
+    included: str
+    #: ``repository/path:line`` of the entry that includes it.
+    declared_at: str
+    #: Where the including repository puts it.
+    path: str
+    format: str
+    #: The commit, tag or branch it pins; ``None`` when it pins none.
+    revision: str | None = None
+    #: Whether the included repository's indexed HEAD is that commit; ``None`` when unknown.
+    in_sync: bool | None = None
+
+
 class HubImpact(BaseModel):
     """A candidate with more dependents than one answer can show; collapsed, not unimportant."""
 
@@ -612,6 +637,8 @@ class ImpactResponse(BaseModel):
     candidates: tuple[ImpactCandidate, ...] = ()
     tests: tuple[ImpactCandidate, ...] = ()
     packages: tuple[PackageImpact, ...] = ()
+    #: Repositories in scope that include the seed's repository (submodules, manifests).
+    inclusions: tuple[InclusionImpact, ...] = ()
     hubs: tuple[HubImpact, ...] = ()
     unresolved: tuple[UnresolvedImpact, ...] = ()
     #: Links refused or qualified where the walk went, at most :data:`MAX_DECISIONS`.
