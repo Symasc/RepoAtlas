@@ -1316,6 +1316,7 @@ CONFIGURES
 MANAGES
 GENERATES
 MAPS_TO
+INCLUDES_REPOSITORY
 ```
 
 **Do not overengineer the ontology.** Add a type only when a concrete retrieval need requires distinguishing it.
@@ -1375,6 +1376,15 @@ states, never a name.
 - **A query** binds to a database only when a datasource in the same repository reads the environment variable its
   client reads (§7.13).
 - **`MAPS_TO`** is not followed across a repository boundary.
+
+**Repository inclusions** (a Git submodule, a git-subrepo, a vcstool, west or repo manifest's project) are linked
+`INCLUDES_REPOSITORY` from the declaring file to the included repository.
+- They are linked only when an indexed repository is checked out at the stated path, or exactly one indexed
+  repository has the stated URL among its remotes. URLs are compared as normalized identities (host and path, without
+  user, port or `.git`).
+- Several matches are ambiguous and no match is unresolved. Neither creates an edge, and both are listed in the
+  topology overview.
+- A user's declaration settles an ambiguous or unresolved entry, and never overrides a path or remote match.
 
 **What a change-impact answer says about links not made.** `repoatlas_impact` lists, under `decisions`, the link
 decisions other than a link made, where they were decided: at the seed, a returned candidate, or in a file one of them
