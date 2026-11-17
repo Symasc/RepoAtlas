@@ -112,6 +112,7 @@ _RULE_FIELDS: dict[tuple[str, ...], bool] = {
     ("http", "paths", "[]", "backend", "service", "port"): False,
     ("http", "paths", "[]", "backend", "service", "port", "number"): True,
 }
+TILT_LOAD_PATH = "tilt_load_path"
 
 #: The ``helm create`` scaffold's helpers, as their action sequences; ``{chart}`` is the
 #: helper's own prefix.
@@ -818,10 +819,10 @@ class HelmHelpersParser:
 
 
 class TiltfileParser:
-    """A Tiltfile's ``helm()`` calls: the release names a local deployment binds."""
+    """A Tiltfile's Helm releases and literal dynamic calls."""
 
     name = "tiltfile"
-    version = "1"
+    version = "2"
     language = "Starlark"
 
     def supports(self, path: Path) -> bool:
@@ -830,11 +831,47 @@ class TiltfileParser:
     def parse(self, path: Path, content: str) -> ParsedFile:
         directory = _directory(PurePosixPath(path.as_posix()))
         references: list[ParsedReference] = []
+        symbols: list[ParsedSymbol] = []
         try:
             tree = ast.parse(content)
         except SyntaxError:
             tree = None
+        if tree is not None:
+            symbols.extend(
+                ParsedSymbol(
+                    kind=EntityType.FUNCTION,
+                    name=node.name,
+                    qualified_name=node.name,
+                    line_start=node.lineno,
+                    line_end=node.end_lineno or node.lineno,
+                )
+                for node in tree.body
+                if isinstance(node, ast.FunctionDef)
+            )
         for node in ast.walk(tree) if tree is not None else ():
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Subscript)
+                and isinstance(node.func.value, ast.Call)
+                and isinstance(node.func.value.func, ast.Name)
+                and node.func.value.func.id == "load_dynamic"
+                and node.func.value.args
+                and isinstance(node.func.value.args[0], ast.Constant)
+                and isinstance(node.func.value.args[0].value, str)
+                and PurePosixPath(node.func.value.args[0].value).name == "Tiltfile"
+                and isinstance(node.func.slice, ast.Constant)
+                and isinstance(node.func.slice.value, str)
+            ):
+                references.append(
+                    ParsedReference(
+                        edge_type=EdgeType.CALLS,
+                        target_kind=EntityType.FUNCTION,
+                        target_key=node.func.slice.value,
+                        line_start=node.lineno,
+                        line_end=node.end_lineno or node.lineno,
+                        meta={TILT_LOAD_PATH: node.func.value.args[0].value},
+                    )
+                )
             if not (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)
@@ -888,7 +925,7 @@ class TiltfileParser:
             language=self.language,
             parser=self.name,
             parser_version=self.version,
-            symbols=(module,),
+            symbols=(module, *symbols),
             references=tuple(references),
         )
 

@@ -25,7 +25,9 @@ from repoatlas.graph.deploy_identity import (
     helm_name,
 )
 from repoatlas.graph.linker import ReferenceLinker
+from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.parsers.deploy_helm import (
+    TILT_LOAD_PATH,
     HelmHelpersParser,
     TiltfileParser,
     chart_references,
@@ -199,6 +201,37 @@ def test_a_tiltfile_binds_a_release_name_literally() -> None:
         ("edge", 3, {"chart": "deploy/charts/devices", "values_files": "true"}),
         ("x", 6, {"chart": "elsewhere"}),
         ("computed", 7, {"chart": "deploy/charts/devices", "set": "null"}),
+    ]
+
+
+def test_a_tiltfile_records_literal_dynamic_load_calls_and_function_definitions() -> None:
+    parsed = TiltfileParser().parse(
+        Path("Tiltfile"),
+        d("""
+            def start_service():
+                pass
+
+            load_dynamic('./child/Tiltfile')['start_service']()
+            load_dynamic(TARGET)['start_service']()
+            load_dynamic('./child/Tiltfile')[FUNCTION]()
+            load_dynamic('./child/TiltfileMigration')['start_job']()
+        """),
+    )
+    assert [
+        (symbol.kind, symbol.name, symbol.line_start)
+        for symbol in parsed.symbols
+        if symbol.kind is EntityType.FUNCTION
+    ] == [(EntityType.FUNCTION, "start_service", 1)]
+    assert [
+        (reference.edge_type, reference.target_key, reference.meta, reference.line_start)
+        for reference in parsed.references
+    ] == [
+        (
+            EdgeType.CALLS,
+            "start_service",
+            {TILT_LOAD_PATH: "./child/Tiltfile"},
+            4,
+        )
     ]
 
 

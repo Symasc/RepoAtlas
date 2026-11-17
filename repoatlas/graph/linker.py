@@ -43,6 +43,7 @@ import json
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from types import MappingProxyType
 
 from repoatlas.config.settings import DECLARATIONS_SLUG, SaltSettings
@@ -140,6 +141,7 @@ from repoatlas.models.parsing import (
 )
 from repoatlas.models.telemetry import LinkTrace, StageTiming, Stopwatch
 from repoatlas.parsers.ci_config import CI_ROLES
+from repoatlas.parsers.deploy_helm import TILT_LOAD_PATH
 from repoatlas.parsers.graphql import GRAPHQL_DOCUMENT, GRAPHQL_FACTS
 from repoatlas.parsers.graphql_artifacts import GRAPHQL_ARTIFACT
 from repoatlas.parsers.graphql_codegen import GRAPHQL_CODEGEN_OUTPUT
@@ -539,6 +541,10 @@ class ReferenceLinker:
             if reference.meta.get(MODULE_RESOLUTION):
                 # Configuration the global pass reads to resolve bare specifiers: a
                 # fact about this file, not an edge to anything, so never interned.
+                claims.append(self._claim(repo_id, file_id, source_id, reference, parsed))
+                continue
+
+            if TILT_LOAD_PATH in reference.meta:
                 claims.append(self._claim(repo_id, file_id, source_id, reference, parsed))
                 continue
 
@@ -1653,6 +1659,25 @@ class ReferenceLinker:
         uses: Callable[[], PythonUseResolver],
     ) -> EdgeRecord | None:
         """A call whose name this file imported, resolved through the import graph."""
+        tilt_path = meta.get(TILT_LOAD_PATH)
+        if tilt_path is not None:
+            target_file = index.resolve_repo_relative_path(origin, tilt_path)
+            if target_file is None or PurePosixPath(target_file.rel_path).name != "Tiltfile":
+                return None
+            symbol = index.resolve_symbol(target_file, claim.target_key)
+            if symbol is None or symbol.type is not EntityType.FUNCTION:
+                return None
+            resolution = json.dumps(
+                {
+                    "basis": "tilt_dynamic_load",
+                    "specifier": tilt_path,
+                    "name": claim.target_key,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            return self._edge(claim, origin, symbol.entity_id, resolution=resolution)
+
         specifier = meta.get("module")
         flavor = _flavor(origin, meta)
         if not specifier or flavor is None:

@@ -2475,7 +2475,9 @@ release name the deployment picks. Nothing renders a template. Each file records
   read by lines, since it is not YAML until rendered;
 - a `.tpl` file records which `<chart>.name` and `<chart>.fullname` helpers match the `helm create` scaffold
   action for action;
-- a `Tiltfile` records each `helm('<chart dir>', name='<literal>', set=[<literals>])`, which binds a release name.
+- a `Tiltfile` records each `helm('<chart dir>', name='<literal>', set=[<literals>])`, which binds a release name;
+  literal `load_dynamic('<path>/Tiltfile')['<function>']()` calls link to a uniquely named top-level function in
+  that exact indexed Tiltfile.
 
 The global pass composes a name only when every action in it is one of four, each read from the same repository's
 chart:
