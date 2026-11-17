@@ -93,6 +93,9 @@ CI_ROLES = frozenset({CI_IMAGE_BUILD, CI_HELM_RELEASE, CI_STEP_UNSUPPORTED, CI_S
 DECLARATIONS_HEADER = "ci-semantics/v1"
 
 MAX_NODES = 10_000
+#: How deep one file may nest before the reader stops following it: far past any
+#: workflow, and well inside the interpreter's recursion limit.
+MAX_DEPTH = 64
 MAX_JOBS = 200
 MAX_STEPS = 200
 MAX_CLAIMS = 256
@@ -187,7 +190,7 @@ class _Reader:
         if node is None:
             return None
         self.visited += 1
-        if self.visited > MAX_NODES or id(node) in path:
+        if self.visited > MAX_NODES or id(node) in path or len(path) >= MAX_DEPTH:
             self.truncated = True
             return None
         inner = path | {id(node)}

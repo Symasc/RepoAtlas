@@ -45,7 +45,7 @@ from repoatlas.models.parsing import (
     Severity,
 )
 from repoatlas.parsers.http_facts import pending_reference
-from repoatlas.parsers.marks import node_span
+from repoatlas.parsers.marks import NodeSpans, node_children
 
 #: The pending-fact role of one configured output.
 GRAPHQL_CODEGEN_OUTPUT = "graphql-codegen-output"
@@ -67,6 +67,10 @@ GRAPHQL_CONFIG = "graphql-config"
 
 MAX_BYTES = 256 * 1024
 MAX_ENTRIES = 512
+#: Nodes a configuration may be once its aliases are written out, and claims one file may
+#: yield: a few lines of aliases can stand for far more than either.
+MAX_EXPANDED = 250_000
+MAX_FILE_CLAIMS = 4 * MAX_ENTRIES
 
 #: Options that change what the generated declarations are called or how enums are
 #: written. Anything else a plugin is configured with leaves the binding as it is.
@@ -109,16 +113,49 @@ def codegen_references(
         return [], []
     if len(content.encode("utf-8", "replace")) > MAX_BYTES:
         return [], [_bound()]
-    lines = content.splitlines()
+    size = _expanded_size(root, MAX_EXPANDED)
+    if size is None or size > MAX_EXPANDED:
+        return [], [_bound()]
+    spans = NodeSpans(content.splitlines())
     try:
         if path.name in GRAPHQL_CONFIG_NAMES:
-            return _projects(root, lines), []
-        return _outputs(root, lines), []
+            return _projects(root, spans), []
+        return _outputs(root, spans), []
     except _Refused:
         return [], [_bound()]
 
 
-def _projects(root: yaml.MappingNode, lines: Sequence[str]) -> list[ParsedReference]:
+def _expanded_size(root: yaml.Node, limit: int) -> int | None:
+    """How many nodes ``root`` is once every alias is written out, counted up to
+    ``limit + 1``; ``None`` for a document that contains itself.
+
+    Aliases make the document a graph, and the readers below walk it as a tree: a few
+    lines that each name the previous one stand for as many nodes as they multiply to.
+    Counted once per node, post-order and without recursion, so the count itself costs
+    what the graph holds.
+    """
+    sizes: dict[int, int] = {}
+    open_: set[int] = set()
+    stack: list[tuple[yaml.Node, bool]] = [(root, False)]
+    while stack:
+        node, done = stack.pop()
+        key = id(node)
+        if not done:
+            if key in sizes:
+                continue
+            if key in open_:
+                return None
+            open_.add(key)
+            stack.append((node, True))
+            for child in node_children(node):
+                stack.append((child, False))
+            continue
+        open_.discard(key)
+        sizes[key] = min(limit + 1, 1 + sum(sizes[id(child)] for child in node_children(node)))
+    return sizes[id(root)]
+
+
+def _projects(root: yaml.MappingNode, spans: NodeSpans) -> list[ParsedReference]:
     """graphql-config: each project's schema and documents, as a documents-binding claim,
     and the outputs of a ``codegen`` extension, which take the project's as their root."""
     fields = _fields(root)
@@ -147,8 +184,8 @@ def _projects(root: yaml.MappingNode, lines: Sequence[str]) -> list[ParsedRefere
                 for item in _inputs(own.get("exclude"), "root")
             ),
         ]
-        start, _ = node_span(anchor, lines)
-        _, end = node_span(node, lines)
+        start, _ = spans.span(anchor)
+        _, end = spans.span(node)
         claims.append(
             pending_reference(
                 EdgeType.GENERATES,
@@ -170,7 +207,9 @@ def _projects(root: yaml.MappingNode, lines: Sequence[str]) -> list[ParsedRefere
             _fields(extensions).get("codegen") if isinstance(extensions, yaml.MappingNode) else None
         )
         if isinstance(codegen, yaml.MappingNode):
-            claims.extend(_outputs(codegen, lines, schema=schema, documents=documents))
+            claims.extend(_outputs(codegen, spans, schema=schema, documents=documents))
+        if len(claims) > MAX_FILE_CLAIMS:
+            raise _Refused
     return claims
 
 
@@ -180,7 +219,7 @@ def _bound() -> ParseDiagnostic:
 
 def _outputs(
     root: yaml.MappingNode,
-    lines: Sequence[str],
+    spans: NodeSpans,
     *,
     schema: list[dict[str, object]] | None = None,
     documents: list[dict[str, object]] | None = None,
@@ -199,8 +238,8 @@ def _outputs(
     claims: list[ParsedReference] = []
     for key, value in entries:
         output = str(key.value)
-        start, _ = node_span(key, lines)
-        _, end = node_span(value, lines)
+        start, _ = spans.span(key)
+        _, end = spans.span(value)
         own = _fields(value) if isinstance(value, yaml.MappingNode) else {}
         plugins_node = value if isinstance(value, yaml.SequenceNode) else own.get("plugins")
         plugins = _plugins(plugins_node)

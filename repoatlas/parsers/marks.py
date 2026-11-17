@@ -175,6 +175,75 @@ def diagnostic_line(mark: Any | None, content: str) -> int | None:
     return min(int(mark.line) + 1, line_count(content))
 
 
+def node_children(node: yaml.Node) -> list[yaml.Node]:
+    """The nodes directly under ``node``: a mapping's keys and values, a sequence's items.
+
+    A scalar has none — its ``value`` is a string, which is not to be iterated.
+    """
+    if isinstance(node, yaml.MappingNode):
+        return [child for pair in node.value for child in pair]
+    if isinstance(node, yaml.SequenceNode):
+        return list(node.value)
+    return []
+
+
+class NodeSpans:
+    """:func:`node_span` for many nodes of one file, each node's end worked out once.
+
+    The end of a node is a property of the node and nothing else, so it is kept: an
+    alias makes many parents share one child, and a document that fans out through
+    aliases is then walked once, not once per path to it. A reference cycle
+    (``a: &a [*a]``) is cut where it closes: the edge back to a node still being
+    worked out adds nothing to its end.
+
+    Holds node identities, so it must not outlive the composed documents it was
+    asked about.
+    """
+
+    def __init__(self, lines: Sequence[str]) -> None:
+        self._lines = lines
+        self._ends: dict[int, int] = {}
+
+    def span(self, node: yaml.Node) -> tuple[int, int]:
+        start = node.start_mark.line + 1
+        return start, max(start, self._end(node))
+
+    def _end(self, node: yaml.Node) -> int:
+        """The last line this node's own content occupies.
+
+        Composite nodes answer through their children, which is the whole trick: the
+        next sibling, the trailing comment and the wrapper's closing Jinja are not
+        children, so no amount of whitespace between them can pull the range along.
+        Post-order, iterative: a document nested deeper than the interpreter's
+        recursion limit is still answered.
+        """
+        ends = self._ends
+        known = ends.get(id(node))
+        if known is not None:
+            return known
+        open_: set[int] = set()
+        stack: list[tuple[yaml.Node, bool]] = [(node, False)]
+        while stack:
+            current, done = stack.pop()
+            key = id(current)
+            if not done:
+                if key in ends or key in open_:
+                    continue
+                open_.add(key)
+                stack.append((current, True))
+                for child in node_children(current):
+                    stack.append((child, False))
+                continue
+            open_.discard(key)
+            children = node_children(current)
+            if not children:
+                ends[key] = _leaf_end(current, self._lines)
+                continue
+            child_ends = [ends[id(child)] for child in children if id(child) in ends]
+            ends[key] = max(child_ends) if child_ends else current.start_mark.line + 1
+        return ends[id(node)]
+
+
 def node_span(node: yaml.Node, lines: Sequence[str]) -> tuple[int, int]:
     """The 1-based inclusive source range a composed YAML node establishes.
 
@@ -182,25 +251,11 @@ def node_span(node: yaml.Node, lines: Sequence[str]) -> tuple[int, int]:
     copy, so that content which only looks empty after neutralization still counts
     as content. Jinja neutralization preserves every character position, so mark
     line numbers index the raw lines exactly.
+
+    One node, one answer. A caller asking about many nodes of one file keeps a
+    :class:`NodeSpans` instead, so that shared (aliased) content is not re-read.
     """
-    start = node.start_mark.line + 1
-    return start, max(start, _end_line(node, lines))
-
-
-def _end_line(node: yaml.Node, lines: Sequence[str]) -> int:
-    """The last line this node's own content occupies.
-
-    Composite nodes answer through their children, which is the whole trick: the
-    next sibling, the trailing comment and the wrapper's closing Jinja are not
-    children, so no amount of whitespace between them can pull the range along.
-    """
-    if isinstance(node, yaml.MappingNode):
-        ends = [_end_line(child, lines) for pair in node.value for child in pair]
-    elif isinstance(node, yaml.SequenceNode):
-        ends = [_end_line(item, lines) for item in node.value]
-    else:
-        ends = []
-    return max(ends) if ends else _leaf_end(node, lines)
+    return NodeSpans(lines).span(node)
 
 
 def _leaf_end(node: yaml.Node, lines: Sequence[str]) -> int:
