@@ -16,6 +16,7 @@ unresolved entry and never overrides a path or remote the index proves.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Literal
 
@@ -31,6 +32,9 @@ INCLUSION_FAMILY = "repository_inclusion"
 MAX_INCLUSION_DECLARATIONS = 2_000
 #: The most unsettled inclusions one overview lists; a total says how many exist.
 MAX_UNSETTLED_INCLUSIONS = 200
+#: The most inclusions one submodule link of an overview lists; ``inclusions_total`` says how
+#: many it holds.
+MAX_LINK_INCLUSIONS = 20
 
 InclusionMethod = Literal["path", "remote", "declared"]
 InclusionDecision = Literal["linked", "ambiguous", "unresolved"]
@@ -54,7 +58,7 @@ class InclusionLink(BaseModel):
     #: The included repository's indexed HEAD.
     head: str | None = None
     #: Whether the included repository's HEAD is the pinned commit. ``None`` when either is
-    #: unknown, or the pin is a branch or tag rather than a commit.
+    #: unknown, or the pin is a branch, a tag, an abbreviation or of another hash length.
     in_sync: bool | None = None
     #: How the included repository was found.
     method: InclusionMethod
@@ -161,9 +165,47 @@ class InclusionDeclarationError(ValueError):
     """A declaration that cannot be stored, in words the caller can act on."""
 
 
+def imported_declarations(
+    held: Mapping[tuple[str, str, str], str], stated: Sequence[InclusionDeclarationFields]
+) -> list[InclusionDeclarationFields]:
+    """The declarations of an import the index does not hold yet, in the file's order.
+
+    ``held`` maps each declared entry ``(repository, file, path)`` to its target. An import never
+    replaces a declaration: an entry stated again with the same target is skipped (already
+    recorded, or stated twice), and one declared with another target -- in ``held`` or earlier in
+    ``stated`` -- refuses the whole import, as does a repository declared to include itself or
+    more declarations than are kept. Nothing is judged partially: either the list comes back or
+    :class:`InclusionDeclarationError` is raised.
+    """
+    seen: dict[tuple[str, str, str], str] = {}
+    new: list[InclusionDeclarationFields] = []
+    for declaration in stated:
+        entry = (declaration.repository, declaration.file, declaration.path)
+        name = f"{declaration.repository}/{declaration.file}:{declaration.path}"
+        if declaration.repository == declaration.target:
+            raise InclusionDeclarationError(f"{name}: a repository cannot include itself")
+        earlier = seen.get(entry)
+        if earlier is None:
+            earlier = held.get(entry)
+        if earlier is None:
+            seen[entry] = declaration.target
+            new.append(declaration)
+        elif earlier != declaration.target:
+            raise InclusionDeclarationError(
+                f"{name} is declared as {earlier} (in the index or in this file): "
+                "revoke one of them first"
+            )
+    if len(held) + len(new) > MAX_INCLUSION_DECLARATIONS:
+        raise InclusionDeclarationError(
+            f"at most {MAX_INCLUSION_DECLARATIONS} inclusion declarations are kept"
+        )
+    return new
+
+
 __all__ = [
     "INCLUSION_FAMILY",
     "MAX_INCLUSION_DECLARATIONS",
+    "MAX_LINK_INCLUSIONS",
     "MAX_UNSETTLED_INCLUSIONS",
     "InclusionDecision",
     "InclusionDeclaration",
@@ -178,4 +220,5 @@ __all__ = [
     "InclusionLink",
     "InclusionMethod",
     "UnsettledInclusion",
+    "imported_declarations",
 ]

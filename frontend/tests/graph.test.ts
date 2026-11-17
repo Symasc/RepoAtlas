@@ -17,6 +17,7 @@ import {
   type Layout,
 } from "@/lib/graph/layout";
 import { toFreshness } from "@/lib/model/freshness";
+import { unsettledRowKey, unsettledSummary } from "@/lib/model/inclusions";
 import {
   buildFile,
   buildOpened,
@@ -30,6 +31,7 @@ import {
   FRAME_ID,
   repositoryId,
   SIDE_LIMIT,
+  unlistedInclusions,
   type Box,
   type LinkData,
 } from "@/lib/model/graph";
@@ -657,5 +659,61 @@ describe("moving between places", () => {
     expect(half.get("n")).toEqual({ x: 50, y: 25, width: 10, height: 10 });
     expect(half.get("new")).toEqual({ x: 5, y: 5, width: 1, height: 1 });
     expect(blend(from, to, 1)).toBe(to);
+  });
+});
+
+describe("a submodule link that lists some of its inclusions", () => {
+  const repositories = ["api", "web"].map((slug) => repository(slug));
+  const inclusion = {
+    format: "gitmodules",
+    path: "modules/api",
+    declared_at: "web/.gitmodules:1",
+    method: "path" as const,
+  };
+
+  it("carries how many it holds and says how many are not listed", () => {
+    const graph = buildOverview(repositories, [
+      { ...link("submodule", "web", "api", 3), inclusions: [inclusion], inclusions_total: 3 },
+    ]);
+    const edge = graph.edges[0];
+    if (!edge) throw new Error("the overview drew no line");
+    expect(edge.link.inclusionsTotal).toBe(3);
+    expect(unlistedInclusions(edge.link)).toBe(2);
+  });
+
+  it("lists none as unlisted when the overview states no total", () => {
+    const graph = buildOverview(repositories, [{ ...link("submodule", "web", "api"), inclusions: [inclusion] }]);
+    const edge = graph.edges[0];
+    if (!edge) throw new Error("the overview drew no line");
+    expect(edge.link.inclusionsTotal).toBeUndefined();
+    expect(unlistedInclusions(edge.link)).toBe(0);
+  });
+});
+
+describe("the row of an unlinked inclusion", () => {
+  const entry = { repository: "web", file: ".gitmodules", path: "modules/api" };
+
+  it("takes a new key when a declaration arrives, so its picker remounts", () => {
+    const before = unsettledRowKey(entry, null);
+    expect(unsettledRowKey(entry, undefined)).toBe(before);
+    expect(unsettledRowKey(entry, { target: "api" })).not.toBe(before);
+    expect(unsettledRowKey(entry, { target: "api" })).not.toBe(unsettledRowKey(entry, { target: "api-fork" }));
+  });
+
+  it("keeps its key while the declaration does not change, and differs by entry", () => {
+    expect(unsettledRowKey(entry, { target: "api" })).toBe(unsettledRowKey({ ...entry }, { target: "api" }));
+    expect(unsettledRowKey(entry, null)).not.toBe(unsettledRowKey({ ...entry, path: "modules/web" }, null));
+  });
+
+  it("says everything is linked only when the index counts nothing unlinked", () => {
+    expect(unsettledSummary(0, 0)).toBe("Every inclusion the index reads is linked.");
+    // An empty list with a count is never "everything is linked": the entries are not listed.
+    expect(unsettledSummary(0, 3)).toMatch(/^Showing 0 of 3\. The others are not listed/);
+    expect(unsettledSummary(0, 3)).not.toMatch(/is linked/);
+  });
+
+  it("says how many it shows when the list is shorter than the count, and nothing when it is whole", () => {
+    expect(unsettledSummary(2, 5)).toMatch(/^Showing 2 of 5\. The others are not listed/);
+    expect(unsettledSummary(5, 5)).toBeNull();
   });
 });

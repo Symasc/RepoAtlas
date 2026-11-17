@@ -54,8 +54,9 @@ from repoatlas.storage.protocols import (
     UnresolvedRefRecord,
 )
 
-#: A pin that names a commit: an abbreviated or full hexadecimal object name.
-_COMMIT = re.compile(r"[0-9a-fA-F]{7,64}")
+#: A pin that names a commit: a full object name, SHA-1 (40) or SHA-256 (64) hexadecimal. A
+#: shorter hex string is as likely a branch or tag (``deadbeef``) as an abbreviated commit.
+_COMMIT = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,10 +87,14 @@ def is_inclusion_claim(claim: UnresolvedRefRecord) -> bool:
 
 
 def pin_in_sync(pin: str | None, head: str | None) -> bool | None:
-    """Whether ``head`` is the commit ``pin`` names; ``None`` when that cannot be told."""
+    """Whether ``head`` is the commit ``pin`` names; ``None`` when that cannot be told: no pin
+    or head, a pin that is not a full-length commit (a branch, a tag, an abbreviation), or a
+    pin and head of different lengths (a SHA-1 pin against a SHA-256 head is no mismatch)."""
     if not pin or not head or not _COMMIT.fullmatch(pin):
         return None
-    return head.lower().startswith(pin.lower())
+    if len(pin) != len(head):
+        return None
+    return head.lower() == pin.lower()
 
 
 def decision_ref(repository: str, file: str, path: str, line: int | None) -> str:
@@ -124,11 +129,22 @@ def plan_inclusions(
     declared = {(d.repository, d.file, d.path): d for d in declarations}
     pairs: set[tuple[int, int]] = set()
 
-    for claim in sorted(claims, key=lambda c: (c.file_id, c.line_start or 0, c.target_key)):
+    # Claims are told apart by where they are and what path they state (see decision_ref):
+    # a second claim at one line for one path, as a one-line flow mapping can make, is
+    # dropped, so the decision and its edge are written once and the first one stands.
+    stated: set[tuple[int, int, str]] = set()
+
+    for claim in sorted(
+        claims, key=lambda c: (c.file_id, c.line_start or 0, c.target_key, c.id or 0)
+    ):
         origin = by_id.get(claim.file_id)
         parent = by_repo_id.get(claim.repo_id)
         if origin is None or parent is None or parent.id is None:
             continue
+        place = (claim.file_id, claim.line_start or 0, claim.target_key)
+        if place in stated:
+            continue
+        stated.add(place)
         meta: dict[str, Any] = json.loads(claim.meta_json) if claim.meta_json else {}
         path = claim.target_key
         url = meta.get("url")
@@ -201,6 +217,9 @@ def plan_inclusions(
             "identity": identity,
             "revision": pin,
         }
+        # A local identity is an absolute path of this machine, and nothing reads it back.
+        if identity is not None and identity.startswith("file:"):
+            del evidence["identity"]
         if found is not None:
             evidence.update(method=method, target=found.slug)
         if decision == "ambiguous":

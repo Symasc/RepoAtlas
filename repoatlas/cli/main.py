@@ -513,17 +513,15 @@ def links_export(
         )
 
 
-def _import_services(workspace: Workspace, services: Sequence[ExternalServiceFields]) -> int:
-    """Store the external services of an import, in the file's order, and return how many were new.
+def _judge_services(
+    workspace: Workspace, services: Sequence[ExternalServiceFields]
+) -> list[ExternalServiceFields]:
+    """The external services of an import the index does not hold yet, in the file's order.
 
-    The whole list is judged before anything is stored: one the index already holds in other words
+    The whole list is judged, and nothing is stored: one the index already holds in other words
     (or the file states twice in other words), or one more than the store keeps, refuses the
     import. One stated word for word again is skipped."""
-    from repoatlas.models.service_declarations import (
-        MAX_SERVICE_DECLARATIONS,
-        ServiceDeclarationConflictError,
-        ServiceDeclarationLimitError,
-    )
+    from repoatlas.models.service_declarations import MAX_SERVICE_DECLARATIONS
 
     store = workspace.service_declarations
     present = store.list_all()
@@ -546,7 +544,18 @@ def _import_services(workspace: Workspace, services: Sequence[ExternalServiceFie
             err=True,
         )
         raise typer.Exit(ExitCode.RUNTIME)
-    for service in new.values():
+    return list(new.values())
+
+
+def _store_services(workspace: Workspace, new: Sequence[ExternalServiceFields]) -> int:
+    """Store the external services ``_judge_services`` returned, and return how many."""
+    from repoatlas.models.service_declarations import (
+        ServiceDeclarationConflictError,
+        ServiceDeclarationLimitError,
+    )
+
+    store = workspace.service_declarations
+    for service in new:
         try:
             store.create(service, via="import")
         except (ServiceDeclarationConflictError, ServiceDeclarationLimitError) as exc:
@@ -561,8 +570,11 @@ def links_import(
 ) -> None:
     """Add the links in FILE. A link already recorded, the same in every field, is skipped.
     They take part in HTTP links from the next sync. External service declarations in FILE are
-    added first and skipped the same way; they are read when the worklist is, never joined. A
-    file with a redirect or a permitted callback is refused whole."""
+    added first and skipped the same way; they are read when the worklist is, never joined.
+    Inclusion declarations are added or skipped the same way; one for an entry already declared
+    with a different target refuses the whole file. They are not checked against the index: the
+    next sync marks an unusable one stale. A file with a redirect or a permitted callback is
+    refused whole."""
     from pydantic import ValidationError
 
     from repoatlas.models.deployment_targets import (
@@ -570,6 +582,7 @@ def links_import(
         LinkLimitError,
         LinksExport,
     )
+    from repoatlas.models.inclusions import InclusionDeclarationError, imported_declarations
     from repoatlas.models.service_declarations import ExternalServiceFields
 
     try:
@@ -591,16 +604,35 @@ def links_import(
     workspace = _open()
     added = skipped = 0
     try:
-        if exported.inclusion_declarations:
-            # Keyed by the entry they settle: one stated again is kept, another target replaces it.
-            for declaration in exported.inclusion_declarations:
-                workspace.inclusion_declarations.create(declaration, via="import")
-            typer.echo(f"Recorded {len(exported.inclusion_declarations)} inclusion declaration(s).")
-        if declared:
-            new_services = _import_services(workspace, services)
+        inclusions = exported.inclusion_declarations or []
+        new_services: list[ExternalServiceFields] = []
+        if inclusions:
+            # Judged before anything is stored, here and again in the transaction that stores them.
+            held = {
+                (d.repository, d.file, d.path): d.target
+                for d in workspace.inclusion_declarations.list_all()
+            }
+            try:
+                imported_declarations(held, inclusions)
+            except InclusionDeclarationError as exc:
+                typer.echo(f"Not imported: {exc}", err=True)
+                raise typer.Exit(ExitCode.RUNTIME) from exc
+        if services:
+            new_services = _judge_services(workspace, services)
+        if inclusions:
+            try:
+                added_inclusions = workspace.inclusion_declarations.import_all(inclusions)
+            except InclusionDeclarationError as exc:
+                typer.echo(f"Not imported: {exc}", err=True)
+                raise typer.Exit(ExitCode.RUNTIME) from exc
             typer.echo(
-                f"Added {new_services} external service(s); {len(services) - new_services} "
-                "already recorded."
+                f"Added {added_inclusions} inclusion declaration(s); "
+                f"{len(inclusions) - added_inclusions} already recorded."
+            )
+        if declared:
+            stored = _store_services(workspace, new_services)
+            typer.echo(
+                f"Added {stored} external service(s); {len(services) - stored} already recorded."
             )
         store = workspace.deployment_links
         present: dict[str, set[str]] = {}

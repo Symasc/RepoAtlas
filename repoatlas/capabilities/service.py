@@ -1952,7 +1952,7 @@ class CapabilityService:
                 included = inclusion_links(
                     found,
                     store.stored_edges(found.inclusion_ids()),
-                    {r.slug: r.head_sha for r in registered},
+                    {r.slug: r.last_indexed_head for r in registered},
                 )
                 unsettled, unsettled_total = unsettled_inclusions(
                     self._workspace.knowledge.list_link_decisions(INCLUSION_FAMILY), in_scope

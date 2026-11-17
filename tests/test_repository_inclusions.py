@@ -3,17 +3,23 @@ metadata of the repositories to the links, the unsettled list, declarations and 
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 from repoatlas.capabilities.errors import InvalidInclusionDeclarationError
+from repoatlas.capabilities.impact import decisions_near
+from repoatlas.capabilities.inclusions import includers
 from repoatlas.capabilities.service import CapabilityService
-from repoatlas.gitstate.config import normalize_git_url
+from repoatlas.capabilities.topology import unsettled_inclusions
+from repoatlas.gitstate.client import GitClient, GitResult
+from repoatlas.gitstate.config import normalize_git_url, parse_git_config
 from repoatlas.gitstate.remotes import read_remotes
 from repoatlas.graph.inclusions import pin_in_sync
 from repoatlas.models.capability import CapabilityContext, CapabilityScope
 from repoatlas.models.impact import ImpactRequest
 from repoatlas.models.inclusions import (
+    INCLUSION_FAMILY,
     InclusionDeclarationCreateRequest,
     InclusionDeclarationFields,
     InclusionDeclarationsRequest,
@@ -24,6 +30,7 @@ from repoatlas.parsers.structured import StructuredParser
 from repoatlas.services.init_service import initialize
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace
+from repoatlas.storage.protocols import LinkDecisionRow
 from tests.conftest import git, init_git_repository
 
 GLOBAL = CapabilityContext(scope=CapabilityScope.GLOBAL)
@@ -75,9 +82,19 @@ def test_a_submodule_checkout_reads_the_config_its_gitdir_file_points_at(tmp_pat
 def test_only_a_commit_pin_says_whether_a_checkout_is_in_sync() -> None:
     head = "0123456789abcdef0123456789abcdef01234567"
     assert pin_in_sync(head, head) is True
-    assert pin_in_sync("0123456", head) is True
-    assert pin_in_sync("fedcba9", head) is False
+    assert pin_in_sync(head.upper(), head) is True
+    assert pin_in_sync("f" * 40, head) is False
+    # Only a full-length commit is told from a branch: an abbreviation is unknown, never False.
+    assert pin_in_sync("0123456", head) is None
+    assert pin_in_sync("fedcba9", head) is None
+    assert pin_in_sync("deadbeef", head) is None
     assert pin_in_sync("main", head) is None
+    sha256 = "0123456789abcdef" * 4
+    assert pin_in_sync(sha256, sha256) is True
+    assert pin_in_sync("f" * 64, sha256) is False
+    # A SHA-1 pin against a SHA-256 head (or the reverse) cannot be told: never False.
+    assert pin_in_sync("f" * 40, sha256) is None
+    assert pin_in_sync(sha256, head) is None
 
 
 # -- what each format states -----------------------------------------------------------------
@@ -315,3 +332,155 @@ def test_inclusion_declarations_survive_an_export_and_import(
         "ext/dup",
         "dup",
     )
+
+
+# -- review fixes ------------------------------------------------------------------------------
+
+
+def test_the_last_value_of_a_repeated_key_wins_and_start_or_end_keys_move_no_line() -> None:
+    [(path, start, end, meta)] = _claims(
+        ".gitmodules",
+        '[submodule "a"]\n\tpath = x\n\tpath = y\n\turl = u\n\turl = v\n'
+        "\tstart = 99\n\tend = 98\n\tbranch = one\n\tbranch = two\n",
+    )
+    assert (path, start, end) == ("y", 1, 9)
+    assert (meta["url"], meta["branch"]) == ("v", "two")
+
+    [(path, start, end, meta)] = _claims(
+        "vendor/sub/.gitrepo",
+        "[subrepo]\n\tremote = a\n\tremote = b\n\tcommit = c1\n\tcommit = c2\n"
+        "\tstart = 99\n\tend = 98\n",
+    )
+    assert (path, start, end) == ("vendor/sub", 1, 7)
+    assert (meta["url"], meta["revision"]) == ("b", "c2")
+
+
+def test_a_value_continued_over_five_lines_is_one_value_and_later_lines_keep_numbers() -> None:
+    entries = parse_git_config("[s]\nk = a\\\nb\\\nc\\\nd\\\ne\nj = 1\n")
+    assert [(e.key, e.value, e.line) for e in entries] == [("k", "abcde", 2), ("j", "1", 7)]
+
+    # A continuation into an empty line ends there.
+    entries = parse_git_config("[s]\nk = a\\\n\nj = 1\n")
+    assert [(e.key, e.value, e.line) for e in entries] == [("k", "a", 2), ("j", "1", 4)]
+
+    # A line that is only an even run of backslashes does not continue: the run before it lost
+    # one, so parity is the line's own.
+    entries = parse_git_config("[s]\nk = a\\\n\\\\\nj = 1\n")
+    assert [(e.key, e.value, e.line) for e in entries] == [("k", "a\\", 2), ("j", "1", 4)]
+
+    # A continuation at the end of the file has nothing to continue into.
+    assert [e.value for e in parse_git_config("[s]\nk = a\\\n")] == ["a\\"]
+
+
+def test_a_relative_url_resolved_through_a_directory_leaves_no_local_path_in_evidence(
+    workspace: Workspace, tmp_path: Path
+) -> None:
+    root = tmp_path / "repos"
+    # No remote, so the URL is resolved against the directory: the identity is a local path.
+    _repo(
+        root / "app",
+        {
+            ".gitmodules": '[submodule "lib"]\n\tpath = ext/lib\n\turl = ../lib.git\n'
+            '[submodule "gone"]\n\tpath = ext/gone\n\turl = ../gone.git\n'
+            '[submodule "net"]\n\tpath = ext/net\n\turl = https://github.com/org/net\n'
+        },
+    )
+    _repo(root / "lib", {"lib.py": "L = 1\n"})
+    initialize(workspace, root, config_path=tmp_path / "config.yaml")
+
+    rows = {r.subject: r for r in workspace.knowledge.list_link_decisions(INCLUSION_FAMILY)}
+    assert {s: r.decision for s, r in rows.items()} == {
+        "ext/lib": "linked",
+        "ext/gone": "unresolved",
+        "ext/net": "unresolved",
+    }
+    for row in rows.values():
+        assert str(tmp_path) not in row.evidence_json
+        assert tmp_path.name not in row.evidence_json
+    assert "identity" not in json.loads(rows["ext/gone"].evidence_json)
+    # A network identity names no place on this machine, and stays.
+    assert json.loads(rows["ext/net"].evidence_json)["identity"] == "github.com/org/net"
+
+    keys = [
+        row[0]
+        for row in workspace.database.execute(
+            "SELECT e.key FROM entities e JOIN files f ON f.id = e.file_id "
+            "WHERE f.rel_path = '.gitmodules' AND e.type = 'file'"
+        ).fetchall()
+    ]
+    near, _ = decisions_near(workspace.knowledge, keys)
+    assert {d.subject for d in near} == {"ext/gone", "ext/net"}
+    text = json.dumps([d.evidence for d in near])
+    assert str(tmp_path) not in text and tmp_path.name not in text
+
+
+def test_in_sync_follows_the_head_that_was_indexed_not_the_head_now(included: Workspace) -> None:
+    child = next(r for r in included.repositories.list_all() if r.slug == "app/modules/child")
+    assert child.last_indexed_head is not None
+    included.repositories.upsert(child.model_copy(update={"head_sha": "f" * 40}))
+    moved = next(r for r in included.repositories.list_all() if r.slug == "app/modules/child")
+    assert moved.head_sha != moved.last_indexed_head
+
+    assert _submodule_links(CapabilityService(included))["app->app/modules/child"] == [
+        ("modules/child", "path", True)
+    ]
+    [impact] = includers(included, "app/modules/child", frozenset({"app", "app/modules/child"}))
+    assert impact.in_sync is True
+
+
+def _unsettled(repo_id: int, subject: str, decision: str, candidates: list[str]) -> LinkDecisionRow:
+    return LinkDecisionRow(
+        decision_ref=f"inc1-{subject}",
+        family=INCLUSION_FAMILY,
+        repo_id=repo_id,
+        file_id=1,
+        src_id=1,
+        line_start=1,
+        subject=subject,
+        decision=decision,
+        evidence_json=json.dumps({"format": "gitmodules", "candidates": candidates}),
+        path=".gitmodules",
+    )
+
+
+def test_the_unsettled_total_counts_an_entry_the_list_leaves_out_for_its_candidate() -> None:
+    in_scope = {1: "app", 3: "a", 4: "b"}
+    rows = [
+        _unsettled(1, "both-in-scope", "ambiguous", ["a", "b"]),
+        _unsettled(1, "one-outside", "ambiguous", ["a", "outside"]),
+        _unsettled(1, "no-candidates", "unresolved", []),
+        _unsettled(2, "other-repository", "unresolved", []),
+        _unsettled(1, "settled", "linked", []),
+    ]
+
+    listed, total = unsettled_inclusions(rows, in_scope)
+
+    # Counted, never named: the entry with a candidate outside the scope is in the total only.
+    assert [u.path for u in listed] == ["both-in-scope", "no-candidates"]
+    assert total == 3
+    assert all("outside" not in u.candidates for u in listed)
+
+
+def test_a_sync_reads_the_index_once_per_repository_and_keeps_the_gitlinks(
+    included: Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = {r.slug: r.gitlinks for r in included.repositories.list_all()}
+    assert [path for path, _ in before["app"]] == ["modules/child"]
+    # A file git does not track makes a repository dirty before its index is read, so the
+    # gitlinks of that one are asked for once, not twice.
+    (tmp_path / "repos" / "lib" / "scratch.txt").write_text("untracked\n")
+
+    stages: dict[Path, int] = {}
+    real = GitClient._run
+
+    def counting(self: GitClient, cwd: Path, *args: str) -> GitResult:
+        if "--stage" in args:
+            stages[cwd] = stages.get(cwd, 0) + 1
+        return real(self, cwd, *args)
+
+    monkeypatch.setattr(GitClient, "_run", counting)
+    sync(included, included.resolver().resolve(tmp_path / "repos"))
+
+    assert len(stages) == len(before)
+    assert set(stages.values()) == {1}
+    assert {r.slug: r.gitlinks for r in included.repositories.list_all()} == before

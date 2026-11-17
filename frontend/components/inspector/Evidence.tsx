@@ -9,7 +9,7 @@ import type { EvidenceItem, TopologyEdgeResponse } from "@/lib/api/generated";
 import { useEdges } from "@/lib/api/topology";
 import { decisionRefOf, type HopPlace } from "@/lib/model/decisions";
 import { formatCount, plural } from "@/lib/model/format";
-import { relationOf, type Connection, type Family } from "@/lib/model/graph";
+import { relationOf, unlistedInclusions, type Connection, type Family } from "@/lib/model/graph";
 
 import { Quiet } from "./Inspector";
 import classes from "./Inspector.module.css";
@@ -103,11 +103,12 @@ export function Evidence({
                 <>
                   <br />
                   Pinned at <span className={classes.mono}>{shortPin(inclusion.revision)}</span>
-                  {inclusion.in_sync === true && " · checkout matches"}
+                  {inclusion.in_sync === true && " · indexed HEAD matches"}
                   {inclusion.in_sync === false && (
                     <>
                       {" "}
-                      · checkout at <span className={classes.mono}>{shortPin(inclusion.head ?? "")}</span>
+                      · indexed HEAD at{" "}
+                      <span className={classes.mono}>{shortPin(inclusion.head ?? "")}</span>
                     </>
                   )}
                 </>
@@ -115,6 +116,11 @@ export function Evidence({
             </li>
           ))}
         </ul>
+      )}
+      {unlistedInclusions(link) > 0 && (
+        <Quiet>
+          Showing {formatCount(link.inclusions!.length)} of {plural(link.inclusionsTotal!, "inclusion")}.
+        </Quiet>
       )}
       {refs.length === 0 ? (
         <Quiet>The index keeps no example of this link to show.</Quiet>

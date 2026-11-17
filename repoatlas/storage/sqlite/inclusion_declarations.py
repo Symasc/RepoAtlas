@@ -7,14 +7,17 @@ where it left them (``009_repository_inclusions.sql``).
 
 One declaration per entry -- the including repository, the file stating the entry and the
 entry's path. Declaring the repository already declared returns the declaration and writes
-nothing; declaring another replaces it. Every change is also one row of
-``inclusion_declaration_audit``, written in the same transaction.
+nothing; declaring another replaces it. An import never replaces a declaration: it adds the
+ones not held, skips those held as stated, and refuses all of them for one that differs
+(``import_all``). Every change is also one row of ``inclusion_declaration_audit``, written in
+the same transaction.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Sequence
 from datetime import datetime, timezone
 
 from repoatlas.models.deployment_targets import DeclarationProvenance
@@ -23,6 +26,7 @@ from repoatlas.models.inclusions import (
     InclusionDeclaration,
     InclusionDeclarationError,
     InclusionDeclarationFields,
+    imported_declarations,
 )
 from repoatlas.storage.sqlite.database import Database
 
@@ -109,6 +113,28 @@ class SqliteInclusionDeclarationStore:
         created = self.get(declaration_id)
         assert created is not None
         return created
+
+    def import_all(self, stated: Sequence[InclusionDeclarationFields]) -> int:
+        """Store the declarations of an import the index does not hold yet, all or none, and
+        return how many were new. One already held with the same target is skipped; any other
+        outcome of :func:`imported_declarations` raises and stores nothing."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._db.transaction() as conn:
+            held = {
+                (row["repository"], row["file"], row["path"]): row["target"]
+                for row in conn.execute(_SELECT + "ORDER BY id").fetchall()
+            }
+            new = imported_declarations(held, stated)
+            for fields in new:
+                cursor = conn.execute(
+                    "INSERT INTO inclusion_declarations (repository, file, path, target, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (fields.repository, fields.file, fields.path, fields.target, now, now),
+                )
+                self._audit(
+                    conn, now, "import", int(cursor.lastrowid or 0), "import", None, None, fields
+                )
+        return len(new)
 
     def delete(
         self, declaration_id: int, *, provenance: DeclarationProvenance | None = None

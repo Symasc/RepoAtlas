@@ -361,8 +361,12 @@ class SyncEngine:
             manifests=sorted(manifests),
             lockfiles=sorted(lockfiles),
         )
+        # The index was read once, by the state; only a state that did not read it asks again.
+        pinned = git_state.gitlinks
         self._repositories.update_origin(
-            repo_id, remotes=read_remotes(repo_path), gitlinks=self._git.gitlinks(repo_path)
+            repo_id,
+            remotes=read_remotes(repo_path),
+            gitlinks=dict(pinned) if pinned is not None else self._git.gitlinks(repo_path),
         )
 
         completion = SyncCompletion(

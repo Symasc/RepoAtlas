@@ -30,7 +30,7 @@ import hashlib
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from repoatlas.containment import RepositoryBoundary
@@ -127,6 +127,11 @@ class GitRepositoryState:
     head_sha: str | None = None
     is_dirty: bool = False
     known: bool = False
+    #: ``(path, commit)`` of each submodule path the index pins, when answering ``is_dirty`` read
+    #: the index anyway (:meth:`GitClient.gitlinks` would read it again). ``None`` when it did
+    #: not: a working tree with an untracked or deleted file is dirty before the index is read,
+    #: and git may not have answered. Not part of the state's identity.
+    gitlinks: tuple[tuple[str, str], ...] | None = field(default=None, compare=False, repr=False)
 
 
 class GitClient:
@@ -167,7 +172,7 @@ class GitClient:
         """Current branch, HEAD SHA and dirty state of the working tree."""
         head = self._run(repo_path, "rev-parse", "HEAD")
         branch = self._run(repo_path, "rev-parse", "--abbrev-ref", "HEAD")
-        dirty = self._dirty(repo_path)
+        dirty, gitlinks = self._dirty(repo_path)
 
         if not branch.ok and not head.ok and dirty is None:
             return GitRepositoryState(known=False)
@@ -182,10 +187,12 @@ class GitClient:
             head_sha=head.stdout.strip() or None,
             is_dirty=bool(dirty),
             known=True,
+            gitlinks=tuple(gitlinks.items()) if gitlinks is not None else None,
         )
 
-    def _dirty(self, repo_path: Path) -> bool | None:
-        """Whether the working tree differs from HEAD, without asking git to look.
+    def _dirty(self, repo_path: Path) -> tuple[bool | None, dict[str, str] | None]:
+        """``(dirty, gitlinks)``: whether the working tree differs from HEAD, without asking
+        git to look, and the gitlinks of the index when answering read it (else ``None``).
 
         ``git status`` answers this in one call, and that call is exactly what
         cannot be made: deciding whether a file still matches the index means
@@ -205,26 +212,31 @@ class GitClient:
 
         ``None`` means git could not answer at all, which is not the same as
         "clean" and is reported as unknown rather than guessed.
+
+        The index listing of step 3 also states the gitlinks, so they are returned with the
+        answer instead of being asked for again; steps 1 and 2 answer before it is read, and
+        then there are none to return.
         """
         others = self._run(repo_path, "ls-files", "--others", "--exclude-standard", "-z")
         if not others.ok:
-            return None
+            return None, None
         if others.stdout.strip("\0").strip():
-            return True
+            return True, None
 
         deleted = self._run(repo_path, "ls-files", "--deleted", "-z")
         if deleted.ok and deleted.stdout.strip("\0").strip():
-            return True
+            return True, None
 
         staged = self._run(repo_path, "ls-files", "--stage", "-z")
         if not staged.ok:
-            return None
+            return None, None
         entries = _parse_index_entries(staged.stdout)
+        gitlinks = _gitlinks_of(entries)
 
         if _staged_differs_from_head(entries, self._run(repo_path, "ls-tree", "-r", "-z", "HEAD")):
-            return True
+            return True, gitlinks
 
-        return _worktree_differs_from_index(repo_path, entries)
+        return _worktree_differs_from_index(repo_path, entries), gitlinks
 
     def list_files(self, repo_path: Path) -> FileListing | None:
         """Tracked plus untracked-not-ignored files, relative to the repo root.
@@ -260,11 +272,12 @@ class GitClient:
         staged = self._run(repo_path, "ls-files", "--stage", "-z")
         if not staged.ok:
             return None
-        return {
-            rel_path: sha
-            for mode, sha, rel_path in _parse_index_entries(staged.stdout)
-            if mode == _MODE_GITLINK
-        }
+        return _gitlinks_of(_parse_index_entries(staged.stdout))
+
+
+def _gitlinks_of(entries: list[tuple[str, str, str]]) -> dict[str, str]:
+    """The commit each gitlink (mode 160000) of parsed index entries is pinned at."""
+    return {rel_path: sha for mode, sha, rel_path in entries if mode == _MODE_GITLINK}
 
 
 def _parse_index_entries(raw: str) -> list[tuple[str, str, str]]:

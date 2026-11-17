@@ -128,8 +128,15 @@ export interface LinkData {
   examples: string[];
   /** On a submodule link: each inclusion, where it is stated and what it pins. */
   inclusions?: InclusionLink[];
+  /** On a submodule link: how many inclusions it holds, of which `inclusions` lists up to a few. */
+  inclusionsTotal?: number;
   /** What the line says instead of its count: how a trace's step reads. */
   label?: string;
+}
+
+/** How many of a submodule link's inclusions the overview holds but does not list. */
+export function unlistedInclusions(link: LinkData): number {
+  return Math.max(0, (link.inclusionsTotal ?? 0) - (link.inclusions?.length ?? 0));
 }
 
 /** Examples kept per merged link: enough to show evidence, never a dump. */
@@ -259,7 +266,10 @@ export function buildOverview(
     const source = repositoryId(link.source);
     const target = repositoryId(link.target);
     const data = linkOf(link, familyOf(link.kind, null, link.types ?? []), (link.packages ?? []).map((p) => p.name));
-    if (link.inclusions?.length) data.inclusions = link.inclusions.map((i) => ({ ...i }));
+    if (link.inclusions?.length) {
+      data.inclusions = link.inclusions.map((i) => ({ ...i }));
+      if (link.inclusions_total !== undefined) data.inclusionsTotal = link.inclusions_total;
+    }
     edges.push({ id, source, target, link: data });
     const name = (slug: string) => known.get(slug)!.name;
     push(connections, source, {

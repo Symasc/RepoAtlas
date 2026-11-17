@@ -530,6 +530,12 @@ class ReferenceLinker:
                 claims.append(self._claim(repo_id, file_id, source_id, reference, parsed))
                 continue
 
+            if reference.edge_type is EdgeType.INCLUDES_REPOSITORY:
+                # Its key is a path, never a name in this file: only the global pass can
+                # decide which repository it is (repoatlas.graph.inclusions).
+                claims.append(self._claim(repo_id, file_id, source_id, reference, parsed))
+                continue
+
             if reference.meta.get(MODULE_RESOLUTION):
                 # Configuration the global pass reads to resolve bare specifiers: a
                 # fact about this file, not an edge to anything, so never interned.

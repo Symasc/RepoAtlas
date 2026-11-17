@@ -5,6 +5,7 @@ import { useState } from "react";
 
 import type { InclusionDeclaration, UnsettledInclusion } from "@/lib/api/generated";
 import { useInclusionDeclarations, useInclusionDeclarationWrites } from "@/lib/api/inclusions";
+import { entryKey, unsettledRowKey, unsettledSummary } from "@/lib/model/inclusions";
 import type { RepositoryModel } from "@/lib/model/repositories";
 
 import classes from "./Connections.module.css";
@@ -22,11 +23,6 @@ const STATUS: Record<string, { label: string; tone?: string }> = {
   superseded: { label: "superseded: the index now finds it by itself" },
   stale: { label: "stale: the entry or the repository is no longer indexed", tone: "warning" },
 };
-
-/** Where an entry is stated: the stable identity a declaration is keyed by. */
-function entryKey(e: { repository: string; file: string; path: string }): string {
-  return `${e.repository}\u0000${e.file}\u0000${e.path}`;
-}
 
 /**
  * Inclusions (submodules, manifest projects) the index could not link to one indexed
@@ -50,6 +46,7 @@ export function InclusionsPanel({
   const listed = declarations.data?.declarations ?? [];
   const byEntry = new Map(listed.map((d) => [entryKey(d), d]));
   const pending = listed.filter((d) => d.status == null).length;
+  const summary = unsettledSummary(unsettled.length, total);
   return (
     <Drawer
       opened={opened}
@@ -77,25 +74,22 @@ export function InclusionsPanel({
             <Tabs.Tab value="declarations">Your declarations ({listed.length})</Tabs.Tab>
           </Tabs.List>
           <Tabs.Panel value="unsettled" pt="md">
-            {unsettled.length === 0 ? (
-              <p className={classes.detail}>Every inclusion the index reads is linked.</p>
-            ) : (
+            {unsettled.length > 0 && (
               <ul className={classes.declarations} aria-label="Unlinked inclusions">
-                {unsettled.map((entry) => (
-                  <UnsettledRow
-                    key={entryKey(entry)}
-                    entry={entry}
-                    declared={byEntry.get(entryKey(entry)) ?? null}
-                    repositories={repositories}
-                  />
-                ))}
+                {unsettled.map((entry) => {
+                  const declared = byEntry.get(entryKey(entry)) ?? null;
+                  return (
+                    <UnsettledRow
+                      key={unsettledRowKey(entry, declared)}
+                      entry={entry}
+                      declared={declared}
+                      repositories={repositories}
+                    />
+                  );
+                })}
               </ul>
             )}
-            {total > unsettled.length && (
-              <p className={classes.detail}>
-                Showing {unsettled.length} of {total}.
-              </p>
-            )}
+            {summary && <p className={classes.detail}>{summary}</p>}
           </Tabs.Panel>
           <Tabs.Panel value="declarations" pt="md">
             {declarations.isLoading && (

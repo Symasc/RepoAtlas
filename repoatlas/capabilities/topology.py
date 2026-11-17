@@ -53,6 +53,7 @@ from repoatlas.models.dependencies import DependencyObservation, DependencyPacka
 from repoatlas.models.dependency_inventory import AppliedPageLimits
 from repoatlas.models.inclusions import (
     INCLUSION_FAMILY,
+    MAX_LINK_INCLUSIONS,
     MAX_UNSETTLED_INCLUSIONS,
     InclusionLink,
     UnsettledInclusion,
@@ -350,14 +351,16 @@ class OverviewGroups:
     groups: dict[_OverviewKey, _Group] = field(default_factory=dict)
     #: For each dependency link, where its edges are asserted: ``(path, line)``.
     sites: dict[tuple[str, str], list[_Site]] = field(default_factory=dict)
-    #: For each submodule link, every edge it holds: each is one inclusion, listed whole.
-    inclusions: dict[tuple[str, str], list[int]] = field(default_factory=dict)
+    #: For each submodule link, the first :data:`MAX_LINK_INCLUSIONS` of the inclusions it holds
+    #: (each edge is one) by where they are stated (file, then numeric line), as
+    #: ``(path, line, edge id)``. Its total is the link's group count.
+    inclusions: dict[tuple[str, str], list[tuple[str, int, int]]] = field(default_factory=dict)
 
     def example_ids(self) -> list[int]:
         return [edge_id for group in self.groups.values() for edge_id in group.example_ids()]
 
     def inclusion_ids(self) -> list[int]:
-        return [edge_id for ids in self.inclusions.values() for edge_id in ids]
+        return [edge_id for kept in self.inclusions.values() for _, _, edge_id in kept]
 
 
 def crossing_groups(rows: Iterable[CrossingEdgeRow], slugs: Mapping[int, str]) -> OverviewGroups:
@@ -380,8 +383,15 @@ def crossing_groups(rows: Iterable[CrossingEdgeRow], slugs: Mapping[int, str]) -
         group.add(row.type, order, row.edge_id)
         if kind is LinkKind.DEPENDENCY:
             found.sites.setdefault((source, target), []).append((row.path, row.line_start))
-        elif kind is LinkKind.SUBMODULE:
-            found.inclusions.setdefault((source, target), []).append(row.edge_id)
+        elif kind is LinkKind.SUBMODULE and row.path is not None:
+            # The order `inclusion_links` lists in, so what is kept is the head of the whole
+            # ordered list, whichever order the rows came in. The line is a number: as text
+            # ":10" would sort before ":4".
+            entry = (row.path, row.line_start or 1, row.edge_id)
+            kept = found.inclusions.setdefault((source, target), [])
+            if len(kept) < MAX_LINK_INCLUSIONS or entry < kept[-1]:
+                bisect.insort(kept, entry)
+                del kept[MAX_LINK_INCLUSIONS:]
     return found
 
 
@@ -393,9 +403,9 @@ def inclusion_links(
     indexed now, never from the edge, so a checkout that moved is never reported in sync."""
     by_id = {edge.edge_id: edge for edge in edges}
     links: dict[tuple[str, str], tuple[InclusionLink, ...]] = {}
-    for (source, target), ids in found.inclusions.items():
+    for (source, target), kept in found.inclusions.items():
         listed: list[InclusionLink] = []
-        for edge_id in ids:
+        for _, _, edge_id in kept:
             edge = by_id.get(edge_id)
             if edge is None or edge.path is None:
                 continue
@@ -416,7 +426,8 @@ def inclusion_links(
                     method=recorded.get("method", "path"),
                 )
             )
-        links[(source, target)] = tuple(sorted(listed, key=lambda i: (i.declared_at, i.path)))
+        # `kept` is already in listing order: file, then numeric line.
+        links[(source, target)] = tuple(listed)
     return links
 
 
@@ -508,6 +519,8 @@ def repository_links(
             inclusions=(
                 (inclusions or {}).get((source, target), ()) if kind is LinkKind.SUBMODULE else ()
             ),
+            # Every submodule edge is one inclusion (INCLUSION_EDGES).
+            inclusions_total=group.count if kind is LinkKind.SUBMODULE else 0,
         )
         for (kind, source, target), group in sorted(
             found.groups.items(),
@@ -549,17 +562,21 @@ def unsettled_inclusions(
 ) -> tuple[tuple[UnsettledInclusion, ...], int]:
     """Inclusions the link pass left ambiguous or unresolved, and how many there are.
 
-    Listed only when the including repository and every candidate are in scope, so a
-    scoped answer never names a repository outside it.
+    The total counts every such entry whose including repository is in scope. The list keeps
+    only those whose candidates are all in scope as well, so a scoped answer never names a
+    repository outside it: the total may therefore exceed what the list holds, by the entries
+    with a candidate outside the scope, which are counted and not named.
     """
     scope = frozenset(in_scope.values())
     listed: list[UnsettledInclusion] = []
+    total = 0
     for row in decisions:
         if row.family != INCLUSION_FAMILY or row.decision not in ("ambiguous", "unresolved"):
             continue
         repository = in_scope.get(row.repo_id)
         if repository is None:
             continue
+        total += 1
         evidence = json.loads(row.evidence_json or "{}")
         candidates = tuple(str(c) for c in evidence.get("candidates") or ())
         if any(c not in scope for c in candidates):
@@ -579,7 +596,7 @@ def unsettled_inclusions(
                 declared=stale,
             )
         )
-    return tuple(listed[:MAX_UNSETTLED_INCLUSIONS]), len(listed)
+    return tuple(listed[:MAX_UNSETTLED_INCLUSIONS]), total
 
 
 # ---------------------------------------------------------------------------

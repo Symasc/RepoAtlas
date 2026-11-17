@@ -1190,10 +1190,16 @@ The global pass decides each claim (`repoatlas/graph/inclusions.py`). The first 
 Each entry's decision is a `link_decisions` row of family `repository_inclusion`. A linked one is also an
 `INCLUDES_REPOSITORY` edge to the included repository's node, asserted at the entry's lines. Its resolution records
 the format, URL, pin and how the repository was found. Whether the included repository's HEAD is the pinned commit is
-computed when asked, from the HEAD indexed then, so a checkout that moves is never reported in sync from a stale edge.
+computed when asked, from the HEAD indexed then (`last_indexed_head`), so a checkout that moves is never reported in
+sync from a stale edge. Only a full-length commit (40 or 64 hexadecimal characters) is told from a branch or tag: any
+other pin, an abbreviation included, is unknown, never out of sync.
 
-The topology overview reports these edges as the `submodule` link kind, and lists the unsettled entries. The
-relationships walk follows the edge, crossing repositories only under `cross_repository`. Change impact lists the
+The topology overview reports these edges as the `submodule` link kind (`LinkKind.SUBMODULE`, whose value is public:
+it covers every inclusion format above, not only git submodules), and lists the unsettled entries. The total counts
+every unsettled entry whose including repository is in scope; the list keeps only those whose candidates are all in
+scope as well, so a scoped answer never names a repository outside it. A
+submodule link lists up to 20 of its inclusions, first by file and line, and `inclusions_total` counts them
+all. The relationships walk follows the edge, crossing repositories only under `cross_repository`. Change impact lists the
 repositories in scope that include the seed's repository as a coarse `inclusions` section, the way it lists
 package-level dependents. It does not walk through the inclusion into the including repository's code.
 
@@ -2557,7 +2563,9 @@ removing a repository from the index never removes them: a label, an optional en
 variables, conditions and a verification state, at most 200 per repository. A variable that names or holds a
 credential is refused. They and the user's declarations (external services, inclusions) are the only user-written
 state in the index, so `repoatlas links export` writes them to a file (`repoatlas/deployment-links/v1`) and
-`repoatlas links import` adds them back, skipping any already recorded.
+`repoatlas links import` adds them back, skipping any already recorded; an inclusion declaration naming another
+repository for an entry already declared refuses the import; a file's inclusion declarations are stored together
+or not at all.
 
 **Links in the HTTP join.** A link states what no indexed source established for its repository: that it is
 reached at the link's URL, or at the URL its target resolves to under the link's values. The global pass reads the

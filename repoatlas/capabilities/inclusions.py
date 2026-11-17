@@ -139,8 +139,11 @@ def includers(
     edges = workspace.topology().stored_edges_to(
         [entity.entity_id for entity in targets], EdgeType.INCLUDES_REPOSITORY
     )
+    # The HEAD last indexed, as in the overview: the commit the index describes, which a
+    # checkout moved since may no longer be.
     head = next(
-        (r.head_sha for r in workspace.repositories.list_all() if r.slug == repository), None
+        (r.last_indexed_head for r in workspace.repositories.list_all() if r.slug == repository),
+        None,
     )
     found: list[InclusionImpact] = []
     for edge in edges:

@@ -39,7 +39,7 @@ _NETWORK_SCHEMES = frozenset(
 _HEADER = re.compile(r'^\[\s*([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]')
 _KEY = re.compile(r"^([A-Za-z][A-Za-z0-9-]*)\s*(?:=(.*))?$")
 #: ``[user@]host:path``, git's scp-like syntax: no scheme, and no slash before the colon.
-_SCP = re.compile(r"^(?:[^@/]+@)?(?P<host>[^:/]+):(?P<path>.*)$")
+_SCP = re.compile(r"^(?:(?P<user>[^@/]+)@)?(?P<host>[^:/]+):(?P<path>.*)$")
 _SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
 
@@ -103,12 +103,16 @@ def parse_git_config(text: str) -> list[ConfigEntry]:
             continue
         value: str | None = None
         if key.group(2) is not None:
-            text_value = key.group(2)
-            # A trailing backslash outside quotes continues the value on the next line.
-            while _continues(text_value) and index < len(lines):
-                text_value = text_value[:-1] + lines[index]
+            # A trailing backslash outside quotes continues the value on the next line. The
+            # pieces are joined once: a value of many lines is not copied once per line. A
+            # line's trailing backslashes count the same joined or alone, because the piece
+            # before it loses exactly one and an odd run less one is even.
+            pieces = [key.group(2)]
+            while _continues(pieces[-1]) and index < len(lines):
+                pieces[-1] = pieces[-1][:-1]
+                pieces.append(lines[index])
                 index += 1
-            value = _value(text_value)
+            value = _value("".join(pieces))
         entries.append(
             ConfigEntry(
                 section=section,
@@ -157,22 +161,40 @@ def _value(raw: str) -> str:
     return "".join(out)
 
 
-def strip_credentials(url: str) -> str:
-    """``url`` without a user or password. Anything not a scheme URL is returned as it
-    is but for an scp-like user, which is a login name and not a secret, kept."""
+def strip_credentials(url: str) -> str | None:
+    """``url`` without a user, password, query or fragment: a token travels in a query
+    (``?private_token=...``) as readily as in the user information. An scp-like URL keeps its
+    user, which is a login name and not a secret, unless the user holds a ``:``, which makes
+    it ``user:password`` and is dropped whole. Anything else is returned as it is. A URL that
+    cannot be told free of credentials is ``None``, and none of it is returned: a scheme URL
+    that does not parse, one with an unreadable port (the user information may have been
+    split at the wrong ``:``), one with an ``@`` after its host (the user information may
+    have ended at a ``#``, ``?`` or ``/``), and a URL without a scheme whose ``@`` follows a
+    ``:`` that is not an scp-like ``user:password@host:path``."""
     url = url.strip()
     if _SCHEME.match(url):
-        parts = urlsplit(url)
+        try:
+            parts = urlsplit(url)
+            port = parts.port
+        except ValueError:
+            return None
+        if "@" in parts.path or "@" in parts.query or "@" in parts.fragment:
+            return None
         if parts.username is None and parts.password is None:
+            if parts.query or parts.fragment:
+                return parts._replace(query="", fragment="").geturl()
             return url
         host = parts.hostname or ""
         if ":" in host:
             host = f"[{host}]"
-        try:
-            port = f":{parts.port}" if parts.port is not None else ""
-        except ValueError:
-            port = ""
-        return parts._replace(netloc=f"{host}{port}").geturl()
+        suffix = f":{port}" if port is not None else ""
+        return parts._replace(netloc=f"{host}{suffix}", query="", fragment="").geturl()
+    scp = _SCP.match(url)
+    if scp is not None and ":" in (scp.group("user") or ""):
+        return f"{scp.group('host')}:{scp.group('path')}"
+    at = url.find("@")
+    if at != -1 and ":" in url[:at]:
+        return None
     return url
 
 
@@ -200,7 +222,10 @@ def normalize_git_url(
             return _local(posixpath.join(base_dir, url))
         return None
     if _SCHEME.match(url):
-        parts = urlsplit(url)
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            return None
         scheme = parts.scheme.lower()
         if scheme == "file":
             return _local(parts.path) if parts.path.startswith("/") else None
