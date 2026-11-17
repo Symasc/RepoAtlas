@@ -40,10 +40,13 @@ def dashboard_references(
         return []
     found: list[tuple[str, yaml.ScalarNode]] = []
     panels = list(top["panels"].value)  # type: ignore[union-attr]
+    # A panel an alias reaches twice is one panel; and one that holds itself is read once.
+    seen: set[int] = set()
     while panels and len(found) < _MAX_QUERIES:
         panel = panels.pop(0)
-        if not isinstance(panel, yaml.MappingNode):
+        if not isinstance(panel, yaml.MappingNode) or id(panel) in seen:
             continue
+        seen.add(id(panel))
         fields = _fields(panel)
         nested = fields.get("panels")
         if isinstance(nested, yaml.SequenceNode):

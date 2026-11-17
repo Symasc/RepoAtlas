@@ -33,7 +33,16 @@ from pathlib import PurePosixPath
 import yaml
 
 from repoatlas.models.parsing import EdgeType, EntityType, ParsedReference
-from repoatlas.parsers.deploy_helm import _ACTION, _COMMENT, _body, _fields, _listen, _value
+from repoatlas.parsers.deploy_helm import (
+    _ACTION,
+    _COMMENT,
+    MAX_VALUE_DEPTH,
+    MAX_VALUE_NODES,
+    _body,
+    _fields,
+    _listen,
+    _value,
+)
 from repoatlas.parsers.http_facts import (
     DEPLOYMENT_TARGET_INGRESS,
     DEPLOYMENT_TARGET_VALUES,
@@ -444,13 +453,23 @@ def values_target_references(
         return []
     found: dict[str, list[list[object]] | None] = {}
     lines: dict[str, int] = {}
-    stack: list[tuple[str, yaml.Node]] = [("", documents[0])]
+    stack: list[tuple[str, yaml.Node, int]] = [("", documents[0], 0)]
     visited = 0
+    # Aliases can reach one mapping many times, and a cycle forever: bounded as
+    # :func:`~repoatlas.parsers.deploy_helm.read_values` bounds the same walk.
+    expanded: set[int] = set()
+    repeated = 0
     while stack and visited < 10_000 and len(found) < _LIMIT:
-        prefix, node = stack.pop()
+        prefix, node, depth = stack.pop()
         visited += 1
-        if not isinstance(node, yaml.MappingNode):
+        if not isinstance(node, yaml.MappingNode) or depth >= MAX_VALUE_DEPTH:
             continue
+        if id(node) in expanded:
+            repeated += len(node.value)
+            if repeated > MAX_VALUE_NODES:
+                break
+        else:
+            expanded.add(id(node))
         for key, value in node.value:
             name = key.value if isinstance(key, yaml.ScalarNode) else None
             if not isinstance(name, str):
@@ -460,7 +479,7 @@ def values_target_references(
                 found[prefix] = _listen(str(text))
                 lines[prefix] = key.start_mark.line + 1
             elif "." not in name:
-                stack.append((f"{prefix}.{name}" if prefix else name, value))
+                stack.append((f"{prefix}.{name}" if prefix else name, value, depth + 1))
     if not found:
         return []
     parent = path.parent

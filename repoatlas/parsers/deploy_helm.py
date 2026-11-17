@@ -76,6 +76,8 @@ from repoatlas.parsers.withhold import guarded
 MAX_VALUES = 256
 #: Nodes one values document's walk visits: aliases can make a small file a large tree.
 MAX_VALUE_NODES = 10_000
+#: How deep a values walk goes: past any chart's values, and the end of an alias cycle.
+MAX_VALUE_DEPTH = 64
 #: DF2 (D2-1): a file a release names with ``-f``, read only because it is named.
 REFERENCED_VALUES_KEY = "helm-values:referenced"
 REFERENCED_VALUES = "referenced-values"
@@ -245,7 +247,7 @@ def referenced_values_meta(path: str, content: str, named_by: Sequence[str]) -> 
     structured parser reads YAML; ``None`` when it is not one YAML mapping document."""
     try:
         documents = list(yaml.compose_all(content, Loader=yaml.SafeLoader))
-    except yaml.YAMLError:
+    except (yaml.YAMLError, RecursionError):
         return None
     if not documents or not isinstance(documents[0], yaml.MappingNode):
         return None
@@ -282,24 +284,39 @@ def read_values(document: yaml.Node) -> Values:
     """Every literal scalar leaf by dotted path (list items as ``a.b[0].c``), capped; a leaf
     whose path names a credential, or whose value carries one, is stored as ``<withheld>``."""
     read = Values()
-    stack: list[tuple[str, yaml.Node]] = [("", document)]
+    stack: list[tuple[str, yaml.Node, int]] = [("", document, 0)]
     visited = 0
+    # An alias lets one node be reached many times, and a cycle lets it be reached forever:
+    # the nodes already expanded, and what expanding them again has cost.
+    expanded: set[int] = set()
+    repeated = 0
     while stack:
-        prefix, node = stack.pop()
+        prefix, node, depth = stack.pop()
         visited += 1
         if visited > MAX_VALUE_NODES:
             read.truncated = True
             break
+        if isinstance(node, yaml.MappingNode) or (isinstance(node, yaml.SequenceNode) and prefix):
+            if depth >= MAX_VALUE_DEPTH:
+                read.truncated = True
+                continue
+            if id(node) in expanded:
+                repeated += len(node.value)
+                if repeated > MAX_VALUE_NODES:
+                    read.truncated = True
+                    break
+            else:
+                expanded.add(id(node))
         if isinstance(node, yaml.MappingNode):
             for key, value in reversed(node.value):
                 name = _scalar(key)
                 if name is not None and "." not in name:
-                    stack.append((f"{prefix}.{name}" if prefix else name, value))
+                    stack.append((f"{prefix}.{name}" if prefix else name, value, depth + 1))
         elif isinstance(node, yaml.SequenceNode) and prefix:
             if not node.value:
                 read.cleared.append([prefix, "list"])
             for index in reversed(range(len(node.value))):
-                stack.append((f"{prefix}[{index}]", node.value[index]))
+                stack.append((f"{prefix}[{index}]", node.value[index], depth + 1))
         elif isinstance(node, yaml.ScalarNode) and prefix:
             value = _scalar(node)
             if value is None:

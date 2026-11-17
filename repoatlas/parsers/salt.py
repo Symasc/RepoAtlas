@@ -40,8 +40,8 @@ from repoatlas.models.parsing import (
 )
 from repoatlas.parsers.http_facts import PENDING_FACT
 from repoatlas.parsers.jinja import extract_references, neutralize
-from repoatlas.parsers.marks import diagnostic_line, node_span, split_lines
-from repoatlas.parsers.structured import collect_config_keys
+from repoatlas.parsers.marks import NodeSpans, diagnostic_line, node_span, split_lines
+from repoatlas.parsers.structured import AliasBudget, collect_config_keys
 
 _SUFFIXES = frozenset({".sls"})
 
@@ -194,11 +194,15 @@ class _Collector:
         #: positions, so marks index these lines exactly — and a line that only
         #: looks blank after neutralization still counts as content.
         self._lines = lines
+        #: One of each per file: every state's walk shares what has been worked out and
+        #: what aliases have already cost, so a file's total is bounded, not each key's.
+        self._spans = NodeSpans(lines)
+        self._keys = AliasBudget()
         self.symbols: list[ParsedSymbol] = []
         self.references: list[ParsedReference] = []
 
     def _span(self, node: yaml.Node) -> tuple[int, int]:
-        return node_span(node, self._lines)
+        return self._spans.span(node)
 
     def document(self, root: yaml.Node) -> None:
         if not isinstance(root, yaml.MappingNode):
@@ -269,7 +273,9 @@ class _Collector:
         functions = self._state_functions(value_node)
 
         if not functions and not self._is_state(value_node):
-            keys, _truncated = collect_config_keys(value_node, state_id, lines=self._lines)
+            keys, _truncated = collect_config_keys(
+                value_node, state_id, lines=self._lines, spans=self._spans, budget=self._keys
+            )
             self.symbols.append(
                 ParsedSymbol(
                     kind=EntityType.CONFIG,
@@ -565,7 +571,7 @@ class SaltParser:
 
         try:
             documents = list(yaml.compose_all(neutralized, Loader=yaml.SafeLoader))
-        except yaml.YAMLError as exc:
+        except (yaml.YAMLError, RecursionError) as exc:
             symbols, references = _fallback_scan(content)
             mark = getattr(exc, "problem_mark", None)
             failed_at = diagnostic_line(mark, content)
@@ -616,7 +622,7 @@ class SaltMasterParser:
         diagnostics: tuple[ParseDiagnostic, ...] = ()
         try:
             root = yaml.compose(content, Loader=yaml.SafeLoader)
-        except yaml.YAMLError as exc:
+        except (yaml.YAMLError, RecursionError) as exc:
             mark = getattr(exc, "problem_mark", None)
             diagnostics = (
                 ParseDiagnostic(

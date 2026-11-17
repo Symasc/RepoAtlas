@@ -43,7 +43,7 @@ from repoatlas.parsers.graphql_artifacts import package_script_references
 from repoatlas.parsers.graphql_codegen import codegen_references
 from repoatlas.parsers.http_openapi import MAX_OPERATIONS, specification_references
 from repoatlas.parsers.inclusions import west_references
-from repoatlas.parsers.marks import diagnostic_line, node_span
+from repoatlas.parsers.marks import NodeSpans, diagnostic_line
 from repoatlas.parsers.module_facts import module_facts
 
 _YAML_SUFFIXES = frozenset({".yaml", ".yml"})
@@ -62,6 +62,27 @@ _MAX_KEYS = 400
 _LEADING_TABS = re.compile(r"^\t+", re.MULTILINE)
 
 
+#: How many times a walk may come back to a node it has already walked. An alias makes
+#: one node the child of many, so the walk of a small file can be a huge (or, through
+#: a cycle, endless) tree; a document without aliases never comes back to a node.
+_MAX_ALIAS_WALKS = 10_000
+
+
+class AliasBudget:
+    """What a file's key walks have spent returning to nodes they already walked.
+
+    One per file: the Salt parser walks one pillar subtree per top-level key and hands
+    every walk the same budget, so the limit holds for the file and not for each key.
+    Holds node identities, so it must not outlive the composed documents.
+    """
+
+    def __init__(self) -> None:
+        self.walked: set[int] = set()
+        self.repeats = 0
+        self.limit = _MAX_ALIAS_WALKS
+        self.exhausted = False
+
+
 def collect_config_keys(
     node: yaml.Node,
     prefix: str = "",
@@ -69,6 +90,8 @@ def collect_config_keys(
     lines: Sequence[str],
     max_depth: int = _MAX_DEPTH,
     max_keys: int = _MAX_KEYS,
+    spans: NodeSpans | None = None,
+    budget: AliasBudget | None = None,
 ) -> tuple[list[ParsedSymbol], bool]:
     """Mapping keys of a composed YAML node as CONFIG symbols with line ranges.
 
@@ -76,9 +99,12 @@ def collect_config_keys(
     content rather than from end marks (see :mod:`repoatlas.parsers.marks`).
 
     Shared with the Salt parser, which uses it for the pillar-data half of an
-    ``.sls`` tree (V1_SPEC §7.5, §7.7).
+    ``.sls`` tree (V1_SPEC §7.5, §7.7). A caller making several calls over one file
+    passes the same ``spans`` and ``budget`` to each.
     """
-    collector = _KeyCollector(lines=lines, max_depth=max_depth, max_keys=max_keys)
+    collector = _KeyCollector(
+        lines=lines, max_depth=max_depth, max_keys=max_keys, spans=spans, budget=budget
+    )
     collector.walk(node, prefix)
     return collector.symbols, collector.truncated
 
@@ -90,18 +116,36 @@ class _KeyCollector:
         lines: Sequence[str],
         max_depth: int = _MAX_DEPTH,
         max_keys: int = _MAX_KEYS,
+        spans: NodeSpans | None = None,
+        budget: AliasBudget | None = None,
     ) -> None:
         self.symbols: list[ParsedSymbol] = []
         self.truncated = False
+        #: Why ``truncated``: the ``max_keys`` cap was reached, or the alias budget ran out.
+        self.key_capped = False
+        self.alias_bounded = False
         self._lines = lines
         self._max_depth = max_depth
         self._max_keys = max_keys
+        self._spans = spans if spans is not None else NodeSpans(lines)
+        self._budget = budget if budget is not None else AliasBudget()
 
     def walk(self, node: yaml.Node, prefix: str = "", depth: int = 0) -> None:
+        budget = self._budget
+        if id(node) in budget.walked:
+            if budget.repeats >= budget.limit:
+                budget.exhausted = True
+                self.truncated = True
+                self.alias_bounded = True
+                return
+            budget.repeats += 1
+        else:
+            budget.walked.add(id(node))
         if depth > self._max_depth:
             return
         if len(self.symbols) >= self._max_keys:
             self.truncated = True
+            self.key_capped = True
             return
 
         if isinstance(node, yaml.MappingNode):
@@ -110,8 +154,8 @@ class _KeyCollector:
                     continue
                 name = key_node.value
                 path = f"{prefix}.{name}" if prefix else name
-                start, _ = node_span(key_node, self._lines)
-                _, end = node_span(value_node, self._lines)
+                start, _ = self._spans.span(key_node)
+                _, end = self._spans.span(value_node)
                 self.symbols.append(
                     ParsedSymbol(
                         kind=EntityType.CONFIG,
@@ -125,6 +169,7 @@ class _KeyCollector:
                 )
                 if len(self.symbols) >= self._max_keys:
                     self.truncated = True
+                    self.key_capped = True
                     return
                 self.walk(value_node, path, depth + 1)
         elif isinstance(node, yaml.SequenceNode):
@@ -208,7 +253,7 @@ class StructuredParser:
 
         try:
             documents = list(yaml.compose_all(text, Loader=yaml.SafeLoader))
-        except yaml.YAMLError as exc:
+        except (yaml.YAMLError, RecursionError) as exc:
             mark = getattr(exc, "problem_mark", None)
             failed_at = diagnostic_line(mark, content)
             return ParsedFile(
@@ -269,11 +314,21 @@ class StructuredParser:
                     references.setdefault(identity, reference)
 
         diagnostics: list[ParseDiagnostic] = list(generation_diagnostics)
-        if collector.truncated:
+        if collector.key_capped:
             diagnostics.append(
                 ParseDiagnostic(
                     severity=Severity.WARNING,
                     message=f"document truncated at {_MAX_KEYS} keys",
+                )
+            )
+        if collector.alias_bounded:
+            diagnostics.append(
+                ParseDiagnostic(
+                    severity=Severity.WARNING,
+                    message=(
+                        f"YAML aliases followed at most {_MAX_ALIAS_WALKS} times; "
+                        "keys reached only through further aliases are not listed"
+                    ),
                 )
             )
         if ci_truncated:
