@@ -56,6 +56,7 @@ from repoatlas.capabilities import (
     http_connections,
     http_inventory,
     http_repository,
+    inclusions,
     service_declarations,
 )
 from repoatlas.capabilities.budget import (
@@ -170,6 +171,7 @@ from repoatlas.capabilities.topology import (
     encode_edge_ref,
     file_entries,
     file_matches,
+    inclusion_links,
     line_references,
     matching_edges,
     name_matches,
@@ -179,6 +181,7 @@ from repoatlas.capabilities.topology import (
     query_terms,
     referenced_repositories,
     repository_links,
+    unsettled_inclusions,
     with_declaration_counts,
 )
 from repoatlas.capabilities.verification import (
@@ -289,9 +292,19 @@ from repoatlas.models.impact import (
     ImpactResponse,
     ImpactSeed,
     ImpactSummary,
+    InclusionImpact,
     PackageImpact,
     SeedCandidate,
     SeedStatus,
+)
+from repoatlas.models.inclusions import (
+    INCLUSION_FAMILY,
+    InclusionDeclarationCreateRequest,
+    InclusionDeclarationDeleteRequest,
+    InclusionDeclarationDeleteResponse,
+    InclusionDeclarationResponse,
+    InclusionDeclarationsRequest,
+    InclusionDeclarationsResponse,
 )
 from repoatlas.models.inspection import (
     Coverage,
@@ -1086,6 +1099,7 @@ class CapabilityService:
             slugs = {repo.id: repo.slug for repo in registered if repo.id is not None}
             answer: Assembled | None = None
             packages: tuple[PackageImpact, ...] = ()
+            included_by: tuple[InclusionImpact, ...] = ()
             decisions: tuple[ImpactDecision, ...] = ()
             decisions_omitted: dict[str, int] = {}
             # The seed, the walk and every row it reads are one indexed snapshot.
@@ -1173,6 +1187,10 @@ class CapabilityService:
                             answer.omitted = answer.omitted.model_copy(
                                 update={"by_reason": reasons}
                             )
+                        if seed.model.repository:
+                            included_by = inclusions.includers(
+                                self._workspace, seed.model.repository, frozenset(scope)
+                            )
                         reached = [
                             seed.model.entity or "",
                             *(c.entity for c in (*answer.candidates, *answer.tests)),
@@ -1219,6 +1237,7 @@ class CapabilityService:
                 candidates=candidates,
                 tests=tests,
                 packages=packages,
+                inclusions=included_by,
                 hubs=answer.hubs if answer is not None else (),
                 unresolved=answer.unresolved if answer is not None else (),
                 decisions=decisions,
@@ -1459,6 +1478,40 @@ class CapabilityService:
                 context=request.context,
                 id=request.id,
                 deleted=store.delete(request.id, provenance=request.provenance),
+            )
+
+    def inclusion_declarations(
+        self, request: InclusionDeclarationsRequest
+    ) -> InclusionDeclarationsResponse:
+        """Every inclusion declaration, with what the last link pass made of it."""
+        with self._operation():
+            self._require_workspace(request.context, "inclusion declarations")
+            with self._workspace.database.read_snapshot():
+                return inclusions.declarations(self._workspace, request)
+
+    def inclusion_declaration_create(
+        self, request: InclusionDeclarationCreateRequest
+    ) -> InclusionDeclarationResponse:
+        """State which indexed repository an inclusion the index leaves unsettled is. The
+        next sync links it; a path or remote the index proves is never overridden."""
+        with self._operation():
+            self._require_workspace(request.context, "inclusion declarations")
+            return inclusions.create(self._workspace, request)
+
+    def inclusion_declaration_delete(
+        self, request: InclusionDeclarationDeleteRequest
+    ) -> InclusionDeclarationDeleteResponse:
+        """Revoke an inclusion declaration. The history keeps what it stated."""
+        with self._operation():
+            self._require_workspace(request.context, "inclusion declarations")
+            return inclusions.delete(self._workspace, request)
+
+    def _require_workspace(self, context: CapabilityContext, what: str) -> None:
+        if context.scope is not CapabilityScope.GLOBAL:
+            raise ContextResolutionError(
+                f"{what} are a workspace view",
+                detail="Ask with scope `global`: they join repositories to one another.",
+                reason=ContextFailure.AMBIGUOUS,
             )
 
     def http_connections(self, request: HttpConnectionsRequest) -> HttpConnectionsResponse:
@@ -1896,7 +1949,15 @@ class CapabilityService:
                     for edge in store.stored_edges(found.example_ids())
                 }
                 packages = self._workspace.dependencies.list_packages(None)
-            links = repository_links(found, refs, packages)
+                included = inclusion_links(
+                    found,
+                    store.stored_edges(found.inclusion_ids()),
+                    {r.slug: r.last_indexed_head for r in registered},
+                )
+                unsettled, unsettled_total = unsettled_inclusions(
+                    self._workspace.knowledge.list_link_decisions(INCLUSION_FAMILY), in_scope
+                )
+            links = repository_links(found, refs, packages, included)
             listed, ambiguous_total = ambiguous_dependencies(packages, frozenset(in_scope.values()))
             facts = current_facts_version(self._workspace)
             return TopologyOverviewResponse(
@@ -1905,6 +1966,8 @@ class CapabilityService:
                 links=tuple(links),
                 ambiguous=listed,
                 ambiguous_total=ambiguous_total,
+                unsettled_inclusions=unsettled,
+                unsettled_inclusions_total=unsettled_total,
                 complete=complete,
                 freshness=index_freshness(
                     [

@@ -24,7 +24,7 @@ Stop when every reported candidate is read or labelled unread. After the seed re
 - `step` is one indexed fact (`edge`, `at`, `lines`) or one `derived` from keys and spans; `from` is its predecessor (`0` is the seed) and `chain` the whole path. `role` is `dependent`, `sets` or `member`.
 - `step.crossing` is package evidence for a step into another repository; `step.http` joins a request in one repository to a handler in another (`called_at`, `served_at`, `identity_at`). Report both sides.
 - Schema and persistence steps name their evidence (`generation`, `composition`, `migration`, `client`, `query`, `mapping`, `comparison`). `decisions` lists links refused or qualified on the way: checks, not breakages.
-- `packages` are coarse; `exact_consumers: "unresolved"` means RepoAtlas does not know which declarations use the change. `hubs` collapse dependents, which are no less affected. `unresolved` lists importers not narrowed to a declaration.
+- `packages` and `inclusions` are coarse; `exact_consumers: "unresolved"` means RepoAtlas does not know which declarations use the change. `hubs` collapse dependents, which are no less affected. `unresolved` lists importers not narrowed to a declaration.
 - `summary.complete: false` or `omitted` other than `deployment_*` means the walk stopped early. Say so: a short list is not proof nothing else is affected.
 
 ## Tools

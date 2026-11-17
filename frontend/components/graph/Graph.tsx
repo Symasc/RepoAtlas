@@ -426,7 +426,7 @@ function isCode(relation: Relation): relation is (typeof CODE_RELATIONS)[number]
 
 /**
  * What each line means. Its pattern is its family (code solid, HTTP dashed, a
- * package dependency double, configuration dotted); its colour is its
+ * package dependency double, configuration dotted, a submodule dash-dot); its colour is its
  * relationship, so colour is never the only difference between families. The
  * key lists what the level draws; a level with nothing drawn yet lists what its
  * families usually carry.

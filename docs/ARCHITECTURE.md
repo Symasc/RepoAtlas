@@ -1155,6 +1155,54 @@ explicit count when more than one distinct value exists. A single unambiguous pa
 most of them are. V1 exposes no `deps` command (V1_SPEC §4 lists the whole CLI surface), so this renderer is what a
 caller of the storage API gets; adding a command is a V2 decision, not a correctness one.
 
+### Repository inclusions: submodules and the manifests that state them
+
+A repository can include another at a path, and say so in a file it commits. Every way RepoAtlas reads becomes one
+claim, `INCLUDES_REPOSITORY` from the declaring file, keyed by the path (`repoatlas/parsers/inclusions.py`):
+
+| Format | File | URL | Pin |
+|---|---|---|---|
+| Git submodule | `.gitmodules` | `url` | the gitlink commit in the including repository's index |
+| git-subrepo | `<dir>/.gitrepo` | `remote` | `commit` |
+| vcstool | `*.repos` (`git` entries) | `url` | `version` |
+| Zephyr west | a YAML `manifest.projects` | `url`, or a remote's `url-base` | `revision`, else the defaults' |
+| Google repo | a manifest XML's `<project>` | its remote's `fetch` and its name | `revision`, else the remote's or default's |
+
+`git subtree` leaves no file and gclient `DEPS` must be evaluated, so neither is read. A path that leaves its base
+is refused, and a credential in a URL is removed before anything is stored.
+
+Every sync also records each repository's **remotes** (`repositories.remotes_json`), read from its Git configuration
+as git finds it (a worktree's or submodule checkout's `.git` file is followed), and only as normalized identities
+(`repoatlas/gitstate/config.py`: host and path, case-folded, without user, port or `.git`). It also records the
+**gitlinks** its index pins (`repositories.gitlinks_json`). Both come from migration 009.
+
+The global pass decides each claim (`repoatlas/graph/inclusions.py`). The first rule that decides wins:
+
+1. **Path.** An indexed repository is checked out where the entry says. For a manifest's workspace-relative path, the
+   repository must also not contradict the URL by its remotes.
+2. **Remote.** Exactly one other indexed repository has the entry's URL. A relative URL is resolved against the
+   including repository's remote, as git resolves it.
+3. **Ambiguous.** Several do, for example two clones of one remote. Nothing is drawn, and the candidates are listed.
+4. **Unresolved.** None does.
+5. **Declared.** A user said which indexed repository it is (`inclusion_declarations`). This is read only for 3 and 4,
+   so it never overrides 1 or 2.
+
+Each entry's decision is a `link_decisions` row of family `repository_inclusion`. A linked one is also an
+`INCLUDES_REPOSITORY` edge to the included repository's node, asserted at the entry's lines. Its resolution records
+the format, URL, pin and how the repository was found. Whether the included repository's HEAD is the pinned commit is
+computed when asked, from the HEAD indexed then (`last_indexed_head`), so a checkout that moves is never reported in
+sync from a stale edge. Only a full-length commit (40 or 64 hexadecimal characters) is told from a branch or tag: any
+other pin, an abbreviation included, is unknown, never out of sync.
+
+The topology overview reports these edges as the `submodule` link kind (`LinkKind.SUBMODULE`, whose value is public:
+it covers every inclusion format above, not only git submodules), and lists the unsettled entries. The total counts
+every unsettled entry whose including repository is in scope; the list keeps only those whose candidates are all in
+scope as well, so a scoped answer never names a repository outside it. A
+submodule link lists up to 20 of its inclusions, first by file and line, and `inclusions_total` counts them
+all. The relationships walk follows the edge, crossing repositories only under `cross_repository`. Change impact lists the
+repositories in scope that include the seed's repository as a coarse `inclusions` section, the way it lists
+package-level dependents. It does not walk through the inclusion into the including repository's code.
+
 ### The load-bearing decision: parsers emit unresolved references
 
 `ParsedReference` carries a *raw target key*, never an entity ID:
@@ -2513,9 +2561,11 @@ is recorded by the user as a link.
 Links live in the `deployment_links` table (migration `003_deployment_links.sql`), keyed by repository slug so
 removing a repository from the index never removes them: a label, an optional environment, a URL or a target id,
 variables, conditions and a verification state, at most 200 per repository. A variable that names or holds a
-credential is refused. They are the only user-written state in the index, so `repoatlas links export` writes them
-to a file (`repoatlas/deployment-links/v1`) and `repoatlas links import` adds them back, skipping any already
-recorded.
+credential is refused. They and the user's declarations (external services, inclusions) are the only user-written
+state in the index, so `repoatlas links export` writes them to a file (`repoatlas/deployment-links/v1`) and
+`repoatlas links import` adds them back, skipping any already recorded; an inclusion declaration naming another
+repository for an entry already declared refuses the import; a file's inclusion declarations are stored together
+or not at all.
 
 **Links in the HTTP join.** A link states what no indexed source established for its repository: that it is
 reached at the link's URL, or at the URL its target resolves to under the link's values. The global pass reads the
@@ -4461,7 +4511,8 @@ crosses when asked. Retrieval's expansion is not a relationships request and is 
 other side of a hub, bounded as above.
 
 **Handler links are a relationships edge, not an expansion edge.** A relationships request that names no type walks
-`RELATIONSHIP_DEFAULT_EDGES`: the expansion set and `CALLS_HTTP_HANDLER`, so what a request or a handler is
+`RELATIONSHIP_DEFAULT_EDGES`: the expansion set, `CALLS_HTTP_HANDLER` and `INCLUDES_REPOSITORY` (which is crossed on
+the same terms), so what a request or a handler is
 connected to includes the one handler or the requests a source-backed chain joins it to (§5). A handler link joins
 two repositories directly, so it is crossed only under `cross_repository` (`RELATIONSHIP_CROSSING_EDGES`); a link
 inside one repository is walked like any other edge, and direction, hops and fan-out bound it as they bound every

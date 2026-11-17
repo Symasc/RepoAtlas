@@ -496,6 +496,29 @@ class InvalidDeploymentLinkError(RepoAtlasError):
         super().__init__(message, detail=detail)
 
 
+class InclusionDeclarationNotFoundError(RepoAtlasError):
+    """No inclusion declaration has that id."""
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(
+        self,
+        message: str = "no inclusion declaration has that id",
+        *,
+        detail: str | None = "List the inclusion declarations for current ids.",
+    ) -> None:
+        super().__init__(message, detail=detail)
+
+
+class InvalidInclusionDeclarationError(RepoAtlasError):
+    """An inclusion declaration that cannot be made, in words the caller can act on."""
+
+    exit_code = ExitCode.RUNTIME
+
+    def __init__(self, message: str, *, detail: str | None = None) -> None:
+        super().__init__(message, detail=detail)
+
+
 class InvalidTopologyRequestError(RepoAtlasError):
     """The topology request asks for something that capability does not answer."""
 
@@ -637,6 +660,14 @@ def capability_error(exc: Exception) -> CapabilityError:
     if isinstance(exc, InvalidDeploymentLinkError):
         return _from_repoatlas(
             exc, code="INVALID_DEPLOYMENT_LINK", category=ErrorCategory.INVALID_REQUEST
+        )
+    if isinstance(exc, InclusionDeclarationNotFoundError):
+        return _from_repoatlas(
+            exc, code="INCLUSION_DECLARATION_NOT_FOUND", category=ErrorCategory.NOT_FOUND
+        )
+    if isinstance(exc, InvalidInclusionDeclarationError):
+        return _from_repoatlas(
+            exc, code="INVALID_INCLUSION_DECLARATION", category=ErrorCategory.INVALID_REQUEST
         )
     if isinstance(exc, InvalidTopologyRequestError):
         return _from_repoatlas(

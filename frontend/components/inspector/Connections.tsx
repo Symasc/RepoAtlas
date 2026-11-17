@@ -17,6 +17,7 @@ const FAMILY_LABEL: Record<Family, string> = {
   http: "HTTP",
   dependency: "Package dependencies",
   config: "Config & env",
+  submodule: "Submodules",
 };
 
 /** Rows listed per family before "show all". */

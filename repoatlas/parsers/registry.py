@@ -14,6 +14,7 @@ from repoatlas.parsers.bash import BashParser
 from repoatlas.parsers.deploy_helm import HelmHelpersParser, TiltfileParser
 from repoatlas.parsers.dockerfile import DockerfileParser
 from repoatlas.parsers.graphql import GraphQLParser
+from repoatlas.parsers.inclusions import RepositoryInclusionParser
 from repoatlas.parsers.jinja import JinjaParser
 from repoatlas.parsers.prisma import PrismaParser
 from repoatlas.parsers.python import PythonParser
@@ -81,5 +82,6 @@ def default_parsers() -> list[LanguageParser]:
         GraphQLParser(),
         PrismaParser(),
         SqlParser(),
+        RepositoryInclusionParser(),
         StructuredParser(),
     ]

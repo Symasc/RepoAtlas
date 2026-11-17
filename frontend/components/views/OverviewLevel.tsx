@@ -8,6 +8,7 @@ import { flowEdges, place } from "@/components/graph/flow";
 import { languagesOf, type GraphNode, type NodeActions } from "@/components/graph/nodes";
 import { useTween } from "@/components/graph/useTween";
 import { ConnectionsPanel } from "@/components/connections/ConnectionsPanel";
+import { InclusionsPanel } from "@/components/connections/InclusionsPanel";
 import { Connections } from "@/components/inspector/Connections";
 import { Contents } from "@/components/inspector/Entries";
 import { Deployments } from "@/components/inspector/Deployments";
@@ -41,6 +42,7 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
   const overview = useTopologyOverview();
   // the HTTP requests the join left unlinked, counted for the totals and listed in the worklist
   const [connectionsOpen, setConnectionsOpen] = useState(false);
+  const [submodulesOpen, setSubmodulesOpen] = useState(false);
   const unresolved = useConnections(NO_FILTERS, true);
   const links = overview.data?.links ?? NO_LINKS;
   const graph = useMemo(() => buildOverview(repositories, links), [repositories, links]);
@@ -186,6 +188,8 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
                 crossing={overview.isSuccess ? crossing : null}
                 unresolved={unresolved.data ? unresolved.data.summary.unresolved : null}
                 onOpenConnections={() => setConnectionsOpen(true)}
+                unlinkedSubmodules={overview.data?.unsettled_inclusions_total ?? null}
+                onOpenSubmodules={() => setSubmodulesOpen(true)}
               />
             }
             notice={note && <p>{note}</p>}
@@ -260,6 +264,13 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
         onClose={() => setConnectionsOpen(false)}
         repositories={repositories}
         onOpenPlace={(at) => openAt(nav, at)}
+      />
+      <InclusionsPanel
+        opened={submodulesOpen}
+        onClose={() => setSubmodulesOpen(false)}
+        unsettled={overview.data?.unsettled_inclusions ?? []}
+        total={overview.data?.unsettled_inclusions_total ?? 0}
+        repositories={repositories}
       />
     </div>
   );

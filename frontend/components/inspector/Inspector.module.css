@@ -364,6 +364,18 @@
   color: var(--ra-text-muted);
 }
 
+.inclusions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-muted);
+  overflow-wrap: anywhere;
+}
+
 .typeItem {
   font-size: var(--mantine-font-size-sm);
 

@@ -1142,6 +1142,10 @@ def test_peak_memory_does_not_scale_with_the_size_of_a_refused_file(tmp_path: Pa
 READERS = {
     "repoatlas/containment.py": "the bounded content reader and the streaming hash reader",
     "repoatlas/gitstate/client.py": "streams a tracked file into a git blob hash, in blocks",
+    # The repository's own git configuration (or the one its `.git` file's gitdir names, as
+    # git reads it), under `MAX_CONFIG_BYTES`. Only `remote.<name>.url` values are kept, and
+    # only as normalized identities with no credentials.
+    "repoatlas/gitstate/remotes.py": "a repository's git config, bounded; remote identities only",
     "repoatlas/discovery/ignore.py": "the workspace-root ignore file, under its own ceiling",
     "repoatlas/config/settings.py": "the operator's own configuration file",
     "repoatlas/storage/sqlite/migrator.py": "migration SQL shipped inside the package",

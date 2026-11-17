@@ -45,11 +45,19 @@ from repoatlas.capabilities.errors import (
     EdgeRefInvalidError,
     InvalidTopologyCursorError,
 )
+from repoatlas.graph.inclusions import pin_in_sync
 from repoatlas.graph.keys import file_key, is_positional
 from repoatlas.models.capability import CapabilityContext, ContextResolution
 from repoatlas.models.capability_io import ContextView
 from repoatlas.models.dependencies import DependencyObservation, DependencyPackage
 from repoatlas.models.dependency_inventory import AppliedPageLimits
+from repoatlas.models.inclusions import (
+    INCLUSION_FAMILY,
+    MAX_LINK_INCLUSIONS,
+    MAX_UNSETTLED_INCLUSIONS,
+    InclusionLink,
+    UnsettledInclusion,
+)
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.models.relationships import EntityRef, RelationshipDirection
 from repoatlas.models.topology import (
@@ -77,6 +85,7 @@ from repoatlas.models.topology import (
 from repoatlas.storage.protocols import (
     CrossingEdgeRow,
     FileMatchRow,
+    LinkDecisionRow,
     LinkEdgeRow,
     NameMatchRow,
     ReferenceRow,
@@ -109,6 +118,10 @@ HTTP_EDGES: frozenset[EdgeType] = frozenset(
 #: one other repository does, both asserted at the declaring line.
 DEPENDENCY_EDGES: frozenset[EdgeType] = frozenset({EdgeType.DEPENDS_ON})
 
+#: Repository inclusions: a file of one repository stating that it includes another at a
+#: path (repoatlas.graph.inclusions), drawn from the file to the included repository.
+INCLUSION_EDGES: frozenset[EdgeType] = frozenset({EdgeType.INCLUDES_REPOSITORY})
+
 #: The most edge rows one scan reads. Past it an answer says it is incomplete and
 #: leaves edge links out, rather than aggregating whichever rows came first.
 ROW_CEILING = 250_000
@@ -119,7 +132,12 @@ _EDGE_REF_FIELDS = 10
 _SHA256_HEX = 64
 
 #: The reading order of link kinds, fixed so output never depends on row order.
-_KIND_ORDER = {LinkKind.OBSERVED: 0, LinkKind.HTTP: 1, LinkKind.DEPENDENCY: 2}
+_KIND_ORDER = {
+    LinkKind.OBSERVED: 0,
+    LinkKind.HTTP: 1,
+    LinkKind.DEPENDENCY: 2,
+    LinkKind.SUBMODULE: 3,
+}
 
 
 def link_kind(edge_type: EdgeType) -> LinkKind:
@@ -128,6 +146,8 @@ def link_kind(edge_type: EdgeType) -> LinkKind:
         return LinkKind.HTTP
     if edge_type in DEPENDENCY_EDGES:
         return LinkKind.DEPENDENCY
+    if edge_type in INCLUSION_EDGES:
+        return LinkKind.SUBMODULE
     return LinkKind.OBSERVED
 
 
@@ -331,9 +351,16 @@ class OverviewGroups:
     groups: dict[_OverviewKey, _Group] = field(default_factory=dict)
     #: For each dependency link, where its edges are asserted: ``(path, line)``.
     sites: dict[tuple[str, str], list[_Site]] = field(default_factory=dict)
+    #: For each submodule link, the first :data:`MAX_LINK_INCLUSIONS` of the inclusions it holds
+    #: (each edge is one) by where they are stated (file, then numeric line), as
+    #: ``(path, line, edge id)``. Its total is the link's group count.
+    inclusions: dict[tuple[str, str], list[tuple[str, int, int]]] = field(default_factory=dict)
 
     def example_ids(self) -> list[int]:
         return [edge_id for group in self.groups.values() for edge_id in group.example_ids()]
+
+    def inclusion_ids(self) -> list[int]:
+        return [edge_id for kept in self.inclusions.values() for _, _, edge_id in kept]
 
 
 def crossing_groups(rows: Iterable[CrossingEdgeRow], slugs: Mapping[int, str]) -> OverviewGroups:
@@ -356,7 +383,52 @@ def crossing_groups(rows: Iterable[CrossingEdgeRow], slugs: Mapping[int, str]) -
         group.add(row.type, order, row.edge_id)
         if kind is LinkKind.DEPENDENCY:
             found.sites.setdefault((source, target), []).append((row.path, row.line_start))
+        elif kind is LinkKind.SUBMODULE and row.path is not None:
+            # The order `inclusion_links` lists in, so what is kept is the head of the whole
+            # ordered list, whichever order the rows came in. The line is a number: as text
+            # ":10" would sort before ":4".
+            entry = (row.path, row.line_start or 1, row.edge_id)
+            kept = found.inclusions.setdefault((source, target), [])
+            if len(kept) < MAX_LINK_INCLUSIONS or entry < kept[-1]:
+                bisect.insort(kept, entry)
+                del kept[MAX_LINK_INCLUSIONS:]
     return found
+
+
+def inclusion_links(
+    found: OverviewGroups, edges: Sequence[StoredEdge], heads: Mapping[str, str | None]
+) -> dict[tuple[str, str], tuple[InclusionLink, ...]]:
+    """Each submodule link's inclusions, read from the resolution its edges record. Whether
+    the included repository is at the pinned commit is read from ``heads``, the HEADs
+    indexed now, never from the edge, so a checkout that moved is never reported in sync."""
+    by_id = {edge.edge_id: edge for edge in edges}
+    links: dict[tuple[str, str], tuple[InclusionLink, ...]] = {}
+    for (source, target), kept in found.inclusions.items():
+        listed: list[InclusionLink] = []
+        for _, _, edge_id in kept:
+            edge = by_id.get(edge_id)
+            if edge is None or edge.path is None:
+                continue
+            recorded = (decoded_resolution(edge) or {}).get("inclusion")
+            if not isinstance(recorded, dict):
+                continue
+            revision = recorded.get("revision")
+            head = heads.get(target)
+            listed.append(
+                InclusionLink(
+                    format=str(recorded.get("format") or ""),
+                    path=str(recorded.get("path") or ""),
+                    declared_at=_location(source, edge.path, edge.line_start or 1),
+                    url=recorded.get("url"),
+                    revision=revision,
+                    head=head,
+                    in_sync=pin_in_sync(revision, head),
+                    method=recorded.get("method", "path"),
+                )
+            )
+        # `kept` is already in listing order: file, then numeric line.
+        links[(source, target)] = tuple(listed)
+    return links
 
 
 def _location(repository: str, path: str, line: int) -> str:
@@ -422,7 +494,10 @@ def package_links(
 
 
 def repository_links(
-    found: OverviewGroups, refs: Mapping[int, str], packages: Sequence[DependencyPackage]
+    found: OverviewGroups,
+    refs: Mapping[int, str],
+    packages: Sequence[DependencyPackage],
+    inclusions: Mapping[tuple[str, str], tuple[InclusionLink, ...]] | None = None,
 ) -> list[RepositoryLink]:
     declared = declaration_index(packages)
     publishers = provider_index(packages)
@@ -441,6 +516,11 @@ def repository_links(
                 if kind is LinkKind.DEPENDENCY
                 else ()
             ),
+            inclusions=(
+                (inclusions or {}).get((source, target), ()) if kind is LinkKind.SUBMODULE else ()
+            ),
+            # Every submodule edge is one inclusion (INCLUSION_EDGES).
+            inclusions_total=group.count if kind is LinkKind.SUBMODULE else 0,
         )
         for (kind, source, target), group in sorted(
             found.groups.items(),
@@ -475,6 +555,48 @@ def ambiguous_dependencies(
                 )
             )
     return tuple(ambiguous[:MAX_AMBIGUOUS]), len(ambiguous)
+
+
+def unsettled_inclusions(
+    decisions: Sequence[LinkDecisionRow], in_scope: Mapping[int, str]
+) -> tuple[tuple[UnsettledInclusion, ...], int]:
+    """Inclusions the link pass left ambiguous or unresolved, and how many there are.
+
+    The total counts every such entry whose including repository is in scope. The list keeps
+    only those whose candidates are all in scope as well, so a scoped answer never names a
+    repository outside it: the total may therefore exceed what the list holds, by the entries
+    with a candidate outside the scope, which are counted and not named.
+    """
+    scope = frozenset(in_scope.values())
+    listed: list[UnsettledInclusion] = []
+    total = 0
+    for row in decisions:
+        if row.family != INCLUSION_FAMILY or row.decision not in ("ambiguous", "unresolved"):
+            continue
+        repository = in_scope.get(row.repo_id)
+        if repository is None:
+            continue
+        total += 1
+        evidence = json.loads(row.evidence_json or "{}")
+        candidates = tuple(str(c) for c in evidence.get("candidates") or ())
+        if any(c not in scope for c in candidates):
+            continue
+        declaration = evidence.get("declaration") or {}
+        stale = declaration.get("target") if declaration.get("status") == "stale" else None
+        listed.append(
+            UnsettledInclusion(
+                repository=repository,
+                file=row.path or "",
+                line=row.line_start,
+                path=row.subject,
+                format=str(evidence.get("format") or ""),
+                url=evidence.get("url"),
+                decision=row.decision,  # type: ignore[arg-type]
+                candidates=candidates,
+                declared=stale,
+            )
+        )
+    return tuple(listed[:MAX_UNSETTLED_INCLUSIONS]), total
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ answers without one call per entity:
 * **references** — what each line of one file declares and refers to, so a
   reader can follow a name in the source to the entity the index resolved it to.
 
-Links are kept apart by **kind**, because the three kinds are different claims and
+Links are kept apart by **kind**, because the kinds are different claims and
 summing them would manufacture a number no fact supports:
 
 * ``observed`` — stored graph edges between code, other than HTTP;
@@ -24,6 +24,9 @@ summing them would manufacture a number no fact supports:
 * ``dependency`` — stored ``DEPENDS_ON`` edges: a manifest declaring a package,
   resolved by the linker to the repository that publishes it where exactly one
   other repository does.
+* ``submodule`` — stored ``INCLUDES_REPOSITORY`` edges: a repository including another
+  at a path (a Git submodule, a subrepo, a workspace manifest's project), resolved to
+  the indexed repository its checkout path or its remote names, or a user declared.
 
 An ``edge_ref`` names one stored fact exactly. It is opaque: a caller passes it
 back verbatim and never parses it, because its encoding is the server's business
@@ -42,6 +45,7 @@ from repoatlas.models.capability_io import ContextView, EvidenceItem
 from repoatlas.models.dependency_inventory import AppliedPageLimits
 from repoatlas.models.freshness import FreshnessDepth, IndexFreshness
 from repoatlas.models.impact import HttpCrossing, PackageCrossing
+from repoatlas.models.inclusions import InclusionLink, UnsettledInclusion
 from repoatlas.models.investigation import LedgerSummary
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.models.relationships import EntityRef, GraphEdge, RelationshipDirection
@@ -84,11 +88,16 @@ MAX_REFERENCES = 2000
 
 
 class LinkKind(StrEnum):
-    """Which kind of fact a link aggregates. Never mixed within one link."""
+    """Which kind of fact a link aggregates. Never mixed within one link.
+
+    ``SUBMODULE`` covers every way a repository includes another (git submodules,
+    git-subrepo, vcstool, west and repo manifests); the value is public, so the name stays.
+    """
 
     OBSERVED = "observed"
     HTTP = "http"
     DEPENDENCY = "dependency"
+    SUBMODULE = "submodule"
 
 
 class EdgeTypeCount(BaseModel):
@@ -151,6 +160,12 @@ class RepositoryLink(BaseModel):
     #: For a dependency link, up to :data:`MAX_PACKAGES` of the packages its
     #: edges declare, read from the declarations they were drawn from.
     packages: tuple[PackageLink, ...] = ()
+    #: For a submodule link, up to ``MAX_LINK_INCLUSIONS`` of the inclusions its edges stand
+    #: for, first by where they are stated (``declared_at``): where the source states it, how
+    #: the target was found, and what it pins.
+    inclusions: tuple[InclusionLink, ...] = ()
+    #: For a submodule link, how many inclusions it holds, listed or not.
+    inclusions_total: int = Field(default=0, ge=0)
 
 
 class TopologyOverviewRequest(BaseModel):
@@ -174,6 +189,13 @@ class TopologyOverviewResponse(BaseModel):
     links: tuple[RepositoryLink, ...] = ()
     ambiguous: tuple[AmbiguousDependency, ...] = ()
     ambiguous_total: int = 0
+    #: Inclusions no indexed repository was linked to: ambiguous or unresolved, each
+    #: with the repository stating it in scope and every candidate in scope as well, so none
+    #: names a repository outside the scope. Up to ``MAX_UNSETTLED_INCLUSIONS``.
+    unsettled_inclusions: tuple[UnsettledInclusion, ...] = ()
+    #: Every such inclusion whose including repository is in scope, listed or not: it also
+    #: counts the ones left out of the list for a candidate outside the scope.
+    unsettled_inclusions_total: int = 0
     #: False when the edge scan reached its row ceiling. Edge links are then
     #: omitted rather than reported from an arbitrary subset.
     complete: bool = True

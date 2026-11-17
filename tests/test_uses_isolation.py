@@ -377,6 +377,7 @@ REVIEWED_TOPOLOGY_EDGE_READS = {
     "repository_edges_under": "per-type counts: a repository entity's edges, by asserting file",
     "stored_edges": "exact: the stored edges an edge_ref's lookup matched, by id",
     "stored_edges_from": "typed: one edge type leaving the entities an edge_ref names",
+    "stored_edges_to": "typed: INCLUDES_REPOSITORY arriving at a repository, for impact",
     "references_in": "per-line: one file's located edges, each listed under its own type",
 }
 

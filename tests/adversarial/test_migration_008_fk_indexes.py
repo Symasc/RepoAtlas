@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from repoatlas.errors import IndexSchemaError, MigrationFailedError
 from repoatlas.storage.sqlite import database as database_module
-from repoatlas.storage.sqlite.database import open_database
+from repoatlas.storage.sqlite.database import SCHEMA_VERSION, open_database
 from repoatlas.storage.sqlite.migrator import (
     Migration,
     _normalize,
@@ -165,7 +165,8 @@ def assert_opens_at_8_unchanged(path: Path, repair: tuple[str, ...]) -> None:
 
     database = open_database(path)
     try:
-        assert user_version(database.connection) == 8
+        # recognized as 8, then migrated on to the current schema like any other index
+        assert user_version(database.connection) == SCHEMA_VERSION
         found = database.connection.execute(
             "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name IN (?, ?, ?, ?, ?)",
             REPAIR_NAMES,
@@ -174,7 +175,7 @@ def assert_opens_at_8_unchanged(path: Path, repair: tuple[str, ...]) -> None:
         wanted = dict(zip(REPAIR_NAMES, MANUAL_REPAIR, strict=True))
         for row in found:
             assert _normalize(row["sql"]) == _normalize(wanted[row["name"]])
-        scratch = _scratch_at(8, load_migrations())
+        scratch = _scratch_at(SCHEMA_VERSION, load_migrations())
         try:
             assert index_count(database.connection) == index_count(scratch)
         finally:

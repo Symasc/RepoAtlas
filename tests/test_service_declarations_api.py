@@ -737,7 +737,8 @@ def api(tmp_path: Path) -> Iterator[Serving]:
 
 def test_the_local_api_serves_the_five_service_declaration_endpoints(api: Serving) -> None:
     served = [endpoint.name for endpoint in ENDPOINTS]
-    assert served[-5:] == [
+    start = served.index("service_declarations/preview")
+    assert served[start : start + 5] == [
         "service_declarations/preview",
         "service_declarations/create",
         "service_declarations/update",

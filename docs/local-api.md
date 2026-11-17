@@ -174,14 +174,16 @@ Content-Length: <n>
 | `deployment_links/create`, `deployment_links/update`, `deployment_links/delete` | record, change or remove a user's deployment link |
 | `service_declarations/preview`, `service_declarations/create`, `service_declarations/update`, `service_declarations/delete`, `service_declarations/history` | classify an origin as an external service: what a declaration would do; record, change or remove one; the declaration history |
 | `http_connections`, `http_connections/preview`, `http_connections/history` | the workspace's unresolved HTTP requests grouped by origin with the user's declarations; what mapping an origin to a service would do, request by request; the declaration history |
-| `topology/overview` | which repositories are linked to which, by kind: `observed`, `http`, `dependency` |
+| `inclusion_declarations`, `inclusion_declarations/create`, `inclusion_declarations/delete` | list, record or revoke which indexed repository an unlinked inclusion (a submodule, a manifest's project) is |
+| `topology/overview` | which repositories are linked to which, by kind: `observed`, `http`, `dependency`, `submodule`; and the inclusions left unlinked |
 | `topology/children` | one page of a directory's or file's children, and how every child links |
 | `topology/edge` | one exact stored edge: its evidence, crossing, and multiplicity |
 | `topology/files` | indexed files whose paths hold every term of a query, best-named first |
 | `topology/names` | declared names (variables, functions, classes, methods, environment variables) that hold every term of a query, best-named first |
 | `topology/references` | what each line of one file declares and refers to, in source order |
 
-The `deployment_links/*` and `service_declarations/*` names are the only writes served here (a declaration from the
+The `deployment_links/*`, `service_declarations/*` and `inclusion_declarations/*` names are the only writes served
+here (a declaration from the
 HTTP connections worklist is one of the first, with its origin recorded in the history). They change only the user's
 own declarations, never an indexed fact, and pass the same Host, token and Origin checks as every other request.
 
@@ -189,6 +191,10 @@ The five `service_declarations/*` names (`preview`, `create`, `update`, `delete`
 declaration classifies an origin as an external service. It never links a request to a handler and never changes a
 request's status or chain. It is refused where the source already says something about the origin, where a
 deployment link names it, on a loopback origin, and for an authentication target that is not an indexed repository.
+
+The `inclusion_declarations*` names are global in scope. A declaration names the including repository, the file
+stating the entry and its path, and the indexed repository it is. It is refused for an entry the index does not
+state, and for one its checkout path or a single remote already links. The next sync applies it.
 
 **Not served:** `sync`, the index's write, and `verify_grounding`, which checks an agent's answer. Both remain
 agent tools over MCP. The topology capabilities are served here only; they are not MCP tools.

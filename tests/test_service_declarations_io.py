@@ -356,8 +356,10 @@ def test_an_older_model_refuses_a_file_with_service_declarations(
 ) -> None:
     """The format string is unchanged, so only the extra key keeps an older RepoAtlas from reading
     half of a file: its strict model refuses the file with services and reads the one without."""
+    # each later key is written only when the index holds some, so a plain file stays readable
     assert set(LinksExport.model_fields) - set(LinksOnlyExport.model_fields) == {
-        "service_declarations"
+        "service_declarations",
+        "inclusion_declarations",
     }
     built.deployment_links.create(
         slug(built, "portal"), DeploymentLinkFields(label="prod", url=PORTAL)

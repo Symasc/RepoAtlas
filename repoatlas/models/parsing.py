@@ -89,6 +89,12 @@ class EdgeType(StrEnum):
     #: (repoatlas.graph.value_mappings). The change-impact walk follows it outward, from
     #: a member to what it is mapped to.
     MAPS_TO = "MAPS_TO"
+    #: A repository includes another at a path: *the including repository's declaring file →
+    #: the included repository*, asserted at the entry that states it (a ``.gitmodules``
+    #: section, a manifest's project). Derived by the global pass only when the checkout path
+    #: or the remote names exactly one indexed repository, or a user declared which one it is
+    #: (repoatlas.graph.inclusions).
+    INCLUDES_REPOSITORY = "INCLUDES_REPOSITORY"
 
 
 #: The target key of the one ``USES`` claim per file that is its export table, not a use

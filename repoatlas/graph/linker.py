@@ -75,6 +75,7 @@ from repoatlas.graph.http_crossings import (
     plan_http_crossings,
 )
 from repoatlas.graph.http_scopes import FileScope, ScopeSymbol
+from repoatlas.graph.inclusions import PendingInclusion, is_inclusion_claim, plan_inclusions
 from repoatlas.graph.keys import file_key, global_key, package_key, repository_key, symbol_key
 from repoatlas.graph.link_exposures import plan_link_exposures, plan_scoped_exposures
 from repoatlas.graph.modules import ModuleResolver, ModuleTarget, declared_constraints
@@ -116,6 +117,7 @@ from repoatlas.models.ordinary_outcomes import (
     EVIDENCE_UNREADABLE,
     GRAPHQL_PLANNER,
     HTTP_PLANNER,
+    INCLUSION_PLANNER,
     MODULE_FACT,
     ORIGIN_FILE_MISSING,
     PERSISTENCE_PLANNER,
@@ -356,6 +358,8 @@ class GlobalPlan:
 
     edges: tuple[EdgeRecord, ...] = ()
     dependencies: tuple[PendingEdge, ...] = ()
+    #: Repository inclusions linked (repoatlas.graph.inclusions).
+    inclusions: tuple[PendingInclusion, ...] = ()
     #: What the pending HTTP facts established, and why each one did or did not.
     http: HttpClaimPlan = field(default_factory=HttpClaimPlan)
     #: Which requests reach a handler another repository serves, and why the rest do not.
@@ -523,6 +527,12 @@ class ReferenceLinker:
                 # A pending fact (repoatlas.parsers.http_facts): only the global pass
                 # can prove it, so it is kept as a claim — never interned here, and
                 # never matched against a local definition by name.
+                claims.append(self._claim(repo_id, file_id, source_id, reference, parsed))
+                continue
+
+            if reference.edge_type is EdgeType.INCLUDES_REPOSITORY:
+                # Its key is a path, never a name in this file: only the global pass can
+                # decide which repository it is (repoatlas.graph.inclusions).
                 claims.append(self._claim(repo_id, file_id, source_id, reference, parsed))
                 continue
 
@@ -802,6 +812,7 @@ class ReferenceLinker:
             resolver_claims: list[UnresolvedRefRecord] = []
             artifact_claims: list[UnresolvedRefRecord] = []
             persistence_claims: list[UnresolvedRefRecord] = []
+            inclusion_claims: list[UnresolvedRefRecord] = []
             salt_resolutions = {
                 id(result.claim): result
                 for result in resolve_pillar_reads(self._salt, index, claims, by_id)
@@ -865,6 +876,12 @@ class ReferenceLinker:
                     ledger.excluded(fact, MODULE_FACT)
 
             for claim in claims:
+                if is_inclusion_claim(claim):
+                    # Decided by its own stage below, from the repositories' paths and remotes.
+                    if ledger is not None:
+                        ledger.excluded(claim, INCLUSION_PLANNER)
+                    inclusion_claims.append(claim)
+                    continue
                 if _is_salt_mapping_claim(claim):
                     if ledger is not None:
                         ledger.excluded(claim, SALT_MAPPING)
@@ -1191,6 +1208,19 @@ class ReferenceLinker:
             watch.detail = "cross-repository edges"
         stages.append(_timing(watch))
 
+        entered("inclusions")
+        with Stopwatch("inclusions") as watch:
+            inclusions = plan_inclusions(
+                inclusion_claims,
+                by_id,
+                self._knowledge.list_inclusion_repositories(),
+                self._knowledge.list_inclusion_declarations(),
+            )
+            watch.candidates_in = len(inclusion_claims)
+            watch.candidates_out = len(inclusions.edges)
+            watch.detail = f"{inclusions.linked} linked, {inclusions.unsettled} unsettled"
+        stages.append(_timing(watch))
+
         outcome_plan = ledger.plan() if ledger is not None else None
         standing_claims, uses_rows = (
             self._knowledge.count_standing_claims() if ledger is not None else (0, 0)
@@ -1199,6 +1229,7 @@ class ReferenceLinker:
         return GlobalPlan(
             edges=tuple(edges),
             dependencies=tuple(dependencies),
+            inclusions=tuple(inclusions.edges),
             http=decided,
             http_crossings=crossings,
             uses=uses_plan,
@@ -1215,6 +1246,7 @@ class ReferenceLinker:
                 *ci.decisions,
                 *deployed.decisions,
                 *environment.decisions,
+                *inclusions.decisions,
             ),
             outcomes=outcome_plan,
             link_reads=tuple((link.id, link.updated_at.isoformat()) for link in read_links),
@@ -1223,9 +1255,10 @@ class ReferenceLinker:
             legacy_ordinary=ordinary_unresolved,
             legacy_graphql_unknown_role=graphql_unknown_role,
             legacy_planners=planners_unresolved,
-            resolved=resolved,
-            unresolved=unresolved,
+            resolved=resolved + inclusions.linked,
+            unresolved=unresolved + inclusions.unsettled,
             cross_repository=cross
+            + inclusions.crossings
             + len(salt_crossings)
             + codegen.crossings
             + documents.crossings
@@ -1260,12 +1293,19 @@ class ReferenceLinker:
         edges = list(plan.edges)
         uses = plan.uses or UsesPlan(scope=UsesScope.everything("every use requested"))
 
-        planned = len(edges) + len(plan.dependencies) + len(plan.http.http) + len(uses.edges)
+        planned = (
+            len(edges)
+            + len(plan.dependencies)
+            + len(plan.inclusions)
+            + len(plan.http.http)
+            + len(uses.edges)
+        )
         with Stopwatch("swap", candidates_in=planned) as watch:
             with self._knowledge.transaction():
                 # USES edges outside the plan's files are kept; apply_uses replaces the rest.
                 removed = self._knowledge.delete_edges_by_parser(GLOBAL_PARSER, keep=EdgeType.USES)
                 edges.extend(self._materialize(plan.dependencies))
+                edges.extend(self._materialize_inclusions(plan.inclusions))
                 edges.extend(self._materialize_http(plan.http))
                 self._knowledge.add_edges(edges)
                 # Every request's decision, links and refusals alike, replaced with the
@@ -1354,6 +1394,29 @@ class ReferenceLinker:
             )
             for edge in pending
         ]
+
+    def _materialize_inclusions(self, pending: Sequence[PendingInclusion]) -> list[EdgeRecord]:
+        """Intern each included repository's node and draw the inclusion edges, in the swap."""
+        interned: dict[str, int] = {}
+        found: list[EdgeRecord] = []
+        for edge in pending:
+            target = interned.get(edge.target.key)
+            if target is None:
+                target = interned[edge.target.key] = self._knowledge.intern_entity(edge.target)
+            found.append(
+                EdgeRecord(
+                    src_id=edge.src_id,
+                    dst_id=target,
+                    type=EdgeType.INCLUDES_REPOSITORY,
+                    repo_id=edge.repo_id,
+                    file_id=edge.file_id,
+                    line_start=edge.line_start,
+                    line_end=edge.line_end,
+                    parser=GLOBAL_PARSER,
+                    resolution=edge.resolution,
+                )
+            )
+        return found
 
     def _materialize_http(self, decided: HttpClaimPlan) -> list[EdgeRecord]:
         """Intern the shared HTTP nodes a pending fact proved, inside the swap.

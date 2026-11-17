@@ -104,9 +104,13 @@ def test_a_calls_only_request_admits_exactly_calls() -> None:
 
 def test_the_default_still_excludes_calls() -> None:
     admitted = admitted_edge_types(RelationshipsRequest(context=GLOBAL, target="file:x:y.py"))
-    # Search's expansion set and the HTTP handler links (M5a, C7); never CALLS.
+    # Search's expansion set, the HTTP handler links (M5a, C7) and inclusions; never CALLS.
     assert admitted == tuple(RELATIONSHIP_DEFAULT_EDGES)
-    assert admitted == (*EXPANSION_EDGES, EdgeType.CALLS_HTTP_HANDLER)
+    assert admitted == (
+        *EXPANSION_EDGES,
+        EdgeType.CALLS_HTTP_HANDLER,
+        EdgeType.INCLUDES_REPOSITORY,
+    )
     assert EdgeType.CALLS not in admitted
 
 

@@ -486,4 +486,6 @@ def test_edge_types_are_appended_and_existing_values_are_unchanged() -> None:
         "CALLS_HTTP_HANDLER",
         # One enum member mapped to another by an explicit typed mapping.
         "MAPS_TO",
+        # A repository including another at a path (a submodule, a manifest's project).
+        "INCLUDES_REPOSITORY",
     )

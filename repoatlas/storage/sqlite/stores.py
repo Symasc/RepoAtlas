@@ -22,6 +22,7 @@ from repoatlas.models.dependencies import (
 )
 from repoatlas.models.deployment_targets import DeploymentLink
 from repoatlas.models.http import ROUTE_KEY_PREFIX
+from repoatlas.models.inclusions import InclusionDeclaration
 from repoatlas.models.ordinary_outcomes import ORDINARY_FAMILY, OutcomeRow
 from repoatlas.models.parsing import (
     USES_EXPORT_TABLE,
@@ -59,6 +60,7 @@ from repoatlas.storage.protocols import (
 )
 from repoatlas.storage.sqlite.database import Database
 from repoatlas.storage.sqlite.deployment_links import DEPLOYMENT_LINKS_SELECT, deployment_link
+from repoatlas.storage.sqlite.inclusion_declarations import SqliteInclusionDeclarationStore
 from repoatlas.storage.sqlite.search import path_scope
 
 #: What every environment variable's key starts with (repoatlas.graph.keys.env_key).
@@ -182,6 +184,8 @@ class SqliteRepositoryStore:
             last_indexed_head=row["last_indexed_head"],
             last_indexed_dirty=None if dirty_flag is None else bool(dirty_flag),
             last_sync_status=SyncStatus(row["last_sync_status"]),
+            remotes=_json_list(row["remotes_json"]),
+            gitlinks=tuple(sorted(json.loads(row["gitlinks_json"] or "{}").items())),
         )
 
     def upsert(self, repo: Repository) -> int:
@@ -392,6 +396,25 @@ class SqliteRepositoryStore:
                     repo_id,
                 ),
             )
+
+    def update_origin(
+        self, repo_id: int, *, remotes: Sequence[str], gitlinks: Mapping[str, str] | None
+    ) -> None:
+        """Record where the repository says it comes from and what it pins (migration 009).
+
+        ``gitlinks`` is ``None`` when git could not answer: what was recorded is kept rather
+        than replaced by nothing, because "pins nothing" and "could not look" differ.
+        """
+        with self._db.transaction() as conn:
+            conn.execute(
+                "UPDATE repositories SET remotes_json = ? WHERE id = ?",
+                (json.dumps(list(remotes)), repo_id),
+            )
+            if gitlinks is not None:
+                conn.execute(
+                    "UPDATE repositories SET gitlinks_json = ? WHERE id = ?",
+                    (json.dumps(dict(sorted(gitlinks.items()))), repo_id),
+                )
 
 
 class SqliteFileStore:
@@ -1541,6 +1564,16 @@ class SqliteKnowledgeStore:
             if handlers:
                 found.append(_near(row, "toward", handlers=handlers))
         return sorted(found, key=lambda n: (n.decision_ref, n.relation))
+
+    def list_inclusion_repositories(self) -> list[Repository]:
+        """Every repository, with the paths, remotes, pins and HEADs inclusions resolve
+        against (repoatlas.graph.inclusions)."""
+        rows = self._db.execute("SELECT * FROM repositories ORDER BY slug, id").fetchall()
+        return [SqliteRepositoryStore._row_to_repository(row) for row in rows]
+
+    def list_inclusion_declarations(self) -> list[InclusionDeclaration]:
+        """Every user's inclusion declaration, by id: what the global pass falls back on."""
+        return SqliteInclusionDeclarationStore(self._db).list_all()
 
     def list_deployment_links(self) -> list[DeploymentLink]:
         """Every user's deployment link, of every repository, by id: what the global pass

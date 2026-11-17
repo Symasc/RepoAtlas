@@ -88,10 +88,13 @@ export type RelationshipDirection = "outgoing" | "incoming" | "both";
 /**
  * Which kind of fact a link aggregates. Never mixed within one link.
  *
+ * ``SUBMODULE`` covers every way a repository includes another (git submodules,
+ * git-subrepo, vcstool, west and repo manifests); the value is public, so the name stays.
+ *
  * This interface was referenced by `ApiIndex`'s JSON-Schema
  * via the `definition` "LinkKind".
  */
-export type LinkKind = "observed" | "http" | "dependency";
+export type LinkKind = "observed" | "http" | "dependency" | "submodule";
 /**
  * This interface was referenced by `ApiIndex`'s JSON-Schema
  * via the `definition` "PeerKind".
@@ -128,7 +131,8 @@ export type EdgeType =
   | "CALLS_HTTP_ENDPOINT"
   | "USES"
   | "CALLS_HTTP_HANDLER"
-  | "MAPS_TO";
+  | "MAPS_TO"
+  | "INCLUDES_REPOSITORY";
 /**
  * The workspace join's decision for one request, as the global link pass stored it.
  *
@@ -2572,6 +2576,7 @@ export interface ImpactResponse {
   };
   freshness: IndexFreshness;
   hubs?: HubImpact[];
+  inclusions?: InclusionImpact[];
   investigation_id: string;
   omitted?: ImpactOmitted;
   packages?: PackageImpact[];
@@ -2579,6 +2584,25 @@ export interface ImpactResponse {
   summary: ImpactSummary;
   tests?: ImpactCandidate[];
   unresolved?: UnresolvedImpact[];
+}
+/**
+ * A repository that includes the one the change lives in. Coarse.
+ *
+ * It includes the changed repository at a path (a submodule, a workspace manifest's
+ * project), so it sees the change when its pin moves to a commit holding it. What in it
+ * uses the included code is not traced through the inclusion: read it from the path.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "InclusionImpact".
+ */
+export interface InclusionImpact {
+  declared_at: string;
+  format: string;
+  in_sync?: boolean | null;
+  included: string;
+  path: string;
+  repository: string;
+  revision?: string | null;
 }
 /**
  * A unit or repository declaring the package the change lives in. Coarse.
@@ -2667,6 +2691,106 @@ export interface UnresolvedImpact {
   entity: string;
   lines?: [unknown, unknown] | null;
   reason: string;
+}
+/**
+ * A stored declaration (``inclusion_declarations``).
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "InclusionDeclaration".
+ */
+export interface InclusionDeclaration {
+  created_at: string;
+  file: string;
+  id: number;
+  path: string;
+  repository: string;
+  status?: ("applied" | "superseded" | "stale") | null;
+  target: string;
+  updated_at: string;
+}
+/**
+ * State which indexed repository an unsettled inclusion is. The next sync applies it.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "InclusionDeclarationCreateRequest".
+ */
+export interface InclusionDeclarationCreateRequest {
+  context: CapabilityContext;
+  declaration: InclusionDeclarationFields;
+  provenance?: DeclarationProvenance | null;
+}
+/**
+ * What a user states: the entry ``path`` of ``repository``'s ``file`` is ``target``.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "InclusionDeclarationFields".
+ */
+export interface InclusionDeclarationFields {
+  file: string;
+  path: string;
+  repository: string;
+  target: string;
+}
+/**
+ * Revoke a declaration. The history keeps what it stated.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "InclusionDeclarationDeleteRequest".
+ */
+export interface InclusionDeclarationDeleteRequest {
+  context: CapabilityContext;
+  id: number;
+  provenance?: DeclarationProvenance | null;
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "InclusionDeclarationDeleteResponse".
+ */
+export interface InclusionDeclarationDeleteResponse {
+  context: CapabilityContext;
+  deleted: boolean;
+  id: number;
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "InclusionDeclarationResponse".
+ */
+export interface InclusionDeclarationResponse {
+  context: CapabilityContext;
+  declaration: InclusionDeclaration;
+}
+/**
+ * List every inclusion declaration.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "InclusionDeclarationsRequest".
+ */
+export interface InclusionDeclarationsRequest {
+  context: CapabilityContext;
+}
+/**
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "InclusionDeclarationsResponse".
+ */
+export interface InclusionDeclarationsResponse {
+  context: CapabilityContext;
+  declarations?: InclusionDeclaration[];
+}
+/**
+ * One inclusion a submodule link rests on: where the parent states it, and what it pins.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "InclusionLink".
+ */
+export interface InclusionLink {
+  declared_at: string;
+  format: string;
+  head?: string | null;
+  in_sync?: boolean | null;
+  method: "path" | "remote" | "declared";
+  path: string;
+  revision?: string | null;
+  url?: string | null;
 }
 /**
  * What the index contains for the requested scope.
@@ -2916,6 +3040,8 @@ export interface RepositoryView {
 export interface RepositoryLink {
   count: number;
   examples?: string[];
+  inclusions?: InclusionLink[];
+  inclusions_total?: number;
   kind: LinkKind;
   packages?: PackageLink[];
   source: string;
@@ -3411,6 +3537,25 @@ export interface TopologyOverviewResponse {
   links?: RepositoryLink[];
   policy?: string;
   repositories?: string[];
+  unsettled_inclusions?: UnsettledInclusion[];
+  unsettled_inclusions_total?: number;
+}
+/**
+ * An inclusion no indexed repository was linked to, and why.
+ *
+ * This interface was referenced by `ApiIndex`'s JSON-Schema
+ * via the `definition` "UnsettledInclusion".
+ */
+export interface UnsettledInclusion {
+  candidates?: string[];
+  decision: "ambiguous" | "unresolved";
+  declared?: string | null;
+  file: string;
+  format: string;
+  line?: number | null;
+  path: string;
+  repository: string;
+  url?: string | null;
 }
 /**
  * Ask what each line of one file declares and refers to.
@@ -3447,7 +3592,7 @@ export interface TopologyReferencesResponse {
 export const CONTRACT = "repoatlas-local-api/1" as const;
 
 /** Every endpoint the local API serves, in the server's registry order. */
-export const ENDPOINT_NAMES = ["repositories","status","search","inspect","relationships","impact","dependencies","http_operations","http_connections","http_connections/preview","http_connections/history","deployment_targets","deployment_links/create","deployment_links/update","deployment_links/delete","topology/overview","topology/children","topology/edge","topology/files","topology/names","topology/references","service_declarations/preview","service_declarations/create","service_declarations/update","service_declarations/delete","service_declarations/history"] as const;
+export const ENDPOINT_NAMES = ["repositories","status","search","inspect","relationships","impact","dependencies","http_operations","http_connections","http_connections/preview","http_connections/history","deployment_targets","deployment_links/create","deployment_links/update","deployment_links/delete","topology/overview","topology/children","topology/edge","topology/files","topology/names","topology/references","service_declarations/preview","service_declarations/create","service_declarations/update","service_declarations/delete","service_declarations/history","inclusion_declarations","inclusion_declarations/create","inclusion_declarations/delete"] as const;
 
 export type EndpointName = (typeof ENDPOINT_NAMES)[number];
 
@@ -3479,4 +3624,7 @@ export interface Endpoints {
   "service_declarations/update": { request: ServiceDeclarationUpdateRequest; response: ServiceDeclarationResponse };
   "service_declarations/delete": { request: ServiceDeclarationDeleteRequest; response: ServiceDeclarationDeleteResponse };
   "service_declarations/history": { request: ServiceDeclarationHistoryRequest; response: ServiceDeclarationHistoryResponse };
+  "inclusion_declarations": { request: InclusionDeclarationsRequest; response: InclusionDeclarationsResponse };
+  "inclusion_declarations/create": { request: InclusionDeclarationCreateRequest; response: InclusionDeclarationResponse };
+  "inclusion_declarations/delete": { request: InclusionDeclarationDeleteRequest; response: InclusionDeclarationDeleteResponse };
 }

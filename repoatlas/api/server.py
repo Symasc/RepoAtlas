@@ -41,9 +41,10 @@ Why sync and verify_grounding are not served
 --------------------------------------------
 A page has no business starting a sync. Verification checks an agent's answer
 against its investigation, and no answer is written here. Both stay agent tools.
-The writes served are ``deployment_links/*`` and ``service_declarations/*``: the user's own
-notes of where a repository is deployed, kept apart from the index, which no sync replaces and
-no read of the index depends on.
+The writes served are ``deployment_links/*``, ``service_declarations/*`` and
+``inclusion_declarations/*``: the user's own notes of where a repository is deployed and which
+repository an inclusion is, kept apart from the index, which no sync replaces and no read of the
+index depends on.
 """
 
 from __future__ import annotations
@@ -102,6 +103,14 @@ from repoatlas.models.http_connections import (
 )
 from repoatlas.models.http_inventory import HttpOperationsRequest, HttpOperationsResponse
 from repoatlas.models.impact import ImpactRequest, ImpactResponse
+from repoatlas.models.inclusions import (
+    InclusionDeclarationCreateRequest,
+    InclusionDeclarationDeleteRequest,
+    InclusionDeclarationDeleteResponse,
+    InclusionDeclarationResponse,
+    InclusionDeclarationsRequest,
+    InclusionDeclarationsResponse,
+)
 from repoatlas.models.inspection import InspectRequest, InspectResponse
 from repoatlas.models.relationships import RelationshipsRequest, RelationshipsResponse
 from repoatlas.models.search import SearchRequest, SearchResponse
@@ -281,6 +290,25 @@ ENDPOINTS: tuple[Endpoint, ...] = (
         ServiceDeclarationHistoryRequest,
         ServiceDeclarationHistoryResponse,
         "service_declaration_history",
+    ),
+    # Inclusion declarations: which indexed repository an unsettled inclusion is. Appended.
+    Endpoint(
+        "inclusion_declarations",
+        InclusionDeclarationsRequest,
+        InclusionDeclarationsResponse,
+        "inclusion_declarations",
+    ),
+    Endpoint(
+        "inclusion_declarations/create",
+        InclusionDeclarationCreateRequest,
+        InclusionDeclarationResponse,
+        "inclusion_declaration_create",
+    ),
+    Endpoint(
+        "inclusion_declarations/delete",
+        InclusionDeclarationDeleteRequest,
+        InclusionDeclarationDeleteResponse,
+        "inclusion_declaration_delete",
     ),
 )
 ENDPOINTS_BY_PATH: Mapping[str, Endpoint] = {endpoint.path: endpoint for endpoint in ENDPOINTS}

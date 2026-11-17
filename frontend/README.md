@@ -92,6 +92,7 @@ A line's pattern is its family and its colour is its relationship. Families are 
 | HTTP | serves or calls a route or endpoint | dashed, teal |
 | package dependency | depends on | double, magenta |
 | configuration and environment variables | reads, configures | dotted, amber |
+| submodule | includes another repository (Git submodule, subrepo, workspace manifest) | dash-dot, lime |
 | the connection being explained | any | thick, vermilion |
 
 A dot marks where a line leaves and an arrowhead where it arrives. One line of each link carries the link's total.

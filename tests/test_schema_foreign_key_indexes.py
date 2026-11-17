@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from repoatlas.services.sync_service import sync
 from repoatlas.services.workspace import Workspace, open_workspace
+from repoatlas.storage.sqlite.database import SCHEMA_VERSION
 from repoatlas.storage.sqlite.migrator import load_migrations, user_version
 from tests.impact_corpus import build
 
@@ -194,6 +195,11 @@ def test_migrating_to_008_reparses_nothing(
     connection = workspace.database.connection
     for name in EIGHT:
         connection.execute(f"DROP INDEX {name}")
+    # and what every later migration added, so the file is the v7 shape it claims to be
+    connection.execute("DROP TABLE inclusion_declarations")
+    connection.execute("DROP TABLE inclusion_declaration_audit")
+    connection.execute("ALTER TABLE repositories DROP COLUMN remotes_json")
+    connection.execute("ALTER TABLE repositories DROP COLUMN gitlinks_json")
     connection.execute("PRAGMA user_version = 7")
     connection.commit()
     before = files_snapshot(workspace)
@@ -202,7 +208,7 @@ def test_migrating_to_008_reparses_nothing(
 
     reopened = open_workspace(settings=settings, require_root=False)
     try:
-        assert user_version(reopened.database.connection) == 8
+        assert user_version(reopened.database.connection) == SCHEMA_VERSION
         assert set(EIGHT) <= present(reopened)
         assert files_snapshot(reopened) == before
 

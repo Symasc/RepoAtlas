@@ -103,6 +103,7 @@ function rowOf(candidate: ImpactCandidate, test: boolean): TraceRow {
 function familyOfStep(row: TraceRow): Family {
   if (row.crossing === "http" || row.candidate.step.edge?.includes("HTTP")) return "http";
   if (row.candidate.step.edge === "DEPENDS_ON") return "dependency";
+  if (row.candidate.step.edge === "INCLUDES_REPOSITORY") return "submodule";
   if (row.candidate.step.edge === "READS" || row.candidate.step.edge === "CONFIGURES") return "config";
   return "code";
 }
@@ -184,7 +185,7 @@ export function buildTrace(impact: ImpactResponse): TraceGraph {
       continue;
     }
     const link: LinkData = {
-      kind: family === "http" ? "http" : family === "dependency" ? "dependency" : "observed",
+      kind: family === "http" || family === "dependency" || family === "submodule" ? family : "observed",
       family,
       count: 1,
       types: c.step.edge ? [{ type: c.step.edge, count: 1 }] : [],

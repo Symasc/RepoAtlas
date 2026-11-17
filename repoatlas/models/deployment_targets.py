@@ -429,6 +429,26 @@ class LinksExport(BaseModel):
     #: Typed ``Any`` only because that module imports this one; every item is read into the class
     #: its ``kind`` names.
     service_declarations: list[Any] | None = None
+    #: Which indexed repository each unsettled inclusion is (``repoatlas.models.inclusions``),
+    #: written only when there are some, for the same reason. ``Any`` for the same import cycle.
+    inclusion_declarations: list[Any] | None = None
+
+    @field_validator("inclusion_declarations")
+    @classmethod
+    def _inclusion_declarations(cls, value: list[Any] | None) -> list[Any] | None:
+        if value is None:
+            return None
+        from repoatlas.models.inclusions import InclusionDeclarationFields
+
+        try:
+            return [
+                item
+                if isinstance(item, InclusionDeclarationFields)
+                else InclusionDeclarationFields.model_validate(item)
+                for item in value
+            ]
+        except ValidationError as exc:
+            raise ValueError(f"an inclusion declaration is not valid: {exc}") from exc
 
     @field_validator("service_declarations")
     @classmethod

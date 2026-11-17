@@ -146,7 +146,10 @@ RELATIONSHIPS = ToolSpec(
         "Return the deterministic indexed graph relationships of one exact entity "
         "identity. The target is a natural entity key, used verbatim: there is no "
         "name search here and no fuzzy fallback, and a key that resolves to nothing "
-        "is refused rather than approximated. Entity keys come back from search."
+        "is refused rather than approximated. Entity keys come back from search. A "
+        "repository's key (repo:<slug>) reaches the files of other repositories that "
+        "include it (INCLUDES_REPOSITORY: a .gitmodules entry or a manifest's project) "
+        "in global scope with cross_repository true."
     ),
     request=RelationshipsRequest,
     capability="relationships",
@@ -163,10 +166,11 @@ IMPACT = ToolSpec(
         "lean: nothing is scored, recorded or quoted, so read the lines a step names to "
         "decide. Tests, hubs "
         "(dependents counted, not listed), importers that cannot be narrowed to a "
-        "declaration, and package-level dependents (coarse: a unit or repository that "
-        "declares the package) are separate sections, and omitted counts what was left "
-        "out. A seed that names more than one thing lists its candidates and follows "
-        "nothing."
+        "declaration, package-level dependents (coarse: a unit or repository that "
+        "declares the package) and inclusions (coarse: a repository that includes the "
+        "seed's repository as a Git submodule or a manifest's project, with the commit "
+        "it pins) are separate sections, and omitted counts what was left out. A seed "
+        "that names more than one thing lists its candidates and follows nothing."
     ),
     request=ImpactRequest,
     capability="impact",
