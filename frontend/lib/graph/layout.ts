@@ -261,6 +261,30 @@ function radial(anchor: string, w: Map<string, Map<string, number>>, out: Ring[]
   return layout;
 }
 
+/** A large nested cluster is clearer as a compact grid than as one oversized ring. */
+function gridCluster(anchor: string, members: readonly string[]): Layout {
+  const layout: Layout = new Map([[anchor, boxAt(0, 0, SIZE.repository)]]);
+  const columns = Math.ceil(
+    Math.sqrt((ASPECT * members.length * SIZE.repository.height) / SIZE.repository.width),
+  );
+  const gap = MARGIN;
+  const top = SIZE.repository.height / 2 + gap.y;
+  members.forEach((id, index) => {
+    const rowStart = Math.floor(index / columns) * columns;
+    const rowSize = Math.min(columns, members.length - rowStart);
+    const rowWidth = rowSize * SIZE.repository.width + (rowSize - 1) * gap.x;
+    const column = index - rowStart;
+    const row = Math.floor(index / columns);
+    layout.set(id, {
+      x: -rowWidth / 2 + column * (SIZE.repository.width + gap.x),
+      y: top + row * (SIZE.repository.height + gap.y),
+      width: SIZE.repository.width,
+      height: SIZE.repository.height,
+    });
+  });
+  return layout;
+}
+
 /**
  * Small constellations beside the main one, each moved there whole: in a
  * column to its right, so the overview keeps the shape of a wide screen.
@@ -343,8 +367,22 @@ export function constellation(
     return { layout, rings: out, anchor, group: null };
   }
 
-  // the anchor's component, ring by ring around it
-  const main = radial(anchor, w, out);
+  // Keep the many repositories nested under one parent in a compact, readable cluster.
+  const mainMembers = component(anchor, w);
+  const memberSet = new Set(mainMembers);
+  const nestedChildren = [
+    ...new Set(
+      edges
+        .filter((edge) => edge.link.family === "nested" && edge.source === anchor && memberSet.has(edge.target))
+        .map((edge) => edge.target),
+    ),
+  ].sort();
+  const nestedSet = new Set(nestedChildren);
+  const clusterMembers = [
+    ...nestedChildren,
+    ...mainMembers.filter((id) => id !== anchor && !nestedSet.has(id)),
+  ];
+  const main = nestedChildren.length > 8 ? gridCluster(anchor, clusterMembers) : radial(anchor, w, out);
   for (const [id, box] of main) {
     layout.set(id, box);
     placed.push(box);

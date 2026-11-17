@@ -175,7 +175,7 @@ Content-Length: <n>
 | `service_declarations/preview`, `service_declarations/create`, `service_declarations/update`, `service_declarations/delete`, `service_declarations/history` | classify an origin as an external service: what a declaration would do; record, change or remove one; the declaration history |
 | `http_connections`, `http_connections/preview`, `http_connections/history` | the workspace's unresolved HTTP requests grouped by origin with the user's declarations; what mapping an origin to a service would do, request by request; the declaration history |
 | `inclusion_declarations`, `inclusion_declarations/create`, `inclusion_declarations/delete` | list, record or revoke which indexed repository an unlinked inclusion (a submodule, a manifest's project) is |
-| `topology/overview` | which repositories are linked to which, by kind: `observed`, `http`, `dependency`, `submodule`; and the inclusions left unlinked |
+| `topology/overview` | which repositories are linked to which, by kind: `observed`, `http`, `dependency`, `submodule`, `nested`; and the inclusions left unlinked |
 | `topology/children` | one page of a directory's or file's children, and how every child links |
 | `topology/edge` | one exact stored edge: its evidence, crossing, and multiplicity |
 | `topology/files` | indexed files whose paths hold every term of a query, best-named first |

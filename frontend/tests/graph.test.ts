@@ -5,6 +5,7 @@ import { blend } from "@/components/graph/useTween";
 import type { ChildEntry, ChildLink, RepositoryLink, TopologyChildrenResponse } from "@/lib/api/generated";
 import { arrowhead, centre, floating, LANE_INSET, octilinear, sideways, type Point } from "@/lib/graph/geometry";
 import {
+  bounds,
   cardHeight,
   CARD,
   constellation,
@@ -192,6 +193,22 @@ describe("the overview", () => {
     ]);
     expect(graph.independent.map((r) => r.slug)).toEqual(["lib", "alone"]);
   });
+
+  it("draws nested checkouts separately from stated repository inclusions", () => {
+    const graph = buildOverview(repositories, [
+      link("submodule", "web", "api"),
+      { ...link("nested", "web", "api"), nested_path: "services/api" },
+    ]);
+
+    expect(graph.edges.map((edge) => [edge.id, edge.link.family, edge.link.nestedPath])).toEqual([
+      ["submodule:web->api", "submodule", undefined],
+      ["nested:web->api", "nested", "services/api"],
+    ]);
+    expect(graph.connections.get(repositoryId("web"))?.map((connection) => connection.partner.detail)).toEqual([
+      null,
+      "services/api",
+    ]);
+  });
 });
 
 describe("the constellation", () => {
@@ -277,6 +294,25 @@ describe("the constellation", () => {
     const shape = constellation(lots, buildOverview(lots, links).edges, null);
     expect([...shape.layout.keys()].filter((k) => k.startsWith("repo:"))).toHaveLength(40);
     assertNoOverlap(shape.layout, (id) => id === GROUP_ID);
+  });
+
+  it("packs a large nested-repository cluster into a compact grid", () => {
+    const parent = repository("local-cluster");
+    const children = Array.from({ length: 21 }, (_, i) => repository(`service-${i}`));
+    const repositories = [parent, ...children];
+    const links = [
+      ...children.map((child) => link("nested", parent.slug, child.slug)),
+      link("observed", children[0]!.slug, children[1]!.slug),
+    ];
+
+    const shape = constellation(repositories, buildOverview(repositories, links).edges, null);
+    const visible = bounds([...shape.layout].filter(([id]) => id.startsWith("repo:")).map(([, box]) => box))!;
+
+    expect(shape.anchor).toBe(repositoryId(parent.slug));
+    expect(shape.rings).toEqual([]);
+    expect(visible.width).toBeLessThan(1500);
+    expect(visible.height).toBeLessThan(900);
+    assertNoOverlap(shape.layout);
   });
 
   it("puts four evenly spaced things on the diagonals", () => {

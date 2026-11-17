@@ -1,19 +1,21 @@
 """topology/overview: which repositories are linked to which, and by what kind of fact.
 
-Checked against the index itself: every link count is the number of stored edges
-the oracle counts for that kind and repository pair, observed, HTTP and
-dependency facts are never merged, and every example resolves to an edge of its
-own link.
+Checked against the index itself: stored-edge link counts match the oracle,
+path-derived nested links name the nearest indexed ancestor, kinds are never
+merged, and every stored-edge example resolves to an edge of its own link.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from repoatlas.capabilities import service as service_module
 from repoatlas.capabilities.service import CapabilityService
+from repoatlas.capabilities.topology import nested_repository_links
 from repoatlas.models.capability import CapabilityContext
+from repoatlas.models.repository import Repository
 from repoatlas.models.topology import (
     MAX_EXAMPLES,
     LinkKind,
@@ -128,6 +130,23 @@ def test_a_repository_scope_holds_no_link_to_another_repository(linked: Workspac
     assert "left" in overview(linked).repositories
 
 
+def test_overview_includes_nested_repository_links(
+    linked: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repositories = linked.repositories.list_all()
+    parent, child, *rest = repositories
+    nested_child = child.model_copy(update={"path": parent.path / "services" / child.name})
+    monkeypatch.setattr(linked.repositories, "list_all", lambda: [parent, nested_child, *rest])
+
+    response = overview(linked)
+
+    assert [
+        (link.source, link.target, link.nested_path)
+        for link in response.links
+        if link.kind is LinkKind.NESTED
+    ] == [(parent.slug, child.slug, f"services/{child.name}")]
+
+
 def test_a_scan_past_its_ceiling_is_reported_incomplete_not_partial(
     linked: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -135,3 +154,23 @@ def test_a_scan_past_its_ceiling_is_reported_incomplete_not_partial(
     response = overview(linked)
     assert not response.complete
     assert response.links == ()
+
+
+def test_nested_repository_links_point_to_the_nearest_indexed_ancestor(tmp_path: Path) -> None:
+    outer = tmp_path / "workspace"
+    service = outer / "services" / "api"
+    nested = service / "vendor" / "shared"
+    repositories = [
+        Repository(name="workspace", slug="workspace", path=outer),
+        Repository(name="api", slug="workspace/services/api", path=service),
+        Repository(name="shared", slug="workspace/services/api/vendor/shared", path=nested),
+        Repository(name="sibling", slug="sibling", path=tmp_path / "sibling"),
+    ]
+
+    links = nested_repository_links(repositories)
+
+    assert [(link.source, link.target, link.nested_path) for link in links] == [
+        ("workspace", "workspace/services/api", "services/api"),
+        ("workspace/services/api", "workspace/services/api/vendor/shared", "vendor/shared"),
+    ]
+    assert all(link.kind is LinkKind.NESTED and not link.examples for link in links)

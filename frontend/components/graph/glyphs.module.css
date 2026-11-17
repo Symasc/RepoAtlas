@@ -25,6 +25,9 @@
   &[data-relation="submodule"] {
     --stroke: var(--ra-submodule);
   }
+  &[data-relation="nested"] {
+    --stroke: var(--ra-nested);
+  }
 }
 
 .line {
@@ -55,6 +58,10 @@
 
 .line[data-family="submodule"] .stroke {
   stroke-dasharray: 9 3 0.1 3;
+}
+
+.line[data-family="nested"] .stroke {
+  stroke-dasharray: 6 4;
 }
 
 .line[data-family="config"] .stroke {

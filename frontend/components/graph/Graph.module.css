@@ -707,6 +707,9 @@
   &[data-relation="submodule"] {
     --stroke: var(--ra-submodule);
   }
+  &[data-relation="nested"] {
+    --stroke: var(--ra-nested);
+  }
   /* after the relationships: whatever it is, the selected line is the accent */
   &[data-emphasis="selected"] {
     --stroke: var(--ra-accent);

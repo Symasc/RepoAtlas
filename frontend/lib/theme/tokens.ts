@@ -7,7 +7,7 @@
  * is data, set as a transit map sets its lines: saturated and distinct, one per
  * relationship (imports blue, calls green, uses violet, other code links grey,
  * HTTP teal, package dependencies magenta, configuration amber, repository
- * inclusions lime), each at 4.5:1
+ * inclusions lime, nested repositories periwinkle), each at 4.5:1
  * or better on the canvas, and so is the text on a count tag filled with it.
  * Everything a line joins is one quiet card: a solid fill a step above the
  * canvas with a clear outline, the same for every kind of thing, told apart by
@@ -43,6 +43,8 @@ export interface ColorTokens {
   package: string;
   /** A repository including another (a submodule, a manifest's project). */
   submodule: string;
+  /** A repository checked out inside another indexed repository. */
+  nested: string;
   endpoint: string;
   config: string;
   halo: string;
@@ -84,6 +86,7 @@ export const DARK: ColorTokens = {
   focus: "#ef7a50",
   package: "#ff6fae",
   submodule: "#b7d84a",
+  nested: "#8fb5ff",
   endpoint: "#22c7c0",
   config: "#ffb43a",
   halo: "rgba(239, 122, 80, 0.28)",
@@ -124,6 +127,7 @@ export const LIGHT: ColorTokens = {
   focus: "#a8381a",
   package: "#ad1263",
   submodule: "#4b6500",
+  nested: "#2b4c91",
   endpoint: "#006b66",
   config: "#7f4f00",
   halo: "rgba(168, 56, 26, 0.2)",

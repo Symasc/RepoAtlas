@@ -53,6 +53,7 @@ export const FAMILY_NOUN: Record<Family, string> = {
   dependency: "package dependency",
   config: "configuration",
   submodule: "repository inclusion",
+  nested: "nested repository",
 };
 
 /** A relationship, named as a reader would: the legend's words. */
@@ -65,6 +66,7 @@ export const RELATION_LABEL: Record<Relation, string> = {
   dependency: "Package dependency",
   config: "Config & env",
   submodule: "Submodule",
+  nested: "Nested repository",
 };
 
 const RELATION_NOUN: Record<Relation, string> = {
@@ -76,6 +78,7 @@ const RELATION_NOUN: Record<Relation, string> = {
   dependency: "package dependency",
   config: "configuration",
   submodule: "repository inclusion",
+  nested: "nested repository",
 };
 
 function describeLink(link: LinkData, relation?: Relation): string {
@@ -85,7 +88,8 @@ function describeLink(link: LinkData, relation?: Relation): string {
       ? `; ${link.family === "submodule" ? "at" : "packages:"} ${link.packages.slice(0, 5).join(", ")}`
       : "";
   const noun = relation ? RELATION_NOUN[relation] : FAMILY_NOUN[link.family];
-  return `${formatCount(link.count)} ${noun} ${link.count === 1 ? "relationship" : "relationships"}${types.length ? ` (${types.join(", ")})` : ""}${packages}`;
+  const nestedPath = link.nestedPath ? `; at ${link.nestedPath}` : "";
+  return `${formatCount(link.count)} ${noun} ${link.count === 1 ? "relationship" : "relationships"}${types.length ? ` (${types.join(", ")})` : ""}${packages}${nestedPath}`;
 }
 
 /**
@@ -96,6 +100,7 @@ const DASH: Partial<Record<Family, (width: number) => string>> = {
   http: (w) => `${w * 2.6} ${w * 1.6}`,
   config: (w) => `0.1 ${w * 2.2}`,
   submodule: (w) => `${w * 4} ${w * 1.6} 0.1 ${w * 1.6}`,
+  nested: (w) => `${w * 2.6} ${w * 1.6}`,
 };
 
 function boxOf(node: InternalNode): Box {
