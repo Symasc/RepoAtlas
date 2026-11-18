@@ -33,10 +33,10 @@ import classes from "./Views.module.css";
 const NO_LINKS: readonly RepositoryLink[] = [];
 
 /**
- * Level one: every indexed repository as a constellation. The selected
- * repository (else the one with the most partners) is the anchor at the centre;
- * its partners ring it; repositories with no links stand apart. Selecting one
- * re-centres the map on it and opens it in the inspector; a second press goes in.
+ * Level one: every indexed repository as a constellation. The repository with
+ * the most partners is the anchor at the centre; its partners ring it;
+ * repositories with no links stand apart. Selecting one opens it in the
+ * inspector and highlights it but never moves the map; a second press goes in.
  */
 export function OverviewLevel({ repositories, nav }: { repositories: RepositoryModel[]; nav: Navigation }) {
   const overview = useTopologyOverview();
@@ -52,7 +52,7 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
   const selected = nav.selected !== null && known.has(nav.selected) ? nav.selected : null;
   const ready = overview.isSuccess || overview.isError;
 
-  const shape = useMemo(() => constellation(repositories, graph.edges, selected), [repositories, graph.edges, selected]);
+  const shape = useMemo(() => constellation(repositories, graph.edges, null), [repositories, graph.edges]);
   const target = useMemo(() => {
     const layout: Layout = new Map(shape.layout);
     for (const ring of shape.rings) {
@@ -60,10 +60,8 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
     }
     return layout;
   }, [shape]);
-  const anchorKey = shape.anchor ?? HUB_ID;
-  // glides when the reader re-centres the map, not when the links first arrive
-  // and move the anchor off the hub: the first view is drawn where it settles
-  const layout = useTween(target, selected ?? "", reduced);
+  // the map holds still on selection, so the tween's key never changes
+  const layout = useTween(target, "", reduced);
   const extent = useMemo(
     () => bounds([...shape.layout.entries()].filter(([id]) => id !== GROUP_ID).map(([, box]) => box)),
     [shape],
@@ -179,7 +177,6 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
               from: nav.arrival.previous?.repository ? repositoryId(nav.arrival.previous.repository) : null,
             }}
             extent={extent}
-            refit={anchorKey}
             families={families}
             start={<h1 className={classes.levelTitle}>All repositories</h1>}
             end={

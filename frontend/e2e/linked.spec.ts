@@ -154,7 +154,32 @@ test("the repository with the most partners anchors the map, its partners closes
   expect(problems).toEqual([]);
 });
 
-test("unlinked repositories are drawn too, in their own group", async ({ page, request, problems }) => {
+test("selecting a repository moves no repository", async ({ page, request, problems }) => {
+  const overview = await ask(request, "topology/overview", { context: WORKSPACE });
+  const links = overview.links ?? [];
+  // a repository that is not the anchor (the one with the most partners), so
+  // that re-centring on it would have moved the rest
+  const [anchor] = busiest(links);
+  const name = [...new Set(links.flatMap((l) => [l.source, l.target]))].sort().find((s) => s !== anchor);
+  expect(name, "a linked repository other than the busiest").toBeTruthy();
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/");
+  await ready(page);
+  const nodes = page.locator(".react-flow__node-repository");
+  const placed = () =>
+    nodes.evaluateAll((all) => Object.fromEntries(all.map((n) => [(n as HTMLElement).dataset.id!, (n as HTMLElement).style.transform])));
+  await expect(nodes.first()).toBeVisible();
+  const before = await placed();
+  expect(Object.keys(before).length).toBeGreaterThan(1);
+
+  await page.getByRole("button", { name: `Select ${name}`, exact: true }).click();
+  await expect(page.getByRole("complementary", { name: `${name}, inspected` })).toBeVisible();
+  expect(await placed()).toEqual(before);
+  expect(problems).toEqual([]);
+});
+
+test("unlinked repositories are drawn too, in their own group",async ({ page, request, problems }) => {
   const overview = await ask(request, "topology/overview", { context: WORKSPACE });
   const linked = new Set((overview.links ?? []).flatMap((l) => [l.source, l.target]));
   const { repositories = [] } = await ask(request, "repositories", { context: WORKSPACE });
