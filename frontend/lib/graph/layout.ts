@@ -30,6 +30,7 @@ const SIZE = {
   anchor: { width: 300, height: 108 },
   neighbour: { width: 244, height: 56 },
 } as const;
+export const REPOSITORY_SIZE = SIZE.repository;
 
 export const CARD = { header: 44, row: 26, padding: 8, footer: 30 } as const;
 const FRAME = { header: 64, padding: 24 } as const;
