@@ -26,6 +26,7 @@ import {
   type ReactNode,
 } from "react";
 
+import { fitViewport, MAX_ZOOM, MIN_ZOOM } from "@/lib/graph/fit";
 import { CODE_RELATIONS, RELATIONS, type Box, type Family, type Relation } from "@/lib/model/graph";
 import { useAnimationsOff } from "@/lib/useMotion";
 
@@ -82,12 +83,6 @@ const RAISE: Record<Emphasis, number> = { dim: 0, rest: 1, lit: 2, selected: 3 }
 
 /** The map's grid, in canvas units: wide enough to sit behind the cards, not among them. */
 const GRATICULE = 120;
-const MIN_ZOOM = 0.12;
-const MAX_ZOOM = 2.5;
-/** Fitting never magnifies past 100%: a small level stays at its own size. */
-const FIT_MAX = 1;
-/** A margin round what is fitted: the toolbar and status bar sit outside the canvas. */
-const PADDING = { top: "36px", bottom: "36px", left: "40px", right: "40px" } as const;
 
 function shapeOf(box: Box): string {
   return `${Math.round(box.x)},${Math.round(box.y)},${Math.round(box.width)},${Math.round(box.height)}`;
@@ -100,17 +95,6 @@ function boxIn(nodes: readonly GraphNode[], id: string): Box | null {
 }
 
 /** `viewport` scaled by `factor` about the middle of the screen. */
-/** The whole extent in view, or, where that would shrink it under `minFit`, its left part at `minFit`. */
-function fitted(extent: Box, width: number, height: number, minFit: number | undefined): Viewport {
-  const whole = getViewportForBounds(extent, width, height, MIN_ZOOM, FIT_MAX, PADDING);
-  if (minFit === undefined || whole.zoom >= minFit) return whole;
-  return {
-    x: parseFloat(PADDING.left) - extent.x * minFit,
-    y: height / 2 - (extent.y + extent.height / 2) * minFit,
-    zoom: minFit,
-  };
-}
-
 function about(viewport: Viewport, factor: number, width: number, height: number): Viewport {
   return {
     x: width / 2 - (width / 2 - viewport.x) * factor,
@@ -246,7 +230,7 @@ function Canvas({
     fittedFor.current = { refit, width, height };
     fittedExtent.current = shapeOf(extent);
     moved.current = false;
-    const target = fitted(extent, width, height, minFit);
+    const target = fitViewport(extent, { width, height }, { minFit });
     let start = target;
     let duration = arrival.direction === "out" ? 480 : 420;
     if (!reduced && arrival.direction === "in") start = about(target, 0.78, width, height);
@@ -287,7 +271,7 @@ function Canvas({
     fittedExtent.current = shapeOf(extent);
     if (!recentred && !resized && moved.current) return;
     moved.current = false;
-    const target = fitted(extent, width, height, minFit);
+    const target = fitViewport(extent, { width, height }, { minFit });
     void setViewport(target, { duration: reduced ? 0 : recentred ? 560 : 320, ease: easeInOut });
   }, [level, refit, extent, width, height, reduced, minFit, setViewport]);
 
@@ -386,7 +370,7 @@ function ZoomControls({ extent, reduced }: { extent: Box | null; reduced: boolea
   const height = useStore((s) => s.height);
   const duration = reduced ? 0 : 200;
   const fit = () => {
-    if (extent) void setViewport(getViewportForBounds(extent, width, height, MIN_ZOOM, FIT_MAX, PADDING), { duration });
+    if (extent) void setViewport(fitViewport(extent, { width, height }), { duration });
   };
   return (
     <div className={classes.zoom} role="group" aria-label="Zoom">
