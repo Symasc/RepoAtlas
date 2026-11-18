@@ -89,12 +89,13 @@ export type RelationshipDirection = "outgoing" | "incoming" | "both";
  * Which kind of fact a link aggregates. Never mixed within one link.
  *
  * ``SUBMODULE`` covers every way a repository includes another (git submodules,
- * git-subrepo, vcstool, west and repo manifests); the value is public, so the name stays.
+ * git-subrepo, vcstool, west and repo manifests); ``NESTED`` is inferred from
+ * one indexed repository's path being inside another's.
  *
  * This interface was referenced by `ApiIndex`'s JSON-Schema
  * via the `definition` "LinkKind".
  */
-export type LinkKind = "observed" | "http" | "dependency" | "submodule";
+export type LinkKind = "observed" | "http" | "dependency" | "submodule" | "nested";
 /**
  * This interface was referenced by `ApiIndex`'s JSON-Schema
  * via the `definition` "PeerKind".
@@ -3043,6 +3044,7 @@ export interface RepositoryLink {
   inclusions?: InclusionLink[];
   inclusions_total?: number;
   kind: LinkKind;
+  nested_path?: string | null;
   packages?: PackageLink[];
   source: string;
   target: string;

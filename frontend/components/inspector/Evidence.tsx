@@ -65,19 +65,24 @@ export function Evidence({
     return <Quiet>Choose a connection to read the lines that assert it.</Quiet>;
   }
   const { link, partner, direction } = connection;
+  const heading =
+    link.family === "submodule"
+      ? direction === "outgoing"
+        ? "Includes"
+        : "Included by"
+      : link.family === "nested"
+        ? direction === "outgoing"
+          ? "Contains"
+          : "Nested in"
+        : direction === "outgoing"
+          ? "Uses"
+          : "Used by";
   return (
     <div className={classes.evidence}>
       <div className={classes.evidenceHead}>
         <LineGlyph family={link.family} width={20} />
         <span className={classes.evidenceTitle}>
-          {link.family === "submodule"
-            ? direction === "outgoing"
-              ? "Includes"
-              : "Included by"
-            : direction === "outgoing"
-              ? "Uses"
-              : "Used by"}{" "}
-          <strong>{partner.label}</strong>
+          {heading} <strong>{partner.label}</strong>
         </span>
         <span className={classes.familyCount}>{plural(link.count, "relationship")}</span>
       </div>
@@ -91,6 +96,11 @@ export function Evidence({
         </p>
       )}
       {link.packages.length > 0 && <p className={classes.typeLine}>Packages: {link.packages.join(", ")}</p>}
+      {link.family === "nested" && link.nestedPath && (
+        <p className={classes.typeLine}>
+          Nested path: <span className={classes.mono}>{link.nestedPath}</span>
+        </p>
+      )}
       {(link.inclusions ?? []).length > 0 && (
         <ul className={classes.inclusions} aria-label="Inclusions">
           {link.inclusions!.map((inclusion) => (
@@ -123,7 +133,11 @@ export function Evidence({
         </Quiet>
       )}
       {refs.length === 0 ? (
-        <Quiet>The index keeps no example of this link to show.</Quiet>
+        <Quiet>
+          {link.family === "nested"
+            ? "Inferred from indexed repository paths; no manifest declaration is required."
+            : "The index keeps no example of this link to show."}
+        </Quiet>
       ) : (
         <ol className={classes.examples}>
           {results.map((result, i) => (

@@ -60,6 +60,7 @@ from repoatlas.models.inclusions import (
 )
 from repoatlas.models.parsing import EdgeType, EntityType
 from repoatlas.models.relationships import EntityRef, RelationshipDirection
+from repoatlas.models.repository import Repository
 from repoatlas.models.topology import (
     DEFAULT_CHILDREN_PAGE,
     MAX_AMBIGUOUS,
@@ -137,6 +138,7 @@ _KIND_ORDER = {
     LinkKind.HTTP: 1,
     LinkKind.DEPENDENCY: 2,
     LinkKind.SUBMODULE: 3,
+    LinkKind.NESTED: 4,
 }
 
 
@@ -527,6 +529,37 @@ def repository_links(
             key=lambda item: (item[0][1], item[0][2], _KIND_ORDER[item[0][0]]),
         )
     ]
+
+
+def nested_repository_links(repositories: Sequence[Repository]) -> list[RepositoryLink]:
+    """The nearest indexed repository ancestor of each nested repository, by path."""
+    by_path = {
+        repository.path.resolve(): repository for repository in repositories if repository.slug
+    }
+    links: list[RepositoryLink] = []
+    for child in repositories:
+        if not child.slug:
+            continue
+        child_path = child.path.resolve()
+        parent_path = child_path.parent
+        while parent_path != child_path:
+            parent = by_path.get(parent_path)
+            if parent is not None and parent.slug != child.slug:
+                links.append(
+                    RepositoryLink(
+                        kind=LinkKind.NESTED,
+                        source=parent.slug,
+                        target=child.slug,
+                        count=1,
+                        nested_path=child_path.relative_to(parent_path).as_posix(),
+                    )
+                )
+                break
+            next_path = parent_path.parent
+            if next_path == parent_path:
+                break
+            parent_path = next_path
+    return sorted(links, key=lambda link: (link.source, link.target))
 
 
 def ambiguous_dependencies(

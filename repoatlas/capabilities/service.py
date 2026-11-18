@@ -175,6 +175,7 @@ from repoatlas.capabilities.topology import (
     line_references,
     matching_edges,
     name_matches,
+    nested_repository_links,
     page_limits,
     page_of,
     peer_repositories,
@@ -1958,6 +1959,7 @@ class CapabilityService:
                     self._workspace.knowledge.list_link_decisions(INCLUSION_FAMILY), in_scope
                 )
             links = repository_links(found, refs, packages, included)
+            links.extend(nested_repository_links(resolution.repositories))
             listed, ambiguous_total = ambiguous_dependencies(packages, frozenset(in_scope.values()))
             facts = current_facts_version(self._workspace)
             return TopologyOverviewResponse(

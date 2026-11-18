@@ -130,6 +130,30 @@ def test_a_shell_script_referencing_another_repository_is_linked(
     assert edge["parser"] == GLOBAL_PARSER
 
 
+def test_a_tilt_dynamic_load_calls_a_function_in_a_nested_repository(
+    initialized: Workspace, workspace_root: Path
+) -> None:
+    outer = workspace_root / "nested-outer"
+    inner = outer / "tools" / "nested-inner"
+    (outer / "Tiltfile").write_text(
+        "load_dynamic('./tools/nested-inner/Tiltfile')['start_service']()\n"
+    )
+    (inner / "Tiltfile").write_text("def start_service():\n    pass\n")
+    sync(initialized, initialized.resolver().resolve(workspace_root))
+
+    edge = one(
+        edges(
+            initialized,
+            type="CALLS",
+            parser=GLOBAL_PARSER,
+            repository="nested-outer",
+            dst_name="start_service",
+        )
+    )
+    assert (edge["path"], edge["line_start"]) == ("Tiltfile", 1)
+    assert (edge["dst_repository"], edge["dst_path"]) == ("nested-inner", "Tiltfile")
+
+
 def test_an_unresolved_reference_is_retained_and_linked_when_the_target_arrives(
     workspace: Workspace, workspace_root: Path, tmp_path: Path
 ) -> None:

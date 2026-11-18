@@ -33,8 +33,8 @@ export interface Box {
  * (environment variables, config keys) told apart from code. Families are never
  * summed into one line.
  */
-export type Family = "code" | "http" | "dependency" | "config" | "submodule";
-export const FAMILIES: readonly Family[] = ["code", "http", "dependency", "config", "submodule"];
+export type Family = "code" | "http" | "dependency" | "config" | "submodule" | "nested";
+export const FAMILIES: readonly Family[] = ["code", "http", "dependency", "config", "submodule", "nested"];
 export type FamilyCounts = Partial<Record<Family, number>>;
 
 const CONFIG_ENTITIES: ReadonlySet<string> = new Set(["env_var", "config"]);
@@ -48,6 +48,7 @@ export function familyOf(
   if (kind === "http") return "http";
   if (kind === "dependency") return "dependency";
   if (kind === "submodule") return "submodule";
+  if (kind === "nested") return "nested";
   if (entityType && CONFIG_ENTITIES.has(entityType)) return "config";
   if (types.length > 0 && types.every((t) => CONFIG_EDGES.has(t.type))) return "config";
   return "code";
@@ -67,9 +68,10 @@ export type Relation =
   | "http"
   | "dependency"
   | "config"
-  | "submodule";
+  | "submodule"
+  | "nested";
 export const CODE_RELATIONS = ["imports", "calls", "uses", "other"] as const satisfies readonly Relation[];
-export const RELATIONS: readonly Relation[] = [...CODE_RELATIONS, "http", "dependency", "config", "submodule"];
+export const RELATIONS: readonly Relation[] = [...CODE_RELATIONS, "http", "dependency", "config", "submodule", "nested"];
 
 const RELATION_OF_TYPE: Readonly<Record<string, Relation>> = {
   IMPORTS: "imports",
@@ -86,7 +88,7 @@ const RELATION_OF_TYPE: Readonly<Record<string, Relation>> = {
 
 /** The family a relationship belongs to, which picks its line's pattern. */
 export function familyOfRelation(relation: Relation): Family {
-  return relation === "http" || relation === "dependency" || relation === "config" || relation === "submodule"
+  return relation === "http" || relation === "dependency" || relation === "config" || relation === "submodule" || relation === "nested"
     ? relation
     : "code";
 }
@@ -130,6 +132,8 @@ export interface LinkData {
   inclusions?: InclusionLink[];
   /** On a submodule link: how many inclusions it holds, of which `inclusions` lists up to a few. */
   inclusionsTotal?: number;
+  /** On a nested-repository link: the child path relative to the parent repository. */
+  nestedPath?: string;
   /** What the line says instead of its count: how a trace's step reads. */
   label?: string;
 }
@@ -150,6 +154,8 @@ function linkOf(link: ChildLink | RepositoryLink, family: Family, packages: stri
     types: (link.types ?? []).map((t) => ({ ...t })),
     packages,
     examples: [...(link.examples ?? [])].slice(0, EXAMPLES),
+    nestedPath:
+      "nested_path" in link && link.kind === "nested" ? (link.nested_path ?? undefined) : undefined,
   };
 }
 
@@ -208,7 +214,7 @@ export interface Partner {
   path?: string;
 }
 
-const FAMILY_ORDER: Record<Family, number> = { code: 0, http: 1, dependency: 2, config: 3, submodule: 4 };
+const FAMILY_ORDER: Record<Family, number> = { code: 0, http: 1, dependency: 2, config: 3, submodule: 4, nested: 5 };
 
 /** Strongest first within a family, families in reading order. */
 function byStrength(a: Connection, b: Connection): number {
@@ -277,7 +283,13 @@ export function buildOverview(
       node: target,
       edge: id,
       direction: "outgoing",
-      partner: { kind: "repository", label: name(link.target), detail: null, repository: link.target, path: "" },
+      partner: {
+        kind: "repository",
+        label: name(link.target),
+        detail: link.kind === "nested" ? (link.nested_path ?? null) : null,
+        repository: link.target,
+        path: "",
+      },
       via: null,
       link: data,
     });
@@ -286,7 +298,13 @@ export function buildOverview(
       node: source,
       edge: id,
       direction: "incoming",
-      partner: { kind: "repository", label: name(link.source), detail: null, repository: link.source, path: "" },
+      partner: {
+        kind: "repository",
+        label: name(link.source),
+        detail: link.kind === "nested" ? (link.nested_path ?? null) : null,
+        repository: link.source,
+        path: "",
+      },
       via: null,
       link: data,
     });

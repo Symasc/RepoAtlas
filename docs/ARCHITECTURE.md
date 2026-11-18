@@ -1203,6 +1203,11 @@ all. The relationships walk follows the edge, crossing repositories only under `
 repositories in scope that include the seed's repository as a coarse `inclusions` section, the way it lists
 package-level dependents. It does not walk through the inclusion into the including repository's code.
 
+The topology overview also reports `nested` links for indexed repositories whose paths are inside another indexed
+repository. The nearest indexed ancestor is the parent, and `nested_path` is the child's path relative to it. This
+relationship comes from indexed repository locations, not a manifest claim; it therefore shows nested checkouts even
+when the parent does not declare them as submodules or workspace projects.
+
 ### The load-bearing decision: parsers emit unresolved references
 
 `ParsedReference` carries a *raw target key*, never an entity ID:
@@ -2470,7 +2475,9 @@ release name the deployment picks. Nothing renders a template. Each file records
   read by lines, since it is not YAML until rendered;
 - a `.tpl` file records which `<chart>.name` and `<chart>.fullname` helpers match the `helm create` scaffold
   action for action;
-- a `Tiltfile` records each `helm('<chart dir>', name='<literal>', set=[<literals>])`, which binds a release name.
+- a `Tiltfile` records each `helm('<chart dir>', name='<literal>', set=[<literals>])`, which binds a release name;
+  literal `load_dynamic('<path>/Tiltfile')['<function>']()` calls link to a uniquely named top-level function in
+  that exact indexed Tiltfile.
 
 The global pass composes a name only when every action in it is one of four, each read from the same repository's
 chart:

@@ -18,6 +18,7 @@ const FAMILY_LABEL: Record<Family, string> = {
   dependency: "Package dependencies",
   config: "Config & env",
   submodule: "Submodules",
+  nested: "Nested repositories",
 };
 
 /** Rows listed per family before "show all". */

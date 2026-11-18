@@ -91,13 +91,15 @@ class LinkKind(StrEnum):
     """Which kind of fact a link aggregates. Never mixed within one link.
 
     ``SUBMODULE`` covers every way a repository includes another (git submodules,
-    git-subrepo, vcstool, west and repo manifests); the value is public, so the name stays.
+    git-subrepo, vcstool, west and repo manifests); ``NESTED`` is inferred from
+    one indexed repository's path being inside another's.
     """
 
     OBSERVED = "observed"
     HTTP = "http"
     DEPENDENCY = "dependency"
     SUBMODULE = "submodule"
+    NESTED = "nested"
 
 
 class EdgeTypeCount(BaseModel):
@@ -152,10 +154,10 @@ class RepositoryLink(BaseModel):
     source: str
     #: The repository holding each edge's target.
     target: str
-    #: How many stored edges the link holds.
+    #: How many facts the link holds. A nested link is one path relationship.
     count: int = Field(ge=1)
     types: tuple[EdgeTypeCount, ...] = ()
-    #: Up to :data:`MAX_EXAMPLES` opaque references to edges this link counts.
+    #: Up to :data:`MAX_EXAMPLES` opaque references to stored edges; empty for a nested link.
     examples: tuple[str, ...] = ()
     #: For a dependency link, up to :data:`MAX_PACKAGES` of the packages its
     #: edges declare, read from the declarations they were drawn from.
@@ -166,6 +168,8 @@ class RepositoryLink(BaseModel):
     inclusions: tuple[InclusionLink, ...] = ()
     #: For a submodule link, how many inclusions it holds, listed or not.
     inclusions_total: int = Field(default=0, ge=0)
+    #: For a nested link, the target path relative to the source repository.
+    nested_path: str | None = None
 
 
 class TopologyOverviewRequest(BaseModel):
@@ -196,8 +200,8 @@ class TopologyOverviewResponse(BaseModel):
     #: Every such inclusion whose including repository is in scope, listed or not: it also
     #: counts the ones left out of the list for a candidate outside the scope.
     unsettled_inclusions_total: int = 0
-    #: False when the edge scan reached its row ceiling. Edge links are then
-    #: omitted rather than reported from an arbitrary subset.
+    #: False when the stored-edge scan reached its row ceiling. Stored-edge links
+    #: are then omitted rather than reported from an arbitrary subset.
     complete: bool = True
     freshness: IndexFreshness
     policy: str = POLICY
