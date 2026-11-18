@@ -1,6 +1,6 @@
 import type { Box } from "@/lib/model/graph";
 
-import type { District } from "./districts";
+import { wholeId, type District } from "./districts";
 import { fitZoom } from "./fit";
 import { bounds, REPOSITORY_SIZE } from "./layout";
 
@@ -108,9 +108,46 @@ export function visibleCards(ds: readonly District[], expanded: ReadonlySet<stri
   return ds.reduce((sum, d) => sum + (expanded.has(d.id) ? d.members.length : 1), 0);
 }
 
-/** The distinct district sizes up to `cardCap`, smallest first: the steps `defaultExpanded` climbs. */
+/**
+ * The shelf that shows `expanded` at the largest fitted zoom in `viewport`. The
+ * rows are as tall as their tallest unit, so a wider shelf can fit better than the
+ * default one: the candidates are the default shelf (so the answer is never worse
+ * than it), the widest unit, and the width of each run of the first k units. The
+ * smallest shelf wins a tie.
+ */
+export function bestShelf(ds: readonly District[], expanded: ReadonlySet<string>, viewport: { width: number; height: number }): number {
+  const heuristic = layoutDistricts(ds, expanded).shelf;
+  if (ds.length === 0) return heuristic;
+  const widths = ds.map((d) => (expanded.has(d.id) ? frameSize(d.members.length).width : REPOSITORY_SIZE.width));
+  const widest = Math.max(...widths);
+  const candidates = new Set<number>([heuristic, widest]);
+  let run = 0;
+  widths.forEach((width, i) => {
+    run += width + (i > 0 ? DISTRICT.gap : 0);
+    candidates.add(run);
+  });
+  let best = heuristic;
+  let bestZoom = -Infinity;
+  for (const shelf of [...candidates].filter((s) => s >= widest).sort((a, b) => a - b)) {
+    const zoom = fitZoom(layoutDistricts(ds, expanded, shelf).extent, viewport);
+    if (zoom > bestZoom) {
+      best = shelf;
+      bestZoom = zoom;
+    }
+  }
+  return best;
+}
+
+/** What each district counts as when opening by size: a part counts as the largest part of its whole, so a cut district opens together. */
+function stepSizes(ds: readonly District[]): Map<string, number> {
+  const largest = new Map<string, number>();
+  for (const d of ds) largest.set(wholeId(d), Math.max(largest.get(wholeId(d)) ?? 0, d.members.length));
+  return new Map(ds.map((d) => [d.id, largest.get(wholeId(d))!]));
+}
+
+/** The distinct opening sizes up to `cardCap`, smallest first: the steps `defaultExpanded` climbs. A part's size is that of the largest part of its whole. */
 export function sizeLevels(ds: readonly District[], cardCap: number = CARD_CAP): number[] {
-  return [...new Set(ds.map((d) => d.members.length))].filter((n) => n <= cardCap).sort((a, b) => a - b);
+  return [...new Set(stepSizes(ds).values())].filter((n) => n <= cardCap).sort((a, b) => a - b);
 }
 
 export interface DefaultExpansion {
@@ -126,8 +163,8 @@ export interface DefaultExpansion {
 /**
  * Which districts open at rest: the largest set of the smallest districts that
  * still fits the card cap and fits the viewport at a readable zoom. Opens
- * districts by size, smallest first, and stops before the first step that
- * fails.
+ * districts by size, smallest first (the parts of a cut district together), and
+ * stops before the first step that fails. Each step is laid out at its `bestShelf`.
  */
 export function defaultExpanded(
   ds: readonly District[],
@@ -137,9 +174,10 @@ export function defaultExpanded(
   const readableZoom = options.readableZoom ?? READABLE_ZOOM;
   const cardCap = options.cardCap ?? CARD_CAP;
   const sizes = sizeLevels(ds, cardCap);
+  const stepOf = stepSizes(ds);
   const state = (size: number) => {
-    const expanded = new Set(ds.filter((d) => d.members.length <= size).map((d) => d.id));
-    const shape = layoutDistricts(ds, expanded);
+    const expanded = new Set(ds.filter((d) => stepOf.get(d.id)! <= size).map((d) => d.id));
+    const shape = layoutDistricts(ds, expanded, bestShelf(ds, expanded, viewport));
     const passes = visibleCards(ds, expanded) <= cardCap && fitZoom(shape.extent, viewport) >= readableZoom;
     return { expanded, shelf: shape.shelf, passes };
   };

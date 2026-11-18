@@ -461,6 +461,15 @@ export function districts(
   }));
 }
 
+/**
+ * The id of the district a part was cut from; a district that was not cut is its
+ * own whole. Ids are built from `encodeURIComponent`ed components, so a "#" only
+ * ever stands for the part separator.
+ */
+export function wholeId(d: District): string {
+  return d.part ? d.id.slice(0, d.id.lastIndexOf("#")) : d.id;
+}
+
 /** The ids of the districts holding more than `DISTRICT_MAX` repositories. */
 export function oversize(ds: readonly District[]): string[] {
   return ds.filter((d) => d.members.length > DISTRICT_MAX).map((d) => d.id);

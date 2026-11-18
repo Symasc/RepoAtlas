@@ -4,6 +4,7 @@ import {
   CARD_CAP,
   DISTRICT,
   READABLE_ZOOM,
+  bestShelf,
   columns,
   defaultExpanded,
   frameSize,
@@ -13,7 +14,7 @@ import {
   visibleCards,
   type DistrictLayout,
 } from "@/lib/graph/districtLayout";
-import { districts, type District } from "@/lib/graph/districts";
+import { districts, wholeId, type District } from "@/lib/graph/districts";
 import { fitZoom } from "@/lib/graph/fit";
 import { REPOSITORY_SIZE } from "@/lib/graph/layout";
 import { buildOverview, repositoryId, type Box } from "@/lib/model/graph";
@@ -140,6 +141,49 @@ describe("the geometry of a district", () => {
   });
 });
 
+describe("the best shelf", () => {
+  const three = [district("a", 1), district("b", 1), district("c", 1)];
+
+  it("sets a wide screen's rows wider than the default shelf, where that fits more", () => {
+    const viewport = { width: 1100, height: 200 };
+    const nothing = new Set<string>();
+    // the default shelf (about 607) puts one summary on a row; all three on one row is 3 * 288 + 2 * 96 wide
+    const heuristic = layoutDistricts(three, nothing);
+    expect(heuristic.extent.height).toBe(3 * 84 + 2 * 96);
+    const shelf = bestShelf(three, nothing, viewport);
+    expect(shelf).toBe(3 * 288 + 2 * 96);
+    expect(fitZoom(layoutDistricts(three, nothing, shelf).extent, viewport)).toBeGreaterThan(fitZoom(heuristic.extent, viewport));
+  });
+
+  it("takes the smallest shelf among equals, and never one under the widest unit", () => {
+    expect(bestShelf(three, new Set(), { width: 4000, height: 4000 })).toBe(288);
+    const wide = [district("w", 30), district("x", 1)];
+    expect(bestShelf(wide, new Set(["w"]), { width: 4000, height: 4000 })).toBeGreaterThanOrEqual(frameSize(30).width);
+  });
+
+  it("is the default shelf's width for nothing to lay out", () => {
+    expect(bestShelf([], new Set(), { width: 1920, height: 1080 })).toBe(0);
+  });
+});
+
+describe("the whole a part was cut from", () => {
+  const part = (id: string, index: number, of: number): District => ({ ...district(id, 3), part: { index, of } });
+
+  it("is the id without its part number, and a district that was not cut is its own", () => {
+    expect(wholeId(district("district:small", 3))).toBe("district:small");
+    expect(wholeId(part("district:small#1", 1, 2))).toBe("district:small");
+    expect(wholeId(part("district:tree:t1-00#12", 12, 12))).toBe("district:tree:t1-00");
+  });
+
+  it("reads a '#' in a slug as part of the slug, since an id escapes it", () => {
+    const slug = encodeURIComponent("a#b");
+    expect(slug).toBe("a%23b");
+    expect(wholeId(district(`district:tree:${slug}`, 3))).toBe(`district:tree:${slug}`);
+    expect(wholeId(part(`district:tree:${slug}#2`, 2, 2))).toBe(`district:tree:${slug}`);
+    expect(wholeId(part(`district:tree:${slug}/${encodeURIComponent("d#e")}#1`, 1, 2))).toBe(`district:tree:${slug}/d%23e`);
+  });
+});
+
 describe("the districts of the 300-repository fixture, laid out", () => {
   const { repositories, links } = ecosystem300();
   const edges = buildOverview(repositories, links).edges;
@@ -263,24 +307,83 @@ describe("the districts of the 300-repository fixture, laid out", () => {
     for (const viewport of VIEWPORTS) {
       const result = atRest(viewport);
       const shape = layoutDistricts(ds, result.expanded, result.shelf);
-      expect(shape.extent, `${viewport.width}`).toEqual(layoutDistricts(ds, result.expanded).extent);
+      expect(shape.extent, `${viewport.width}`).toEqual(layoutDistricts(ds, result.expanded, bestShelf(ds, result.expanded, viewport)).extent);
       expect(result.readable, `${viewport.width}`).toBe(true);
       expect(visibleCards(ds, result.expanded), `${viewport.width}`).toBeLessThanOrEqual(CARD_CAP);
       expect(fitZoom(shape.extent, viewport), `${viewport.width}`).toBeGreaterThanOrEqual(READABLE_ZOOM);
     }
   });
 
+  it("lays each default out at a shelf no other candidate beats, and none under the default shelf's zoom", () => {
+    for (const viewport of VIEWPORTS) {
+      for (const readableZoom of [0.75, 0.5]) {
+        const name = `${viewport.width} at ${readableZoom}`;
+        const result = defaultExpanded(ds, viewport, { readableZoom });
+        const zoomAt = (shelf?: number) => fitZoom(layoutDistricts(ds, result.expanded, shelf).extent, viewport);
+        expect(result.shelf, name).toBe(bestShelf(ds, result.expanded, viewport));
+        const chosen = zoomAt(result.shelf);
+        expect(chosen, `${name}: against the default shelf`).toBeGreaterThanOrEqual(zoomAt());
+
+        const widths = ds.map((d) => (result.expanded.has(d.id) ? frameSize(d.members.length).width : REPOSITORY_SIZE.width));
+        const widest = Math.max(...widths);
+        expect(result.shelf, `${name}: not under the widest unit`).toBeGreaterThanOrEqual(widest);
+        const candidates = [widest];
+        let run = 0;
+        widths.forEach((width, i) => {
+          run += width + (i > 0 ? DISTRICT.gap : 0);
+          candidates.push(run);
+        });
+        for (const shelf of candidates.filter((s) => s >= widest)) {
+          expect(zoomAt(shelf), `${name}: shelf ${shelf}`).toBeLessThanOrEqual(chosen);
+        }
+      }
+    }
+  });
+
+  it("chooses the same default twice", () => {
+    for (const viewport of VIEWPORTS) {
+      for (const readableZoom of [0.75, 0.5]) {
+        const first = defaultExpanded(ds, viewport, { readableZoom });
+        const again = defaultExpanded(ds, viewport, { readableZoom });
+        expect([...again.expanded], `${viewport.width} at ${readableZoom}`).toEqual([...first.expanded]);
+        expect(again.shelf).toBe(first.shelf);
+        expect(again.level).toBe(first.level);
+        expect(again.readable).toBe(first.readable);
+      }
+    }
+  });
+
+  it("opens the parts of one cut district together, or none of them", () => {
+    const wholes = new Map<string, District[]>();
+    for (const d of ds) wholes.set(wholeId(d), [...(wholes.get(wholeId(d)) ?? []), d]);
+    const cut = [...wholes.values()].filter((parts) => parts.length > 1);
+    expect(cut.length, "the fixture cuts at least one district").toBeGreaterThan(0);
+    for (const viewport of VIEWPORTS) {
+      for (const readableZoom of [0.75, 0.5]) {
+        const { expanded } = defaultExpanded(ds, viewport, { readableZoom });
+        for (const parts of cut) {
+          const open = parts.filter((d) => expanded.has(d.id)).length;
+          expect(open === 0 || open === parts.length, `${viewport.width} at ${readableZoom}: ${wholeId(parts[0]!)}`).toBe(true);
+        }
+      }
+    }
+  });
+
   it("opens every district up to a size, and no further set that would still be readable", () => {
+    // a part counts as the largest part of the district it was cut from, so the parts open together
+    const largest = new Map<string, number>();
+    for (const d of ds) largest.set(wholeId(d), Math.max(largest.get(wholeId(d)) ?? 0, d.members.length));
+    const sizeOf = (d: District): number => largest.get(wholeId(d))!;
     const levels = sizeLevels(ds);
-    expect(levels).toEqual([...new Set(ds.map((d) => d.members.length))].filter((n) => n <= CARD_CAP).sort((a, b) => a - b));
+    expect(levels).toEqual([...new Set(ds.map(sizeOf))].filter((n) => n <= CARD_CAP).sort((a, b) => a - b));
     for (const viewport of VIEWPORTS) {
       const result = atRest(viewport);
-      const opened = new Set(ds.filter((d) => d.members.length <= (levels[result.level - 1] ?? 0)).map((d) => d.id));
+      const opened = new Set(ds.filter((d) => sizeOf(d) <= (levels[result.level - 1] ?? 0)).map((d) => d.id));
       expect(result.expanded, `${viewport.width}: the level's districts`).toEqual(opened);
       const next = levels[result.level];
       if (next === undefined) continue;
-      const larger = new Set(ds.filter((d) => d.members.length <= next).map((d) => d.id));
-      const shape = layoutDistricts(ds, larger);
+      const larger = new Set(ds.filter((d) => sizeOf(d) <= next).map((d) => d.id));
+      const shape = layoutDistricts(ds, larger, bestShelf(ds, larger, viewport));
       const cards = visibleCards(ds, larger);
       const zoom = fitZoom(shape.extent, viewport);
       expect(cards > CARD_CAP || zoom < READABLE_ZOOM, `${viewport.width}: opening size ${next} (${cards} cards, zoom ${zoom})`).toBe(true);
