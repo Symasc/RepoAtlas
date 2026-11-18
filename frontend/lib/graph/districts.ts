@@ -270,6 +270,24 @@ export function inclusionTrees(repositories: readonly RepositoryModel[], edges: 
   });
 }
 
+/**
+ * Where each repository of an inclusion family sits in it, by slug, keys in
+ * code-unit order: its parent slug (null for a root), its depth from the root, and
+ * the root's slug. Only repositories in some family appear.
+ */
+export function inclusionParents(
+  repositories: readonly RepositoryModel[],
+  edges: readonly ViewEdge[],
+): Map<string, { parent: string | null; depth: number; root: string }> {
+  const fo = forest(facts(repositories, edges));
+  return new Map(
+    [...fo.root.keys()].sort(cmp).map((slug) => [
+      slug,
+      { parent: fo.parent.get(slug) ?? null, depth: fo.depth.get(slug)!, root: fo.root.get(slug)! },
+    ]),
+  );
+}
+
 // -- shared (R4) -----------------------------------------------------------------------
 
 /** Dependents a repository needs to be shared, among `linked` repositories with a link. */

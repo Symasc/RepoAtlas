@@ -1,11 +1,22 @@
 "use client";
 
-import { ArrowRightIcon, CaretRightIcon, FileIcon, FolderSimpleIcon, PuzzlePieceIcon } from "@phosphor-icons/react";
+import {
+  ArrowRightIcon,
+  CaretDownIcon,
+  CaretRightIcon,
+  FileIcon,
+  FolderSimpleIcon,
+  PuzzlePieceIcon,
+  StackIcon,
+} from "@phosphor-icons/react";
 import { Handle, Position, type Node, type NodeProps, type NodeTypes } from "@xyflow/react";
 import { Fragment, memo, type MouseEvent, type ReactNode } from "react";
 
 import { RepoSwatch } from "@/components/common/RepoSwatch";
 import type { ChildEntry } from "@/lib/api/generated";
+import type { InclusionKind } from "@/lib/graph/inclusionMarks";
+import type { FamilyTallies } from "@/lib/graph/lift";
+import { frameMeta, frameTitle, summaryLabel, type FrameFacts, type SummaryFacts } from "@/lib/graph/overviewCards";
 import { compactCount, formatCount, plural, shortSha } from "@/lib/model/format";
 import type { FreshnessModel } from "@/lib/model/freshness";
 import {
@@ -38,7 +49,16 @@ export interface NodeActions {
 
 type Common = { actions: NodeActions; selected?: boolean };
 
-type RepositoryNodeData = Common & { repository: RepositoryModel; partners: number };
+type RepositoryNodeData = Common & {
+  repository: RepositoryModel;
+  partners: number;
+  /** In an inclusion tree: who includes it and how, or `parentName: null` for the tree's root. */
+  inclusion?: { parentName: string | null; depth: number; kind: InclusionKind | null; label: string | null } | null;
+};
+/** An open district's frame: a backdrop with one real button, to close it. */
+type DistrictNodeData = { facts: FrameFacts; actions: NodeActions };
+/** A collapsed district: one card, which opens it. */
+type DistrictSummaryNodeData = Common & { facts: SummaryFacts };
 type HubNodeData = { repositories: number; files: number; note: string | null };
 type GroupNodeData = { count: number };
 /** Out to a directory on the way here, `""` for the repository's root (see useClimb). */
@@ -64,6 +84,8 @@ type NeighbourNodeData = Common & { node: Neighbour };
 
 export type GraphNode =
   | Node<RepositoryNodeData, "repository">
+  | Node<DistrictNodeData, "district">
+  | Node<DistrictSummaryNodeData, "districtSummary">
   | Node<HubNodeData, "hub">
   | Node<GroupNodeData, "group">
   | Node<FrameNodeData, "frame">
@@ -78,7 +100,7 @@ export type GraphNode =
   | TraceNode;
 
 /** Nodes that are backdrop, not things: never faded, never selected. */
-export const BACKDROP: ReadonlySet<string> = new Set(["group", "frame", "hub", "traceFrame", "traceLabel"]);
+export const BACKDROP: ReadonlySet<string> = new Set(["group", "frame", "district", "hub", "traceFrame", "traceLabel"]);
 
 /** React Flow wants handles to draw edges from; ours compute their own ends, so one hidden pair will do. */
 export function Anchors() {
@@ -161,9 +183,18 @@ export function languagesOf(repository: RepositoryModel, max = 3): string {
 // -- the overview ---------------------------------------------------------------------
 
 function RepositoryNode({ id, data }: NodeProps<Node<RepositoryNodeData, "repository">>) {
-  const { repository: r, selected = false, actions, partners } = data;
+  const { repository: r, selected = false, actions, partners, inclusion = null } = data;
+  // a child says who includes it, in words, besides the pattern of its edge; a tree's root says it is one
+  const parentName = inclusion?.parentName ?? null;
+  const root = inclusion !== null && parentName === null;
   return (
-    <div className={classes.repository} data-selected={selected || undefined}>
+    <div
+      className={classes.repository}
+      data-selected={selected || undefined}
+      data-inclusion={parentName !== null ? (inclusion?.kind ?? "other") : undefined}
+      data-depth={parentName !== null ? Math.min(inclusion?.depth ?? 0, 6) : undefined}
+      data-inclusion-root={root || undefined}
+    >
       <Anchors />
       <Cover id={id} name={r.name} selected={selected} openable actions={actions} />
       <span className={classes.body}>
@@ -172,12 +203,86 @@ function RepositoryNode({ id, data }: NodeProps<Node<RepositoryNodeData, "reposi
           <span className={classes.name}>{r.name}</span>
           {selected ? <OpenHint /> : <FreshnessWord freshness={r.freshness} />}
         </span>
-        <span className={classes.meta}>{languagesOf(r) || "No languages recorded"}</span>
+        <span className={classes.meta}>
+          {parentName !== null ? `in ${parentName} · ${inclusion?.label ?? "Inclusion"}` : languagesOf(r) || "No languages recorded"}
+        </span>
         <span className={classes.stats}>
           <span>{plural(r.files, "file")}</span>
           {partners > 0 ? <span>{plural(partners, "partner")}</span> : <span>{plural(r.symbols, "symbol")}</span>}
         </span>
       </span>
+    </div>
+  );
+}
+
+/** An open district: its name and size, what joins a tree, and the button that closes it. */
+function DistrictNode({ data }: NodeProps<Node<DistrictNodeData, "district">>) {
+  const { facts, actions } = data;
+  const meta = frameMeta(facts);
+  const kinds = facts.inclusion?.kinds ?? [];
+  const mark = kinds.length === 0 ? undefined : kinds.length === 1 ? kinds[0] : "mixed";
+  return (
+    <div className={classes.district} data-kind={facts.kind} data-inclusion={mark}>
+      <div className={classes.districtHeader}>
+        <span className={classes.districtTitle}>{frameTitle(facts)}</span>
+        {meta !== null && <span className={classes.districtMeta}>{meta}</span>}
+        <button
+          type="button"
+          className={`${classes.districtToggle} nodrag nopan`}
+          aria-expanded={true}
+          aria-label={`Collapse ${facts.label}`}
+          onClick={stop(() => actions.activate(facts.id))}
+        >
+          <CaretDownIcon size={14} weight="bold" aria-hidden />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** The tallies of a summary, a glyph and a count per family; the sentence for them is `summaryLabel`. */
+function SummaryTallies({ tallies }: { tallies: FamilyTallies }) {
+  return (
+    <>
+      {FAMILIES.filter((f) => (tallies[f]?.links ?? 0) > 0).map((family) => (
+        <span key={family} className={classes.tallyItem}>
+          <LineGlyph family={family} width={14} />
+          {compactCount(tallies[family]!.links)}
+        </span>
+      ))}
+    </>
+  );
+}
+
+/** A collapsed district, one card: its name, who is in it, and what its links look like from outside and inside. */
+function DistrictSummaryNode({ data }: NodeProps<Node<DistrictSummaryNodeData, "districtSummary">>) {
+  const { facts, actions, selected = false } = data;
+  const hasInternal = FAMILIES.some((f) => (facts.internal[f]?.links ?? 0) > 0);
+  return (
+    <div className={classes.districtSummary} data-kind={facts.kind} data-selected={selected || undefined}>
+      <Anchors />
+      <button
+        type="button"
+        className={`${classes.cover} nodrag`}
+        aria-expanded={false}
+        aria-label={`Expand ${facts.label}, ${plural(facts.members, "repository", "repositories")}`}
+        onClick={stop(() => actions.activate(facts.id))}
+      />
+      <span className={classes.summaryTitle} aria-hidden>
+        <StackIcon size={16} className={classes.folder} aria-hidden />
+        <span className={classes.cardTitle}>{facts.label}</span>
+        <span className={classes.cardCount}>{formatCount(facts.members)}</span>
+      </span>
+      <span className={classes.summarySample} aria-hidden>
+        {facts.sample.join(", ")}
+        {facts.more > 0 && ` +${facts.more}`}
+      </span>
+      <span className={classes.summaryTallies} aria-hidden>
+        <SummaryTallies tallies={facts.crossing} />
+        {hasInternal && <span className={classes.summaryInside}>inside</span>}
+        <SummaryTallies tallies={facts.internal} />
+      </span>
+      <span className={classes.srOnly}>{summaryLabel(facts)}</span>
     </div>
   );
 }
@@ -531,6 +636,8 @@ function NeighbourNode({ id, data }: NodeProps<Node<NeighbourNodeData, "neighbou
 // module scope, so React Flow never sees a new object and remounts every node
 export const nodeTypes: NodeTypes = {
   repository: memo(RepositoryNode),
+  district: memo(DistrictNode),
+  districtSummary: memo(DistrictSummaryNode),
   hub: memo(HubNode),
   group: memo(GroupNode),
   frame: memo(FrameNode),

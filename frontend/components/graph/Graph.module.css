@@ -265,6 +265,46 @@
   font-size: var(--mantine-font-size-md);
 }
 
+/*
+ * A repository inside an inclusion tree: a 3px left edge in the pattern of how
+ * it was included (solid for a submodule, dashed for git-subrepo, dotted for a
+ * manifest, double for any other), and its body set in a step per level of depth.
+ * The card's meta line says the same in words, so the edge is never the only cue.
+ */
+.repository[data-inclusion] {
+  border-left: 3px solid var(--ra-text-muted);
+}
+.repository[data-inclusion="submodule"] {
+  border-left-style: solid;
+}
+.repository[data-inclusion="subrepo"] {
+  border-left-style: dashed;
+}
+.repository[data-inclusion="manifest"] {
+  border-left-style: dotted;
+}
+.repository[data-inclusion="other"] {
+  border-left-style: double;
+}
+.repository[data-depth="1"] .body {
+  padding-left: 6px;
+}
+.repository[data-depth="2"] .body {
+  padding-left: 12px;
+}
+.repository[data-depth="3"] .body {
+  padding-left: 18px;
+}
+.repository[data-depth="4"] .body {
+  padding-left: 24px;
+}
+.repository[data-depth="5"] .body {
+  padding-left: 30px;
+}
+.repository[data-depth="6"] .body {
+  padding-left: 36px;
+}
+
 /* -- the workspace, when no repository is at the centre, and the orbits ----------- */
 
 /* a label on the map, not a badge */
@@ -325,6 +365,152 @@
   background-color: var(--ra-district);
   border-radius: var(--ra-radius-l);
   pointer-events: none;
+}
+
+/*
+ * An open district of the overview: the same region as a frame, with its name,
+ * what joins an inclusion tree, and one live button to close it. Presses go
+ * through it to the canvas, except on that button. A tree's frame is edged in the
+ * pattern of its inclusions (solid for a submodule, dashed for git-subrepo, dotted
+ * for a manifest, double for any other or a mix); the words in its header say the
+ * same, so the edge is never the only difference.
+ */
+.district {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  background-color: var(--ra-district);
+  border-radius: var(--ra-radius-l);
+  pointer-events: none;
+
+  &[data-inclusion] {
+    border: 3px solid var(--ra-border-strong);
+  }
+  &[data-inclusion="submodule"] {
+    border-style: solid;
+  }
+  &[data-inclusion="subrepo"] {
+    border-style: dashed;
+  }
+  &[data-inclusion="manifest"] {
+    border-style: dotted;
+  }
+  &[data-inclusion="other"],
+  &[data-inclusion="mixed"] {
+    border-style: double;
+  }
+}
+
+.districtHeader {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 40px;
+  padding: 0 14px 0 17px;
+}
+
+.districtTitle {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: var(--mantine-font-size-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ra-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.districtMeta {
+  flex: 1 1 0;
+  min-width: 0;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.districtToggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ra-radius-s);
+  background: transparent;
+  color: var(--ra-text-muted);
+  cursor: pointer;
+  pointer-events: auto;
+
+  &:hover {
+    background-color: var(--ra-hover);
+    color: var(--ra-text);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--ra-focus);
+    outline-offset: 1px;
+  }
+}
+
+/* a collapsed district: one card, three single lines (name, who is in it, its links) */
+.districtSummary {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+  height: 100%;
+  padding: 0 14px;
+  background-color: var(--ra-card);
+  border: 1px solid var(--ra-card-outline);
+  border-radius: var(--ra-radius);
+  color: var(--ra-text);
+  transition: border-color var(--ra-duration-fast) var(--ra-ease);
+
+  &:hover {
+    border-color: var(--ra-text-subtle);
+  }
+}
+
+.summaryTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.summarySample {
+  font-size: var(--mantine-font-size-sm);
+  color: var(--ra-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summaryTallies {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 16px;
+  overflow: hidden;
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* the divider between the links to other districts and those inside this one */
+.summaryInside {
+  color: var(--ra-text-subtle);
+  border-left: 1px solid var(--ra-border);
+  padding-left: 12px;
 }
 
 .frameHeader {
@@ -675,7 +861,7 @@
 
 /* the selected thing: an accent outline, nothing lifted or glowing; after the
    hover rules, so pointing at it keeps it marked */
-:is(.repository, .peer, .place, .card, .shared, .moreNode)[data-selected] {
+:is(.repository, .peer, .place, .card, .shared, .moreNode, .districtSummary)[data-selected] {
   border-color: var(--ra-accent);
   outline: 1px solid var(--ra-accent);
 }
@@ -820,6 +1006,17 @@
   display: flex;
   align-items: center;
   gap: 2px;
+}
+
+/* what the level leaves out: one line between the zoom and the key, cut short when it is long */
+.statusNote {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--mantine-font-size-xs);
+  color: var(--ra-text-muted);
 }
 
 .zoomValue {
