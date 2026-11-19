@@ -165,7 +165,10 @@ export interface NotDrawn {
   internal: Tally;
   /** How many collapsed districts hold them. */
   internalDistricts: number;
-  /** Links between a shown district and one that is not shown, summed over every family. */
+  /**
+   * Links with exactly one end shown, summed over every family. Links with both ends hidden are counted by the lift
+   * as `beyond` and are not reported here, because the note describes what is on screen.
+   */
   outside: Tally;
   /** Links with an end on no card. */
   unplaced: number;

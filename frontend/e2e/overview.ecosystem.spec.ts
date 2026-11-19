@@ -204,7 +204,7 @@ test("the overview holds an ecosystem of 300 repositories", async ({ page, probl
 test("isolating a district shows it and the districts linked to it, counts the rest, and Show all brings the map back", async ({
   page,
   problems,
-}) => {
+}, testInfo) => {
   test.setTimeout(240_000);
   const ecosystem = ecosystem300();
   await serveEcosystem(page, ecosystem);
@@ -240,6 +240,10 @@ test("isolating a district shows it and the districts linked to it, counts the r
   const fit = async () => {
     await settled(page);
     await page.getByRole("button", { name: "Fit to screen", exact: true }).click();
+  };
+  const shot = async (name: string) => {
+    await settled(page);
+    await page.screenshot({ path: testInfo.outputPath(name) });
   };
   const measured = async () => {
     const pane = await page
@@ -314,6 +318,7 @@ test("isolating a district shows it and the districts linked to it, counts the r
   // (7) the notice says what is shown, and has the way back
   await expect(notice).toHaveText(isolationText(iso));
   await expect(page.getByRole("button", { name: "Show all districts", exact: true })).toBeVisible();
+  await shot("ecosystem-isolated.png");
 
   // (8) the isolated district is not offered for isolation again
   await expect(page.getByRole("button", { name: `Isolate ${iso.label}`, exact: true })).toHaveCount(0);
@@ -370,6 +375,7 @@ test("isolating a district shows it and the districts linked to it, counts the r
   await fit();
   await expectMap(stated);
   await expect(notice).toHaveText(isolationText(iso));
+  await shot("ecosystem-isolated-address.png");
 
   // (13) an address that names no district is the whole map, with no notice
   await page.goto("/?isolate=nope");
