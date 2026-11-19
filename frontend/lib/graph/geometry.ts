@@ -19,6 +19,8 @@ export interface Route {
   /** The route's last point, and a point behind it that gives its direction there. */
   end: Point;
   towards: Point;
+  /** The corners the path is drawn through, before its bends are rounded: start first, end last. */
+  points: Point[];
 }
 
 /** Room left at the target's border for the arrowhead. */
@@ -65,7 +67,7 @@ const MIN_RUN = 14;
 export type Axis = "x" | "y";
 
 /** Corners cut back by up to `radius` along both of their sides, and rounded. */
-function rounded(points: readonly Point[], radius: number): string {
+export function rounded(points: readonly Point[], radius: number): string {
   let d = `M ${at(points[0]!)}`;
   for (let i = 1; i < points.length - 1; i++) {
     const p = points[i - 1]!;
@@ -117,6 +119,7 @@ export function octilinear(start: Point, end: Point, axis: Axis = "x", shift = 0
     start,
     end,
     towards: last.x === end.x && last.y === end.y ? start : last,
+    points,
   };
 }
 
@@ -138,7 +141,14 @@ export function floating(source: Box, target: Box, offset = 0): Route {
   if (gapX <= 0 && gapY <= 0) {
     const start = exitPoint(source, a, b);
     const end = exitPoint(target, b, a, ARRIVAL_GAP);
-    return { path: `M ${at(start)} L ${at(end)}`, label: { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 }, start, end, towards: start };
+    return {
+      path: `M ${at(start)} L ${at(end)}`,
+      label: { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 },
+      start,
+      end,
+      towards: start,
+      points: [start, end],
+    };
   }
   if (gapX >= gapY) {
     const sx = Math.sign(dx) || 1;

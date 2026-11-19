@@ -16,6 +16,7 @@ import {
   isolationText,
   notDrawn,
   notDrawnText,
+  overviewTitle,
   summaryFacts,
   summaryLabel,
   whyNotDrawn,
@@ -444,6 +445,14 @@ describe("the cards of an isolated district", () => {
     expect(isolationText(iso)).toBe(
       `Isolated: ${iso.label} and ${plural(iso.neighbours.length, "linked district")} · ${plural(iso.hidden.length, "district")} not shown`,
     );
+  });
+
+  it("titles the level by the whole map, or by the district it is isolated on, in the pinned words", () => {
+    expect(overviewTitle(null)).toBe("All repositories");
+    expect(overviewTitle(iso)).toBe(`Isolated: ${iso.label}`);
+    expect(overviewTitle({ ...iso, label: "t1-00" })).toBe("Isolated: t1-00");
+    // the title names the district's whole, never one of its parts
+    expect(overviewTitle(iso)).not.toMatch(/\d+ of \d+/);
   });
 
   it("says a selection is in a district not shown, in the pinned words", () => {

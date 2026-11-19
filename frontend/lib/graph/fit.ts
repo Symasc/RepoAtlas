@@ -20,17 +20,26 @@ export interface FitOptions {
    * from the extent's left edge, and the rest is a pan away.
    */
   minFit?: number | undefined;
+  /**
+   * Where a level held at `minFit` sits vertically: its middle on the screen's
+   * middle (the default), or its top edge at the top of the screen, as a page
+   * is read from. An extent that fits whole is never moved by it.
+   */
+  anchor?: "middle" | "start" | undefined;
 }
 
 /** The whole extent in view, or, where that would shrink it under `minFit`, its left part at `minFit`. */
 export function fitViewport(extent: Box, viewport: { width: number; height: number }, options: FitOptions = {}): Viewport {
   const { width, height } = viewport;
-  const { minFit } = options;
+  const { minFit, anchor = "middle" } = options;
   const whole = getViewportForBounds(extent, width, height, MIN_ZOOM, FIT_MAX, FIT_PADDING);
   if (minFit === undefined || whole.zoom >= minFit) return whole;
   return {
     x: parseFloat(FIT_PADDING.left) - extent.x * minFit,
-    y: height / 2 - (extent.y + extent.height / 2) * minFit,
+    y:
+      anchor === "start"
+        ? parseFloat(FIT_PADDING.top) - extent.y * minFit
+        : height / 2 - (extent.y + extent.height / 2) * minFit,
     zoom: minFit,
   };
 }

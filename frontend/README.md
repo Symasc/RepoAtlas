@@ -70,7 +70,13 @@ The explorer shows the summary first and the detail when you ask for it.
 - **All repositories:** a district map. Each district is a frame you can collapse into a summary card, and a summary
   card you can expand again. A line between repositories is lifted onto the cards that are visible, so a collapsed
   district carries the lines of what it holds. A repository included in another is shown nested inside it. Selecting
-  something never moves the map.
+  something never moves the map. **Expand all districts** opens every district; since that is more than one screen
+  can read, the view moves to the map's top left at a readable zoom (75%) and the rest is a pan away. **Fit to
+  screen** shows all of it at once, small.
+  An open or collapsed district that has something to leave out has an **Isolate** button: the map then shows that
+  district and the districts linked to it, and counts the links to the rest. The title becomes `Isolated: <district>`
+  beside an **All repositories** step that brings the whole map back (as does **Show all districts**), and the isolated
+  district is marked with an accent edge and an *Isolated* tag.
 - **A repository:** the directory you are in, as cards: one per directory, plus its files. Each card counts its links
   per family rather than drawing them.
 - **A file:** opens on its highlighted code. Press a name to select it; press again, or **Trace**, to follow it.

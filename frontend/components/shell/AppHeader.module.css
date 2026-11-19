@@ -1,6 +1,7 @@
 .bar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 600px) minmax(0, 1fr);
+  /* the side columns are never narrower than what they hold: the search in the middle gives way */
+  grid-template-columns: minmax(max-content, 1fr) minmax(0, 600px) minmax(max-content, 1fr);
   align-items: center;
   gap: var(--mantine-spacing-lg);
   height: 100%;

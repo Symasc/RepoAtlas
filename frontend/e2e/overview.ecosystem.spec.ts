@@ -1,18 +1,32 @@
 import type { Locator, Page } from "@playwright/test";
 
 import type { RepositoriesResponse, TopologyOverviewResponse } from "@/lib/api/generated";
-import { CARD_CAP, defaultExpanded, layoutDistricts, summaryId, visibleCards } from "@/lib/graph/districtLayout";
+import {
+  CARD_CAP,
+  defaultExpanded,
+  layoutDistricts,
+  READABLE_ZOOM,
+  summaryId,
+  visibleCards,
+} from "@/lib/graph/districtLayout";
 import { districts, wholeId } from "@/lib/graph/districts";
-import { districtLinks, isolate, wholeLabel } from "@/lib/graph/isolate";
+import { districtLinks, isolable, isolate, wholeLabel } from "@/lib/graph/isolate";
 import { liftEdges } from "@/lib/graph/lift";
-import { isolationText, notDrawn, notDrawnText, summaryFacts, summaryLabel } from "@/lib/graph/overviewCards";
-import { resolveOverview, type ResolvedOverview } from "@/lib/graph/overviewState";
+import {
+  isolationText,
+  notDrawn,
+  notDrawnText,
+  overviewTitle,
+  summaryFacts,
+  summaryLabel,
+} from "@/lib/graph/overviewCards";
+import { isolateState, resolveOverview, type ResolvedOverview } from "@/lib/graph/overviewState";
 import { overviewView } from "@/lib/graph/overviewView";
 import { buildOverview, repositoryId } from "@/lib/model/graph";
 import { readOverviewState, type OverviewState } from "@/lib/model/location";
 import { ecosystem300 } from "@/tests/fixtures/ecosystem";
 
-import { expect, ready, test, wholeMap } from "./fixtures";
+import { expect, ready, test } from "./fixtures";
 
 /**
  * The overview at the size it has to hold: the 300-repository ecosystem fixture,
@@ -144,8 +158,14 @@ test("the overview holds an ecosystem of 300 repositories", async ({ page, probl
   await fit();
   await shot("ecosystem-tree-fit.png");
 
-  await wholeMap(page);
+  // Expand all opens every district and looks at the map's top left at a readable zoom:
+  // all of it is more than one screen reads, so the rest is a pan away; Fit shows it all, small
+  await page.getByRole("button", { name: "Expand all districts", exact: true }).click();
+  await expect(page.getByLabel("Zoom level")).toHaveText(`${Math.round(READABLE_ZOOM * 100)}%`);
+  await expect(page.locator(`.react-flow__node-district[data-id="${ds[0]!.id}"]`)).toBeInViewport();
   await shot("ecosystem-all.png");
+  await fit();
+  await shot("ecosystem-all-fit.png");
 
   await page.getByRole("button", { name: "Collapse all districts", exact: true }).click();
   await fit();
@@ -285,8 +305,12 @@ test("isolating a district shows it and the districts linked to it, counts the r
   await expect(overviewEl).not.toHaveAttribute("data-isolate", /.*/);
   const before = await entries();
 
-  // (2) Isolate writes the whole and every part open, and is an entry to come back to
-  await page.getByRole("button", { name: `Isolate ${iso.label}`, exact: true }).click();
+  // (2) Isolate writes the whole and every part open, and is an entry to come back to; the other
+  // parts are collapsed summaries that carry the same name, so the press is scoped to the open frame
+  await page
+    .locator(`.react-flow__node-district[data-id="${FIRST}"]`)
+    .getByRole("button", { name: `Isolate ${iso.label}`, exact: true })
+    .click();
   const isolated = query([
     ["isolate", token(WHOLE)],
     ["expand", partTokens.join(",")],
@@ -323,9 +347,18 @@ test("isolating a district shows it and the districts linked to it, counts the r
     );
   }
 
-  // (7) the notice says what is shown, and has the way back
+  // (7) the notice says what is shown, and has the way back; the title says which district this is,
+  // and the district is marked on the map: the open core, and nothing else
   await expect(notice).toHaveText(isolationText(iso));
   await expect(page.getByRole("button", { name: "Show all districts", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: overviewTitle(iso), exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "All repositories", exact: true })).toHaveCount(0);
+  // the whole map is a step back, in the title's place
+  await expect(page.getByRole("button", { name: "All repositories", exact: true })).toBeVisible();
+  const openCore = iso.core.filter((id) => r.expanded.has(id)).sort();
+  expect(openCore.length, "the isolated district is open").toBeGreaterThan(0);
+  await expect.poll(() => nodeIds(".react-flow__node-district:has([data-isolated])")).toEqual(openCore);
+  await expect.poll(() => nodeIds(".react-flow__node-districtSummary:has([data-isolated])")).toEqual([]);
   await shot("ecosystem-isolated.png");
 
   // (8) the isolated district is not offered for isolation again
@@ -347,6 +380,9 @@ test("isolating a district shows it and the districts linked to it, counts the r
   expect(await entries(), "Show all pushes an entry").toBe(before + 2);
   await expect(notice).toHaveCount(0);
   await expect(overviewEl).not.toHaveAttribute("data-isolate", /.*/);
+  // nothing is marked, and the title is the whole map's again
+  await expect(page.locator("[data-isolated]")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: overviewTitle(null), exact: true })).toBeVisible();
   pane = await measured();
   const whole = resolveAs(readOverviewState(new URLSearchParams(everything)), pane);
   expect(whole.shown.map((d) => d.id)).toEqual(ds.map((d) => d.id));
@@ -417,6 +453,20 @@ test("isolating a district shows it and the districts linked to it, counts the r
   await fit();
   await expectMap(nothing);
 
-  // (14) and nothing went wrong in the page
+  // (14) a collapsed district offers Isolate itself: it isolates that district, as an entry to come back to
+  const offered = isolable(ds, adjacency);
+  const Y = ds.find((d) => offered.has(wholeId(d)) && wholeId(d) !== WHOLE && !nothing.expanded.has(d.id));
+  expect(Y, "a collapsed district that isolating narrows").toBeDefined();
+  const beforeY = await entries();
+  await page
+    .locator(`.react-flow__node-districtSummary[data-id="${summaryId(Y!.id)}"]`)
+    .getByRole("button", { name: `Isolate ${wholeLabel(Y!)}`, exact: true })
+    .click();
+  const wanted = isolateState(nothing, ds, Y!.id)!;
+  await expect.poll(async () => readOverviewState(new URLSearchParams(await search()))).toEqual(wanted);
+  expect(await entries(), "Isolate on a summary pushes an entry").toBe(beforeY + 1);
+  await expect(overviewEl).toHaveAttribute("data-isolate", wholeId(Y!));
+
+  // (15) and nothing went wrong in the page
   expect(problems).toEqual([]);
 });

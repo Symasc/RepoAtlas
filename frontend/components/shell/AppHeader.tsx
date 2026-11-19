@@ -20,7 +20,7 @@ interface Props {
 export function AppHeader({ repositories, freshness, offline }: Props) {
   return (
     <div className={classes.bar}>
-      <div className={classes.start}>
+      <div className={classes.start} data-header="start">
         <Link className={classes.brand} href="/" aria-label="RepoAtlas, all repositories">
           <span className={classes.mark}>
             <Logo />
@@ -29,12 +29,12 @@ export function AppHeader({ repositories, freshness, offline }: Props) {
         </Link>
       </div>
 
-      <div className={classes.center}>
+      <div className={classes.center} data-header="center">
         <SearchTrigger />
         <NamesToggle className={classes.names} />
       </div>
 
-      <div className={classes.end}>
+      <div className={classes.end} data-header="end">
         <FreshnessIndicator repositories={repositories} check={freshness} offline={offline} />
         <MotionToggle />
         <ThemeToggle />

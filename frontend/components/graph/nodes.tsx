@@ -58,9 +58,19 @@ type RepositoryNodeData = Common & {
   inclusion?: { parentName: string | null; depth: number; kind: InclusionKind | null; label: string | null } | null;
 };
 /** An open district's frame: a backdrop with real buttons to close it and, when there is something to leave out, to isolate it. */
-type DistrictNodeData = { facts: FrameFacts; actions: NodeActions; isolate: { label: string } | null };
-/** A collapsed district: one card, which opens it. */
-type DistrictSummaryNodeData = Common & { facts: SummaryFacts };
+type DistrictNodeData = {
+  facts: FrameFacts;
+  actions: NodeActions;
+  isolate: { label: string } | null;
+  /** This is the district the map is isolated on. */
+  isolated: boolean;
+};
+/** A collapsed district: one card, which opens it, and, when there is something to leave out, a button to isolate it. */
+type DistrictSummaryNodeData = Common & {
+  facts: SummaryFacts;
+  isolate: { label: string } | null;
+  isolated: boolean;
+};
 type HubNodeData = { repositories: number; files: number; note: string | null };
 type GroupNodeData = { count: number };
 /** Out to a directory on the way here, `""` for the repository's root (see useClimb). */
@@ -219,14 +229,20 @@ function RepositoryNode({ id, data }: NodeProps<Node<RepositoryNodeData, "reposi
 
 /** An open district: its name and size, what joins a tree, and the buttons that isolate it and close it. */
 function DistrictNode({ data }: NodeProps<Node<DistrictNodeData, "district">>) {
-  const { facts, actions, isolate } = data;
+  const { facts, actions, isolate, isolated } = data;
   const meta = frameMeta(facts);
   const kinds = facts.inclusion?.kinds ?? [];
   const mark = kinds.length === 0 ? undefined : kinds.length === 1 ? kinds[0] : "mixed";
   return (
-    <div className={classes.district} data-kind={facts.kind} data-inclusion={mark}>
+    <div
+      className={classes.district}
+      data-kind={facts.kind}
+      data-inclusion={mark}
+      data-isolated={isolated || undefined}
+    >
       <div className={classes.districtHeader}>
         <span className={classes.districtTitle}>{frameTitle(facts)}</span>
+        {isolated && <span className={classes.isolatedTag}>Isolated</span>}
         {meta !== null && <span className={classes.districtMeta}>{meta}</span>}
         {isolate !== null && (
           <button
@@ -269,10 +285,16 @@ function SummaryTallies({ tallies }: { tallies: FamilyTallies }) {
 
 /** A collapsed district, one card: its name, who is in it, and what its links look like from outside and inside. */
 function DistrictSummaryNode({ data }: NodeProps<Node<DistrictSummaryNodeData, "districtSummary">>) {
-  const { facts, actions, selected = false } = data;
+  const { facts, actions, isolate, isolated, selected = false } = data;
   const hasInternal = FAMILIES.some((f) => (facts.internal[f]?.links ?? 0) > 0);
   return (
-    <div className={classes.districtSummary} data-kind={facts.kind} data-selected={selected || undefined}>
+    <div
+      className={classes.districtSummary}
+      data-kind={facts.kind}
+      data-selected={selected || undefined}
+      data-isolated={isolated || undefined}
+      data-isolable={isolate !== null || undefined}
+    >
       <Anchors />
       <button
         type="button"
@@ -281,9 +303,22 @@ function DistrictSummaryNode({ data }: NodeProps<Node<DistrictSummaryNodeData, "
         aria-label={`Expand ${facts.label}, ${plural(facts.members, "repository", "repositories")}`}
         onClick={stop(() => actions.activate(facts.id))}
       />
+      {isolate !== null && (
+        <button
+          type="button"
+          className={`${classes.summaryIsolate} nodrag nopan`}
+          aria-label={`Isolate ${isolate.label}`}
+          title="Show only this district and the districts linked to it"
+          // the node's own id is the summary's: the district is what is isolated
+          onClick={stop(() => actions.isolate?.(facts.district))}
+        >
+          Isolate
+        </button>
+      )}
       <span className={classes.summaryTitle} aria-hidden>
         <StackIcon size={16} className={classes.folder} aria-hidden />
         <span className={classes.cardTitle}>{facts.label}</span>
+        {isolated && <span className={classes.isolatedTag}>Isolated</span>}
         <span className={classes.cardCount}>{formatCount(facts.members)}</span>
       </span>
       <span className={classes.summarySample} aria-hidden>

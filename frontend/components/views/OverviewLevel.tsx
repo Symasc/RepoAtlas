@@ -1,6 +1,6 @@
 "use client";
 
-import { Button } from "@mantine/core";
+import { Button, UnstyledButton } from "@mantine/core";
 import { useCallback, useMemo, useState } from "react";
 
 import { RepoSwatch } from "@/components/common/RepoSwatch";
@@ -19,8 +19,8 @@ import inspectorClasses from "@/components/inspector/Inspector.module.css";
 import type { RepositoryLink } from "@/lib/api/generated";
 import { useConnections } from "@/lib/api/connections";
 import { useTopologyOverview } from "@/lib/api/topology";
-import { districts, wholeId } from "@/lib/graph/districts";
-import { summaryId } from "@/lib/graph/districtLayout";
+import { districts, wholeId, type District } from "@/lib/graph/districts";
+import { READABLE_ZOOM, summaryId } from "@/lib/graph/districtLayout";
 import { inclusionMarks } from "@/lib/graph/inclusionMarks";
 import { districtLinks, isolable, wholeLabel } from "@/lib/graph/isolate";
 import { HUB_ID } from "@/lib/graph/layout";
@@ -30,6 +30,7 @@ import {
   isolationText,
   notDrawn,
   notDrawnText,
+  overviewTitle,
   summaryFacts,
   whyNotDrawn,
   whyNotDrawnText,
@@ -148,7 +149,16 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
     [resolveFor, nav],
   );
   const toggle = useCallback((id: string) => change((r) => toggleState(r, id)), [change]);
-  const expandAll = useCallback(() => change(expandAllState), [change]);
+  // Expand all remembers what it opened: once the map is that, the view looks at its top left
+  // at a readable zoom (every district open is more than any screen shows at once)
+  const [expandedAll, setExpandedAll] = useState<{ nonce: number; expand: readonly string[] } | null>(null);
+  const expandAll = useCallback(() => {
+    const r = resolveFor(nav.currentOverview());
+    if (!r) return;
+    const next = expandAllState(r);
+    nav.setOverview(next);
+    setExpandedAll((prev) => ({ nonce: (prev?.nonce ?? 0) + 1, expand: next.expand ?? [] }));
+  }, [resolveFor, nav]);
   const collapseAll = useCallback(() => change(collapseAllState), [change]);
   // isolating and coming back are places to return to: they push an entry, so Back undoes them
   const isolateDistrict = useCallback(
@@ -210,17 +220,19 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
     }
     if (!view) return [];
     const out: GraphNode[] = [];
+    // isolating the isolated district, or one that leaves nothing out, would change nothing
+    const offer = (d: District) =>
+      canIsolate.has(wholeId(d)) && wholeId(d) !== isolation?.focus ? { label: wholeLabel(d) } : null;
+    const marked = (d: District) => wholeId(d) === isolation?.focus;
     for (const [id, box] of view.layout.frames) {
       const d = byId.get(id);
       if (!d) continue;
-      // isolating the isolated district, or one that leaves nothing out, would change nothing
-      const offered = canIsolate.has(wholeId(d)) && wholeId(d) !== isolation?.focus;
       out.push(
         place(
           {
             id,
             type: "district",
-            data: { facts: frameFacts(d, marks), actions, isolate: offered ? { label: wholeLabel(d) } : null },
+            data: { facts: frameFacts(d, marks), actions, isolate: offer(d), isolated: marked(d) },
             zIndex: -1,
           },
           box,
@@ -232,7 +244,16 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
       const id = summaryId(d.id);
       const box = view.layout.cards.get(id);
       if (box) {
-        out.push(place({ id, type: "districtSummary", data: { facts: summaryFacts(view, d, names), actions } }, box));
+        out.push(
+          place(
+            {
+              id,
+              type: "districtSummary",
+              data: { facts: summaryFacts(view, d, names), actions, isolate: offer(d), isolated: marked(d) },
+            },
+            box,
+          ),
+        );
       }
     }
     for (const repository of repositories) {
@@ -255,6 +276,13 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
 
   const edges = useMemo(() => (view ? flowEdges(view.edges, { route: () => "float" }) : []), [view]);
   const extent = view ? view.layout.extent : ready && ds.length === 0 ? HUB_BOX : null;
+  // asked for only once the map holds exactly what Expand all opened: the layout it looks at is then the one drawn
+  const look = useMemo(() => {
+    if (expandedAll === null || resolved === null) return null;
+    const open = resolved.expanded;
+    const same = open.size === expandedAll.expand.length && expandedAll.expand.every((id) => open.has(id));
+    return same ? { key: String(expandedAll.nonce), minFit: READABLE_ZOOM } : null;
+  }, [expandedAll, resolved]);
 
   const families = useMemo<Family[]>(() => {
     const present = new Set(graph.edges.map((e) => e.link.family));
@@ -319,13 +347,29 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
             }}
             extent={extent}
             refit={`${dsKey}|${isolation?.focus ?? ""}|${pane?.width}x${pane?.height}`}
+            look={look}
             holdOnGrowth
             holdOnResize
             onPaneSize={onPaneSize}
             families={families}
             start={
               <>
-                <h1 className={classes.levelTitle}>All repositories</h1>
+                {isolation ? (
+                  // isolated: the whole map is a step back, and the title says which district this is
+                  <nav className={classes.isolatedTrail} aria-label="Location">
+                    <UnstyledButton className={classes.crumb} onClick={showAll}>
+                      All repositories
+                    </UnstyledButton>
+                    <span className={classes.separator} aria-hidden>
+                      /
+                    </span>
+                    <h1 className={`${classes.levelTitle} ${classes.isolatedTitle}`} title={overviewTitle(isolation)}>
+                      {overviewTitle(isolation)}
+                    </h1>
+                  </nav>
+                ) : (
+                  <h1 className={classes.levelTitle}>{overviewTitle(null)}</h1>
+                )}
                 <div className={classes.toolbarGroup} role="group" aria-label="Districts">
                   <Button size="compact-xs" variant="subtle" onClick={expandAll} disabled={view === null}>
                     Expand all districts
