@@ -313,6 +313,106 @@ test("the overview is a map of districts", async ({ page, request, problems }) =
   expect(problems).toEqual([]);
 });
 
+test("the districts that are expanded are in the address: Back, a reload and a shared link keep them", async ({ page, request, problems }) => {
+  // what the model says the page should hold, from the same API
+  const repositories = toRepositories(await ask(request, "repositories", { context: WORKSPACE }));
+  const overview = await ask(request, "topology/overview", { context: WORKSPACE });
+  const edges = buildOverview(repositories, overview.links ?? []).edges;
+  const ds = districts(repositories, edges);
+  const names = new Map(repositories.map((r) => [repositoryId(r.slug), r.name]));
+  expect(ds.length, "at least two districts").toBeGreaterThanOrEqual(2);
+  const nodeIds = (selector: string) =>
+    page.locator(selector).evaluateAll((all) => all.map((n) => (n as HTMLElement).dataset.id!).sort());
+  // fitted once the map has something on it and has stopped moving
+  const fit = async () => {
+    await settled(page);
+    await page.getByRole("button", { name: "Fit to screen", exact: true }).click();
+  };
+  const search = () => page.evaluate(() => window.location.search);
+  const entries = () => page.evaluate(() => window.history.length);
+  /** The map holds exactly these districts open, as frames, and every other one as a summary. */
+  const expectOpen = async (open: readonly string[]) => {
+    await expect.poll(() => nodeIds(".react-flow__node-district")).toEqual([...open].sort());
+    await expect
+      .poll(() => nodeIds(".react-flow__node-districtSummary"))
+      .toEqual(ds.filter((d) => !open.includes(d.id)).map((d) => summaryId(d.id)).sort());
+  };
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/");
+  await ready(page);
+  await settled(page);
+  const pane = await page
+    .locator(".react-flow")
+    .evaluate((el) => ({ width: (el as HTMLElement).offsetWidth, height: (el as HTMLElement).offsetHeight }));
+  await expect(page.locator("[data-overview]")).toHaveAttribute("data-pane", `${pane.width}x${pane.height}`);
+  const def = defaultExpanded(ds, pane).expanded;
+  const home = ds.find((d) => !(def.size === 1 && def.has(d.id)));
+  expect(home, "a district whose expansion differs from the default's alone").toBeDefined();
+  const token = home!.id.slice("district:".length);
+  const homeNames = home!.members.map((m) => names.get(m)!);
+  const slug = home!.members[0]!.slice("repo:".length);
+  const first = homeNames[0]!;
+
+  // (a) the adaptive default is not written
+  expect(await search(), "arriving writes no expand").toBe("");
+  await expectOpen([...def]);
+
+  // (b) collapsing all is stated as an empty list, replaces the entry, and leaves nothing open
+  const before = await entries();
+  await page.getByRole("button", { name: "Collapse all districts", exact: true }).click();
+  await expect.poll(search).toBe("?expand=");
+  expect(await entries(), "Collapse all replaces the entry").toBe(before);
+  await fit();
+  await expectOpen([]);
+  await expect(page.locator(".react-flow__node-district")).toHaveCount(0);
+
+  // (c) one district opened is the one in the address
+  await page
+    .getByRole("button", { name: `Expand ${home!.label}, ${plural(home!.members.length, "repository", "repositories")}`, exact: true })
+    .click();
+  await expect.poll(search).toBe(`?${new URLSearchParams({ expand: token }).toString()}`);
+  expect(await entries(), "Expand replaces the entry").toBe(before);
+  await fit();
+  await expectOpen([home!.id]);
+
+  // (d) choosing a repository keeps the districts; going into it leaves them behind it
+  await page.getByRole("button", { name: `Select ${first}`, exact: true }).click();
+  const chosen = `?${new URLSearchParams([["expand", token], ["sel", `repo:${slug}`]]).toString()}`;
+  await expect.poll(search).toBe(chosen);
+  await expect(page.getByRole("complementary", { name: `${first}, inspected` })).toBeVisible();
+  await page.getByRole("button", { name: `Open ${first}`, exact: true }).first().click();
+  await expect.poll(search).toBe(`?${new URLSearchParams({ repo: slug }).toString()}`);
+
+  // (e) Back is the map as it was left, selection included
+  await page.goBack();
+  await expect.poll(search).toBe(chosen);
+  await expect(page.getByRole("complementary", { name: `${first}, inspected` })).toBeVisible();
+  await fit();
+  await expectOpen([home!.id]);
+
+  // (f) a reload is the same map, and the same inspector
+  await page.reload();
+  await ready(page);
+  await expect(page.getByRole("complementary", { name: `${first}, inspected` })).toBeVisible();
+  await fit();
+  await expectOpen([home!.id]);
+
+  // (g) a shared link: what is not a district, and empty entries, are ignored
+  await page.goto(`/?${new URLSearchParams({ expand: `nope,${token},,` }).toString()}`);
+  await ready(page);
+  await fit();
+  await expectOpen([home!.id]);
+
+  // (h) `expand=` is nothing open, not the default
+  await page.goto("/?expand=");
+  await ready(page);
+  await fit();
+  await expectOpen([]);
+  await expect(page.locator(".react-flow__node-districtSummary")).toHaveCount(ds.length);
+  expect(problems).toEqual([]);
+});
+
 test("unlinked repositories are drawn too, in their own group",async ({ page, request, problems }) => {
   const overview = await ask(request, "topology/overview", { context: WORKSPACE });
   const linked = new Set((overview.links ?? []).flatMap((l) => [l.source, l.target]));

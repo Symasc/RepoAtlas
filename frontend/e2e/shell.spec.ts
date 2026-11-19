@@ -117,7 +117,8 @@ test("a first press selects a repository, a second opens it, and Back climbs out
   await ready(page);
   await wholeMap(page);
   await page.getByRole("button", { name: `Select ${target.name}`, exact: true }).click();
-  await expect(page).toHaveURL(new RegExp(`\\?sel=repo${literal("%3A")}${slug}$`));
+  // the districts that are expanded are in the address, and the selection ends it
+  await expect(page).toHaveURL(new RegExp(`[?&]sel=repo${literal("%3A")}${slug}$`));
   const panel = inspector(page, target.name);
   await expect(panel).toBeVisible();
   await expect(panel.getByRole("button", { name: `Open ${target.name}` })).toBeVisible();
@@ -144,7 +145,8 @@ test("a first press selects a repository, a second opens it, and Back climbs out
   await expect(page).toHaveURL(new RegExp(`\\?repo=${slug}&sel=dir${literal("%3A")}`));
   await expect(inspector(page, first.name)).toBeVisible();
   await page.goBack();
-  await expect(page).toHaveURL(new RegExp(`\\?sel=repo${literal("%3A")}${slug}$`));
+  await expect(page).toHaveURL(new RegExp(`[?&]sel=repo${literal("%3A")}${slug}$`));
+  await expect(page).toHaveURL(/[?&]expand=/);
   await expect(page.getByRole("button", { name: `Open ${target.name}`, exact: true }).first()).toBeVisible();
 
   // Escape clears the selection

@@ -15,16 +15,17 @@ import { TraceLevel } from "@/components/views/TraceLevel";
 import { ApiError } from "@/lib/api/client";
 import type { NameMatch } from "@/lib/api/generated";
 import { useLiveFreshness, useRepositories } from "@/lib/api/queries";
-import { direction, placeKey, search, type Place } from "@/lib/model/location";
+import { direction, isOverview, placeKey, readOverviewState, search, type Place } from "@/lib/model/location";
 import type { RepositoryModel } from "@/lib/model/repositories";
 
 import classes from "./Explorer.module.css";
 
 /**
  * The one explorer screen. Where you are lives in the address
- * (`?repo=<slug>&path=<dir or file>&sel=<node>`), so a view can be shared and
- * Back climbs out. Going somewhere pushes an entry once the canvas has zoomed
- * on its way; choosing something replaces the current one.
+ * (`?repo=<slug>&path=<dir or file>&sel=<node>`, and on the overview which
+ * districts are expanded), so a view can be shared and Back climbs out. Going
+ * somewhere pushes an entry once the canvas has zoomed on its way; choosing
+ * something replaces the current one.
  */
 export function Explorer() {
   const pathname = usePathname();
@@ -47,6 +48,12 @@ export function Explorer() {
   const path = params.get("path") ?? "";
   const trace = params.get("trace");
   const selected = params.get("sel");
+  const expandParam = params.get("expand");
+  const isolateParam = params.get("isolate");
+  const overview = useMemo(
+    () => readOverviewState({ get: (name) => (name === "expand" ? expandParam : name === "isolate" ? isolateParam : null) }),
+    [expandParam, isolateParam],
+  );
   const here = useMemo<Place>(
     () => ({ repository: slug, path: slug === null ? "" : path, trace }),
     [slug, path, trace],
@@ -74,8 +81,20 @@ export function Explorer() {
     };
   }, []);
   const moving = useRef(false);
+  // what the address says of the overview now: a write that changes one thing keeps the rest as it is
+  const currentOverview = useCallback(() => readOverviewState(new URLSearchParams(window.location.search)), []);
   const select = useCallback(
-    (id: string | null) => window.history.replaceState(null, "", `${pathname}${search(here, id)}`),
+    (id: string | null) => window.history.replaceState(null, "", `${pathname}${search(here, id, currentOverview())}`),
+    [pathname, here, currentOverview],
+  );
+  const setOverview = useCallback<Navigation["setOverview"]>(
+    (state, options = {}) => {
+      if (!isOverview(here)) return;
+      const sel = new URLSearchParams(window.location.search).get("sel");
+      const url = `${pathname}${search(here, sel, state)}`;
+      if (options.push) window.history.pushState(null, "", url);
+      else window.history.replaceState(null, "", url);
+    },
     [pathname, here],
   );
   const go = useCallback<Navigation["go"]>(
@@ -92,13 +111,15 @@ export function Explorer() {
         const leaving = exit.current?.(direction(here, to), options.via ?? null);
         if (leaving) await Promise.race([leaving, new Promise((resolve) => setTimeout(resolve, 700))]);
         // the way back lands on what was gone into, chosen
-        if (options.via) window.history.replaceState(null, "", `${pathname}${search(here, options.via)}`);
+        if (options.via) {
+          window.history.replaceState(null, "", `${pathname}${search(here, options.via, currentOverview())}`);
+        }
         window.history.pushState(null, "", `${pathname}${search(to, options.select ?? null)}`);
       } finally {
         moving.current = false;
       }
     },
-    [here, pathname, select],
+    [here, pathname, select, currentOverview],
   );
   const nav = useMemo<Navigation>(
     () => ({
@@ -109,8 +130,11 @@ export function Explorer() {
       select,
       // the address itself: a second press can land before the view re-renders
       isSelected: (id) => new URLSearchParams(window.location.search).get("sel") === id,
+      overview,
+      currentOverview,
+      setOverview,
     }),
-    [here, selected, arrival, go, select],
+    [here, selected, arrival, go, select, overview, currentOverview, setOverview],
   );
   const openRepository = useCallback((next: string) => nav.go({ repository: next, path: "" }), [nav]);
   const openFile = useCallback((next: string, file: string) => nav.go({ repository: next, path: file }), [nav]);

@@ -20,7 +20,7 @@ import type { RepositoryLink } from "@/lib/api/generated";
 import { useConnections } from "@/lib/api/connections";
 import { useTopologyOverview } from "@/lib/api/topology";
 import { districts } from "@/lib/graph/districts";
-import { defaultExpanded, summaryId } from "@/lib/graph/districtLayout";
+import { summaryId } from "@/lib/graph/districtLayout";
 import { inclusionMarks } from "@/lib/graph/inclusionMarks";
 import { HUB_ID } from "@/lib/graph/layout";
 import {
@@ -31,7 +31,15 @@ import {
   whyNotDrawn,
   whyNotDrawnText,
 } from "@/lib/graph/overviewCards";
+import {
+  collapseAllState,
+  expandAllState,
+  resolveOverview,
+  toggleState,
+  type ResolvedOverview,
+} from "@/lib/graph/overviewState";
 import { overviewView, visibleEdge, visibleSelection } from "@/lib/graph/overviewView";
+import type { OverviewState } from "@/lib/model/location";
 import { absoluteTime, formatCount, relativeTime, shortSha } from "@/lib/model/format";
 import { NO_FILTERS } from "@/lib/model/connections";
 import { buildOverview, FAMILIES, repositoryId, type Box, type Connection, type Family } from "@/lib/model/graph";
@@ -96,42 +104,35 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
   );
   const paneWidth = pane?.width;
   const paneHeight = pane?.height;
-  const base = useMemo(
-    () =>
+  // which districts are open is in the address; an address that says nothing is the adaptive default
+  const resolveFor = useCallback(
+    (state: OverviewState) =>
       paneWidth !== undefined && paneHeight !== undefined && ds.length > 0
-        ? defaultExpanded(ds, { width: paneWidth, height: paneHeight })
+        ? resolveOverview({ districts: ds, state, pane: { width: paneWidth, height: paneHeight }, pinned })
         : null,
-    [ds, paneWidth, paneHeight],
+    [ds, paneWidth, paneHeight, pinned],
   );
-  const start = useMemo(
-    () =>
-      base &&
-      new Set([...base.expanded, ...ds.filter((d) => pinned.some((p) => d.members.includes(p))).map((d) => d.id)]),
-    [base, ds, pinned],
-  );
-  // what the reader opened and closed holds for these districts, and is dropped when they change
-  const [toggled, setToggled] = useState<{ key: string; expanded: ReadonlySet<string> } | null>(null);
-  const expanded = toggled?.key === dsKey ? toggled.expanded : start;
+  const resolved = useMemo(() => resolveFor(nav.overview), [resolveFor, nav.overview]);
 
   const view = useMemo(
-    () => (expanded && base ? overviewView({ districts: ds, edges: graph.edges, expanded, shelf: base.shelf }) : null),
-    [ds, graph.edges, expanded, base],
+    () =>
+      resolved
+        ? overviewView({ districts: ds, edges: graph.edges, expanded: resolved.expanded, shelf: resolved.shelf })
+        : null,
+    [ds, graph.edges, resolved],
   );
 
-  const toggle = useCallback(
-    (id: string) =>
-      setToggled((prev) => {
-        const current = prev?.key === dsKey ? prev.expanded : start;
-        if (!current) return prev;
-        const next = new Set(current);
-        if (next.has(id)) next.delete(id);
-        else next.add(id);
-        return { key: dsKey, expanded: next };
-      }),
-    [dsKey, start],
+  // a press is resolved against the address as it is now, so two presses within one frame are both kept
+  const change = useCallback(
+    (next: (r: ResolvedOverview) => OverviewState) => {
+      const r = resolveFor(nav.currentOverview());
+      if (r) nav.setOverview(next(r));
+    },
+    [resolveFor, nav],
   );
-  const expandAll = useCallback(() => setToggled({ key: dsKey, expanded: new Set(ds.map((d) => d.id)) }), [dsKey, ds]);
-  const collapseAll = useCallback(() => setToggled({ key: dsKey, expanded: new Set() }), [dsKey]);
+  const toggle = useCallback((id: string) => change((r) => toggleState(r, id)), [change]);
+  const expandAll = useCallback(() => change(expandAllState), [change]);
+  const collapseAll = useCallback(() => change(collapseAllState), [change]);
 
   // -- what the cards ask for ----------------------------------------------------------------
 
@@ -258,8 +259,8 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
           className={classes.canvas}
           data-overview
           data-pane={pane ? `${pane.width}x${pane.height}` : undefined}
-          data-level={base?.level}
-          data-readable={base ? String(base.readable) : undefined}
+          data-level={resolved?.level}
+          data-readable={resolved ? String(resolved.readable) : undefined}
         >
           <Graph
             nodes={nodes}
@@ -283,12 +284,14 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
             start={
               <>
                 <h1 className={classes.levelTitle}>All repositories</h1>
-                <Button size="compact-xs" variant="subtle" onClick={expandAll} disabled={view === null}>
-                  Expand all districts
-                </Button>
-                <Button size="compact-xs" variant="subtle" onClick={collapseAll} disabled={view === null}>
-                  Collapse all districts
-                </Button>
+                <div className={classes.toolbarGroup} role="group" aria-label="Districts">
+                  <Button size="compact-xs" variant="subtle" onClick={expandAll} disabled={view === null}>
+                    Expand all districts
+                  </Button>
+                  <Button size="compact-xs" variant="subtle" onClick={collapseAll} disabled={view === null}>
+                    Collapse all districts
+                  </Button>
+                </div>
               </>
             }
             end={

@@ -1,5 +1,5 @@
 import type { Direction } from "@/components/graph/transition";
-import type { Place } from "@/lib/model/location";
+import type { OverviewState, Place } from "@/lib/model/location";
 
 /** What a level view is told about where it is, and what it may do about it. */
 export interface Navigation {
@@ -16,6 +16,16 @@ export interface Navigation {
   select: (id: string | null) => void;
   /** Whether `id` is selected now, in an event handler: ahead of any render. */
   isSelected: (id: string) => boolean;
+  /** What the address states of the overview (`expand`, `isolate`), as written and not yet resolved against the districts. */
+  overview: OverviewState;
+  /** The same, read from the address now, in an event handler: ahead of any render. */
+  currentOverview: () => OverviewState;
+  /**
+   * States the overview in the address, keeping the selection as it is there. It
+   * replaces the entry unless `push` says it is a place to come back to. Does
+   * nothing anywhere but the overview.
+   */
+  setOverview: (state: OverviewState, options?: { push?: boolean }) => void;
 }
 
 /** The selection a file level reads as "this line": a place opened at its line lands on it. */

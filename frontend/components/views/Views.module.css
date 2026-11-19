@@ -16,6 +16,15 @@
   white-space: nowrap;
 }
 
+/* the two buttons that open and close every district: they stay side by side, never one under the other */
+.toolbarGroup {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
 /* the workspace in one line: "4 repositories · 3,950 files · …" */
 .totals {
   display: flex;

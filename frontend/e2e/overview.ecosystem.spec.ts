@@ -1,8 +1,10 @@
 import type { Locator, Page } from "@playwright/test";
 
 import type { RepositoriesResponse, TopologyOverviewResponse } from "@/lib/api/generated";
-import { CARD_CAP, defaultExpanded, summaryId, visibleCards } from "@/lib/graph/districtLayout";
+import { CARD_CAP, defaultExpanded, layoutDistricts, summaryId, visibleCards } from "@/lib/graph/districtLayout";
 import { districts } from "@/lib/graph/districts";
+import { notDrawn, notDrawnText } from "@/lib/graph/overviewCards";
+import { overviewView } from "@/lib/graph/overviewView";
 import { buildOverview } from "@/lib/model/graph";
 import { ecosystem300 } from "@/tests/fixtures/ecosystem";
 
@@ -155,22 +157,33 @@ test("the overview holds an ecosystem of 300 repositories", async ({ page, probl
     return box;
   };
   const totals = await boxOf(page.getByLabel("Workspace totals"));
+  const boxes = new Map<string, Rect>();
   for (const [name, locator] of [
     ["the level title", page.getByRole("heading", { name: "All repositories", exact: true })],
     ["Expand all districts", page.getByRole("button", { name: "Expand all districts", exact: true })],
     ["Collapse all districts", page.getByRole("button", { name: "Collapse all districts", exact: true })],
   ] as const) {
     const box = await boxOf(locator);
+    boxes.set(name, box);
     expect(overlaps(box, totals), `${name} is drawn over the workspace totals`).toBe(false);
   }
+  // the two buttons stay side by side: one never wraps under the other
+  expect(
+    Math.abs(boxes.get("Expand all districts")!.y - boxes.get("Collapse all districts")!.y),
+    "Expand all and Collapse all are on one line",
+  ).toBeLessThanOrEqual(1);
   // the legend is shown above the small-screen breakpoint, so 1024px has it
   const legend = await boxOf(page.getByRole("list", { name: "Legend", exact: true }));
-  // the note only exists while something is not drawn; when there is one, it ends before the legend begins
+  // everything is collapsed, so the status note says what is not drawn, and it ends before the legend begins
+  const left1024 = notDrawnText(
+    notDrawn(overviewView({ districts: ds, edges, expanded: new Set(), shelf: layoutDistricts(ds, new Set()).shelf })),
+    0,
+  );
+  expect(left1024, "something is left out of the collapsed map").not.toBeNull();
   const note = page.getByTestId("status-note");
-  if ((await note.count()) > 0) {
-    const noteBox = await boxOf(note);
-    expect(noteBox.x + noteBox.width, "the status note runs under the legend").toBeLessThanOrEqual(legend.x);
-  }
+  await expect(note).toHaveText(left1024!);
+  const noteBox = await boxOf(note);
+  expect(noteBox.x + noteBox.width, "the status note runs under the legend").toBeLessThanOrEqual(legend.x);
   const zoom = await boxOf(page.getByLabel("Zoom level"));
   expect(zoom.x).toBeGreaterThanOrEqual(0);
   expect(zoom.y).toBeGreaterThanOrEqual(0);

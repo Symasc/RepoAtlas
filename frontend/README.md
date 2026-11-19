@@ -129,6 +129,12 @@ The inspector holds the detail: **Connections**, **Contents** or **Files**, **Co
 declarations), and **Evidence** for a chosen connection. Where you are is in the URL
 (`?repo=<slug>&path=<dir or file>&trace=<seed>&sel=<node>`), so a view can be shared.
 
+On the overview, which districts are expanded is in the address too: `expand=<district>,<district>,…` (a district's id
+without its `district:` prefix). With no `expand` the overview opens what stays readable on your screen; `expand=` with
+nothing after it opens none; otherwise exactly the districts listed open. `isolate=<district>` is reserved for
+showing one district and its neighbours: it does nothing yet. Pressing Expand or Collapse replaces the
+history entry, so Back still climbs out of a repository onto the map as you left it.
+
 Motion is limited to transforms and opacity. The header's **Turn animations off** switch stops it; until you choose,
 your system's reduced-motion setting decides. The theme follows your system until you change it with the header's
 theme button.
