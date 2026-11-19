@@ -16,6 +16,7 @@
     "lint": "eslint --max-warnings 0 .",
     "test": "vitest run",
     "e2e": "playwright test",
+    "e2e:servers": "node e2e/servers.mjs",
     "dto": "node scripts/generate-dto.mjs",
     "dto:check": "node scripts/generate-dto.mjs --check",
     "check": "pnpm dto:check && pnpm typecheck && pnpm lint && pnpm test"

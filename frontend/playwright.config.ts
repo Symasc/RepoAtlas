@@ -23,6 +23,12 @@ import { E2E_STATE, assertScratchDatabase } from "./e2e/isolation";
  *
  * One production build of the explorer serves all, each reading its own
  * connection file. Nothing is mocked except where a test says so.
+ *
+ * Servers: by default Playwright starts everything fresh, through one launcher
+ * (`e2e/servers.mjs`) that builds the explorer if it is stale and starts all eight servers in
+ * parallel. `RA_E2E_REUSE=1` reuses servers you started yourself with `pnpm e2e:servers`. Their
+ * state persists across runs, so restart the launcher after a run that mutates state, such as
+ * the scoped project, which declares a scope, syncs and revokes.
  */
 const APP = import.meta.dirname;
 export const REPOSITORY = path.join(APP, "..");
@@ -76,28 +82,8 @@ const PORTS = {
   r1: 7368,
 } as const;
 
-function api(port: number, connectionFile: string, env: Record<string, string> = {}, build = "") {
-  return {
-    command: `${build}"${PYTHON}" -m repoatlas.cli.main serve --port ${port}`,
-    cwd: REPOSITORY,
-    // an unauthenticated GET is refused with 401, which is how it says it is up
-    url: `http://127.0.0.1:${port}/v1`,
-    env: { REPOATLAS_API_CONNECTION_FILE: connectionFile, ...env },
-    reuseExistingServer: false,
-    timeout: 180_000,
-  };
-}
-
-function explorer(port: number, connectionFile: string, build: boolean) {
-  return {
-    command: `${build ? "pnpm exec next build && " : ""}pnpm exec next start --hostname 127.0.0.1 --port ${port}`,
-    cwd: APP,
-    url: `http://localhost:${port}`,
-    env: { REPOATLAS_API_CONNECTION_FILE: connectionFile, RA_DIST_DIR: ".next-e2e" },
-    reuseExistingServer: false,
-    timeout: 300_000,
-  };
-}
+/** `RA_E2E_REUSE=1`: use the servers `pnpm e2e:servers` started, instead of starting fresh ones. */
+const REUSE = Boolean(process.env.RA_E2E_REUSE);
 
 export default defineConfig({
   testDir: "e2e",
@@ -147,51 +133,17 @@ export default defineConfig({
       },
     },
   ],
-  // started in order: the first explorer builds, the second serves the same build
-  webServer: [
-    api(
-      PORTS.liveApi,
-      path.join(STATE, "live-api.json"),
-      LIVE_ENV,
-      // built fresh by the command itself, like the linked and scoped corpora
-      `rm -rf "${LIVE}" && "${PYTHON}" -m tests.topology_corpus "${LIVE}" && `,
-    ),
-    api(
-      PORTS.linkedApi,
-      path.join(STATE, "linked-api.json"),
-      {
-        REPOATLAS_CONFIG: path.join(LINKED, "config.yaml"),
-        REPOATLAS_DB: path.join(LINKED, "state/atlas.db"),
-        // the corpus and its server never touch this machine's RepoAtlas state
-        XDG_CONFIG_HOME: path.join(STATE, "xdg-config"),
-        XDG_DATA_HOME: path.join(STATE, "xdg-data"),
-      },
-      // built fresh by the command itself: the config is also loaded by every
-      // worker, so it must not touch the disk
-      `rm -rf "${LINKED}" && "${PYTHON}" -m tests.topology_corpus "${LINKED}" && `,
-    ),
-    // the scoped corpus: its own index, connection file and ports, built fresh like the linked one
-    api(
-      PORTS.scopedApi,
-      path.join(STATE, "scoped-api.json"),
-      SCOPED_ENV,
-      `rm -rf "${SCOPED}" && "${PYTHON}" -m tests.scoped_e2e_corpus "${SCOPED}" && `,
-    ),
-    // the R1 provider-evidence corpus: read-only in its test, built fresh like the others
-    api(
-      PORTS.r1Api,
-      path.join(STATE, "r1-api.json"),
-      {
-        REPOATLAS_CONFIG: path.join(R1, "config.yaml"),
-        REPOATLAS_DB: path.join(R1, "state/atlas.db"),
-        XDG_CONFIG_HOME: path.join(STATE, "xdg-config"),
-        XDG_DATA_HOME: path.join(STATE, "xdg-data"),
-      },
-      `rm -rf "${R1}" && "${PYTHON}" -m tests.r1_e2e_corpus "${R1}" && `,
-    ),
-    explorer(PORTS.live, path.join(STATE, "live-api.json"), true),
-    explorer(PORTS.linked, path.join(STATE, "linked-api.json"), false),
-    explorer(PORTS.scoped, path.join(STATE, "scoped-api.json"), false),
-    explorer(PORTS.r1, path.join(STATE, "r1-api.json"), false),
-  ],
+  // One entry: the launcher starts all eight servers at once (e2e/servers.mjs) and prints
+  // "e2e servers ready" when each answers. Without `url` Playwright probes nothing, which is the
+  // point: a probe of a closed loopback port can hang for minutes. With RA_E2E_REUSE it probes
+  // the last explorer once, to find the servers you started with `pnpm e2e:servers`.
+  webServer: {
+    command: "node e2e/servers.mjs",
+    cwd: APP,
+    ...(REUSE ? { url: `http://localhost:${PORTS.r1}` } : {}),
+    wait: { stdout: /e2e servers ready/ },
+    reuseExistingServer: REUSE,
+    timeout: 900_000,
+    gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
+  },
 });
