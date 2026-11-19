@@ -198,6 +198,14 @@ test("the overview holds an ecosystem of 300 repositories", async ({ page, probl
   expect(zoom.x + zoom.width).toBeLessThanOrEqual(1024);
   expect(zoom.y + zoom.height).toBeLessThanOrEqual(900);
   await shot("ecosystem-1024.png");
+  // the two buttons that open and close every district stay side by side as the window narrows
+  for (const width of [1024, 900, 760]) {
+    await page.setViewportSize({ width, height: 900 });
+    await settled(page);
+    const open = await boxOf(page.getByRole("button", { name: "Expand all districts" }));
+    const close = await boxOf(page.getByRole("button", { name: "Collapse all districts" }));
+    expect(Math.abs(open.y - close.y), `Expand all and Collapse all share a row at ${width}px`).toBeLessThan(2);
+  }
   expect(problems).toEqual([]);
 });
 
@@ -375,6 +383,25 @@ test("isolating a district shows it and the districts linked to it, counts the r
   await fit();
   await expectMap(stated);
   await expect(notice).toHaveText(isolationText(iso));
+  // no two districts or summaries overlap unless one is inside the other
+  const clashes = await page
+    .locator(".react-flow__node-district, .react-flow__node-districtSummary")
+    .evaluateAll((nodes) => {
+      const boxes = nodes.map((n) => ({ id: n.getAttribute("data-id") ?? "", r: n.getBoundingClientRect() }));
+      const inside = (a: DOMRect, b: DOMRect) =>
+        a.left >= b.left - 1 && a.right <= b.right + 1 && a.top >= b.top - 1 && a.bottom <= b.bottom + 1;
+      const out: string[] = [];
+      for (let i = 0; i < boxes.length; i++) {
+        for (let j = i + 1; j < boxes.length; j++) {
+          const a = boxes[i]!.r;
+          const b = boxes[j]!.r;
+          const across = a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1;
+          if (across && !inside(a, b) && !inside(b, a)) out.push(`${boxes[i]!.id} / ${boxes[j]!.id}`);
+        }
+      }
+      return out;
+    });
+  expect(clashes, "districts drawn over one another").toEqual([]);
   await shot("ecosystem-isolated-address.png");
 
   // (13) an address that names no district is the whole map, with no notice
