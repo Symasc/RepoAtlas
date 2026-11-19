@@ -19,12 +19,15 @@ import inspectorClasses from "@/components/inspector/Inspector.module.css";
 import type { RepositoryLink } from "@/lib/api/generated";
 import { useConnections } from "@/lib/api/connections";
 import { useTopologyOverview } from "@/lib/api/topology";
-import { districts } from "@/lib/graph/districts";
+import { districts, wholeId } from "@/lib/graph/districts";
 import { summaryId } from "@/lib/graph/districtLayout";
 import { inclusionMarks } from "@/lib/graph/inclusionMarks";
+import { districtLinks, isolable, wholeLabel } from "@/lib/graph/isolate";
 import { HUB_ID } from "@/lib/graph/layout";
 import {
   frameFacts,
+  hiddenSelectionText,
+  isolationText,
   notDrawn,
   notDrawnText,
   summaryFacts,
@@ -34,7 +37,9 @@ import {
 import {
   collapseAllState,
   expandAllState,
+  isolateState,
   resolveOverview,
+  showAllState,
   toggleState,
   type ResolvedOverview,
 } from "@/lib/graph/overviewState";
@@ -58,7 +63,9 @@ const HUB_BOX: Box = { x: 0, y: 0, width: 184, height: 184 };
  * Level one: every indexed repository, in districts. A district is open (a frame
  * holding its repositories as cards) or collapsed to one summary card; which
  * open at rest is the most that stays readable on this screen, and the reader
- * opens and closes the rest. Links are drawn between what is on screen. Selecting
+ * opens and closes the rest. An open district can be isolated: the map then shows
+ * it and the districts linked to it, counts the links to the rest, and a notice
+ * says so and brings the whole map back. Links are drawn between what is on screen. Selecting
  * a repository opens it in the inspector and highlights it but never moves the
  * map; a second press goes in.
  */
@@ -84,6 +91,9 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
   const byId = useMemo(() => new Map(ds.map((d) => [d.id, d])), [ds]);
   const names = useMemo(() => new Map(repositories.map((r) => [repositoryId(r.slug), r.name])), [repositories]);
   const marks = useMemo(() => inclusionMarks(repositories, graph.edges), [repositories, graph.edges]);
+  // which districts a connection joins, and which of them have something to leave out when isolated
+  const adjacency = useMemo(() => districtLinks(ds, graph.edges), [ds, graph.edges]);
+  const canIsolate = useMemo(() => isolable(ds, adjacency), [ds, adjacency]);
 
   // The canvas's size decides what opens at rest. While the inspector narrows it
   // the size is not taken: the map holds still, and follows the canvas again once
@@ -104,20 +114,27 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
   );
   const paneWidth = pane?.width;
   const paneHeight = pane?.height;
-  // which districts are open is in the address; an address that says nothing is the adaptive default
+  // which districts are open, and which are on the map, is in the address; an address that says nothing is the adaptive default
   const resolveFor = useCallback(
     (state: OverviewState) =>
       paneWidth !== undefined && paneHeight !== undefined && ds.length > 0
-        ? resolveOverview({ districts: ds, state, pane: { width: paneWidth, height: paneHeight }, pinned })
+        ? resolveOverview({ districts: ds, state, pane: { width: paneWidth, height: paneHeight }, pinned, links: adjacency })
         : null,
-    [ds, paneWidth, paneHeight, pinned],
+    [ds, paneWidth, paneHeight, pinned, adjacency],
   );
   const resolved = useMemo(() => resolveFor(nav.overview), [resolveFor, nav.overview]);
+  const isolation = resolved?.isolation ?? null;
 
   const view = useMemo(
     () =>
       resolved
-        ? overviewView({ districts: ds, edges: graph.edges, expanded: resolved.expanded, shelf: resolved.shelf })
+        ? overviewView({
+            districts: ds,
+            edges: graph.edges,
+            expanded: resolved.expanded,
+            shelf: resolved.shelf,
+            visible: resolved.shown,
+          })
         : null,
     [ds, graph.edges, resolved],
   );
@@ -133,6 +150,19 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
   const toggle = useCallback((id: string) => change((r) => toggleState(r, id)), [change]);
   const expandAll = useCallback(() => change(expandAllState), [change]);
   const collapseAll = useCallback(() => change(collapseAllState), [change]);
+  // isolating and coming back are places to return to: they push an entry, so Back undoes them
+  const isolateDistrict = useCallback(
+    (id: string) => {
+      const r = resolveFor(nav.currentOverview());
+      const next = r ? isolateState(r, ds, id) : null;
+      if (next) nav.setOverview(next, { push: true });
+    },
+    [resolveFor, ds, nav],
+  );
+  const showAll = useCallback(() => {
+    const r = resolveFor(nav.currentOverview());
+    if (r) nav.setOverview(showAllState(r), { push: true });
+  }, [resolveFor, nav]);
 
   // -- what the cards ask for ----------------------------------------------------------------
 
@@ -161,8 +191,8 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
     [ds, byId, toggle, known, nav, open],
   );
   const actions = useMemo<NodeActions>(
-    () => ({ activate, go: (to) => nav.go({ repository: to.repository, path: to.path }) }),
-    [activate, nav],
+    () => ({ activate, go: (to) => nav.go({ repository: to.repository, path: to.path }), isolate: isolateDistrict }),
+    [activate, nav, isolateDistrict],
   );
 
   const partners = useMemo(() => {
@@ -183,10 +213,19 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
     for (const [id, box] of view.layout.frames) {
       const d = byId.get(id);
       if (!d) continue;
+      // isolating the isolated district, or one that leaves nothing out, would change nothing
+      const offered = canIsolate.has(wholeId(d)) && wholeId(d) !== isolation?.focus;
       out.push(
-        place({ id, type: "district", data: { facts: frameFacts(d, marks), actions }, zIndex: -1 }, box, {
-          pointerEvents: "none",
-        }),
+        place(
+          {
+            id,
+            type: "district",
+            data: { facts: frameFacts(d, marks), actions, isolate: offered ? { label: wholeLabel(d) } : null },
+            zIndex: -1,
+          },
+          box,
+          { pointerEvents: "none" },
+        ),
       );
     }
     for (const d of ds) {
@@ -212,7 +251,7 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
       out.push(place({ id, type: "repository", data: { repository, actions, partners: partners.get(id) ?? 0, inclusion } }, box));
     }
     return out;
-  }, [ready, ds, view, byId, marks, names, repositories, overview.isError, actions, partners]);
+  }, [ready, ds, view, byId, marks, names, repositories, overview.isError, actions, partners, canIsolate, isolation]);
 
   const edges = useMemo(() => (view ? flowEdges(view.edges, { route: () => "float" }) : []), [view]);
   const extent = view ? view.layout.extent : ready && ds.length === 0 ? HUB_BOX : null;
@@ -249,6 +288,8 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
       const why = edge ? whyNotDrawn(view, ds, edge) : null;
       if (why) statusText = whyNotDrawnText(why);
     }
+    // a selection in a district that isolating leaves out is on no card: say so
+    if (statusText === null && repository !== null && shownSelection === null) statusText = hiddenSelectionText(repository.name);
     statusText ??= notDrawnText(notDrawn(view), overview.data?.ambiguous_total ?? 0);
   }
 
@@ -261,6 +302,7 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
           data-pane={pane ? `${pane.width}x${pane.height}` : undefined}
           data-level={resolved?.level}
           data-readable={resolved ? String(resolved.readable) : undefined}
+          data-isolate={isolation?.focus}
         >
           <Graph
             nodes={nodes}
@@ -276,7 +318,7 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
               from: view && previous ? visibleSelection(view, previous) : null,
             }}
             extent={extent}
-            refit={`${dsKey}|${pane?.width}x${pane?.height}`}
+            refit={`${dsKey}|${isolation?.focus ?? ""}|${pane?.width}x${pane?.height}`}
             holdOnGrowth
             holdOnResize
             onPaneSize={onPaneSize}
@@ -304,7 +346,21 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
                 onOpenSubmodules={() => setSubmodulesOpen(true)}
               />
             }
-            notice={note && <p>{note}</p>}
+            notice={
+              (note || isolation) && (
+                <>
+                  {note && <p>{note}</p>}
+                  {isolation && (
+                    <div className={classes.isolation}>
+                      <p role="status">{isolationText(isolation)}</p>
+                      <Button size="compact-xs" variant="default" onClick={showAll}>
+                        Show all districts
+                      </Button>
+                    </div>
+                  )}
+                </>
+              )
+            }
             status={statusText === null ? null : <span title={statusText}>{statusText}</span>}
           />
         </div>

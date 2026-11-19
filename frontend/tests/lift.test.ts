@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import type { EdgeType, RepositoryLink } from "@/lib/api/generated";
 import { defaultExpanded, summaryId } from "@/lib/graph/districtLayout";
-import { districts, type District } from "@/lib/graph/districts";
+import { districts, wholeId, type District } from "@/lib/graph/districts";
+import { districtLinks, isolate } from "@/lib/graph/isolate";
 import { cardsOf, liftEdges, liftId, type FamilyTallies, type Lift } from "@/lib/graph/lift";
 import { toFreshness } from "@/lib/model/freshness";
 import { buildOverview, FAMILIES, repositoryId, type ViewEdge } from "@/lib/model/graph";
@@ -105,6 +106,9 @@ function snapshot(lift: Lift) {
     cardOf: [...lift.cardOf],
     unplaced: lift.unplaced,
     nesting: lift.nesting,
+    shown: [...lift.shown],
+    outside: [...lift.outside],
+    beyond: lift.beyond,
   };
 }
 
@@ -521,5 +525,233 @@ describe("lifting the edges of the 300-repository fixture", () => {
     const order = lift.edges.map((l) => [FAMILIES.indexOf(l.link.family), l.source, l.target] as const);
     expect(order).toEqual([...order].sort((a, b) => a[0] - b[0] || cmp(a[1], b[1]) || cmp(a[2], b[2])));
     expect(lift.cardOf.size).toBe(sum(ds.map((d) => d.members.length)));
+  });
+
+  it("shows every district, and counts nothing outside, when no districts are chosen", () => {
+    for (const [name, expanded] of states) {
+      const lift = liftEdges(edges, ds, expanded);
+      expect([...lift.shown], name).toEqual(ds.map((d) => d.id).sort());
+      expect(lift.outside.size, name).toBe(0);
+      expect(lift.beyond, name).toEqual({ links: 0, count: 0 });
+      // choosing every district is the same lift
+      expect(snapshot(liftEdges(edges, ds, expanded, new Set(ds.map((d) => d.id)))), name).toEqual(snapshot(lift));
+    }
+  });
+});
+
+// -- only some districts shown ---------------------------------------------------------
+
+describe("lifting edges when only some districts are shown", () => {
+  // A and B are shown and open; C is not shown, and is collapsed
+  const slugs = ["a1", "b1", "c1", "c2"];
+  const A = dist("A", ["a1"]);
+  const B = dist("B", ["b1"]);
+  const C = dist("C", ["c1", "c2"]);
+  const shown = new Set(["A", "B"]);
+  const open = new Set(["A", "B"]);
+  const zero = { links: 0, count: 0 };
+
+  it("draws between shown districts, counts a link to a district not shown on the shown end, and a link between two such apart", () => {
+    const edges = edgesOf(slugs, [
+      plain("a1", "b1", 3),
+      plain("a1", "c1", 4),
+      plain("c1", "a1", 2),
+      plain("b1", "c2", 5),
+      plain("c1", "c2", 6),
+    ]);
+    const lift = liftEdges(edges, [A, B, C], open, shown);
+    expect(lift.edges.map((e) => e.id)).toEqual([idOf("observed", "a1", "b1")]);
+    expect(lift.outside.get("A")).toEqual({ code: { links: 2, count: 6 } });
+    expect(lift.outside.get("B")).toEqual({ code: { links: 1, count: 5 } });
+    expect([...lift.outside.keys()]).toEqual(["A", "B"]);
+    expect(lift.beyond).toEqual({ links: 1, count: 6 });
+    // C is collapsed, and the link inside it is the beyond one: not internal, because C is not shown
+    expect(lift.internal.has("C")).toBe(false);
+    expect(lift.internal.size).toBe(0);
+    expect(lift.unplaced).toEqual([]);
+    expect(lift.nesting).toEqual(zero);
+    for (const id of [idOf("observed", "a1", "c1"), idOf("observed", "c1", "a1"), idOf("observed", "b1", "c2"), idOf("observed", "c1", "c2")]) {
+      expect(lift.carriedBy.get(id), id).toBeNull();
+    }
+    expect(lift.carriedBy.size).toBe(edges.length);
+    // only the members of shown districts have a card
+    expect([...lift.cardOf]).toEqual([["repo:a1", "repo:a1"], ["repo:b1", "repo:b1"]]);
+    expect([...lift.shown]).toEqual(["A", "B"]);
+  });
+
+  it("counts an inclusion to a district not shown on the shown end, not as nesting", () => {
+    const edges = edgesOf(slugs, [incl("a1", "c1"), incl("a1", "b1"), incl("c1", "c2")]);
+    const lift = liftEdges(edges, [A, B, C], open, shown);
+    expect(lift.outside.get("A")).toEqual({ submodule: { links: 1, count: 1 } });
+    expect(lift.nesting).toEqual({ links: 1, count: 1 });
+    expect(lift.beyond).toEqual({ links: 1, count: 1 });
+  });
+
+  it("still counts a link inside a shown, collapsed district as internal", () => {
+    const edges = edgesOf(slugs, [plain("c1", "c2", 6), plain("a1", "c1", 1)]);
+    const lift = liftEdges(edges, [A, B, C], open, new Set(["A", "C"]));
+    expect(lift.internal.get("C")).toEqual({ code: { links: 1, count: 6 } });
+    expect(lift.beyond).toEqual(zero);
+    expect(lift.edges.map((e) => e.id)).toEqual(["lift:code:repo:a1->summary:C"]);
+  });
+
+  it("lists a link with an end in no district as unplaced, even when its other end is not shown", () => {
+    const edges = edgesOf([...slugs, "ghost"], [plain("ghost", "c1", 2), plain("a1", "ghost", 1)]);
+    const lift = liftEdges(edges, [A, B, C], open, shown);
+    expect(lift.unplaced).toEqual([idOf("observed", "a1", "ghost"), idOf("observed", "ghost", "c1")]);
+    expect(lift.outside.size).toBe(0);
+    expect(lift.beyond).toEqual(zero);
+  });
+
+  it("fails closed when a district that is not there is said to be shown", () => {
+    const edges = edgesOf(slugs, [plain("a1", "b1")]);
+    expect(() => liftEdges(edges, [A, B, C], open, new Set(["A", "nope"]))).toThrow("lift: nope is shown but is not a district");
+  });
+
+  it("gives a card only to the members of shown districts, and still fails closed on a clash among the rest", () => {
+    expect([...cardsOf([A, B, C], open, new Set(["A"]))]).toEqual([["repo:a1", "repo:a1"]]);
+    const clash = [dist("A", ["a1"]), dist("B", ["a1"])];
+    expect(() => cardsOf(clash, new Set(), new Set(["A"]))).toThrow("lift: repo:a1 is in A and B");
+    expect(() => liftEdges(edgesOf(slugs, []), clash, new Set(), new Set(["A"]))).toThrow("lift: repo:a1 is in A and B");
+  });
+
+  it("gives the same lift whatever order edges and districts arrive in", () => {
+    const edges = edgesOf(slugs, [
+      plain("a1", "b1", 3),
+      plain("a1", "c1", 4),
+      plain("c1", "a1", 2),
+      plain("b1", "c2", 5),
+      plain("c1", "c2", 6),
+      incl("a1", "c1"),
+    ]);
+    const base = snapshot(liftEdges(edges, [A, B, C], open, shown));
+    for (const seed of [1, 2, 3]) {
+      expect(snapshot(liftEdges(shuffled(edges, seed), shuffled([A, B, C], seed + 100), open, shown)), `seed ${seed}`).toEqual(base);
+    }
+  });
+});
+
+describe("lifting the edges of the 300-repository fixture to what isolating a district shows", () => {
+  const { repositories, links } = ecosystem300();
+  const edges = buildOverview(repositories, links).edges;
+  const ds = districts(repositories, edges);
+  const adjacency = districtLinks(ds, edges);
+  const byId = new Map(ds.map((d) => [d.id, d]));
+  const ownerOf = new Map(ds.flatMap((d) => d.members.map((m) => [m, d.id] as const)));
+  const VIEWPORT = { width: 1440, height: 810 };
+  const zero = { links: 0, count: 0 };
+  const sum = (xs: readonly number[]) => xs.reduce((a, b) => a + b, 0);
+
+  // every district isolated in turn, with what is open nowhere, by default among what is shown, and everywhere
+  const worlds = [...new Set(ds.map(wholeId))].map((whole) => {
+    const iso = isolate(ds, adjacency, whole)!;
+    const shownDs = [...iso.core, ...iso.neighbours].map((id) => byId.get(id)!);
+    const states: [string, ReadonlySet<string>][] = [
+      ["nothing open", new Set<string>()],
+      ["the default of what is shown", defaultExpanded(shownDs, VIEWPORT).expanded],
+      ["everything open", new Set(ds.map((d) => d.id))],
+    ];
+    return { whole, shownIds: new Set(shownDs.map((d) => d.id)), shownDs, states };
+  });
+  const bothEndsHidden = (shownIds: ReadonlySet<string>) =>
+    edges.filter((e) => !shownIds.has(ownerOf.get(e.source)!) && !shownIds.has(ownerOf.get(e.target)!));
+
+  it("starts from isolations that hide something and leave something to count", () => {
+    expect(worlds.length).toBeGreaterThan(5);
+    expect(worlds.some((w) => w.shownIds.size < ds.length)).toBe(true);
+    expect(worlds.some((w) => liftEdges(edges, ds, new Set(), w.shownIds).outside.size > 0)).toBe(true);
+    expect(worlds.some((w) => bothEndsHidden(w.shownIds).length > 0)).toBe(true);
+  });
+
+  it("conserves every family's links and counts: drawn, inside, nested, unplaced, outside, and the rest apart", () => {
+    const byEdge = new Map(edges.map((e) => [e.id, e]));
+    for (const { whole, shownIds, states } of worlds) {
+      const hiddenPairs = bothEndsHidden(shownIds);
+      for (const [name, expanded] of states) {
+        const lift = liftEdges(edges, ds, expanded, shownIds);
+        const tag = `${whole}: ${name}`;
+        let beyondLinks = 0;
+        let beyondCount = 0;
+        for (const family of FAMILIES) {
+          const input = edges.filter((e) => e.link.family === family);
+          const drawn = lift.edges.filter((e) => e.link.family === family);
+          const inside = [...lift.internal.values()].map((t: FamilyTallies) => t[family] ?? zero);
+          const outside = [...lift.outside.values()].map((t: FamilyTallies) => t[family] ?? zero);
+          const unplaced = lift.unplaced.map((id) => byEdge.get(id)!).filter((e) => e.link.family === family);
+          const nested = family === "submodule" ? lift.nesting : zero;
+          const rest = hiddenPairs.filter((e) => e.link.family === family);
+          expect(input.length, `${tag}: ${family} links`).toBe(
+            sum(drawn.map((e) => e.from.length)) +
+              sum(inside.map((t) => t.links)) +
+              nested.links +
+              unplaced.length +
+              sum(outside.map((t) => t.links)) +
+              rest.length,
+          );
+          expect(sum(input.map((e) => e.link.count)), `${tag}: ${family} count`).toBe(
+            sum(drawn.map((e) => e.link.count)) +
+              sum(inside.map((t) => t.count)) +
+              nested.count +
+              sum(unplaced.map((e) => e.link.count)) +
+              sum(outside.map((t) => t.count)) +
+              sum(rest.map((e) => e.link.count)),
+          );
+          beyondLinks += rest.length;
+          beyondCount += sum(rest.map((e) => e.link.count));
+        }
+        expect(lift.beyond, tag).toEqual({ links: beyondLinks, count: beyondCount });
+      }
+    }
+  });
+
+  it("counts on each shown district exactly its links to districts not shown, whatever is open", () => {
+    for (const { whole, shownIds, states } of worlds) {
+      const expected = new Map<string, FamilyTallies>();
+      for (const e of edges) {
+        const a = ownerOf.get(e.source)!;
+        const b = ownerOf.get(e.target)!;
+        if (shownIds.has(a) === shownIds.has(b)) continue;
+        const on = shownIds.has(a) ? a : b;
+        const tallies = expected.get(on) ?? {};
+        expected.set(on, tallies);
+        const tally = (tallies[e.link.family] ??= { links: 0, count: 0 });
+        tally.links += 1;
+        tally.count += e.link.count;
+      }
+      for (const [name, expanded] of states) {
+        const lift = liftEdges(edges, ds, expanded, shownIds);
+        const tag = `${whole}: ${name}`;
+        expect(lift.outside, tag).toEqual(expected);
+        expect([...lift.outside.keys()], tag).toEqual([...expected.keys()].sort());
+        for (const key of lift.outside.keys()) expect(shownIds.has(key), `${tag}: ${key}`).toBe(true);
+      }
+    }
+  });
+
+  it("draws every line between cards of shown districts, and gives a card to exactly their members", () => {
+    for (const { whole, shownDs, shownIds, states } of worlds) {
+      for (const [name, expanded] of states) {
+        const lift = liftEdges(edges, ds, expanded, shownIds);
+        const tag = `${whole}: ${name}`;
+        const cards = new Set(shownDs.flatMap((d) => (expanded.has(d.id) ? d.members : [summaryId(d.id)])));
+        for (const line of lift.edges) {
+          expect(cards.has(line.source), `${tag}: ${line.id} source`).toBe(true);
+          expect(cards.has(line.target), `${tag}: ${line.id} target`).toBe(true);
+        }
+        expect([...lift.cardOf.keys()], tag).toEqual(shownDs.flatMap((d) => d.members).sort());
+        expect([...lift.shown], tag).toEqual([...shownIds].sort());
+      }
+    }
+  });
+
+  it("is the same whatever order the world arrives in", () => {
+    for (const { whole, shownIds, states } of worlds) {
+      const [name, expanded] = states[1]!;
+      const base = snapshot(liftEdges(edges, ds, expanded, shownIds));
+      for (const seed of [1, 2]) {
+        const other = liftEdges(shuffled(edges, seed), shuffled(ds, seed + 100), expanded, shownIds);
+        expect(snapshot(other), `${whole}: ${name}, seed ${seed}`).toEqual(base);
+      }
+    }
   });
 });

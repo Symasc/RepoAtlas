@@ -7,8 +7,8 @@ import { liftEdges, type Lift } from "./lift";
 /**
  * The overview as one value: where the cards go (the districts laid out) and what
  * lines join them (the edges lifted onto the visible cards). Pure, and a function
- * of districts, edges, which districts are open and the shelf alone: what is
- * selected is not an input, so selecting never moves the map. A selection is
+ * of districts, edges, which districts are open, the shelf and which districts are
+ * on the map: what is selected is not an input, so selecting never moves the map. A selection is
  * mapped to what is visible afterwards, by lookups that change nothing.
  */
 
@@ -21,9 +21,20 @@ export function overviewView(input: {
   edges: readonly ViewEdge[];
   expanded: ReadonlySet<string>;
   shelf: number;
+  /** The districts on the map, in layout order; every one, in the order given, when absent. Must be some of `districts`. */
+  visible?: readonly District[];
 }): OverviewView {
-  const { districts, edges, expanded, shelf } = input;
-  return { ...liftEdges(edges, districts, expanded), layout: layoutDistricts(districts, expanded, shelf) };
+  const { districts, edges, expanded, shelf, visible } = input;
+  if (visible === undefined) {
+    return { ...liftEdges(edges, districts, expanded), layout: layoutDistricts(districts, expanded, shelf) };
+  }
+  const known = new Set(districts.map((d) => d.id));
+  const stray = visible.find((d) => !known.has(d.id));
+  if (stray !== undefined) throw new Error(`overviewView: ${stray.id} is visible but is not a district`);
+  return {
+    ...liftEdges(edges, districts, expanded, new Set(visible.map((d) => d.id))),
+    layout: layoutDistricts(visible, expanded, shelf),
+  };
 }
 
 /**

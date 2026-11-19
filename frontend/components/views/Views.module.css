@@ -25,6 +25,14 @@
   flex-shrink: 0;
 }
 
+/* the notice above an isolated map: what is shown, and the way back to the whole map */
+.isolation {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 /* the workspace in one line: "4 repositories · 3,950 files · …" */
 .totals {
   display: flex;

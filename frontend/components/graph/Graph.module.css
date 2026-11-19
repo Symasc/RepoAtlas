@@ -459,6 +459,40 @@
   }
 }
 
+/* the word beside a district's close button: shows that district and the ones linked to it */
+.districtIsolate {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-left: auto;
+  width: auto;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--ra-radius-s);
+  background: transparent;
+  color: var(--ra-text-muted);
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 600;
+  cursor: pointer;
+  pointer-events: auto;
+
+  &:hover {
+    background-color: var(--ra-hover);
+    color: var(--ra-text);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--ra-focus);
+    outline-offset: 1px;
+  }
+}
+
+.districtIsolate + .districtToggle {
+  margin-left: 0;
+}
+
 /* a collapsed district: one card, three single lines (name, who is in it, its links) */
 .districtSummary {
   position: relative;

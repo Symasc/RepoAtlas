@@ -2,10 +2,14 @@ import type { Locator, Page } from "@playwright/test";
 
 import type { RepositoriesResponse, TopologyOverviewResponse } from "@/lib/api/generated";
 import { CARD_CAP, defaultExpanded, layoutDistricts, summaryId, visibleCards } from "@/lib/graph/districtLayout";
-import { districts } from "@/lib/graph/districts";
-import { notDrawn, notDrawnText } from "@/lib/graph/overviewCards";
+import { districts, wholeId } from "@/lib/graph/districts";
+import { districtLinks, isolate, wholeLabel } from "@/lib/graph/isolate";
+import { liftEdges } from "@/lib/graph/lift";
+import { isolationText, notDrawn, notDrawnText, summaryFacts, summaryLabel } from "@/lib/graph/overviewCards";
+import { resolveOverview, type ResolvedOverview } from "@/lib/graph/overviewState";
 import { overviewView } from "@/lib/graph/overviewView";
-import { buildOverview } from "@/lib/model/graph";
+import { buildOverview, repositoryId } from "@/lib/model/graph";
+import { readOverviewState, type OverviewState } from "@/lib/model/location";
 import { ecosystem300 } from "@/tests/fixtures/ecosystem";
 
 import { expect, ready, test, wholeMap } from "./fixtures";
@@ -51,11 +55,9 @@ function overlaps(a: Rect, b: Rect): boolean {
   return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 }
 
-test("the overview holds an ecosystem of 300 repositories", async ({ page, problems }, testInfo) => {
-  test.setTimeout(180_000);
-  const ecosystem = ecosystem300();
+/** Serves the ecosystem in place of the live index's repositories and links. */
+async function serveEcosystem(page: Page, ecosystem: ReturnType<typeof ecosystem300>): Promise<void> {
   const slugs = ecosystem.repositories.map((r) => r.slug);
-
   await page.route("**/api/ra/topology/overview", async (route) => {
     const response = await route.fetch();
     const body = (await response.json()) as { ok: true; result: TopologyOverviewResponse };
@@ -86,6 +88,12 @@ test("the overview holds an ecosystem of 300 repositories", async ({ page, probl
     }));
     await route.fulfill({ response, json: body });
   });
+}
+
+test("the overview holds an ecosystem of 300 repositories", async ({ page, problems }, testInfo) => {
+  test.setTimeout(180_000);
+  const ecosystem = ecosystem300();
+  await serveEcosystem(page, ecosystem);
 
   const edges = buildOverview(ecosystem.repositories, ecosystem.links).edges;
   const ds = districts(ecosystem.repositories, edges);
@@ -190,5 +198,192 @@ test("the overview holds an ecosystem of 300 repositories", async ({ page, probl
   expect(zoom.x + zoom.width).toBeLessThanOrEqual(1024);
   expect(zoom.y + zoom.height).toBeLessThanOrEqual(900);
   await shot("ecosystem-1024.png");
+  expect(problems).toEqual([]);
+});
+
+test("isolating a district shows it and the districts linked to it, counts the rest, and Show all brings the map back", async ({
+  page,
+  problems,
+}) => {
+  test.setTimeout(240_000);
+  const ecosystem = ecosystem300();
+  await serveEcosystem(page, ecosystem);
+
+  // what the model says the page should hold
+  const edges = buildOverview(ecosystem.repositories, ecosystem.links).edges;
+  const ds = districts(ecosystem.repositories, edges);
+  const adjacency = districtLinks(ds, edges);
+  const names = new Map(ecosystem.repositories.map((r) => [repositoryId(r.slug), r.name]));
+  const token = (id: string) => id.slice("district:".length);
+  const WHOLE = "district:tree:t1-00";
+  const FIRST = `${WHOLE}#1`;
+  const parts = ds.filter((d) => wholeId(d) === WHOLE);
+  expect(ds.map((d) => d.id), "the first inclusion tree is cut into parts").toContain(FIRST);
+  expect(parts.length).toBeGreaterThanOrEqual(2);
+  expect(parts[0]!.id).toBe(FIRST);
+  const iso = isolate(ds, adjacency, WHOLE)!;
+  expect(iso.label).toBe(wholeLabel(parts[0]!));
+  expect(iso.hidden.length, "isolating hides something").toBeGreaterThan(0);
+  const shownIds = new Set([...iso.core, ...iso.neighbours]);
+  expect(liftEdges(edges, ds, new Set(), shownIds).outside.size, "something is counted outside").toBeGreaterThan(0);
+  const partTokens = parts.map((d) => token(d.id)).sort();
+  const laterTokens = partTokens.filter((t) => t !== token(FIRST));
+
+  const query = (pairs: [string, string][]) => `?${new URLSearchParams(pairs).toString()}`;
+  const search = () => page.evaluate(() => window.location.search);
+  const entries = () => page.evaluate(() => window.history.length);
+  const nodeIds = (selector: string) =>
+    page.locator(selector).evaluateAll((all) => all.map((n) => (n as HTMLElement).dataset.id!).sort());
+  const lineGroups = page.locator(".react-flow__edges g[data-kind][data-emphasis]");
+  const overviewEl = page.locator("[data-overview]");
+  const notice = page.getByRole("status").filter({ hasText: "Isolated:" });
+  const fit = async () => {
+    await settled(page);
+    await page.getByRole("button", { name: "Fit to screen", exact: true }).click();
+  };
+  const measured = async () => {
+    const pane = await page
+      .locator(".react-flow")
+      .evaluate((el) => ({ width: (el as HTMLElement).offsetWidth, height: (el as HTMLElement).offsetHeight }));
+    await expect(overviewEl).toHaveAttribute("data-pane", `${pane.width}x${pane.height}`);
+    return pane;
+  };
+  const resolveAs = (state: OverviewState, pane: { width: number; height: number }) =>
+    resolveOverview({ districts: ds, state, pane, pinned: [], links: adjacency });
+  /** The map holds exactly the districts the model shows, open as frames or collapsed as summaries, and the repositories of the open ones. */
+  const expectMap = async (r: ResolvedOverview) => {
+    const open = r.shown.filter((d) => r.expanded.has(d.id));
+    const shut = r.shown.filter((d) => !r.expanded.has(d.id));
+    await expect.poll(() => nodeIds(".react-flow__node-district")).toEqual(open.map((d) => d.id).sort());
+    await expect.poll(() => nodeIds(".react-flow__node-districtSummary")).toEqual(shut.map((d) => summaryId(d.id)).sort());
+    await expect.poll(() => nodeIds(".react-flow__node-repository")).toEqual(open.flatMap((d) => d.members).sort());
+  };
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+
+  // (1) one part of the tree, stated in the address as it is written there
+  await page.goto("/?expand=tree%3At1-00%231");
+  await ready(page);
+  await settled(page);
+  let pane = await measured();
+  await fit();
+  await expectMap(resolveAs({ expand: [FIRST], isolate: null }, pane));
+  await expect.poll(() => nodeIds(".react-flow__node-district")).toEqual([FIRST]);
+  expect(await search()).toBe("?expand=tree%3At1-00%231");
+  await expect(overviewEl).not.toHaveAttribute("data-isolate", /.*/);
+  const before = await entries();
+
+  // (2) Isolate writes the whole and every part open, and is an entry to come back to
+  await page.getByRole("button", { name: `Isolate ${iso.label}`, exact: true }).click();
+  const isolated = query([
+    ["isolate", token(WHOLE)],
+    ["expand", partTokens.join(",")],
+  ]);
+  await expect.poll(search).toBe(isolated);
+  expect(await entries(), "Isolate pushes an entry").toBe(before + 1);
+  await expect(overviewEl).toHaveAttribute("data-isolate", WHOLE);
+
+  // (3) the map is the core, then the districts linked to it; nothing of the rest
+  pane = await measured();
+  const r = resolveAs(readOverviewState(new URLSearchParams(isolated)), pane);
+  expect(r.shown.map((d) => d.id)).toEqual([...iso.core, ...iso.neighbours]);
+  await fit();
+  await expectMap(r);
+
+  // (4) the lines are those between what is shown
+  const view = overviewView({ districts: ds, edges, expanded: r.expanded, shelf: r.shelf, visible: r.shown });
+  expect(view.edges.length).toBeGreaterThan(0);
+  await expect
+    .poll(async () => new Set(await lineGroups.evaluateAll((gs) => gs.map((g) => g.getAttribute("data-link")))))
+    .toEqual(new Set(view.edges.map((e) => e.id)));
+
+  // (5) what goes to districts not shown is counted in the status
+  const left = notDrawnText(notDrawn(view), 0);
+  expect(left, "something goes to districts not shown").toContain("to districts not shown");
+  await expect(page.getByTestId("status-note")).toHaveText(left!);
+
+  // (6) a collapsed district says the same of itself
+  const shut = r.shown.filter((d) => !r.expanded.has(d.id));
+  expect(shut.some((d) => view.outside.has(d.id)), "a collapsed district with links to districts not shown").toBe(true);
+  for (const d of shut) {
+    await expect(page.locator(`.react-flow__node-districtSummary[data-id="${summaryId(d.id)}"]`)).toContainText(
+      summaryLabel(summaryFacts(view, d, names)),
+    );
+  }
+
+  // (7) the notice says what is shown, and has the way back
+  await expect(notice).toHaveText(isolationText(iso));
+  await expect(page.getByRole("button", { name: "Show all districts", exact: true })).toBeVisible();
+
+  // (8) the isolated district is not offered for isolation again
+  await expect(page.getByRole("button", { name: `Isolate ${iso.label}`, exact: true })).toHaveCount(0);
+
+  // (9) closing a part is a replace: the isolation stays, and the part leaves `expand`
+  await page.getByRole("button", { name: `Collapse ${parts[0]!.label}`, exact: true }).click();
+  const closedOne = query([
+    ["isolate", token(WHOLE)],
+    ["expand", laterTokens.join(",")],
+  ]);
+  await expect.poll(search).toBe(closedOne);
+  expect(await entries(), "Collapse replaces the entry").toBe(before + 1);
+
+  // (10) Show all districts removes `isolate`, keeps `expand`, and is an entry of its own
+  await page.getByRole("button", { name: "Show all districts", exact: true }).click();
+  const everything = query([["expand", laterTokens.join(",")]]);
+  await expect.poll(search).toBe(everything);
+  expect(await entries(), "Show all pushes an entry").toBe(before + 2);
+  await expect(notice).toHaveCount(0);
+  await expect(overviewEl).not.toHaveAttribute("data-isolate", /.*/);
+  pane = await measured();
+  const whole = resolveAs(readOverviewState(new URLSearchParams(everything)), pane);
+  expect(whole.shown.map((d) => d.id)).toEqual(ds.map((d) => d.id));
+  await fit();
+  await expectMap(whole);
+
+  // (11) Back is the isolation as it was left, and Back again is the map the page opened on
+  await page.goBack();
+  await expect.poll(search).toBe(closedOne);
+  await expect(overviewEl).toHaveAttribute("data-isolate", WHOLE);
+  pane = await measured();
+  await fit();
+  await expectMap(resolveAs(readOverviewState(new URLSearchParams(closedOne)), pane));
+  await page.goBack();
+  await expect.poll(search).toBe("?expand=tree%3At1-00%231");
+  await expect(overviewEl).not.toHaveAttribute("data-isolate", /.*/);
+  pane = await measured();
+  await fit();
+  await expectMap(resolveAs({ expand: [FIRST], isolate: null }, pane));
+  await expect.poll(() => nodeIds(".react-flow__node-district")).toEqual([FIRST]);
+
+  // (12) an address that isolates and says nothing of what is open opens the core, with the default
+  await page.goto("/?isolate=tree%3At1-00");
+  await ready(page);
+  await settled(page);
+  await expect(overviewEl).toHaveAttribute("data-isolate", WHOLE);
+  // the notice narrows the canvas, and the default follows the canvas: wait for the map to stop moving
+  await expect(notice).toBeVisible();
+  await settled(page);
+  pane = await measured();
+  const stated = resolveAs(readOverviewState(new URLSearchParams("isolate=tree%3At1-00")), pane);
+  expect(stated.isolation).toEqual(iso);
+  for (const id of iso.core) expect(stated.expanded.has(id), id).toBe(true);
+  await fit();
+  await expectMap(stated);
+  await expect(notice).toHaveText(isolationText(iso));
+
+  // (13) an address that names no district is the whole map, with no notice
+  await page.goto("/?isolate=nope");
+  await ready(page);
+  await settled(page);
+  pane = await measured();
+  const nothing = resolveAs(readOverviewState(new URLSearchParams("isolate=nope")), pane);
+  expect(nothing.isolation).toBeNull();
+  expect(nothing.shown.map((d) => d.id)).toEqual(ds.map((d) => d.id));
+  await expect(notice).toHaveCount(0);
+  await expect(overviewEl).not.toHaveAttribute("data-isolate", /.*/);
+  await fit();
+  await expectMap(nothing);
+
+  // (14) and nothing went wrong in the page
   expect(problems).toEqual([]);
 });

@@ -45,6 +45,8 @@ export interface NodeActions {
   activate: (id: string) => void;
   /** Straight to a place: a row inside a card names exactly where it goes. */
   go: (to: { repository: string; path: string }) => void;
+  /** Show one district and the districts linked to it (the overview only). */
+  isolate?: (districtId: string) => void;
 }
 
 type Common = { actions: NodeActions; selected?: boolean };
@@ -55,8 +57,8 @@ type RepositoryNodeData = Common & {
   /** In an inclusion tree: who includes it and how, or `parentName: null` for the tree's root. */
   inclusion?: { parentName: string | null; depth: number; kind: InclusionKind | null; label: string | null } | null;
 };
-/** An open district's frame: a backdrop with one real button, to close it. */
-type DistrictNodeData = { facts: FrameFacts; actions: NodeActions };
+/** An open district's frame: a backdrop with real buttons to close it and, when there is something to leave out, to isolate it. */
+type DistrictNodeData = { facts: FrameFacts; actions: NodeActions; isolate: { label: string } | null };
 /** A collapsed district: one card, which opens it. */
 type DistrictSummaryNodeData = Common & { facts: SummaryFacts };
 type HubNodeData = { repositories: number; files: number; note: string | null };
@@ -215,9 +217,9 @@ function RepositoryNode({ id, data }: NodeProps<Node<RepositoryNodeData, "reposi
   );
 }
 
-/** An open district: its name and size, what joins a tree, and the button that closes it. */
+/** An open district: its name and size, what joins a tree, and the buttons that isolate it and close it. */
 function DistrictNode({ data }: NodeProps<Node<DistrictNodeData, "district">>) {
-  const { facts, actions } = data;
+  const { facts, actions, isolate } = data;
   const meta = frameMeta(facts);
   const kinds = facts.inclusion?.kinds ?? [];
   const mark = kinds.length === 0 ? undefined : kinds.length === 1 ? kinds[0] : "mixed";
@@ -226,6 +228,17 @@ function DistrictNode({ data }: NodeProps<Node<DistrictNodeData, "district">>) {
       <div className={classes.districtHeader}>
         <span className={classes.districtTitle}>{frameTitle(facts)}</span>
         {meta !== null && <span className={classes.districtMeta}>{meta}</span>}
+        {isolate !== null && (
+          <button
+            type="button"
+            className={`${classes.districtIsolate} nodrag nopan`}
+            aria-label={`Isolate ${isolate.label}`}
+            title="Show only this district and the districts linked to it"
+            onClick={stop(() => actions.isolate?.(facts.id))}
+          >
+            Isolate
+          </button>
+        )}
         <button
           type="button"
           className={`${classes.districtToggle} nodrag nopan`}

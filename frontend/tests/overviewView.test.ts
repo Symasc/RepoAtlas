@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { defaultExpanded, layoutDistricts, summaryId } from "@/lib/graph/districtLayout";
 import { districts } from "@/lib/graph/districts";
+import { districtLinks, isolate } from "@/lib/graph/isolate";
 import { liftEdges } from "@/lib/graph/lift";
 import { overviewView, visibleEdge, visibleSelection } from "@/lib/graph/overviewView";
 import { buildOverview, FAMILIES, type Family } from "@/lib/model/graph";
@@ -164,5 +165,68 @@ describe("the overview view of the 300-repository fixture", () => {
           JSON.stringify({ viewport, lines: view.edges.length, byFamily, internalLinks, nestingLinks: view.nesting.links }),
       );
     }
+  });
+});
+
+describe("the overview view of an isolated district", () => {
+  const { repositories, links } = ecosystem300();
+  const edges = buildOverview(repositories, links).edges;
+  const ds = districts(repositories, edges);
+  const byId = new Map(ds.map((d) => [d.id, d]));
+  const iso = isolate(ds, districtLinks(ds, edges), "district:tree:t1-00")!;
+  const visible = [...iso.core, ...iso.neighbours].map((id) => byId.get(id)!);
+  const expanded = new Set(iso.core);
+  const shelf = layoutDistricts(visible, expanded).shelf;
+  const view = overviewView({ districts: ds, edges, expanded, shelf, visible });
+  const owner = new Map(ds.flatMap((d) => d.members.map((m) => [m, d.id] as const)));
+  const shownIds = new Set(visible.map((d) => d.id));
+
+  it("starts from an isolation with parts, neighbours and districts left out", () => {
+    expect(iso.core.length).toBeGreaterThan(1);
+    expect(iso.neighbours.length).toBeGreaterThan(0);
+    expect(iso.hidden.length).toBeGreaterThan(0);
+  });
+
+  it("lays out the districts given, in the order given, and lifts onto them alone", () => {
+    const shape = layoutDistricts(visible, expanded, shelf);
+    expect([...view.layout.cards]).toEqual([...shape.cards]);
+    expect([...view.layout.frames]).toEqual([...shape.frames]);
+    expect([...view.layout.frames.keys()]).toEqual(iso.core);
+    expect(view.layout.extent).toEqual(shape.extent);
+    expect(view.layout.shelf).toBe(shelf);
+    const { layout, ...lifted } = view;
+    expect(layout).toBe(view.layout);
+    expect(lifted).toEqual(liftEdges(edges, ds, expanded, shownIds));
+    for (const id of iso.hidden) {
+      for (const member of byId.get(id)!.members) expect(view.layout.cards.has(member), member).toBe(false);
+      expect(view.layout.cards.has(summaryId(id)), id).toBe(false);
+    }
+  });
+
+  it("lays out every district, as given, when none are chosen", () => {
+    const all = overviewView({ districts: ds, edges, expanded, shelf });
+    expect(all.shown).toEqual(new Set(ds.map((d) => d.id)));
+    expect([...all.layout.cards]).toEqual([...layoutDistricts(ds, expanded, shelf).cards]);
+  });
+
+  it("fails closed when a district to show is not one of the districts", () => {
+    const stray = { ...ds[0]!, id: "district:nope" };
+    expect(() => overviewView({ districts: ds, edges, expanded, shelf, visible: [ds[1]!, stray] })).toThrow(
+      "overviewView: district:nope is visible but is not a district",
+    );
+  });
+
+  it("stands for nothing on the map when the repository or the connection is in a district not shown", () => {
+    const hiddenMember = byId.get(iso.hidden[0]!)!.members[0]!;
+    const shownMember = byId.get(iso.core[0]!)!.members[0]!;
+    expect(visibleSelection(view, hiddenMember)).toBeNull();
+    expect(visibleSelection(view, shownMember)).toBe(shownMember);
+    const outside = edges.filter((e) => shownIds.has(owner.get(e.source)!) !== shownIds.has(owner.get(e.target)!));
+    const beyond = edges.filter((e) => !shownIds.has(owner.get(e.source)!) && !shownIds.has(owner.get(e.target)!));
+    expect(outside.length).toBeGreaterThan(0);
+    expect(beyond.length).toBeGreaterThan(0);
+    for (const e of [...outside, ...beyond]) expect(visibleEdge(view, e.id), e.id).toBeNull();
+    expect(view.edges.length).toBeGreaterThan(0);
+    for (const line of view.edges) expect(visibleEdge(view, line.id), line.id).toBe(line.id);
   });
 });

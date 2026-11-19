@@ -10,10 +10,13 @@ import type { District } from "./districts";
  * repositories is drawn to that card, and the links that now join the same two
  * cards in one family merge into one line. A link inside one collapsed district
  * is counted on that district instead; an inclusion (submodule) link that does
- * not stay inside one is counted as nesting, never drawn. Every input edge lands
- * in exactly one of unplaced, internal, nesting or a drawn line, so the counts
- * are conserved. Pure and total: the answer does not depend on the order edges
- * or districts arrive in (every tie is broken in code-unit order).
+ * not stay inside one is counted as nesting, never drawn. When only some districts
+ * are shown, a link with exactly one end in a district not shown is counted on the
+ * shown one (`outside`), and a link with both ends in districts not shown is counted
+ * apart (`beyond`): neither is drawn. Every input edge lands in exactly one of
+ * unplaced, outside, beyond, internal, nesting or a drawn line, so the counts are
+ * conserved. Pure and total: the answer does not depend on the order edges or
+ * districts arrive in (every tie is broken in code-unit order).
  */
 
 /** Links, and the sum of their counts. */
@@ -40,8 +43,14 @@ export interface Lift {
   unplaced: string[];
   /** Every input edge id -> the drawn edge id carrying it, or null; keys code-unit sorted. */
   carriedBy: Map<string, string | null>;
-  /** Every member repository id -> the visible card standing for it; keys code-unit sorted. */
+  /** Every member repository id of a shown district -> the visible card standing for it; keys code-unit sorted. */
   cardOf: Map<string, string>;
+  /** The ids of the districts shown (all of them when none were chosen), code-unit sorted. */
+  shown: Set<string>;
+  /** Shown district id -> its links to districts not shown, by family; only districts with at least one; keys code-unit sorted. */
+  outside: Map<string, FamilyTallies>;
+  /** Links with both ends in districts not shown. */
+  beyond: Tally;
 }
 
 /** Code-unit order: the same on every machine, which a locale-aware comparison is not. */
@@ -63,19 +72,25 @@ function conflict(member: string, a: string, b: string): Error {
 
 /**
  * The card standing for each member repository: the repository itself in an open
- * district, the district's summary in a collapsed one. Throws when one repository
- * is a member of two districts.
+ * district, the district's summary in a collapsed one. Only the members of shown
+ * districts have one (every district is shown unless `shown` says otherwise).
+ * Throws when one repository is a member of two districts, shown or not.
  */
-export function cardsOf(ds: readonly District[], expanded: ReadonlySet<string>): Map<string, string> {
+export function cardsOf(
+  ds: readonly District[],
+  expanded: ReadonlySet<string>,
+  shown: ReadonlySet<string> | null = null,
+): Map<string, string> {
   const holder = new Map<string, string>();
   const card = new Map<string, string>();
   for (const d of ds) {
     const standing = expanded.has(d.id) ? null : summaryId(d.id);
+    const visible = shown === null || shown.has(d.id);
     for (const member of d.members) {
       const held = holder.get(member);
       if (held !== undefined) throw conflict(member, held, d.id);
       holder.set(member, d.id);
-      card.set(member, standing ?? member);
+      if (visible) card.set(member, standing ?? member);
     }
   }
   return new Map([...card].sort(([a], [b]) => cmp(a, b)));
@@ -128,7 +143,16 @@ interface Group {
   members: ViewEdge[];
 }
 
-export function liftEdges(edges: readonly ViewEdge[], ds: readonly District[], expanded: ReadonlySet<string>): Lift {
+/**
+ * `shown` names the districts on the map (every one when null); it must name
+ * districts of `ds`. A link with an end in a district not shown is counted, not drawn.
+ */
+export function liftEdges(
+  edges: readonly ViewEdge[],
+  ds: readonly District[],
+  expanded: ReadonlySet<string>,
+  shown: ReadonlySet<string> | null = null,
+): Lift {
   const owner = new Map<string, District>();
   for (const d of ds) {
     for (const member of d.members) {
@@ -137,17 +161,22 @@ export function liftEdges(edges: readonly ViewEdge[], ds: readonly District[], e
       owner.set(member, d);
     }
   }
-  const cardOf = cardsOf(ds, expanded);
+  const known = new Set(ds.map((d) => d.id));
+  const shownIds = new Set([...(shown ?? known)].sort(cmp));
+  for (const id of shownIds) if (!known.has(id)) throw new Error(`lift: ${id} is shown but is not a district`);
+  const cardOf = cardsOf(ds, expanded, shown === null ? null : shownIds);
 
   const internal = new Map<string, FamilyTallies>();
-  const internalOf = (id: string): FamilyTallies => {
-    let tallies = internal.get(id);
+  const tallied = (into: Map<string, FamilyTallies>, id: string): FamilyTallies => {
+    let tallies = into.get(id);
     if (tallies === undefined) {
       tallies = {};
-      internal.set(id, tallies);
+      into.set(id, tallies);
     }
     return tallies;
   };
+  const outside = new Map<string, FamilyTallies>();
+  const beyond: Tally = { links: 0, count: 0 };
   const nesting: Tally = { links: 0, count: 0 };
   const unplaced: string[] = [];
   const carried = new Map<string, string | null>();
@@ -162,8 +191,14 @@ export function liftEdges(edges: readonly ViewEdge[], ds: readonly District[], e
     if (!from || !to || edge.source === edge.target) {
       unplaced.push(edge.id);
       carried.set(edge.id, null);
+    } else if (!shownIds.has(from.id) || !shownIds.has(to.id)) {
+      // an end is in a district not shown: counted on the shown end, or apart when both are hidden
+      if (shownIds.has(from.id)) add(tallied(outside, from.id), edge);
+      else if (shownIds.has(to.id)) add(tallied(outside, to.id), edge);
+      else bump(beyond, edge);
+      carried.set(edge.id, null);
     } else if (from === to && !expanded.has(from.id)) {
-      add(internalOf(from.id), edge);
+      add(tallied(internal, from.id), edge);
       carried.set(edge.id, null);
     } else if (edge.link.family === "submodule") {
       bump(nesting, edge);
@@ -210,5 +245,8 @@ export function liftEdges(edges: readonly ViewEdge[], ds: readonly District[], e
     unplaced: unplaced.sort(cmp),
     carriedBy: new Map([...carried].sort(([a], [b]) => cmp(a, b))),
     cardOf,
+    shown: shownIds,
+    outside: new Map([...outside].sort(([a], [b]) => cmp(a, b))),
+    beyond,
   };
 }

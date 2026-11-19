@@ -4,6 +4,7 @@ import { FAMILIES, type Family, type ViewEdge } from "@/lib/model/graph";
 import { summaryId } from "./districtLayout";
 import type { District, DistrictKind } from "./districts";
 import { INCLUSION_KINDS, type InclusionKind, type InclusionMark } from "./inclusionMarks";
+import type { Isolation } from "./isolate";
 import type { FamilyTallies, Tally } from "./lift";
 import { visibleEdge, type OverviewView } from "./overviewView";
 
@@ -98,6 +99,8 @@ export interface SummaryFacts {
   crossing: FamilyTallies;
   /** The links inside it, by family. */
   internal: FamilyTallies;
+  /** The links to districts that are not shown, by family. */
+  outside: FamilyTallies;
 }
 
 function copy(tallies: FamilyTallies): FamilyTallies {
@@ -129,6 +132,7 @@ export function summaryFacts(view: OverviewView, d: District, names: ReadonlyMap
     more: d.members.length - sample.length,
     crossing,
     internal: copy(view.internal.get(d.id) ?? {}),
+    outside: copy(view.outside.get(d.id) ?? {}),
   };
 }
 
@@ -147,6 +151,8 @@ export function summaryLabel(f: SummaryFacts): string {
   if (crossing !== "") text += `; to other districts: ${crossing}`;
   const internal = tallyList(f.internal);
   if (internal !== "") text += `; inside: ${internal}`;
+  const outside = tallyList(f.outside);
+  if (outside !== "") text += `; to districts not shown: ${outside}`;
   return text;
 }
 
@@ -159,6 +165,8 @@ export interface NotDrawn {
   internal: Tally;
   /** How many collapsed districts hold them. */
   internalDistricts: number;
+  /** Links between a shown district and one that is not shown, summed over every family. */
+  outside: Tally;
   /** Links with an end on no card. */
   unplaced: number;
 }
@@ -171,10 +179,18 @@ export function notDrawn(view: OverviewView): NotDrawn {
       internal.count += tally.count;
     }
   }
+  const outside: Tally = { links: 0, count: 0 };
+  for (const tallies of view.outside.values()) {
+    for (const tally of Object.values(tallies)) {
+      outside.links += tally.links;
+      outside.count += tally.count;
+    }
+  }
   return {
     nesting: { links: view.nesting.links, count: view.nesting.count },
     internal,
     internalDistricts: view.internal.size,
+    outside,
     unplaced: view.unplaced.length,
   };
 }
@@ -187,11 +203,16 @@ export function notDrawnText(n: NotDrawn, ambiguous: number): string | null {
   if (n.internal.links > 0) {
     parts.push(`${plural(n.internal.links, "link")} inside ${plural(n.internalDistricts, "collapsed district")}`);
   }
+  if (n.outside.links > 0) parts.push(`${plural(n.outside.links, "link")} to districts not shown`);
   if (n.unplaced > 0) parts.push(`${plural(n.unplaced, "link")} with an end not on the map`);
   return parts.length === 0 ? null : `Not drawn: ${parts.join(" · ")}`;
 }
 
-export type NotDrawnReason = { kind: "inside"; district: District } | { kind: "nesting" } | { kind: "unplaced" };
+export type NotDrawnReason =
+  | { kind: "inside"; district: District }
+  | { kind: "nesting" }
+  | { kind: "hidden" }
+  | { kind: "unplaced" };
 
 /** Why a connection has no line of its own, or null when it is drawn. Decided in the order `liftEdges` decides. */
 export function whyNotDrawn(view: OverviewView, ds: readonly District[], edge: ViewEdge): NotDrawnReason | null {
@@ -199,6 +220,7 @@ export function whyNotDrawn(view: OverviewView, ds: readonly District[], edge: V
   if (view.unplaced.includes(edge.id)) return { kind: "unplaced" };
   const from = ds.find((d) => d.members.includes(edge.source));
   const to = ds.find((d) => d.members.includes(edge.target));
+  if (from !== undefined && to !== undefined && !(view.shown.has(from.id) && view.shown.has(to.id))) return { kind: "hidden" };
   if (from !== undefined && from === to && !view.layout.frames.has(from.id)) return { kind: "inside", district: from };
   if (edge.link.family === "submodule") return { kind: "nesting" };
   return { kind: "unplaced" };
@@ -210,7 +232,21 @@ export function whyNotDrawnText(r: NotDrawnReason): string {
       return `The chosen connection is not drawn: both ends are inside ${r.district.label}, which is collapsed`;
     case "nesting":
       return "The chosen connection is not drawn: it is an inclusion, shown by nesting";
+    case "hidden":
+      return "The chosen connection is not drawn: an end is in a district not shown";
     case "unplaced":
       return "The chosen connection is not drawn: an end is not on the map";
   }
+}
+
+// -- isolating a district ------------------------------------------------------------------
+
+/** The notice above an isolated map: what is shown and how much is not. */
+export function isolationText(i: Isolation): string {
+  return `Isolated: ${i.label} and ${plural(i.neighbours.length, "linked district")} · ${plural(i.hidden.length, "district")} not shown`;
+}
+
+/** The status when the selected repository is in a district that is not on the map. */
+export function hiddenSelectionText(name: string): string {
+  return `The selected repository, ${name}, is in a district not shown`;
 }
