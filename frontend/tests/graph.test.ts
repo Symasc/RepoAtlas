@@ -1,17 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { flowEdges } from "@/components/graph/flow";
-import { blend } from "@/components/graph/useTween";
 import type { ChildEntry, ChildLink, RepositoryLink, TopologyChildrenResponse } from "@/lib/api/generated";
-import { arrowhead, centre, floating, LANE_INSET, octilinear, sideways, type Point } from "@/lib/graph/geometry";
+import { arrowhead, floating, LANE_INSET, octilinear, sideways, type Point } from "@/lib/graph/geometry";
 import {
-  bounds,
   cardHeight,
   CARD,
-  constellation,
-  evenAngles,
-  GROUP_ID,
-  HUB_ID,
   layoutFile,
   layoutOpened,
   strokeFor,
@@ -124,8 +118,6 @@ function assertNoOverlap(layout: Layout, skip: (id: string) => boolean = () => f
   }
 }
 
-const distance = (box: Box) => Math.hypot(centre(box).x, centre(box).y);
-
 describe("link families", () => {
   it("keeps HTTP and dependencies apart, and tells configuration from code", () => {
     expect(familyOf("http", null)).toBe("http");
@@ -208,116 +200,6 @@ describe("the overview", () => {
       null,
       "services/api",
     ]);
-  });
-});
-
-describe("the constellation", () => {
-  const many = Array.from({ length: 12 }, (_, i) => repository(`r${String(i).padStart(2, "0")}`));
-  const chain = [
-    link("observed", "r00", "r01", 50),
-    link("observed", "r00", "r02", 40),
-    link("http", "r00", "r03", 5),
-    link("dependency", "r01", "r04", 3),
-    link("observed", "r01", "r05", 2),
-    link("observed", "r02", "r06", 1),
-    link("observed", "r07", "r08", 9), // apart from r00's component
-  ];
-
-  it("rings the workspace hub when no repository has a link: never a straight row", () => {
-    const four = ["a", "b", "c", "d"].map((s) => repository(s));
-    const shape = constellation(four, [], null);
-    expect(shape.anchor).toBeNull();
-    expect(shape.layout.has(HUB_ID)).toBe(true);
-    const ys = four.map((r) => Math.round(centre(shape.layout.get(repositoryId(r.slug))!).y));
-    expect(new Set(ys).size).toBeGreaterThan(1);
-    assertNoOverlap(shape.layout);
-  });
-
-  it("centres the repository with the most partners, its partners on the first ring", () => {
-    const edges = buildOverview(many, chain).edges;
-    const shape = constellation(many, edges, null);
-    expect(shape.anchor).toBe("repo:r00");
-    const at = (slug: string) => distance(shape.layout.get(repositoryId(slug))!);
-    expect(at("r00")).toBe(0);
-    for (const near of ["r01", "r02", "r03"]) {
-      for (const far of ["r04", "r05", "r06"]) expect(at(near)).toBeLessThan(at(far));
-    }
-  });
-
-  it("re-centres on the selected repository", () => {
-    const edges = buildOverview(many, chain).edges;
-    const shape = constellation(many, edges, "repo:r04");
-    expect(shape.anchor).toBe("repo:r04");
-    expect(distance(shape.layout.get("repo:r04")!)).toBe(0);
-    expect(distance(shape.layout.get("repo:r01")!)).toBeLessThan(distance(shape.layout.get("repo:r00")!));
-  });
-
-  it("places every repository once, overlapping nothing, the unlinked in their own group beneath", () => {
-    const edges = buildOverview(many, chain).edges;
-    const shape = constellation(many, edges, null);
-    for (const r of many) expect(shape.layout.has(repositoryId(r.slug)), r.slug).toBe(true);
-    assertNoOverlap(shape.layout, (id) => id === GROUP_ID);
-    const group = shape.group!;
-    const linkedBottom = Math.max(
-      ...["r00", "r01", "r02", "r03", "r04", "r05", "r06", "r07", "r08"].map((s) => {
-        const b = shape.layout.get(repositoryId(s))!;
-        return b.y + b.height;
-      }),
-    );
-    expect(group.y).toBeGreaterThan(linkedBottom);
-    for (const s of ["r09", "r10", "r11"]) expect(contains(group, shape.layout.get(repositoryId(s))!)).toBe(true);
-  });
-
-  it("gives a component linked only among itself its own small constellation, beside the main one", () => {
-    const edges = buildOverview(many, chain).edges;
-    const shape = constellation(many, edges, null);
-    const main = ["r00", "r01", "r02", "r03", "r04", "r05", "r06"].map((s) => shape.layout.get(repositoryId(s))!);
-    const right = Math.max(...main.map((b) => b.x + b.width));
-    const [a, b] = ["r07", "r08"].map((s) => shape.layout.get(repositoryId(s))!);
-    expect(a!.x).toBeGreaterThan(right);
-    expect(b!.x).toBeGreaterThan(right);
-    // a pair sits side by side, near each other
-    expect(Math.abs(centre(a!).y - centre(b!).y)).toBeLessThan(1);
-  });
-
-  it("rings an unlinked repository chosen as the anchor with all the rest", () => {
-    const edges = buildOverview(many, chain).edges;
-    const shape = constellation(many, edges, "repo:r10");
-    expect(distance(shape.layout.get("repo:r10")!)).toBe(0);
-    expect(shape.group).toBeNull();
-    assertNoOverlap(shape.layout);
-  });
-
-  it("scales to dozens of repositories without overlap", () => {
-    const lots = Array.from({ length: 40 }, (_, i) => repository(`x${String(i).padStart(2, "0")}`));
-    const links = lots.slice(1, 25).map((r, i) => link("observed", i % 3 === 0 ? "x00" : `x${String(i).padStart(2, "0")}`, r.slug));
-    const shape = constellation(lots, buildOverview(lots, links).edges, null);
-    expect([...shape.layout.keys()].filter((k) => k.startsWith("repo:"))).toHaveLength(40);
-    assertNoOverlap(shape.layout, (id) => id === GROUP_ID);
-  });
-
-  it("packs a large nested-repository cluster into a compact grid", () => {
-    const parent = repository("local-cluster");
-    const children = Array.from({ length: 21 }, (_, i) => repository(`service-${i}`));
-    const repositories = [parent, ...children];
-    const links = [
-      ...children.map((child) => link("nested", parent.slug, child.slug)),
-      link("observed", children[0]!.slug, children[1]!.slug),
-    ];
-
-    const shape = constellation(repositories, buildOverview(repositories, links).edges, null);
-    const visible = bounds([...shape.layout].filter(([id]) => id.startsWith("repo:")).map(([, box]) => box))!;
-
-    expect(shape.anchor).toBe(repositoryId(parent.slug));
-    expect(shape.rings).toEqual([]);
-    expect(visible.width).toBeLessThan(1500);
-    expect(visible.height).toBeLessThan(900);
-    assertNoOverlap(shape.layout);
-  });
-
-  it("puts four evenly spaced things on the diagonals", () => {
-    const degrees = evenAngles(4).map((a) => Math.round((a * 180) / Math.PI) % 360);
-    expect(degrees).toEqual([225, 315, 45, 135]);
   });
 });
 
@@ -683,18 +565,6 @@ describe("moving between places", () => {
     expect(childOf("src", "src/a/b.ts")).toBe("src/a");
     expect(childOf("src", "lib/a.ts")).toBeNull();
     expect(childOf("src", "src")).toBeNull();
-  });
-
-  it("glides each box part of the way", () => {
-    const from: Layout = new Map([["n", { x: 0, y: 0, width: 10, height: 10 }]]);
-    const to: Layout = new Map([
-      ["n", { x: 100, y: 50, width: 10, height: 10 }],
-      ["new", { x: 5, y: 5, width: 1, height: 1 }],
-    ]);
-    const half = blend(from, to, 0.5);
-    expect(half.get("n")).toEqual({ x: 50, y: 25, width: 10, height: 10 });
-    expect(half.get("new")).toEqual({ x: 5, y: 5, width: 1, height: 1 });
-    expect(blend(from, to, 1)).toBe(to);
   });
 });
 

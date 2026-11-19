@@ -67,8 +67,10 @@ from a checkout: `repoatlas ui --frontend frontend/out`. Keep anything that need
 
 The explorer shows the summary first and the detail when you ask for it.
 
-- **All repositories:** the selected repository, or the one with the most partners, sits at the centre, with its
-  partners around it.
+- **All repositories:** a district map. Each district is a frame you can collapse into a summary card, and a summary
+  card you can expand again. A line between repositories is lifted onto the cards that are visible, so a collapsed
+  district carries the lines of what it holds. A repository included in another is shown nested inside it. Selecting
+  something never moves the map.
 - **A repository:** the directory you are in, as cards: one per directory, plus its files. Each card counts its links
   per family rather than drawing them.
 - **A file:** opens on its highlighted code. Press a name to select it; press again, or **Trace**, to follow it.
