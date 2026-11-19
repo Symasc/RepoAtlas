@@ -140,6 +140,12 @@ function Canvas({
   const width = useStore((s) => s.width);
   const height = useStore((s) => s.height);
   const [hovered, setHovered] = useState<string | null>(null);
+  // a hovered node that leaves the canvas (a summary opened by its own button) sends no mouse-leave
+  const [hoverNodes, setHoverNodes] = useState(nodes);
+  if (hoverNodes !== nodes) {
+    setHoverNodes(nodes);
+    if (hovered !== null && !nodes.some((n) => n.id === hovered)) setHovered(null);
+  }
 
   // the canvas's size goes out when it changes, not when the callback does
   const report = useRef(onPaneSize);

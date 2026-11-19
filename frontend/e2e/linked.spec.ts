@@ -2,10 +2,15 @@ import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
 
 import type { ImpactCandidate, ImpactResponse, RepositoryLink } from "@/lib/api/generated";
-import { ASPECT } from "@/lib/graph/layout";
-import { familyOf, relationOf } from "@/lib/model/graph";
+import { CARD_CAP, defaultExpanded, summaryId, visibleCards } from "@/lib/graph/districtLayout";
+import { districts } from "@/lib/graph/districts";
+import { notDrawn, notDrawnText, summaryFacts, summaryLabel } from "@/lib/graph/overviewCards";
+import { overviewView } from "@/lib/graph/overviewView";
+import { plural } from "@/lib/model/format";
+import { buildOverview, byRelation, familyOf, relationOf, repositoryId } from "@/lib/model/graph";
+import { toRepositories } from "@/lib/model/repositories";
 
-import { ask, expect, ready, test } from "./fixtures";
+import { ask, expect, ready, test, wholeMap } from "./fixtures";
 
 /**
  * The linked corpus (tests/topology_corpus.py): repositories that import from,
@@ -47,6 +52,7 @@ test("the overview draws one line per link and kind, each in its own stroke", as
 
   await page.goto("/");
   await ready(page);
+  await wholeMap(page);
   for (const kind of ["observed", "http", "dependency"] as const) {
     const drawn = links.filter((l) => l.kind === kind && l.source !== l.target);
     // one line per relationship of each link, and every line belongs to exactly one link
@@ -121,61 +127,189 @@ function literal(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-test("the repository with the most partners anchors the map, its partners closest", async ({ page, request, problems }) => {
-  const overview = await ask(request, "topology/overview", { context: WORKSPACE });
-  const links = overview.links ?? [];
-  // most distinct partners, then most links, then by name
-  const partnersOf = new Map<string, Set<string>>();
-  const weight = new Map<string, number>();
-  for (const l of links) {
-    for (const [a, b] of [[l.source, l.target], [l.target, l.source]] as const) {
-      partnersOf.set(a, (partnersOf.get(a) ?? new Set()).add(b));
-      weight.set(a, (weight.get(a) ?? 0) + l.count);
-    }
-  }
-  const anchor = [...partnersOf.keys()].sort(
-    (a, b) => partnersOf.get(b)!.size - partnersOf.get(a)!.size || weight.get(b)! - weight.get(a)! || a.localeCompare(b),
-  )[0]!;
-  const partners = new Set(links.flatMap((l) => (l.source === anchor ? [l.target] : l.target === anchor ? [l.source] : [])));
-  const others = new Set(links.flatMap((l) => [l.source, l.target]).filter((s) => s !== anchor && !partners.has(s)));
+/** What the page holds of the map right now: each repository card's place, the view, and the canvas's width. */
+function mapState(page: Page) {
+  return page.evaluate(() => ({
+    cards: Object.fromEntries(
+      [...document.querySelectorAll<HTMLElement>(".react-flow__node-repository")].map((n) => [n.dataset.id!, n.style.transform]),
+    ),
+    viewport: document.querySelector<HTMLElement>(".react-flow__viewport")!.style.transform,
+    width: document.querySelector<HTMLElement>(".react-flow")!.offsetWidth,
+  }));
+}
 
-  await page.goto("/");
-  await ready(page);
-  const centres = await settled(page);
-  const middle = centres[`repo:${anchor}`]!;
-  // rings are ellipses: measured in ring units, a partner of a partner sits
-  // on a ring further out, and another component apart from them all
-  const distance = (name: string) => {
-    const c = centres[`repo:${name}`]!;
-    return Math.hypot((c.x - middle.x) / ASPECT, c.y - middle.y);
-  };
-  const near = Math.max(...[...partners].map(distance));
-  for (const other of others) expect(distance(other), other).toBeGreaterThan(near);
-  expect(problems).toEqual([]);
-});
-
-test("selecting a repository moves no repository", async ({ page, request, problems }) => {
+test("selecting a repository moves no repository and not the view", async ({ page, request, problems }) => {
   const overview = await ask(request, "topology/overview", { context: WORKSPACE });
-  const links = overview.links ?? [];
-  // a repository that is not the anchor (the one with the most partners), so
-  // that re-centring on it would have moved the rest
-  const [anchor] = busiest(links);
-  const name = [...new Set(links.flatMap((l) => [l.source, l.target]))].sort().find((s) => s !== anchor);
-  expect(name, "a linked repository other than the busiest").toBeTruthy();
+  const linked = new Set((overview.links ?? []).flatMap((l) => [l.source, l.target]));
 
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/");
   await ready(page);
-  const nodes = page.locator(".react-flow__node-repository");
-  const placed = () =>
-    nodes.evaluateAll((all) => Object.fromEntries(all.map((n) => [(n as HTMLElement).dataset.id!, (n as HTMLElement).style.transform])));
-  await expect(nodes.first()).toBeVisible();
-  const before = await placed();
-  expect(Object.keys(before).length).toBeGreaterThan(1);
+  await wholeMap(page);
+  // the inspector takes the right of the canvas, so the card kept in reach is the leftmost one
+  const centres = await settled(page);
+  const name = Object.entries(centres)
+    .filter(([id]) => id.startsWith("repo:") && linked.has(id.slice("repo:".length)))
+    .sort(([a, p], [b, q]) => p.x - q.x || (a < b ? -1 : a > b ? 1 : 0))[0]?.[0]
+    ?.slice("repo:".length);
+  expect(name, "a linked repository with a card on the map").toBeTruthy();
+
+  const before = await mapState(page);
+  expect(Object.keys(before.cards).length).toBeGreaterThan(1);
 
   await page.getByRole("button", { name: `Select ${name}`, exact: true }).click();
   await expect(page.getByRole("complementary", { name: `${name}, inspected` })).toBeVisible();
-  expect(await placed()).toEqual(before);
+  // the canvas has narrowed, and two frames on, nothing has been asked to move
+  await expect.poll(async () => (await mapState(page)).width).toBeLessThan(before.width);
+  await page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+  const after = await mapState(page);
+  for (const [id, transform] of Object.entries(after.cards)) expect(transform, id).toBe(before.cards[id]);
+  expect(Object.keys(after.cards)).toContain(`repo:${name}`);
+  expect(after.viewport).toBe(before.viewport);
+  expect(problems).toEqual([]);
+});
+
+const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+test("the overview is a map of districts", async ({ page, request, problems }) => {
+  // (1) what the model says the page should hold, from the same API
+  const repositories = toRepositories(await ask(request, "repositories", { context: WORKSPACE }));
+  const overview = await ask(request, "topology/overview", { context: WORKSPACE });
+  const edges = buildOverview(repositories, overview.links ?? []).edges;
+  const ds = districts(repositories, edges);
+  const names = new Map(repositories.map((r) => [repositoryId(r.slug), r.name]));
+  const ambiguous = overview.ambiguous_total ?? 0;
+  const lineGroups = page.locator(".react-flow__edges g[data-kind][data-emphasis]");
+  const nodeIds = (selector: string) =>
+    page.locator(selector).evaluateAll((all) => all.map((n) => (n as HTMLElement).dataset.id!).sort());
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/");
+  await ready(page);
+  await settled(page);
+
+  // (2) the default state: what opens is what the measured canvas allows
+  const pane = await page
+    .locator(".react-flow")
+    .evaluate((el) => ({ width: (el as HTMLElement).offsetWidth, height: (el as HTMLElement).offsetHeight }));
+  await expect(page.locator("[data-overview]")).toHaveAttribute("data-pane", `${pane.width}x${pane.height}`);
+  const expected = defaultExpanded(ds, pane);
+  const open = ds.filter((d) => expected.expanded.has(d.id));
+  const collapsed = ds.filter((d) => !expected.expanded.has(d.id));
+  expect(await nodeIds(".react-flow__node-district")).toEqual(open.map((d) => d.id).sort());
+  expect(await nodeIds(".react-flow__node-districtSummary")).toEqual(collapsed.map((d) => summaryId(d.id)).sort());
+  expect(await nodeIds(".react-flow__node-repository")).toEqual(open.flatMap((d) => d.members).sort());
+  const view = overviewView({ districts: ds, edges, expanded: expected.expanded, shelf: expected.shelf });
+  for (const d of collapsed) {
+    // the summary's sentence is read out in a span the eye does not see: it is in the node's text
+    await expect(page.locator(`.react-flow__node-districtSummary[data-id="${summaryId(d.id)}"]`)).toContainText(
+      summaryLabel(summaryFacts(view, d, names)),
+    );
+  }
+
+  // (3) the lines at rest are the edges lifted onto what is on screen
+  const lineCount = (lifted: ReturnType<typeof overviewView>) => lifted.edges.reduce((sum, e) => sum + byRelation(e.link).length, 0);
+  const drawnLinks = async () =>
+    new Set(await lineGroups.evaluateAll((gs) => gs.map((g) => g.getAttribute("data-link"))));
+  await expect(lineGroups).toHaveCount(lineCount(view));
+  expect(await drawnLinks()).toEqual(new Set(view.edges.map((e) => e.id)));
+
+  // (4) readable means readable
+  await expect(page.locator("[data-overview]")).toHaveAttribute("data-readable", String(expected.readable));
+  const zoomText = page.getByLabel("Zoom level");
+  await expect(zoomText).toHaveText(/^\d+%$/);
+  const zoom = parseInt((await zoomText.textContent())!, 10);
+  if (expected.readable) {
+    expect(zoom).toBeGreaterThanOrEqual(75);
+    expect(visibleCards(ds, expected.expanded)).toBeLessThanOrEqual(CARD_CAP);
+  }
+
+  // (5) what the page settled on, for the report
+  console.info(
+    "DISTRICTS_AT_REST " +
+      JSON.stringify({
+        pane,
+        level: expected.level,
+        readable: expected.readable,
+        open: [...expected.expanded],
+        ids: ds.map((d) => d.id),
+        zoom,
+      }),
+  );
+
+  // (6) everything collapsed: one summary each, the lines lifted onto them, and what is left out said so
+  await page.getByRole("button", { name: "Collapse all districts", exact: true }).click();
+  await page.getByRole("button", { name: "Fit to screen", exact: true }).click();
+  const none = overviewView({ districts: ds, edges, expanded: new Set(), shelf: expected.shelf });
+  await expect(page.locator(".react-flow__node-districtSummary")).toHaveCount(ds.length);
+  await expect(page.locator(".react-flow__node-repository")).toHaveCount(0);
+  await expect(page.locator(".react-flow__node-district")).toHaveCount(0);
+  await expect(lineGroups).toHaveCount(lineCount(none));
+  expect(await drawnLinks()).toEqual(new Set(none.edges.map((e) => e.id)));
+  const left = notDrawnText(notDrawn(none), ambiguous);
+  // nothing left out: the status line has nothing to say, and is not there
+  if (left === null) await expect(page.getByTestId("status-note")).toHaveCount(0);
+  else await expect(page.getByTestId("status-note")).toHaveText(left);
+
+  // (7) a chosen connection inside a collapsed district is not drawn, and says why; opened, it is
+  const slugs = repositories.map((r) => r.slug).sort(cmp);
+  const districtOf = new Map(ds.flatMap((d) => d.members.map((m) => [m, d] as const)));
+  const joining = (a: string, b: string) =>
+    edges.filter(
+      (e) =>
+        e.link.family !== "submodule" &&
+        ((e.source === repositoryId(a) && e.target === repositoryId(b)) || (e.source === repositoryId(b) && e.target === repositoryId(a))),
+    );
+  let pair: { x: string; p: string } | null = null;
+  for (const x of slugs) {
+    for (const p of slugs) {
+      const own = districtOf.get(repositoryId(x));
+      if (x === p || own === undefined || own !== districtOf.get(repositoryId(p)) || own.members.length < 2) continue;
+      if (joining(x, p).length === 1) {
+        pair = { x, p };
+        break;
+      }
+    }
+    if (pair) break;
+  }
+  expect(pair, "two repositories of one district, joined by exactly one link").not.toBeNull();
+  const { x, p } = pair!;
+  const home = districtOf.get(repositoryId(x))!;
+  const link = joining(x, p)[0]!;
+  const nameOf = (slug: string) => names.get(repositoryId(slug))!;
+
+  await page.goto(`/?sel=${encodeURIComponent(repositoryId(x))}`);
+  await ready(page);
+  await settled(page);
+  // the selected repository's district opened for it, on arrival
+  const card = page.locator(`.react-flow__node-repository[data-id="${repositoryId(x)}"]`);
+  await expect(card.locator("[data-selected]")).toHaveCount(1);
+
+  await page.getByRole("button", { name: "Collapse all districts", exact: true }).click();
+  await page.getByRole("button", { name: "Fit to screen", exact: true }).click();
+  await expect(
+    page.locator(`.react-flow__node-districtSummary[data-id="${summaryId(home.id)}"] [data-selected]`),
+  ).toHaveCount(1);
+
+  const panel = page.getByRole("complementary", { name: `${nameOf(x)}, inspected` });
+  await panel
+    .locator("button[aria-pressed]")
+    .filter({ has: page.getByText(nameOf(p), { exact: true }) })
+    .first()
+    .click();
+  const chosen = page.locator('.react-flow__edges g[data-emphasis="selected"]');
+  await expect(page.getByTestId("status-note")).toHaveText(
+    `The chosen connection is not drawn: both ends are inside ${home.label}, which is collapsed`,
+  );
+  await expect(chosen).toHaveCount(0);
+
+  await page
+    .getByRole("button", { name: `Expand ${home.label}, ${plural(home.members.length, "repository", "repositories")}`, exact: true })
+    .click();
+  await page.getByRole("button", { name: "Fit to screen", exact: true }).click();
+  await expect.poll(() => chosen.count()).toBeGreaterThanOrEqual(1);
+  expect(new Set(await chosen.evaluateAll((gs) => gs.map((g) => g.getAttribute("data-link"))))).toEqual(new Set([link.id]));
+  await expect(card.locator("[data-selected]")).toHaveCount(1);
   expect(problems).toEqual([]);
 });
 
@@ -188,6 +322,7 @@ test("unlinked repositories are drawn too, in their own group",async ({ page, re
 
   await page.goto("/");
   await ready(page);
+  await wholeMap(page);
   await expect(page.getByText(`No links recorded with the others · ${independent.length}`)).toBeVisible();
   for (const repository of independent) {
     await expect(page.getByRole("button", { name: `Select ${repository.name}`, exact: true })).toBeVisible();
@@ -205,6 +340,7 @@ test("pointing at a repository lights its links and fades the rest; selecting ho
 
   await page.goto("/");
   await ready(page);
+  await wholeMap(page);
   await page.getByRole("button", { name: `Select ${name}`, exact: true }).hover();
   await expect(page.locator('.react-flow__edges g[data-emphasis="lit"]')).toHaveCount(litLines);
   expect(await linksIn(page.locator('.react-flow__edges g[data-emphasis="lit"]'))).toBe(touching);
@@ -214,6 +350,8 @@ test("pointing at a repository lights its links and fades the rest; selecting ho
 
   await page.getByRole("button", { name: `Select ${name}`, exact: true }).click();
   await expect(page.getByRole("complementary", { name: `${name}, inspected` })).toBeVisible();
+  // the view holds still while the inspector narrows the canvas, so the right of the map is out of it: fit it again
+  await page.getByRole("button", { name: "Fit to screen", exact: true }).click();
   // the pointer leaving does not undo a selection
   await page.mouse.move(2, 400);
   await expect(page.locator('.react-flow__edges g[data-emphasis="lit"]')).toHaveCount(litLines);

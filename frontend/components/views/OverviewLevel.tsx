@@ -1,12 +1,12 @@
 "use client";
 
+import { Button } from "@mantine/core";
 import { useCallback, useMemo, useState } from "react";
 
 import { RepoSwatch } from "@/components/common/RepoSwatch";
 import { Graph } from "@/components/graph/Graph";
 import { flowEdges, place } from "@/components/graph/flow";
 import { languagesOf, type GraphNode, type NodeActions } from "@/components/graph/nodes";
-import { useTween } from "@/components/graph/useTween";
 import { ConnectionsPanel } from "@/components/connections/ConnectionsPanel";
 import { InclusionsPanel } from "@/components/connections/InclusionsPanel";
 import { Connections } from "@/components/inspector/Connections";
@@ -19,12 +19,23 @@ import inspectorClasses from "@/components/inspector/Inspector.module.css";
 import type { RepositoryLink } from "@/lib/api/generated";
 import { useConnections } from "@/lib/api/connections";
 import { useTopologyOverview } from "@/lib/api/topology";
-import { bounds, constellation, GROUP_ID, HUB_ID, type Layout } from "@/lib/graph/layout";
-import { absoluteTime, formatCount, plural, relativeTime, shortSha } from "@/lib/model/format";
+import { districts } from "@/lib/graph/districts";
+import { defaultExpanded, summaryId } from "@/lib/graph/districtLayout";
+import { inclusionMarks } from "@/lib/graph/inclusionMarks";
+import { HUB_ID } from "@/lib/graph/layout";
+import {
+  frameFacts,
+  notDrawn,
+  notDrawnText,
+  summaryFacts,
+  whyNotDrawn,
+  whyNotDrawnText,
+} from "@/lib/graph/overviewCards";
+import { overviewView, visibleEdge, visibleSelection } from "@/lib/graph/overviewView";
+import { absoluteTime, formatCount, relativeTime, shortSha } from "@/lib/model/format";
 import { NO_FILTERS } from "@/lib/model/connections";
-import { buildOverview, FAMILIES, repositoryId, type Connection, type Family } from "@/lib/model/graph";
+import { buildOverview, FAMILIES, repositoryId, type Box, type Connection, type Family } from "@/lib/model/graph";
 import type { RepositoryModel } from "@/lib/model/repositories";
-import { useAnimationsOff } from "@/lib/useMotion";
 
 import { openAt, type Navigation } from "./navigation";
 import { Totals } from "./Totals";
@@ -32,11 +43,16 @@ import classes from "./Views.module.css";
 
 const NO_LINKS: readonly RepositoryLink[] = [];
 
+/** The workspace's own box, when there is no repository to draw. */
+const HUB_BOX: Box = { x: 0, y: 0, width: 184, height: 184 };
+
 /**
- * Level one: every indexed repository as a constellation. The repository with
- * the most partners is the anchor at the centre; its partners ring it;
- * repositories with no links stand apart. Selecting one opens it in the
- * inspector and highlights it but never moves the map; a second press goes in.
+ * Level one: every indexed repository, in districts. A district is open (a frame
+ * holding its repositories as cards) or collapsed to one summary card; which
+ * open at rest is the most that stays readable on this screen, and the reader
+ * opens and closes the rest. Links are drawn between what is on screen. Selecting
+ * a repository opens it in the inspector and highlights it but never moves the
+ * map; a second press goes in.
  */
 export function OverviewLevel({ repositories, nav }: { repositories: RepositoryModel[]; nav: Navigation }) {
   const overview = useTopologyOverview();
@@ -46,26 +62,78 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
   const unresolved = useConnections(NO_FILTERS, true);
   const links = overview.data?.links ?? NO_LINKS;
   const graph = useMemo(() => buildOverview(repositories, links), [repositories, links]);
-  const reduced = useAnimationsOff();
 
   const known = useMemo(() => new Map(repositories.map((r) => [repositoryId(r.slug), r])), [repositories]);
   const selected = nav.selected !== null && known.has(nav.selected) ? nav.selected : null;
   const ready = overview.isSuccess || overview.isError;
+  const repository = selected ? known.get(selected)! : null;
+  const inspecting = repository !== null;
 
-  const shape = useMemo(() => constellation(repositories, graph.edges, null), [repositories, graph.edges]);
-  const target = useMemo(() => {
-    const layout: Layout = new Map(shape.layout);
-    for (const ring of shape.rings) {
-      layout.set(ring.id, { x: -ring.rx, y: -ring.ry, width: ring.rx * 2, height: ring.ry * 2 });
-    }
-    return layout;
-  }, [shape]);
-  // the map holds still on selection, so the tween's key never changes
-  const layout = useTween(target, "", reduced);
-  const extent = useMemo(
-    () => bounds([...shape.layout.entries()].filter(([id]) => id !== GROUP_ID).map(([, box]) => box)),
-    [shape],
+  // -- the districts, and which are open ---------------------------------------------------
+
+  const ds = useMemo(() => (ready ? districts(repositories, graph.edges) : []), [ready, repositories, graph.edges]);
+  const dsKey = ds.map((d) => d.id).join("|");
+  const byId = useMemo(() => new Map(ds.map((d) => [d.id, d])), [ds]);
+  const names = useMemo(() => new Map(repositories.map((r) => [repositoryId(r.slug), r.name])), [repositories]);
+  const marks = useMemo(() => inclusionMarks(repositories, graph.edges), [repositories, graph.edges]);
+
+  // The canvas's size decides what opens at rest. While the inspector narrows it
+  // the size is not taken: the map holds still, and follows the canvas again once
+  // the inspector closes.
+  const [pane, setPane] = useState<{ width: number; height: number } | null>(null);
+  const onPaneSize = useCallback(
+    (size: { width: number; height: number }) =>
+      setPane((prev) =>
+        (prev === null || !inspecting) && (prev?.width !== size.width || prev?.height !== size.height) ? size : prev,
+      ),
+    [inspecting],
   );
+  // what was selected, or came from, on arrival: its district opens, now and never again
+  const [pinned] = useState<readonly string[]>(() =>
+    [nav.selected, nav.arrival.previous?.repository ? repositoryId(nav.arrival.previous.repository) : null].filter(
+      (x): x is string => x !== null,
+    ),
+  );
+  const paneWidth = pane?.width;
+  const paneHeight = pane?.height;
+  const base = useMemo(
+    () =>
+      paneWidth !== undefined && paneHeight !== undefined && ds.length > 0
+        ? defaultExpanded(ds, { width: paneWidth, height: paneHeight })
+        : null,
+    [ds, paneWidth, paneHeight],
+  );
+  const start = useMemo(
+    () =>
+      base &&
+      new Set([...base.expanded, ...ds.filter((d) => pinned.some((p) => d.members.includes(p))).map((d) => d.id)]),
+    [base, ds, pinned],
+  );
+  // what the reader opened and closed holds for these districts, and is dropped when they change
+  const [toggled, setToggled] = useState<{ key: string; expanded: ReadonlySet<string> } | null>(null);
+  const expanded = toggled?.key === dsKey ? toggled.expanded : start;
+
+  const view = useMemo(
+    () => (expanded && base ? overviewView({ districts: ds, edges: graph.edges, expanded, shelf: base.shelf }) : null),
+    [ds, graph.edges, expanded, base],
+  );
+
+  const toggle = useCallback(
+    (id: string) =>
+      setToggled((prev) => {
+        const current = prev?.key === dsKey ? prev.expanded : start;
+        if (!current) return prev;
+        const next = new Set(current);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return { key: dsKey, expanded: next };
+      }),
+    [dsKey, start],
+  );
+  const expandAll = useCallback(() => setToggled({ key: dsKey, expanded: new Set(ds.map((d) => d.id)) }), [dsKey, ds]);
+  const collapseAll = useCallback(() => setToggled({ key: dsKey, expanded: new Set() }), [dsKey]);
+
+  // -- what the cards ask for ----------------------------------------------------------------
 
   const open = useCallback(
     (id: string) => {
@@ -76,11 +144,20 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
   );
   const activate = useCallback(
     (id: string) => {
+      if (id.startsWith("summary:")) {
+        const d = ds.find((district) => summaryId(district.id) === id);
+        if (d) toggle(d.id);
+        return;
+      }
+      if (id.startsWith("district:")) {
+        if (byId.has(id)) toggle(id);
+        return;
+      }
       if (!known.has(id)) return;
       if (nav.isSelected(id)) open(id);
       else nav.select(id);
     },
-    [known, nav, open],
+    [ds, byId, toggle, known, nav, open],
   );
   const actions = useMemo<NodeActions>(
     () => ({ activate, go: (to) => nav.go({ repository: to.repository, path: to.path }) }),
@@ -95,43 +172,49 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
 
   const nodes = useMemo<GraphNode[]>(() => {
     if (!ready) return [];
+    if (ds.length === 0) {
+      // nothing indexed: the workspace alone
+      const note = overview.isError ? "Links between them could not be read" : null;
+      return [place({ id: HUB_ID, type: "hub", data: { repositories: 0, files: 0, note } }, HUB_BOX)];
+    }
+    if (!view) return [];
     const out: GraphNode[] = [];
-    if (shape.group) {
+    for (const [id, box] of view.layout.frames) {
+      const d = byId.get(id);
+      if (!d) continue;
       out.push(
-        place(
-          { id: GROUP_ID, type: "group", data: { count: graph.independent.length }, zIndex: -1 },
-          layout.get(GROUP_ID) ?? shape.group,
-          { pointerEvents: "none" },
-        ),
+        place({ id, type: "district", data: { facts: frameFacts(d, marks), actions }, zIndex: -1 }, box, {
+          pointerEvents: "none",
+        }),
       );
     }
-    const hub = layout.get(HUB_ID);
-    if (shape.anchor === null && hub) {
-      const files = repositories.reduce((sum, r) => sum + r.files, 0);
-      const note = overview.isError
-        ? "Links between them could not be read"
-        : repositories.length > 1
-          ? "No links between them are recorded"
-          : null;
-      out.push(place({ id: HUB_ID, type: "hub", data: { repositories: repositories.length, files, note } }, hub));
+    for (const d of ds) {
+      const id = summaryId(d.id);
+      const box = view.layout.cards.get(id);
+      if (box) {
+        out.push(place({ id, type: "districtSummary", data: { facts: summaryFacts(view, d, names), actions } }, box));
+      }
     }
     for (const repository of repositories) {
       const id = repositoryId(repository.slug);
-      const box = layout.get(id);
-      if (box) {
-        out.push(place({ id, type: "repository", data: { repository, actions, partners: partners.get(id) ?? 0 } }, box));
-      }
+      const box = view.layout.cards.get(id);
+      if (!box) continue;
+      const mark = marks.get(id);
+      const inclusion = mark
+        ? {
+            parentName: mark.parent ? (names.get(mark.parent) ?? null) : null,
+            depth: mark.depth,
+            kind: mark.kind,
+            label: mark.label,
+          }
+        : null;
+      out.push(place({ id, type: "repository", data: { repository, actions, partners: partners.get(id) ?? 0, inclusion } }, box));
     }
     return out;
-  }, [ready, shape, layout, repositories, graph.independent.length, overview.isError, actions, partners]);
+  }, [ready, ds, view, byId, marks, names, repositories, overview.isError, actions, partners]);
 
-  const edges = useMemo(
-    () =>
-      flowEdges(graph.edges, {
-        route: () => "float",
-      }),
-    [graph.edges],
-  );
+  const edges = useMemo(() => (view ? flowEdges(view.edges, { route: () => "float" }) : []), [view]);
+  const extent = view ? view.layout.extent : ready && ds.length === 0 ? HUB_BOX : null;
 
   const families = useMemo<Family[]>(() => {
     const present = new Set(graph.edges.map((e) => e.link.family));
@@ -139,13 +222,8 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
   }, [graph.edges]);
 
   const crossing = links.reduce((sum, link) => sum + link.count, 0);
-  const note = overview.isError
-    ? "The links between repositories could not be read. Repositories are shown without them."
-    : overview.data?.ambiguous_total
-      ? `${plural(overview.data.ambiguous_total, "package")} with more than one possible publisher ${overview.data.ambiguous_total === 1 ? "is" : "are"} not drawn.`
-      : null;
+  const note = overview.isError ? "The links between repositories could not be read. Repositories are shown without them." : null;
 
-  const repository = selected ? known.get(selected)! : null;
   const [connection, setConnection] = useState<{ subject: string | null; id: string | null }>({ subject: null, id: null });
   const [tab, setTab] = useState<{ subject: string | null; value: string }>({ subject: null, value: "connections" });
   const rows: Connection[] = selected ? (graph.connections.get(selected) ?? []) : [];
@@ -159,26 +237,60 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
   };
   const hues = useMemo(() => new Map(repositories.map((r) => [r.slug, r.hue])), [repositories]);
 
+  // what is on the map for the selection and the chosen connection, and what is left out of it
+  const shownSelection = view ? visibleSelection(view, selected) : null;
+  const shownEdge = picked && view ? visibleEdge(view, picked.edge) : null;
+  const previous = nav.arrival.previous?.repository ? repositoryId(nav.arrival.previous.repository) : null;
+  let statusText: string | null = null;
+  if (view) {
+    if (picked && shownEdge === null) {
+      const edge = graph.edges.find((e) => e.id === picked.edge);
+      const why = edge ? whyNotDrawn(view, ds, edge) : null;
+      if (why) statusText = whyNotDrawnText(why);
+    }
+    statusText ??= notDrawnText(notDrawn(view), overview.data?.ambiguous_total ?? 0);
+  }
+
   return (
     <div className={classes.level}>
       <div className={classes.stage} data-inspector={repository ? true : undefined}>
-        <div className={classes.canvas}>
+        <div
+          className={classes.canvas}
+          data-overview
+          data-pane={pane ? `${pane.width}x${pane.height}` : undefined}
+          data-level={base?.level}
+          data-readable={base ? String(base.readable) : undefined}
+        >
           <Graph
             nodes={nodes}
             edges={edges}
             level="overview"
             label="Repositories and the links between them"
-            selected={selected}
-            selectedEdge={picked?.edge ?? null}
+            selected={shownSelection}
+            selectedEdge={shownEdge}
             onSelect={nav.select}
             onActivate={activate}
             arrival={{
               direction: nav.arrival.direction,
-              from: nav.arrival.previous?.repository ? repositoryId(nav.arrival.previous.repository) : null,
+              from: view && previous ? visibleSelection(view, previous) : null,
             }}
             extent={extent}
+            refit={`${dsKey}|${pane?.width}x${pane?.height}`}
+            holdOnGrowth
+            holdOnResize
+            onPaneSize={onPaneSize}
             families={families}
-            start={<h1 className={classes.levelTitle}>All repositories</h1>}
+            start={
+              <>
+                <h1 className={classes.levelTitle}>All repositories</h1>
+                <Button size="compact-xs" variant="subtle" onClick={expandAll} disabled={view === null}>
+                  Expand all districts
+                </Button>
+                <Button size="compact-xs" variant="subtle" onClick={collapseAll} disabled={view === null}>
+                  Collapse all districts
+                </Button>
+              </>
+            }
             end={
               <Totals
                 repositories={repositories}
@@ -190,6 +302,7 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
               />
             }
             notice={note && <p>{note}</p>}
+            status={statusText === null ? null : <span title={statusText}>{statusText}</span>}
           />
         </div>
         {repository && (

@@ -25,6 +25,7 @@
   align-items: center;
   gap: 12px;
   min-width: 0;
+  flex-wrap: wrap;
 }
 
 .toolbarEnd {
@@ -1010,7 +1011,7 @@
 
 /* what the level leaves out: one line between the zoom and the key, cut short when it is long */
 .statusNote {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
