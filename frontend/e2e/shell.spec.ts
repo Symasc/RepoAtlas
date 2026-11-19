@@ -2,9 +2,13 @@ import AxeBuilder from "@axe-core/playwright";
 import type { APIRequestContext, Page } from "@playwright/test";
 
 import type { RepositoryView } from "@/lib/api/generated";
+import { summaryId } from "@/lib/graph/districtLayout";
+import { districts } from "@/lib/graph/districts";
 import { formatCount } from "@/lib/model/format";
+import { buildOverview } from "@/lib/model/graph";
+import { toRepositories } from "@/lib/model/repositories";
 
-import { ask, expect, ready, test } from "./fixtures";
+import { ask, expect, ready, test, wholeMap } from "./fixtures";
 
 const WORKSPACE = { scope: "global" } as const;
 
@@ -46,6 +50,10 @@ for (const scheme of ["dark", "light"] as const) {
       await ready(page);
 
       await expect(page.locator("html")).toHaveAttribute("data-mantine-color-scheme", scheme);
+      // the map as it opens, then the whole of it
+      await expect(page.locator(".react-flow__node").first()).toBeVisible();
+      await page.screenshot({ path: testInfo.outputPath(`overview-${scheme}.png`) });
+      await wholeMap(page);
       for (const repository of repositories) {
         await expect(page.getByRole("button", { name: `Select ${repository.name}`, exact: true })).toBeVisible();
       }
@@ -56,7 +64,6 @@ for (const scheme of ["dark", "light"] as const) {
       );
       await expect(page.getByRole("list", { name: "Legend" })).toContainText("Package dependency");
 
-      await page.screenshot({ path: testInfo.outputPath(`overview-${scheme}.png`) });
       expect(problems).toEqual([]);
     });
 
@@ -108,8 +115,10 @@ test("a first press selects a repository, a second opens it, and Back climbs out
 
   await page.goto("/");
   await ready(page);
+  await wholeMap(page);
   await page.getByRole("button", { name: `Select ${target.name}`, exact: true }).click();
-  await expect(page).toHaveURL(new RegExp(`\\?sel=repo${literal("%3A")}${slug}$`));
+  // the districts that are expanded are in the address, and the selection ends it
+  await expect(page).toHaveURL(new RegExp(`[?&]sel=repo${literal("%3A")}${slug}$`));
   const panel = inspector(page, target.name);
   await expect(panel).toBeVisible();
   await expect(panel.getByRole("button", { name: `Open ${target.name}` })).toBeVisible();
@@ -136,7 +145,8 @@ test("a first press selects a repository, a second opens it, and Back climbs out
   await expect(page).toHaveURL(new RegExp(`\\?repo=${slug}&sel=dir${literal("%3A")}`));
   await expect(inspector(page, first.name)).toBeVisible();
   await page.goBack();
-  await expect(page).toHaveURL(new RegExp(`\\?sel=repo${literal("%3A")}${slug}$`));
+  await expect(page).toHaveURL(new RegExp(`[?&]sel=repo${literal("%3A")}${slug}$`));
+  await expect(page).toHaveURL(/[?&]expand=/);
   await expect(page.getByRole("button", { name: `Open ${target.name}`, exact: true }).first()).toBeVisible();
 
   // Escape clears the selection
@@ -305,7 +315,9 @@ test("animations can be turned off, and the choice outlasts a reload", async ({ 
 test.describe("narrower windows", () => {
   for (const width of [1280, 1024, 768, 390]) {
     test(`fit ${width}px without scrolling sideways`, async ({ page, request, problems }) => {
-      const { repositories = [] } = await ask(request, "repositories", { context: WORKSPACE });
+      const repositories = toRepositories(await ask(request, "repositories", { context: WORKSPACE }));
+      const overview = await ask(request, "topology/overview", { context: WORKSPACE });
+      const ds = districts(repositories, buildOverview(repositories, overview.links ?? []).edges);
       await page.setViewportSize({ width, height: 900 });
       await page.goto("/");
       await ready(page);
@@ -315,10 +327,15 @@ test.describe("narrower windows", () => {
         innerWidth: window.innerWidth,
       }));
       expect(scrollWidth).toBeLessThanOrEqual(innerWidth);
-      // fitted to the window: every repository is on screen
-      for (const repository of repositories) {
-        await expect(page.getByRole("button", { name: `Select ${repository.name}`, exact: true })).toBeInViewport();
+      // fitted to the window: every district is on screen, open as a frame or collapsed as a summary
+      for (const d of ds) {
+        const frame = page.locator(`.react-flow__node-district[data-id="${d.id}"]`);
+        const summary = page.locator(`.react-flow__node-districtSummary[data-id="${summaryId(d.id)}"]`);
+        await expect(frame.or(summary)).toBeInViewport();
       }
+      // and so is every repository that is drawn
+      const drawn = page.locator(".react-flow__node-repository");
+      for (let i = 0; i < (await drawn.count()); i++) await expect(drawn.nth(i)).toBeInViewport();
       expect(problems).toEqual([]);
     });
   }

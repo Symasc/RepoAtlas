@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 
-import { ask, expect, ready, test } from "./fixtures";
+import { ask, expect, ready, test, wholeMap } from "./fixtures";
 
 /**
  * A repository's Deployments tab: what its source states, and the links a person
@@ -13,6 +13,7 @@ test("a deployment link is recorded, shown, edited and removed from the inspecto
 
   await page.goto("/");
   await ready(page);
+  await wholeMap(page);
   await page.getByRole("button", { name: `Select ${name}`, exact: true }).click();
   const panel = page.getByRole("complementary", { name: `${name}, inspected` });
   await panel.getByRole("tab", { name: "Deployments" }).click();

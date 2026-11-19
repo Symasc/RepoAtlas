@@ -26,6 +26,8 @@ import {
   type ReactNode,
 } from "react";
 
+import { fitViewport, MAX_ZOOM, MIN_ZOOM } from "@/lib/graph/fit";
+import { refitAction } from "@/lib/graph/refit";
 import { CODE_RELATIONS, RELATIONS, type Box, type Family, type Relation } from "@/lib/model/graph";
 import { useAnimationsOff } from "@/lib/useMotion";
 
@@ -37,6 +39,7 @@ import classes from "./Graph.module.css";
 import { BACKDROP, type GraphNode } from "./nodes";
 import { nodeTypes } from "./registry";
 import { easeIn, easeInOut, easeOut, useRegisterExit, type Arrival, type Direction } from "./transition";
+import { useHoverFollowingNodes } from "./useHoverFollowingNodes";
 
 interface Props {
   nodes: GraphNode[];
@@ -67,6 +70,14 @@ interface Props {
   end?: ReactNode;
   /** What is on screen but incomplete, in a line under the toolbar. */
   notice?: ReactNode;
+  /** Growth of the extent alone does not glide the view to a new fit. */
+  holdOnGrowth?: boolean;
+  /** A change of the canvas's size alone does not glide the view to a new fit. */
+  holdOnResize?: boolean;
+  /** The canvas's size, whenever it changes (never for a new callback). */
+  onPaneSize?: (size: { width: number; height: number }) => void;
+  /** What the level leaves out, in a line of the status bar. */
+  status?: ReactNode;
 }
 
 export function Graph(props: Props) {
@@ -82,12 +93,6 @@ const RAISE: Record<Emphasis, number> = { dim: 0, rest: 1, lit: 2, selected: 3 }
 
 /** The map's grid, in canvas units: wide enough to sit behind the cards, not among them. */
 const GRATICULE = 120;
-const MIN_ZOOM = 0.12;
-const MAX_ZOOM = 2.5;
-/** Fitting never magnifies past 100%: a small level stays at its own size. */
-const FIT_MAX = 1;
-/** A margin round what is fitted: the toolbar and status bar sit outside the canvas. */
-const PADDING = { top: "36px", bottom: "36px", left: "40px", right: "40px" } as const;
 
 function shapeOf(box: Box): string {
   return `${Math.round(box.x)},${Math.round(box.y)},${Math.round(box.width)},${Math.round(box.height)}`;
@@ -100,17 +105,6 @@ function boxIn(nodes: readonly GraphNode[], id: string): Box | null {
 }
 
 /** `viewport` scaled by `factor` about the middle of the screen. */
-/** The whole extent in view, or, where that would shrink it under `minFit`, its left part at `minFit`. */
-function fitted(extent: Box, width: number, height: number, minFit: number | undefined): Viewport {
-  const whole = getViewportForBounds(extent, width, height, MIN_ZOOM, FIT_MAX, PADDING);
-  if (minFit === undefined || whole.zoom >= minFit) return whole;
-  return {
-    x: parseFloat(PADDING.left) - extent.x * minFit,
-    y: height / 2 - (extent.y + extent.height / 2) * minFit,
-    zoom: minFit,
-  };
-}
-
 function about(viewport: Viewport, factor: number, width: number, height: number): Viewport {
   return {
     x: width / 2 - (width / 2 - viewport.x) * factor,
@@ -136,13 +130,26 @@ function Canvas({
   start,
   end,
   notice,
+  holdOnGrowth,
+  holdOnResize,
+  onPaneSize,
+  status,
 }: Props) {
   const scheme = useComputedColorScheme("dark", { getInitialValueInEffect: true });
   const reduced = useAnimationsOff();
   const { setViewport, getViewport } = useReactFlow();
   const width = useStore((s) => s.width);
   const height = useStore((s) => s.height);
-  const [hovered, setHovered] = useState<string | null>(null);
+  const [hovered, setHovered] = useHoverFollowingNodes(nodes);
+
+  // the canvas's size goes out when it changes, not when the callback does
+  const report = useRef(onPaneSize);
+  useLayoutEffect(() => {
+    report.current = onPaneSize;
+  });
+  useEffect(() => {
+    if (width > 0 && height > 0) report.current?.({ width, height });
+  }, [width, height]);
 
   // What is selected, else what is pointed at, is in focus: its lines are lit,
   // the things it touches stay, and everything else fades. Layout never moves
@@ -206,9 +213,15 @@ function Canvas({
   const onFocus = useCallback((event: FocusEvent<HTMLDivElement>) => {
     const node = (event.target as HTMLElement).closest<HTMLElement>(".react-flow__node");
     const id = node?.dataset.id ?? null;
-    setHovered(id !== null && !node?.classList.contains("react-flow__node-frame") ? id : null);
-  }, []);
-  const onBlur = useCallback(() => setHovered(null), []);
+    setHovered(
+      id !== null &&
+        !node?.classList.contains("react-flow__node-frame") &&
+        !node?.classList.contains("react-flow__node-district")
+        ? id
+        : null,
+    );
+  }, [setHovered]);
+  const onBlur = useCallback(() => setHovered(null), [setHovered]);
   // Escape lets go of the selection wherever focus is (after Back it rests on
   // the page, not in the canvas), unless a field or an open dialog owns it
   useEffect(() => {
@@ -246,7 +259,7 @@ function Canvas({
     fittedFor.current = { refit, width, height };
     fittedExtent.current = shapeOf(extent);
     moved.current = false;
-    const target = fitted(extent, width, height, minFit);
+    const target = fitViewport(extent, { width, height }, { minFit });
     let start = target;
     let duration = arrival.direction === "out" ? 480 : 420;
     if (!reduced && arrival.direction === "in") start = about(target, 0.78, width, height);
@@ -285,11 +298,11 @@ function Canvas({
     if (!recentred && !resized && !grown) return;
     fittedFor.current = { refit, width, height };
     fittedExtent.current = shapeOf(extent);
-    if (!recentred && !resized && moved.current) return;
+    if (refitAction({ recentred, resized, grown, moved: moved.current }, { growth: holdOnGrowth, resize: holdOnResize }) === "none") return;
     moved.current = false;
-    const target = fitted(extent, width, height, minFit);
+    const target = fitViewport(extent, { width, height }, { minFit });
     void setViewport(target, { duration: reduced ? 0 : recentred ? 560 : 320, ease: easeInOut });
-  }, [level, refit, extent, width, height, reduced, minFit, setViewport]);
+  }, [level, refit, extent, width, height, reduced, minFit, holdOnGrowth, holdOnResize, setViewport]);
 
   // leaving: zoom into what is being opened, or back out, as the view fades
   const register = useRegisterExit();
@@ -354,6 +367,11 @@ function Canvas({
       </div>
       <div className={classes.statusBar}>
         <ZoomControls extent={extent} reduced={reduced} />
+        {status && (
+          <div className={classes.statusNote} data-testid="status-note" aria-live="polite">
+            {status}
+          </div>
+        )}
         <Legend families={families} edges={edges} />
       </div>
     </div>
@@ -386,7 +404,7 @@ function ZoomControls({ extent, reduced }: { extent: Box | null; reduced: boolea
   const height = useStore((s) => s.height);
   const duration = reduced ? 0 : 200;
   const fit = () => {
-    if (extent) void setViewport(getViewportForBounds(extent, width, height, MIN_ZOOM, FIT_MAX, PADDING), { duration });
+    if (extent) void setViewport(fitViewport(extent, { width, height }), { duration });
   };
   return (
     <div className={classes.zoom} role="group" aria-label="Zoom">

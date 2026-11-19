@@ -37,6 +37,15 @@ export async function ask<N extends EndpointName>(
   return payload.result;
 }
 
+/**
+ * The whole map: every district open, fitted to the screen. The overview opens only
+ * what stays readable, so a test that looks for any repository starts here.
+ */
+export async function wholeMap(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "Expand all districts", exact: true }).click();
+  await page.getByRole("button", { name: "Fit to screen", exact: true }).click();
+}
+
 /** The shell has the live index: the freshness check has answered. */
 export async function ready(page: Page): Promise<void> {
   await expect(

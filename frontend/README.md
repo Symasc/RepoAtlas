@@ -67,8 +67,10 @@ from a checkout: `repoatlas ui --frontend frontend/out`. Keep anything that need
 
 The explorer shows the summary first and the detail when you ask for it.
 
-- **All repositories:** the selected repository, or the one with the most partners, sits at the centre, with its
-  partners around it.
+- **All repositories:** a district map. Each district is a frame you can collapse into a summary card, and a summary
+  card you can expand again. A line between repositories is lifted onto the cards that are visible, so a collapsed
+  district carries the lines of what it holds. A repository included in another is shown nested inside it. Selecting
+  something never moves the map.
 - **A repository:** the directory you are in, as cards: one per directory, plus its files. Each card counts its links
   per family rather than drawing them.
 - **A file:** opens on its highlighted code. Press a name to select it; press again, or **Trace**, to follow it.
@@ -126,6 +128,16 @@ reason.
 The inspector holds the detail: **Connections**, **Contents** or **Files**, **Code**, **Details** (size, language,
 declarations), and **Evidence** for a chosen connection. Where you are is in the URL
 (`?repo=<slug>&path=<dir or file>&trace=<seed>&sel=<node>`), so a view can be shared.
+
+On the overview, which districts are expanded is in the address too: `expand=<district>,<district>,…` (a district's id
+without its `district:` prefix). With no `expand` the overview opens what stays readable on your screen; `expand=` with
+nothing after it opens none; otherwise exactly the districts listed open. `isolate=<district>` shows one district and
+the districts linked to it (a district cut into parts is isolated whole, and a part's id names its whole); the others
+are not on the map, and the links to them are counted ("N links to districts not shown") instead of drawn. `expand`
+stays the state of the whole map, districts not shown included. An open district's **Isolate** button writes
+`isolate`, and **Show all districts** removes it; both push a history entry, so Back undoes them. An `isolate` that
+names no district shows the whole map. Pressing Expand or Collapse replaces the history entry, so Back still climbs
+out of a repository onto the map as you left it.
 
 Motion is limited to transforms and opacity. The header's **Turn animations off** switch stops it; until you choose,
 your system's reduced-motion setting decides. The theme follows your system until you change it with the header's
