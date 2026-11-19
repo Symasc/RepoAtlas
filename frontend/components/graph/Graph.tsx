@@ -63,6 +63,12 @@ interface Props {
    * readable from the extent's left edge, and the rest is a pan away.
    */
   minFit?: number;
+  /**
+   * A one-off look at the level's top left, at a readable zoom: when its key is
+   * new, the view glides there once. For a press that opens more than the screen
+   * can show at once, where fitting the whole would only shrink it out of reading.
+   */
+  look?: { key: string; minFit: number } | null;
   families: readonly Family[];
   /** The toolbar's start: where the reader is. */
   start?: ReactNode;
@@ -126,6 +132,7 @@ function Canvas({
   extent,
   refit,
   minFit,
+  look = null,
   families,
   start,
   end,
@@ -181,9 +188,11 @@ function Canvas({
     [nodes, related, focus, selected],
   );
 
-  // a line at rest runs under the cards; what is lit or selected comes in
-  // front of them, its casing cutting it clean across what it passes over, and
-  // is drawn last, so it crosses the rest
+  // a line at rest runs under the cards (the district map routes round the cards
+  // it joins no more than it must; the other views let it pass under them on
+  // purpose); what is lit or selected comes in front of them, its casing
+  // cutting it clean across what it passes over, and is drawn last, so it
+  // crosses the rest
   const shownEdges = useMemo<GraphEdge[]>(
     () =>
       edges
@@ -303,6 +312,23 @@ function Canvas({
     const target = fitViewport(extent, { width, height }, { minFit });
     void setViewport(target, { duration: reduced ? 0 : recentred ? 560 : 320, ease: easeInOut });
   }, [level, refit, extent, width, height, reduced, minFit, holdOnGrowth, holdOnResize, setViewport]);
+
+  // a look asked for by key: once per key, at the extent it was asked for (the
+  // caller gives it only once the level has the layout it belongs to)
+  const lookedKey = useRef<string | null>(null);
+  const lookKey = look?.key ?? null;
+  const lookFit = look?.minFit;
+  useEffect(() => {
+    if (lookKey === null || lookFit === undefined || lookedKey.current === lookKey) return;
+    if (entered.current !== level || extent === null || width === 0 || height === 0) return;
+    lookedKey.current = lookKey;
+    fittedExtent.current = shapeOf(extent);
+    moved.current = false;
+    void setViewport(fitViewport(extent, { width, height }, { minFit: lookFit, anchor: "start" }), {
+      duration: reduced ? 0 : 420,
+      ease: easeInOut,
+    });
+  }, [lookKey, lookFit, level, extent, width, height, reduced, setViewport]);
 
   // leaving: zoom into what is being opened, or back out, as the view fades
   const register = useRegisterExit();

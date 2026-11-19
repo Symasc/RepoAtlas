@@ -244,6 +244,11 @@ export function whyNotDrawnText(r: NotDrawnReason): string {
 
 // -- isolating a district ------------------------------------------------------------------
 
+/** The level's title: the whole map's, or the district it is isolated on. */
+export function overviewTitle(i: Isolation | null): string {
+  return i === null ? "All repositories" : `Isolated: ${i.label}`;
+}
+
 /** The notice above an isolated map: what is shown and how much is not. */
 export function isolationText(i: Isolation): string {
   return `Isolated: ${i.label} and ${plural(i.neighbours.length, "linked district")} · ${plural(i.hidden.length, "district")} not shown`;

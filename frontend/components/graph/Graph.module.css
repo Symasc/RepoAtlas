@@ -400,6 +400,25 @@
   &[data-inclusion="mixed"] {
     border-style: double;
   }
+
+  /* the district the map is isolated on: edged in the accent, in whatever pattern its inclusions have */
+  &[data-isolated] {
+    border-color: var(--ra-accent);
+    box-shadow: inset 0 0 0 2px var(--ra-accent);
+  }
+}
+
+/* the word that marks the isolated district, in its header: the title above the map says the same */
+.isolatedTag {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid var(--ra-accent);
+  border-radius: var(--ra-radius-s);
+  color: var(--ra-accent);
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
 }
 
 .districtHeader {
@@ -512,6 +531,11 @@
   &:hover {
     border-color: var(--ra-text-subtle);
   }
+
+  &[data-isolated] {
+    border-color: var(--ra-accent);
+    outline: 1px solid var(--ra-accent);
+  }
 }
 
 .summaryTitle {
@@ -519,6 +543,38 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+/* room for the Isolate button in the corner */
+.districtSummary[data-isolable] .summaryTitle {
+  padding-right: 64px;
+}
+
+/* the word in a collapsed district's corner: shows that district and the ones linked to it; above the card's own button */
+.summaryIsolate {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  z-index: 2;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--ra-radius-s);
+  background: transparent;
+  color: var(--ra-text-muted);
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 600;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--ra-hover);
+    color: var(--ra-text);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--ra-focus);
+    outline-offset: 1px;
+  }
 }
 
 .summarySample {

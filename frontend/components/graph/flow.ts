@@ -31,6 +31,8 @@ export function flowEdges(
   how: {
     route: (edge: ViewEdge) => RouteKind;
     labelled?: boolean;
+    /** The cards an `avoid` line goes round; without them it is drawn as `float`. */
+    obstacles?: ReadonlyMap<string, Box> | null;
   },
 ): GraphEdge[] {
   const lines = edges.flatMap((edge) => {
@@ -56,7 +58,7 @@ export function flowEdges(
     const route = how.route(edge);
     // a floating line's offset is measured across its own direction: two lines
     // running opposite ways between one pair must flip one sign to stay apart
-    const flip = route === "float" && edge.source > edge.target ? -1 : 1;
+    const flip = (route === "float" || route === "avoid") && edge.source > edge.target ? -1 : 1;
     return {
       id,
       type: "link",
@@ -72,6 +74,7 @@ export function flowEdges(
         labelled: how.labelled ?? false,
         offset: (offsets.get(id) ?? 0) * flip,
         route,
+        obstacles: route === "avoid" ? (how.obstacles ?? null) : null,
         scope: edge.scope ?? null,
       },
     };

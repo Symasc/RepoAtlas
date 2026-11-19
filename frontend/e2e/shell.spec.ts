@@ -341,6 +341,59 @@ test.describe("narrower windows", () => {
   }
 });
 
+test.describe("the header", () => {
+  for (const width of [1280, 1024, 900, 768]) {
+    test(`keeps its three regions apart and on screen at ${width}px`, async ({ page, problems }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto("/");
+      await ready(page);
+      await expect(page.locator(".react-flow__node").first()).toBeVisible();
+      // what each region draws: the union of its visible descendants' boxes
+      const regions = await page.locator("[data-header]").evaluateAll((all) =>
+        all.map((region) => {
+          let left = Infinity;
+          let top = Infinity;
+          let right = -Infinity;
+          let bottom = -Infinity;
+          for (const el of region.querySelectorAll("*")) {
+            const style = getComputedStyle(el);
+            if (style.display === "none" || style.visibility === "hidden") continue;
+            const box = el.getBoundingClientRect();
+            // a visually hidden label is a pixel somewhere: it draws nothing
+            if (box.width <= 1 && box.height <= 1) continue;
+            left = Math.min(left, box.left);
+            top = Math.min(top, box.top);
+            right = Math.max(right, box.right);
+            bottom = Math.max(bottom, box.bottom);
+          }
+          return { name: (region as HTMLElement).dataset.header!, left, top, right, bottom };
+        }),
+      );
+      expect(regions.map((r) => r.name)).toEqual(["start", "center", "end"]);
+      const inner = await page.evaluate(() => window.innerWidth);
+      // the search in the centre is hidden at the small breakpoint (768px and below); the rest always draws
+      const drawn = regions.filter((r) => Number.isFinite(r.left));
+      expect(
+        drawn.map((r) => r.name),
+        `which regions of the header draw at ${width}px`,
+      ).toEqual(width > 768 ? ["start", "center", "end"] : ["start", "end"]);
+      for (const region of drawn) {
+        expect(region.left, `the ${region.name} of the header starts on screen at ${width}px`).toBeGreaterThanOrEqual(0);
+        expect(region.right, `the ${region.name} of the header ends on screen at ${width}px`).toBeLessThanOrEqual(inner);
+      }
+      for (let i = 0; i < drawn.length; i++) {
+        for (let j = i + 1; j < drawn.length; j++) {
+          const a = drawn[i]!;
+          const b = drawn[j]!;
+          const across = a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
+          expect(across, `the ${a.name} and the ${b.name} of the header overlap at ${width}px`).toBe(false);
+        }
+      }
+      expect(problems).toEqual([]);
+    });
+  }
+});
+
 test("explains a stopped API and how to start it", async ({ page }) => {
   // the one mocked case: the API this suite runs cannot also be stopped
   await page.route("**/api/ra/**", (route) =>

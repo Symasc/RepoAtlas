@@ -16,6 +16,22 @@
   white-space: nowrap;
 }
 
+/* an isolated map: the way back to the whole map, then the district's title, which gives way with an ellipsis rather than wrapping */
+.isolatedTrail {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.isolatedTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* the two buttons that open and close every district: they stay side by side, never one under the other */
 .toolbarGroup {
   display: flex;
