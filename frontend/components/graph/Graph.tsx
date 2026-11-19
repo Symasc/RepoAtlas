@@ -188,9 +188,11 @@ function Canvas({
     [nodes, related, focus, selected],
   );
 
-  // a line at rest runs under the cards; what is lit or selected comes in
-  // front of them, its casing cutting it clean across what it passes over, and
-  // is drawn last, so it crosses the rest
+  // a line at rest runs under the cards (the district map routes round the cards
+  // it joins no more than it must; the other views let it pass under them on
+  // purpose); what is lit or selected comes in front of them, its casing
+  // cutting it clean across what it passes over, and is drawn last, so it
+  // crosses the rest
   const shownEdges = useMemo<GraphEdge[]>(
     () =>
       edges

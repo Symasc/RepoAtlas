@@ -163,6 +163,9 @@ test("the overview holds an ecosystem of 300 repositories", async ({ page, probl
   await page.getByRole("button", { name: "Expand all districts", exact: true }).click();
   await expect(page.getByLabel("Zoom level")).toHaveText(`${Math.round(READABLE_ZOOM * 100)}%`);
   await expect(page.locator(`.react-flow__node-district[data-id="${ds[0]!.id}"]`)).toBeInViewport();
+  // every line on the district map goes round the cards it would run under, where there is a way
+  await expect.poll(() => page.locator('.react-flow__edges g[data-kind][data-route="avoid"]').count()).toBeGreaterThan(0);
+  await expect(page.locator('.react-flow__edges g[data-kind]:not([data-route="avoid"])')).toHaveCount(0);
   await shot("ecosystem-all.png");
   await fit();
   await shot("ecosystem-all-fit.png");

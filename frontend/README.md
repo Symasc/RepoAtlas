@@ -69,7 +69,8 @@ The explorer shows the summary first and the detail when you ask for it.
 
 - **All repositories:** a district map. Each district is a frame you can collapse into a summary card, and a summary
   card you can expand again. A line between repositories is lifted onto the cards that are visible, so a collapsed
-  district carries the lines of what it holds. A repository included in another is shown nested inside it. Selecting
+  district carries the lines of what it holds. A line is routed round the cards it does not join where a free route
+  exists, and runs under them only where none does. A repository included in another is shown nested inside it. Selecting
   something never moves the map. **Expand all districts** opens every district; since that is more than one screen
   can read, the view moves to the map's top left at a readable zoom (75%) and the rest is a pan away. **Fit to
   screen** shows all of it at once, small.

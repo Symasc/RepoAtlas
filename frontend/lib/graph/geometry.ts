@@ -129,9 +129,11 @@ export function octilinear(start: Point, end: Point, axis: Axis = "x", shift = 0
  * side. `offset` moves the line across its own direction (to separate parallel
  * kinds), as a normal to the run would: a line running back the other way
  * with the same offset sits on the other side. Boxes that overlap on both axes
- * are joined straight, centre towards centre.
+ * are joined straight, centre towards centre. `axis` forces the run's axis
+ * (by default the one with the wider gap); it is only meaningful where the
+ * boxes have a gap along it.
  */
-export function floating(source: Box, target: Box, offset = 0): Route {
+export function floating(source: Box, target: Box, offset = 0, axis?: Axis): Route {
   const a = centre(source);
   const b = centre(target);
   const dx = b.x - a.x;
@@ -150,7 +152,7 @@ export function floating(source: Box, target: Box, offset = 0): Route {
       points: [start, end],
     };
   }
-  if (gapX >= gapY) {
+  if ((axis ?? (gapX >= gapY ? "x" : "y")) === "x") {
     const sx = Math.sign(dx) || 1;
     const shift = offset * sx;
     const start = { x: sx > 0 ? source.x + source.width : source.x, y: clamp(a.y + shift, source.y + 4, source.y + source.height - 4) };
@@ -168,6 +170,57 @@ export function floating(source: Box, target: Box, offset = 0): Route {
     y: sy > 0 ? target.y - ARRIVAL_GAP : target.y + target.height + ARRIVAL_GAP,
   };
   return octilinear(start, end, "y", shift);
+}
+
+/** How far a gutter route runs off its source's side, and off the face of its target. */
+const SOURCE_GUTTER = 24;
+const TARGET_GUTTER = 14;
+/** How far a line's offset moves its gutters: more would carry it into the next card's gutter. */
+const SOURCE_GUTTER_SPREAD = 18;
+const TARGET_GUTTER_SPREAD = 10;
+
+/**
+ * A line round the cards between two boxes, in the gutters between cards: out of
+ * the source's side that faces the target, along a vertical gutter beside the
+ * source, along a horizontal gutter beside the target's top or bottom, and into
+ * that face. `far` arrives at the face away from the source (the target's bottom
+ * for a target below it) instead of the face towards it. `offset` moves the
+ * gutters and the line's ends so that parallel lines nest rather than cross.
+ */
+export function gutter(source: Box, target: Box, offset = 0, far = false): Route {
+  const a = centre(source);
+  const b = centre(target);
+  const sx = Math.sign(b.x - a.x) || 1;
+  const sdy = Math.sign(b.y - a.y) || 1;
+  const wide = clamp(offset, -SOURCE_GUTTER_SPREAD, SOURCE_GUTTER_SPREAD);
+  const narrow = clamp(offset, -TARGET_GUTTER_SPREAD, TARGET_GUTTER_SPREAD);
+  const top = (sdy > 0) !== far;
+  const base = top ? target.y - TARGET_GUTTER : target.y + target.height + TARGET_GUTTER;
+  // the way the vertical gutter runs; the line sits further along it the less `offset` is
+  const run = Math.sign(base - a.y) || sdy;
+  const edge = sx > 0 ? source.x + source.width : source.x;
+  const y0 = clamp(a.y - wide * run, source.y + 4, source.y + source.height - 4);
+  const gx = edge + sx * (SOURCE_GUTTER + wide);
+  const gy = base - run * narrow;
+  // a line whose horizontal run is further from the face arrives further along its direction
+  const k = top ? run : -run;
+  const tx = clamp(b.x + sx * k * wide, target.x + 4, target.x + target.width - 4);
+  const endY = top ? target.y - ARRIVAL_GAP : target.y + target.height + ARRIVAL_GAP;
+  const points: Point[] = [
+    { x: edge, y: y0 },
+    { x: gx, y: y0 },
+    { x: gx, y: gy },
+    { x: tx, y: gy },
+    { x: tx, y: endY },
+  ];
+  return {
+    path: rounded(points, BEND_RADIUS),
+    label: { x: (gx + tx) / 2, y: gy },
+    start: points[0]!,
+    end: points[4]!,
+    towards: points[3]!,
+    points,
+  };
 }
 
 function clamp(n: number, low: number, high: number): number {

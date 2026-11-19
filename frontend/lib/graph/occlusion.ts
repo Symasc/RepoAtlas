@@ -1,6 +1,6 @@
 import type { Box } from "@/lib/model/graph";
 
-import type { Point, Route } from "./geometry";
+import { centre, floating, gutter, type Point, type Route } from "./geometry";
 
 /**
  * How many lines run under cards they are not drawn between. A line at rest is
@@ -72,6 +72,87 @@ export function polylineEnters(points: readonly Point[], box: Box): boolean {
     if (segmentEnters(points[i - 1]!, points[i]!, box)) return true;
   }
   return false;
+}
+
+/** The cards a polyline enters (a card entered twice counts once): `inner` are the cards already shrunk by `INSET`. */
+function hitsOf(points: readonly Point[], inner: readonly Box[]): number {
+  let left = Infinity;
+  let top = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+  for (const p of points) {
+    left = Math.min(left, p.x);
+    top = Math.min(top, p.y);
+    right = Math.max(right, p.x);
+    bottom = Math.max(bottom, p.y);
+  }
+  let hit = 0;
+  for (const box of inner) {
+    if (box.x > right || box.x + box.width < left || box.y > bottom || box.y + box.height < top) continue;
+    if (polylineEnters(points, box)) hit += 1;
+  }
+  return hit;
+}
+
+const sameBox = (a: Box, b: Box) => a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+
+/** The obstacle maps seen, shrunk once: a map is not changed after it is handed to `routeAvoiding`. */
+const shrunkCards = new WeakMap<ReadonlyMap<string, Box>, Box[]>();
+
+function shrunkOf(cards: ReadonlyMap<string, Box>): Box[] {
+  let inner = shrunkCards.get(cards);
+  if (inner === undefined) {
+    inner = [];
+    for (const box of cards.values()) {
+      const small = shrunk(box, INSET);
+      if (small !== null) inner.push(small);
+    }
+    shrunkCards.set(cards, inner);
+  }
+  return inner;
+}
+
+/**
+ * `floating`, unless the line it draws runs under cards it does not join and a
+ * route round them has fewer. The candidates, best first: `floating`; `floating`
+ * along the other axis (where the boxes have a gap along it); a route through
+ * the gutters beside the source and the target's near face; the same into the
+ * target's far face. The one with the fewest cards entered wins, the earlier on
+ * a tie, so a line is never worse than `floating` and one that is clear stays
+ * as it is. `obstacles` are the cards of the layout; a box equal to the source's
+ * or the target's is the line's own end and is not one.
+ */
+export function routeAvoiding(source: Box, target: Box, offset: number, obstacles: ReadonlyMap<string, Box>): Route {
+  const own = [shrunk(source, INSET), shrunk(target, INSET)].filter((box): box is Box => box !== null);
+  const inner = shrunkOf(obstacles).filter((box) => !own.some((mine) => sameBox(box, mine)));
+  let best = floating(source, target, offset);
+  let fewest = hitsOf(best.points, inner);
+  if (fewest === 0) return best;
+  const a = centre(source);
+  const b = centre(target);
+  const gapX = Math.abs(b.x - a.x) - (source.width + target.width) / 2;
+  const gapY = Math.abs(b.y - a.y) - (source.height + target.height) / 2;
+  // along the axis the default did not take, if the boxes are apart along it
+  const other = gapX >= gapY ? "y" : "x";
+  const apart = (other === "y" ? gapY : gapX) > 0;
+  const candidates: (() => Route | null)[] = [
+    () => (apart ? floating(source, target, offset, other) : null),
+    () => gutter(source, target, offset, false),
+    () => gutter(source, target, offset, true),
+  ];
+  for (const make of candidates) {
+    const route = make();
+    if (route === null) continue;
+    // a gutter route must not run through its own ends
+    if (own.some((mine) => polylineEnters(route.points, mine))) continue;
+    const hit = hitsOf(route.points, inner);
+    if (hit < fewest) {
+      best = route;
+      fewest = hit;
+      if (fewest === 0) break;
+    }
+  }
+  return best;
 }
 
 /**

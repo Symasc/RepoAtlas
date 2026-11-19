@@ -274,7 +274,11 @@ export function OverviewLevel({ repositories, nav }: { repositories: RepositoryM
     return out;
   }, [ready, ds, view, byId, marks, names, repositories, overview.isError, actions, partners, canIsolate, isolation]);
 
-  const edges = useMemo(() => (view ? flowEdges(view.edges, { route: () => "float" }) : []), [view]);
+  // lines go round the cards they would otherwise run under, where there is a way
+  const edges = useMemo(
+    () => (view ? flowEdges(view.edges, { route: () => "avoid", obstacles: view.layout.cards }) : []),
+    [view],
+  );
   const extent = view ? view.layout.extent : ready && ds.length === 0 ? HUB_BOX : null;
   // asked for only once the map holds exactly what Expand all opened: the layout it looks at is then the one drawn
   const look = useMemo(() => {

@@ -9,10 +9,11 @@ import {
   type EdgeTypes,
   type InternalNode,
 } from "@xyflow/react";
-import { memo } from "react";
+import { memo, useMemo } from "react";
 
 import { arrowhead, floating, sideways, type Route } from "@/lib/graph/geometry";
 import { strokeFor } from "@/lib/graph/layout";
+import { routeAvoiding } from "@/lib/graph/occlusion";
 import { compactCount, formatCount } from "@/lib/model/format";
 import type { Box, Family, LinkData, Relation } from "@/lib/model/graph";
 
@@ -24,8 +25,11 @@ import classes from "./Graph.module.css";
  */
 export type Emphasis = "rest" | "lit" | "dim" | "selected";
 
-/** `float`: border to border; `side`: side to side; `lane`: side to side, met by a frame as a lane. */
-export type RouteKind = "float" | "side" | "lane";
+/**
+ * `float`: border to border; `side`: side to side; `lane`: side to side, met by a frame as a lane;
+ * `avoid`: border to border, round the cards it would run under where there is a way.
+ */
+export type RouteKind = "float" | "side" | "lane" | "avoid";
 
 type LinkEdgeData = {
   /** What this line draws: the whole link, or the part of it of one relationship. */
@@ -42,6 +46,8 @@ type LinkEdgeData = {
   /** Pixels across the line, to separate families drawn between the same pair. */
   offset: number;
   route: RouteKind;
+  /** The boxes of the cards an `avoid` line goes round (its own two ends among them); `null` for the other routes. */
+  obstacles: ReadonlyMap<string, Box> | null;
   scope: "detail" | "aggregate" | null;
 };
 
@@ -122,17 +128,23 @@ function boxOf(node: InternalNode): Box {
 function LinkEdge({ id, source, target, data }: EdgeProps<GraphEdge>) {
   const from = useInternalNode(source);
   const to = useInternalNode(target);
+  const none: Box = { x: 0, y: 0, width: 0, height: 0 };
+  const s = from ? boxOf(from) : none;
+  const t = to ? boxOf(to) : none;
+  const kind = data?.route ?? "float";
+  const offset = data?.offset ?? 0;
+  const obstacles = data?.obstacles ?? null;
+  const lane = kind === "lane" ? (from?.type === "frame" ? "source" : to?.type === "frame" ? "target" : null) : null;
+  // a route is worked out again only when what it depends on moves, not at every hover
+  const route = useMemo<Route>(() => {
+    const a: Box = { x: s.x, y: s.y, width: s.width, height: s.height };
+    const b: Box = { x: t.x, y: t.y, width: t.width, height: t.height };
+    if (kind === "float") return floating(a, b, offset);
+    if (kind === "avoid") return obstacles ? routeAvoiding(a, b, offset, obstacles) : floating(a, b, offset);
+    return sideways(a, b, offset, lane);
+  }, [kind, s.x, s.y, s.width, s.height, t.x, t.y, t.width, t.height, offset, obstacles, lane]);
   if (!from || !to || !data) return null;
-  const { link, relation, badge, emphasis, labelled, offset } = data;
-  const s = boxOf(from);
-  const t = boxOf(to);
-  let route: Route;
-  if (data.route === "float") {
-    route = floating(s, t, offset);
-  } else {
-    const lane = data.route === "lane" ? (from.type === "frame" ? "source" : to.type === "frame" ? "target" : null) : null;
-    route = sideways(s, t, offset, lane);
-  }
+  const { link, relation, badge, emphasis, labelled } = data;
   const width = strokeFor(link.count) + (emphasis === "selected" ? 1 : 0);
   const head = arrowhead(route.end, route.towards, 4 + width * 1.2);
   const casing = (link.family === "dependency" ? width + 3 : width) + 3;
@@ -143,6 +155,7 @@ function LinkEdge({ id, source, target, data }: EdgeProps<GraphEdge>) {
         data-family={link.family}
         data-relation={relation}
         data-kind={link.kind}
+        data-route={data.route}
         data-link={data.base}
         data-emphasis={emphasis}
       >
