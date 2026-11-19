@@ -39,6 +39,7 @@ import classes from "./Graph.module.css";
 import { BACKDROP, type GraphNode } from "./nodes";
 import { nodeTypes } from "./registry";
 import { easeIn, easeInOut, easeOut, useRegisterExit, type Arrival, type Direction } from "./transition";
+import { useHoverFollowingNodes } from "./useHoverFollowingNodes";
 
 interface Props {
   nodes: GraphNode[];
@@ -139,13 +140,7 @@ function Canvas({
   const { setViewport, getViewport } = useReactFlow();
   const width = useStore((s) => s.width);
   const height = useStore((s) => s.height);
-  const [hovered, setHovered] = useState<string | null>(null);
-  // a hovered node that leaves the canvas (a summary opened by its own button) sends no mouse-leave
-  const [hoverNodes, setHoverNodes] = useState(nodes);
-  if (hoverNodes !== nodes) {
-    setHoverNodes(nodes);
-    if (hovered !== null && !nodes.some((n) => n.id === hovered)) setHovered(null);
-  }
+  const [hovered, setHovered] = useHoverFollowingNodes(nodes);
 
   // the canvas's size goes out when it changes, not when the callback does
   const report = useRef(onPaneSize);
@@ -225,8 +220,8 @@ function Canvas({
         ? id
         : null,
     );
-  }, []);
-  const onBlur = useCallback(() => setHovered(null), []);
+  }, [setHovered]);
+  const onBlur = useCallback(() => setHovered(null), [setHovered]);
   // Escape lets go of the selection wherever focus is (after Back it rests on
   // the page, not in the canvas), unless a field or an open dialog owns it
   useEffect(() => {
