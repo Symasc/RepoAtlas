@@ -163,3 +163,19 @@ An exported build has no route; the local API applies the same checks itself
   directory, never the checkout. Its repositories link to each other, so the lines between them are always tested.
 
 It needs Playwright's Chromium (`pnpm exec playwright install chromium`).
+
+`pnpm e2e` starts all of its servers through one launcher, `e2e/servers.mjs`: it builds the explorer unless
+`.next-e2e` is newer than everything it is built from (`RA_E2E_REBUILD=1` forces a build), then starts the four APIs
+and four explorers in parallel. To start them once and reuse them across runs, run the launcher yourself and point
+Playwright at it:
+
+```sh
+pnpm e2e:servers                # leave running; prints "e2e servers ready"
+RA_E2E_REUSE=1 pnpm e2e         # in another terminal, as often as you like
+```
+
+This matters where connecting to a closed loopback port hangs for minutes instead of being refused (some WSL and
+sandbox networks): Playwright's one-server-at-a-time start probes every URL before it starts, and each probe of a
+port that is not up yet costs that long. The launcher polls with a short timeout per attempt, and a reused run
+probes one port that is already listening. The servers keep their state between runs, so restart the launcher after
+a run that changes it (the scoped project declares a scope, syncs and revokes).
